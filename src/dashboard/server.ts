@@ -140,12 +140,12 @@ export function start(opts: {
 
   server.listen(port, '127.0.0.1');
 
+  const url = `http://localhost:${port}`;
+  console.log(`🖥️  Dashboard: ${url}`);
   // Restore the original Python harness behavior: pop the dashboard open in the
   // user's default browser unless explicitly suppressed (opts.openBrowser === false).
   // The opener is best-effort — a missing `open`/`xdg-open` must never crash the harness.
   if (opts.openBrowser !== false) {
-    const url = `http://localhost:${port}`;
-    console.log(`🖥️  Dashboard: ${url}`);
     try {
       const { cmd, args } = browserOpenCommand(process.platform, url);
       const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
