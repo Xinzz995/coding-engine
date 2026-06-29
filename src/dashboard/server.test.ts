@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { setState, buildApiResponse, start, configureWorkspace } from './server.js';
+import { setState, buildApiResponse, start, configureWorkspace, browserOpenCommand } from './server.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
@@ -30,6 +30,18 @@ describe('buildApiResponse', () => {
     expect(r.branchName).toBe('ralph/x');
     expect(r.stories.length).toBe(1);
     expect(r.logs).toContain('US-001');
+  });
+});
+
+describe('browserOpenCommand', () => {
+  it('darwin → open', () => {
+    expect(browserOpenCommand('darwin', 'http://x')).toEqual({ cmd: 'open', args: ['http://x'] });
+  });
+  it('win32 → cmd /c start "" url', () => {
+    expect(browserOpenCommand('win32', 'http://x')).toEqual({ cmd: 'cmd', args: ['/c', 'start', '', 'http://x'] });
+  });
+  it('linux → xdg-open', () => {
+    expect(browserOpenCommand('linux', 'http://x')).toEqual({ cmd: 'xdg-open', args: ['http://x'] });
   });
 });
 

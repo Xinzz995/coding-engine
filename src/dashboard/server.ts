@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
 import { tryReadPrd } from '../engine/prd.js';
 import { readProgress } from '../engine/progress.js';
 
@@ -81,6 +82,16 @@ function ephemeralPort(): number {
   return base + r;
 }
 
+/**
+ * Pure mapping from platform → the shell command that opens a URL in the user's
+ * default browser. Exported so tests can assert behavior without spawning.
+ */
+export function browserOpenCommand(platform: NodeJS.Platform, url: string): { cmd: string; args: string[] } {
+  if (platform === 'darwin') return { cmd: 'open', args: [url] };
+  if (platform === 'win32') return { cmd: 'cmd', args: ['/c', 'start', '', url] };
+  return { cmd: 'xdg-open', args: [url] };
+}
+
 export function start(opts: {
   workspace: string;
   maxIterations: number;
@@ -128,6 +139,20 @@ export function start(opts: {
   });
 
   server.listen(port, '127.0.0.1');
+
+  // Restore the original Python harness behavior: pop the dashboard open in the
+  // user's default browser unless explicitly suppressed (opts.openBrowser === false).
+  // The opener is best-effort — a missing `open`/`xdg-open` must never crash the harness.
+  if (opts.openBrowser !== false) {
+    const url = `http://localhost:${port}`;
+    console.log(`🖥️  Dashboard: ${url}`);
+    try {
+      const { cmd, args } = browserOpenCommand(process.platform, url);
+      spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+    } catch {
+      // swallow — browser launch failures are non-fatal
+    }
+  }
 
   return {
     close: () => server.close(),
