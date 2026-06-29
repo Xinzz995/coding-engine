@@ -148,7 +148,13 @@ export function start(opts: {
     console.log(`🖥️  Dashboard: ${url}`);
     try {
       const { cmd, args } = browserOpenCommand(process.platform, url);
-      spawn(cmd, args, { stdio: 'ignore', detached: true }).unref();
+      const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+      // spawn reports a missing binary (ENOENT — e.g. no `xdg-open` on a headless
+      // box) as an asynchronous 'error' event, which the surrounding try/catch
+      // does NOT catch. With no 'error' listener Node throws an uncaught
+      // exception and crashes the harness — so swallow it here.
+      child.on('error', () => { /* opener missing or failed — non-fatal */ });
+      child.unref();
     } catch {
       // swallow — browser launch failures are non-fatal
     }
