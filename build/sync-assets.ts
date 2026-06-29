@@ -10,6 +10,8 @@ export interface TargetSpec {
 export function syncAssets(opts: { sourceDir: string; targets: TargetSpec[] }): void {
   const skillsSrc = join(opts.sourceDir, 'skills');
   const commandsSrc = join(opts.sourceDir, 'commands');
+  const agentsTplSrc = join(opts.sourceDir, 'AGENTS-template.md');
+  const hasAgentsTpl = existsSync(agentsTplSrc);
 
   for (const t of opts.targets) {
     const skillsOut = join(t.dir, t.skillsSubdir);
@@ -19,6 +21,10 @@ export function syncAssets(opts: { sourceDir: string; targets: TargetSpec[] }): 
     mkdirSync(t.dir, { recursive: true });
     if (existsSync(skillsSrc)) cpSync(skillsSrc, skillsOut, { recursive: true });
     if (existsSync(commandsSrc)) cpSync(commandsSrc, commandsOut, { recursive: true });
+    // Copy the AGENTS-template.md harness template (referenced by create-rules)
+    // from the single source into each target dir root. Guarded so a source
+    // without the template still syncs cleanly.
+    if (hasAgentsTpl) cpSync(agentsTplSrc, join(t.dir, 'AGENTS-template.md'));
   }
 }
 
