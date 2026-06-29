@@ -1,0 +1,7 @@
+{
+  "name": "coding-x-marketplace",
+  "owner": "Xinzz",
+  "plugins": [
+    { "name": "coding-x", "source": ".", "description": "Ralph auto-coding workflow + TS engine" }
+  ]
+}

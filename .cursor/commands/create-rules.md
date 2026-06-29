@@ -92,7 +92,7 @@ vite.config.*      → 构建工具配置
 
 ### 创建 AGENTS.md
 
-以 `.cursor/AGENTS-template.md` 模板作为起点。
+以 `AGENTS-template.md` 模板作为起点。
 
 **输出路径**：`AGENTS.md`（项目根目录）
 
