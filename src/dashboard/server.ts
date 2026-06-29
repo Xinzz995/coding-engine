@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http';
+import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,7 +93,7 @@ export function start(opts: {
   const requestedPort = opts.port ?? 7331;
   const port = requestedPort === 0 ? ephemeralPort() : requestedPort;
 
-  const serveHtml = (server: Server, res: import('node:http').ServerResponse, file: string) => {
+  const serveHtml = (res: import('node:http').ServerResponse, file: string) => {
     try {
       const html = readFileSync(join(publicDir, file));
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -114,13 +114,17 @@ export function start(opts: {
       });
       res.end(body);
     } else if (path === '/' || path === '/index.html') {
-      serveHtml(server, res, 'dashboard.html');
+      serveHtml(res, 'dashboard.html');
     } else if (path === '/p' || path === '/p.html') {
-      serveHtml(server, res, 'dashboard-p.html');
+      serveHtml(res, 'dashboard-p.html');
     } else {
       res.writeHead(404);
       res.end();
     }
+  });
+
+  server.on('error', (err) => {
+    console.error(`dashboard server error: ${(err as Error).message}`);
   });
 
   server.listen(port, '127.0.0.1');

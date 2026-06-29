@@ -49,5 +49,6 @@ describe('start', () => {
     const body = await res.json();
     expect(body.runtime.max_iterations).toBe(50);
     expect(res.headers.get('content-type')).toContain('application/json');
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
   });
 });
