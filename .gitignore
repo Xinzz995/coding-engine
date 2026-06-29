@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+.idea/
+.vscode/
+/.coverage
+coverage.xml
+diff-cover.html
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 环境配置（含密钥，禁止提交）
+.env
+conf/secrets/
+
+# 日志目录
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git worktrees（superpowers:subagent-driven-development 隔离工作空间）
+.worktrees/
