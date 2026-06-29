@@ -11,7 +11,7 @@ description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统�
 
 ## 工作流程
 
-获取 PRD（markdown 文件或文本）并将其转换为 ralph 目录中的 `prd.json` (保存到当前项目跟路径下/scripts/ralph/prd.json)。
+获取 PRD（markdown 文件或文本）并将其转换为 ralph 目录中的 `prd.json` (保存到当前项目跟路径下/.workspace/prd.json)。
 
 ---
 
@@ -365,32 +365,4 @@ Add ability to mark tasks with different statuses.
 
 ---
 
-## 写入后：JSON 自动修复与验证（必须执行）
-
-**每次写入 prd.json 之后，必须立即运行修复脚本**，以防止 LLM 输出中的未转义引号、多余逗号等问题导致解析失败。
-
-### 执行步骤
-
-```bash
-python3 .claude/skills/ralph/scripts/repair_prd_json.py
-```
-
-脚本接受可选的路径参数（默认为 `scripts/ralph/prd.json`）：
-
-```bash
-# 指定自定义路径
-python3 .claude/skills/ralph/scripts/repair_prd_json.py path/to/prd.json
-```
-
-脚本会自动安装 `json-repair`（若未安装），修复文件后覆盖写回，并打印结果。
-
-### 脚本位置
-
-`.claude/skills/ralph/scripts/repair_prd_json.py`
-
-### 说明
-
-- `json-repair` 自动修复 LLM 生成 JSON 的常见问题：未转义内嵌双引号、多余逗号、括号不匹配等
-- `ensure_ascii=False` 保留中文字符，不转成 `\uXXXX` 转义序列
-- 修复后再做一次 `json.loads()` 二次验证，确保结果绝对合法
-- 修复失败则报错退出，不覆盖原文件
+写入 prd.json 后运行：`npx coding-x repair`（引擎会用 jsonrepair 修复并二次校验）。
