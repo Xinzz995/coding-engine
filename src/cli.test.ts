@@ -27,4 +27,7 @@ describe('permissionWarning', () => {
   it('mentions skip-permissions for claude', () => {
     expect(permissionWarning('claude')).toMatch(/--dangerously-skip-permissions/);
   });
+  it('mentions bypass-approvals for codex', () => {
+    expect(permissionWarning('codex')).toMatch(/--dangerously-bypass-approvals-and-sandbox/);
+  });
 });

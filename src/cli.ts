@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairPrdFile } from './engine/repair.js';
 import type { AgentKind } from './engine/agent.js';
@@ -82,6 +82,11 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 // Entry: run when executed directly (not when imported by tests).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Compares URLs (not paths) so symlinked bin shims (npm/npx/pnpm create
+// `node_modules/.bin/coding-x` as a symlink to the real module) still match:
+// `process.argv[1]` may be the shim path, which `pathToFileURL` resolves to
+// the same URL as `import.meta.url`. Under vitest, argv[1] is the runner, so
+// the guard never fires and the suite does not hang.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).then((code) => process.exit(code));
 }
