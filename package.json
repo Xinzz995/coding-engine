@@ -1,0 +1,27 @@
+{
+  "name": "coding-x",
+  "version": "0.1.0",
+  "description": "Ralph auto-coding harness — Developer/Validator loop engine + Claude Code plugin",
+  "type": "module",
+  "bin": { "coding-x": "dist/cli.js" },
+  "files": ["dist", "assets/instructions", "assets/dashboard"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "sync": "tsx build/sync-assets.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jsonrepair": "^3.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  }
+}

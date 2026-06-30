@@ -25,3 +25,7 @@ Thumbs.db
 
 # Git worktrees（superpowers:subagent-driven-development 隔离工作空间）
 .worktrees/
+
+# Node / coding-x
+node_modules/
+.workspace/
