@@ -4,14 +4,14 @@
 
 ## 你能看到的信息
 
-你需要自己读取 `.workspace/progress.md`，从最后一个进度 section 中找出刚完成的 story。
+你需要自己读取 `{{WORKSPACE}}/progress.md`，从最后一个进度 section 中找出刚完成的 story。
 
 ## 你的工作步骤
 
-1. 读取 `.workspace/progress.md`
+1. 读取 `{{WORKSPACE}}/progress.md`
 2. 找到最后一个以 `## ` 开头的进度 section，并从标题中提取 story ID
 3. 如果 `progress.md` 为空、没有找到 story ID，或最后一个 section 格式不合法，立即结束并明确说明无法验证
-4. 读取 `.workspace/prd.json`，找到该 story 的完整信息（acceptanceCriteria、retryCount 等）
+4. 读取 `{{WORKSPACE}}/prd.json`，找到该 story 的完整信息（acceptanceCriteria、retryCount 等）
 5. 逐条验证 acceptanceCriteria 中的每一项：
    - 对于 "Typecheck passes" 类：运行 `npm run typecheck` 或 `tsc --noEmit`
    - 对于 "Verify in browser using agent-browser" 类：按下方【浏览器测试流程】优先复用已有服务；若服务不存在，再按规则启动 dev server 后，用浏览器工具实际操作验证

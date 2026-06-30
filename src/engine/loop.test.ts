@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { runLoop } from './loop.js';
+import { runLoop, renderInstruction } from './loop.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
@@ -96,5 +96,52 @@ describe('runLoop', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
+  });
+
+  it('renders the actual workspace into the agent prompt instead of a hardcoded path', async () => {
+    // The instruction files use the {{WORKSPACE}} placeholder so a custom
+    // --workspace path reaches the agent. This fake records the prompt it
+    // received (its last argv) so we can assert the placeholder was substituted
+    // with the real workspace value and no literal {{WORKSPACE}} leaks through.
+    const { workspace, instructionsDir } = setup([story()]);
+    writeFileSync(join(instructionsDir, 'builder.md'), 'read {{WORKSPACE}}/prd.json and {{WORKSPACE}}/progress.md');
+    const fake = join(workspace, 'fake-prompt.mjs');
+    const marker = join(workspace, 'agent-prompt.txt');
+    const prdPath = join(workspace, 'prd.json');
+    writeFileSync(fake, `
+      import { writeFileSync, existsSync } from 'node:fs';
+      // Capture only the first (Developer) invocation's prompt; the Validator
+      // runs afterward with the same binary and would otherwise overwrite it.
+      if (!existsSync(${JSON.stringify(marker)})) writeFileSync(${JSON.stringify(marker)}, process.argv[process.argv.length - 1]);
+      writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
+        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
+          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const prompt = readFileSync(marker, 'utf8');
+      expect(prompt).toContain(`${workspace}/prd.json`);
+      expect(prompt).toContain(`${workspace}/progress.md`);
+      expect(prompt).not.toContain('{{WORKSPACE}}');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+});
+
+describe('renderInstruction', () => {
+  it('substitutes every {{WORKSPACE}} occurrence with the given path', () => {
+    const out = renderInstruction('a {{WORKSPACE}}/prd.json b {{WORKSPACE}}/progress.md', '/abs/state');
+    expect(out).toBe('a /abs/state/prd.json b /abs/state/progress.md');
+  });
+
+  it('leaves text without the placeholder unchanged', () => {
+    expect(renderInstruction('no placeholder here', '.workspace')).toBe('no placeholder here');
   });
 });

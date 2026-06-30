@@ -20,10 +20,21 @@ function readInstruction(dir: string, file: string): string | null {
   return existsSync(path) ? readFileSync(path, 'utf-8') : null;
 }
 
+// Instruction files use the {{WORKSPACE}} placeholder instead of a hardcoded
+// '.workspace/' prefix so a custom --workspace path reaches the agent. The
+// agent runs at the project root, and cfg.workspace is resolved the same way
+// the engine resolves it (relative to the project root, or absolute), so the
+// agent and engine always read/write the same prd.json / progress.md.
+export function renderInstruction(text: string, workspace: string): string {
+  return text.replaceAll('{{WORKSPACE}}', workspace);
+}
+
 export async function runLoop(cfg: LoopConfig): Promise<number> {
   const prdPath = join(cfg.workspace, 'prd.json');
-  const builder = readInstruction(cfg.instructionsDir, 'builder.md');
-  const validator = readInstruction(cfg.instructionsDir, 'validator.md');
+  const builderRaw = readInstruction(cfg.instructionsDir, 'builder.md');
+  const validatorRaw = readInstruction(cfg.instructionsDir, 'validator.md');
+  const builder = builderRaw === null ? null : renderInstruction(builderRaw, cfg.workspace);
+  const validator = validatorRaw === null ? null : renderInstruction(validatorRaw, cfg.workspace);
 
   const server = dashboard.start({
     workspace: cfg.workspace,

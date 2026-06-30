@@ -2,7 +2,7 @@
 
 你是一个在软件项目上工作的自主编码 agent。
 
-以下文件都在 .workspace/ 下: prd.json、progress.md
+以下文件都在 {{WORKSPACE}}/ 下: prd.json、progress.md
 
 ## 你的任务
 
