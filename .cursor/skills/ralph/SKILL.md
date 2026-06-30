@@ -338,12 +338,12 @@ Add ability to mark tasks with different statuses.
 
 1. 如果存在，读取当前的 `prd.json`
 2. 检查 `branchName` 是否与新功能的 branch name 不同
-3. 如果不同且 `progress.txt` 在 header 之外有内容：
+3. 如果不同且 `progress.md` 在 header 之外有内容：
    - 创建归档文件夹：`archive/YYYY-MM-DD-feature-name/`
-   - 将当前的 `prd.json` 和 `progress.txt` 复制到归档
-   - 使用新的 header 重置 `progress.txt`
+   - 将当前的 `prd.json` 和 `progress.md` 复制到归档
+   - 使用新的 header 重置 `progress.md`
 
-**ralph.sh 脚本会在你运行它时自动处理此操作**，但如果你在运行之间手动更新 prd.json，请先归档。
+如果你在运行之间手动更新 prd.json，请先按上述步骤归档旧运行，再写入新的 prd.json。
 
 ---
 
@@ -362,7 +362,5 @@ Add ability to mark tasks with different statuses.
 - [ ] Acceptance criteria 是可验证的（不模糊）
 - [ ] 没有 story 依赖于后面的 story
 - [ ] 每个 story 包含 `retryCount: 0` 和 `blocked: false` 字段
-
----
 
 写入 prd.json 后运行：`npx coding-x repair`（引擎会用 jsonrepair 修复并二次校验）。

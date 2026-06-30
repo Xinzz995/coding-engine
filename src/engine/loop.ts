@@ -33,6 +33,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   });
 
   try {
+    // Agents must run at the project root (the engine process's cwd), NOT at
+    // cfg.workspace. The engine reads/writes prd.json at join(cfg.workspace,
+    // 'prd.json'), which for the default relative '.workspace' resolves against
+    // the process cwd → <root>/.workspace/prd.json. The builder/validator
+    // instructions also read '.workspace/prd.json' and root AGENTS.md/tasks/,
+    // assuming cwd == project root. Spawning at cfg.workspace would make the
+    // agent resolve '.workspace/prd.json' to <root>/.workspace/.workspace/prd.json,
+    // so engine and agent would never share state and the loop would always hit
+    // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
+    const agentCwd = process.cwd();
     for (let i = 1; i <= cfg.maxIterations; i++) {
       const before = tryReadPrd(prdPath);
       const currentStory = before ? getCurrentStoryId(before) : null;
@@ -43,7 +53,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         console.error('❌ builder.md 不存在，跳过开发');
       } else {
         const dev = await runAgent({
-          kind: cfg.kind, prompt: builder, cwd: cfg.workspace, timeoutMs: cfg.devTimeoutMs,
+          kind: cfg.kind, prompt: builder, cwd: agentCwd, timeoutMs: cfg.devTimeoutMs,
         });
         if (dev.timedOut) {
           dashboard.setState({ phase: 'idle' });
@@ -55,7 +65,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       dashboard.setState({ phase: 'validating' });
       if (validator) {
         await runAgent({
-          kind: cfg.kind, prompt: validator, cwd: cfg.workspace, timeoutMs: cfg.valTimeoutMs,
+          kind: cfg.kind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
         });
       }
 
