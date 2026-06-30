@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { runAgent, type AgentKind } from './agent.js';
 import { tryReadPrd, getCurrentStoryId, allStoriesResolved } from './prd.js';
 import * as dashboard from '../dashboard/server.js';
@@ -16,8 +16,11 @@ export interface LoopConfig {
 }
 
 function readInstruction(dir: string, file: string): string | null {
-  const path = join(dir, file);
-  return existsSync(path) ? readFileSync(path, 'utf-8') : null;
+  try {
+    return readFileSync(join(dir, file), 'utf-8');
+  } catch {
+    return null;
+  }
 }
 
 // Instruction files use the {{WORKSPACE}} placeholder instead of a hardcoded
