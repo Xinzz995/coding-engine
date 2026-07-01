@@ -24,11 +24,9 @@ logs/
 Thumbs.db
 
 # Claude Code 本地运行/个人目录（settings.local.json、worktrees 等，均不共享）
-# 注意：插件的可共享配置在 .claude-plugin/，与此目录无关。
-# 若将来需要提交共享配置，可加负向规则，例如 !.claude/settings.json
 .claude/
 
-# superpowers 回退的 git worktree 隔离空间（仓库根）
+# git worktree 隔离空间（仓库根）
 .worktrees/
 
 # Node / coding-x
