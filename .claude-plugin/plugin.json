@@ -2,7 +2,5 @@
   "name": "coding-x",
   "version": "0.1.0",
   "description": "Ralph auto-coding workflow: prd/ralph/agent-browser skills + prime/plan-feature/create-rules commands. Run the engine via `npx coding-x`.",
-  "author": "Xinzz",
-  "commands": "./commands",
-  "skills": "./skills"
+  "author": { "name": "Xinzz" }
 }

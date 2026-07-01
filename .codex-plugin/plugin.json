@@ -2,7 +2,7 @@
   "name": "coding-x",
   "version": "0.1.0",
   "description": "Ralph auto-coding workflow: prd/ralph/agent-browser skills + prime/plan-feature/create-rules commands. Run the engine via `npx coding-x`.",
-  "author": "Xinzz",
+  "author": { "name": "Xinzz" },
   "homepage": "https://github.com/Xinzz995/coding-engine",
   "repository": "https://github.com/Xinzz995/coding-engine",
   "license": "MIT",

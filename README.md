@@ -261,7 +261,7 @@ coding-engine/
 ├── AGENTS-template.md            # 项目级 AGENTS.md 模板（create-rules 引用）
 │
 ├── .claude-plugin/               # Claude Code 插件清单
-│   ├── plugin.json               #   声明 commands/ skills/（指向仓库根）
+│   ├── plugin.json               #   插件元数据（commands/ skills/ 自动发现）
 │   └── marketplace.json          #   marketplace 元数据
 ├── .cursor-plugin/plugin.json    # Cursor 瘦清单：{ skills: ./skills/, commands: ./commands/ }
 ├── .codex-plugin/plugin.json     # Codex 瘦清单：同上
