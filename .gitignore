@@ -23,12 +23,13 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Git worktrees（隔离工作空间：harness 原生放在 .claude/worktrees/，superpowers 回退放在 .worktrees/）
-.claude/worktrees/
-.worktrees/
+# Claude Code 本地运行/个人目录（settings.local.json、worktrees 等，均不共享）
+# 注意：插件的可共享配置在 .claude-plugin/，与此目录无关。
+# 若将来需要提交共享配置，可加负向规则，例如 !.claude/settings.json
+.claude/
 
-# Claude Code 本地个人配置（含已批准权限，因人而异，不共享）
-.claude/settings.local.json
+# superpowers 回退的 git worktree 隔离空间（仓库根）
+.worktrees/
 
 # Node / coding-x
 node_modules/
