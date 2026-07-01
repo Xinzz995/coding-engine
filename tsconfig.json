@@ -12,6 +12,6 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "include": ["src", "build"],
+  "include": ["src"],
   "exclude": ["node_modules", "dist"]
 }
