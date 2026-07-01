@@ -44,7 +44,59 @@ coding-x 同时是两样东西：
 
 ### 单一数据源资产生成
 
-`assets/` 是所有 skills / commands / 指令模板的唯一来源，`npm run sync` 会据此重新生成 Claude（根目录）、`.cursor/`、`.agents/` 三套工具目录，避免多处手动维护。
+同一份 skill / command / 指令内容，需要被三类工具（Claude Code、Cursor、其他 agent）以及运行时引擎读取。如果每处各存一份，改一句话就要同步四五个地方，极易漂移。coding-x 用 **`assets/` 作为唯一数据源**，其余目录全部由脚本从 `assets/` 生成——只改 `assets/`，其它同步产物一律不手动编辑。
+
+#### 数据源目录 `assets/`
+
+```
+assets/
+├── skills/                # prd / ralph / agent-browser 三个 skill 的 SKILL.md
+│   ├── prd/SKILL.md
+│   ├── ralph/SKILL.md
+│   └── agent-browser/SKILL.md
+├── commands/              # 三个 slash 命令
+│   ├── prime.md
+│   ├── plan-feature.md
+│   └── create-rules.md
+├── instructions/          # 引擎在循环中喂给 agent 的指令
+│   ├── builder.md         # Developer 指令（含 {{WORKSPACE}} 占位符）
+│   └── validator.md       # Validator 指令
+├── dashboard/             # 仪表盘静态页
+│   ├── dashboard.html
+│   └── dashboard-p.html
+└── AGENTS-template.md     # 项目级 AGENTS.md 模板，被 create-rules 命令引用
+```
+
+#### 两条生成链路
+
+`assets/` 里的内容分别流向两个方向：
+
+**1. 面向「工具」——`npm run sync`（`build/sync-assets.ts`）**
+
+把 `assets/skills`、`assets/commands`、`assets/AGENTS-template.md` 复制到三套工具目录，让 Claude Code / Cursor / 其他 agent 都能就地读取同一份内容：
+
+```
+                 ┌──▶ ./            (skills/  commands/  AGENTS-template.md)  ← Claude 插件根目录
+assets/  ──sync──┼──▶ .cursor/      (skills/  commands/  AGENTS-template.md)  ← Cursor
+                 └──▶ .agents/      (skills/  commands/  AGENTS-template.md)  ← 通用 agent
+```
+
+脚本对每个目标目录的动作是幂等的：先 `rm -rf` 掉旧的 `skills/`、`commands/`，再从 `assets/` 全量 `cp` 过去，最后拷一份 `AGENTS-template.md`。因此**目标目录里的任何手改都会在下次 `sync` 时被覆盖**——要改就改 `assets/`。插件清单 `.claude-plugin/plugin.json` 里 `commands: ./commands`、`skills: ./skills` 指向的正是根目录这套生成产物。
+
+**2. 面向「引擎」——`npm run build`（`tsup` + `onSuccess` 钩子）**
+
+`instructions/` 和 `dashboard/` 不是给工具读的，而是引擎运行时要用的。打包时 tsup 编译 `src/` 到 `dist/`，并在 `onSuccess` 钩子里把它们拷进 `dist/`：
+
+```
+assets/instructions/  ──build──▶  dist/instructions/   ← 引擎 cli.ts 读 builder.md / validator.md
+assets/dashboard/     ──build──▶  dist/public/         ← 引擎 server.ts 作为仪表盘静态页返回
+```
+
+引擎通过 `import.meta.url` 定位自身所在的 `dist/`，再拼出 `dist/instructions`、`dist/public`，所以 `npx coding-x` 无论在哪个项目里运行都能找到这两份资产。`package.json` 的 `files` 字段只发布 `dist`、`assets/instructions`、`assets/dashboard`，工具目录（skills/commands）不进 npm 包，只随插件仓库分发。
+
+#### 一句话总结
+
+> **只编辑 `assets/`。** 面向工具的四套目录用 `npm run sync` 生成，面向引擎的 `dist/` 资产用 `npm run build` 生成；两者都是从 `assets/` 单向拷贝，任何下游产物都不该手动改。
 
 ---
 
