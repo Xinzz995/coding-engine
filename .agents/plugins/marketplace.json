@@ -1,0 +1,20 @@
+{
+  "name": "coding-x-dev",
+  "interface": {
+    "displayName": "coding-x"
+  },
+  "plugins": [
+    {
+      "name": "coding-x",
+      "source": {
+        "source": "url",
+        "url": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

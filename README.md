@@ -42,61 +42,47 @@ coding-x 同时是两样东西：
 | `ralph` | 把已有 PRD 转换成 Ralph 引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
 | `agent-browser` | 浏览器自动化：导航、填表、截图、数据提取，用于 UI story 的实际验证 | 需要在浏览器中验证 UI 时 |
 
-### 单一数据源资产生成
+### 目录与资产布局
 
-同一份 skill / command / 指令内容，需要被三类工具（Claude Code、Cursor、其他 agent）以及运行时引擎读取。如果每处各存一份，改一句话就要同步四五个地方，极易漂移。coding-x 用 **`assets/` 作为唯一数据源**，其余目录全部由脚本从 `assets/` 生成——只改 `assets/`，其它同步产物一律不手动编辑。
+skill / command 内容在整个仓库里**只存一份**（顶层 `skills/`、`commands/`），各工具用一个瘦清单（`plugin.json` / `marketplace.json`）指回这同一份，因此没有副本、不需要同步、也不会漂移。（做法参考 [superpowers](https://github.com/obra/superpowers)。）
 
-#### 数据源目录 `assets/`
-
-```
-assets/
-├── skills/                # prd / ralph / agent-browser 三个 skill 的 SKILL.md
-│   ├── prd/SKILL.md
-│   ├── ralph/SKILL.md
-│   └── agent-browser/SKILL.md
-├── commands/              # 三个 slash 命令
-│   ├── prime.md
-│   ├── plan-feature.md
-│   └── create-rules.md
-├── instructions/          # 引擎在循环中喂给 agent 的指令
-│   ├── builder.md         # Developer 指令（含 {{WORKSPACE}} 占位符）
-│   └── validator.md       # Validator 指令
-├── dashboard/             # 仪表盘静态页
-│   ├── dashboard.html
-│   └── dashboard-p.html
-└── AGENTS-template.md     # 项目级 AGENTS.md 模板，被 create-rules 命令引用
-```
-
-#### 两条生成链路
-
-`assets/` 里的内容分别流向两个方向：
-
-**1. 面向「工具」——`npm run sync`（`build/sync-assets.ts`）**
-
-把 `assets/skills`、`assets/commands`、`assets/AGENTS-template.md` 复制到三套工具目录，让 Claude Code / Cursor / 其他 agent 都能就地读取同一份内容：
+#### 唯一源：顶层 `skills/`、`commands/`
 
 ```
-                 ┌──▶ ./            (skills/  commands/  AGENTS-template.md)  ← Claude 插件根目录
-assets/  ──sync──┼──▶ .cursor/      (skills/  commands/  AGENTS-template.md)  ← Cursor
-                 └──▶ .agents/      (skills/  commands/  AGENTS-template.md)  ← 通用 agent
+skills/                 # 唯一源:prd / ralph / agent-browser 三个 skill 的 SKILL.md
+├── prd/SKILL.md
+├── ralph/SKILL.md
+└── agent-browser/SKILL.md
+commands/               # 唯一源:三个 slash 命令
+├── prime.md
+├── plan-feature.md
+└── create-rules.md
+AGENTS-template.md      # 唯一一份:项目级 AGENTS.md 模板，被 create-rules 命令引用
 ```
 
-脚本对每个目标目录的动作是幂等的：先 `rm -rf` 掉旧的 `skills/`、`commands/`，再从 `assets/` 全量 `cp` 过去，最后拷一份 `AGENTS-template.md`。因此**目标目录里的任何手改都会在下次 `sync` 时被覆盖**——要改就改 `assets/`。插件清单 `.claude-plugin/plugin.json` 里 `commands: ./commands`、`skills: ./skills` 指向的正是根目录这套生成产物。
+Claude Code 按约定直接读取插件根目录的 `skills/`、`commands/`（`.claude-plugin/plugin.json` 里的 `skills: ./skills`、`commands: ./commands` 也显式指向它们）。**改内容只改这里,不需要跑任何生成脚本。**
 
-**2. 面向「引擎」——`npm run build`（`tsup` + `onSuccess` 钩子）**
+#### 各工具的瘦清单
 
-`instructions/` 和 `dashboard/` 不是给工具读的，而是引擎运行时要用的。打包时 tsup 编译 `src/` 到 `dist/`，并在 `onSuccess` 钩子里把它们拷进 `dist/`：
+其余工具各自只放一个清单文件，用相对路径 `./skills/` `./commands/` 指回上面那份唯一源，目录里**不再存任何技能副本**：
+
+```
+.claude-plugin/plugin.json      # Claude Code:自动发现根目录 skills/ commands/
+.cursor-plugin/plugin.json      # Cursor:  { "skills": "./skills/", "commands": "./commands/" }
+.codex-plugin/plugin.json       # Codex:   { "skills": "./skills/", "commands": "./commands/" }
+.agents/plugins/marketplace.json  # 通用 agent:source 指向仓库根 "./"
+```
+
+#### 引擎专用资产：`assets/`
+
+`assets/` 只保留引擎运行时需要、而工具不读的两类资产。打包时 tsup 编译 `src/` 到 `dist/`，并在 `onSuccess` 钩子里把它们拷进 `dist/`：
 
 ```
 assets/instructions/  ──build──▶  dist/instructions/   ← 引擎 cli.ts 读 builder.md / validator.md
 assets/dashboard/     ──build──▶  dist/public/         ← 引擎 server.ts 作为仪表盘静态页返回
 ```
 
-引擎通过 `import.meta.url` 定位自身所在的 `dist/`，再拼出 `dist/instructions`、`dist/public`，所以 `npx coding-x` 无论在哪个项目里运行都能找到这两份资产。`package.json` 的 `files` 字段只发布 `dist`、`assets/instructions`、`assets/dashboard`，工具目录（skills/commands）不进 npm 包，只随插件仓库分发。
-
-#### 一句话总结
-
-> **只编辑 `assets/`。** 面向工具的四套目录用 `npm run sync` 生成，面向引擎的 `dist/` 资产用 `npm run build` 生成；两者都是从 `assets/` 单向拷贝，任何下游产物都不该手动改。
+引擎通过 `import.meta.url` 定位自身所在的 `dist/`，再拼出 `dist/instructions`、`dist/public`，所以 `npx coding-x` 无论在哪个项目里运行都能找到这两份资产。`package.json` 的 `files` 字段只发布 `dist`、`assets/instructions`、`assets/dashboard`。
 
 ---
 
@@ -238,7 +224,6 @@ npx coding-x repair             # 仅修复 .workspace/prd.json，不跑循环
 - `npm run dev` —— 用 tsx 直接运行 CLI
 - `npm test` —— Vitest 测试
 - `npm run typecheck` —— `tsc --noEmit` 类型检查
-- `npm run sync` —— 从 `assets/` 重新生成 `skills/ commands/ .cursor/ .agents/`
 - `npm run build` —— tsup 打包到 `dist/`
 
 技法来源：Ralph 自主循环 + Anthropic harness 设计。详见 `docs/superpowers/specs/`。
