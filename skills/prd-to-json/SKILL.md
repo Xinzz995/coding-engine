@@ -3,9 +3,9 @@ name: prd-to-json
 description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统使用。当你已有 PRD 并需要将其转换为 Ralph 的 JSON 格式时使用。触发词：将prd 转成 prd.json"
 ---
 
-# Ralph PRD Converter
+# PRD → prd.json 转换器
 
-将现有 PRD 转换为 Ralph 用于自主执行的 prd.json 格式。
+将现有 PRD 转换为 Ralph 引擎用于自主执行的 prd.json 格式。
 
 ---
 

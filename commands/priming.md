@@ -2,7 +2,7 @@
 description: 为代理建立代码库理解
 ---
 
-# Prime：加载项目上下文
+# Priming：加载项目上下文
 
 ## 目标
 
