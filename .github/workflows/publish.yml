@@ -15,6 +15,8 @@ jobs:
       id-token: write # 供 npm provenance 使用
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # 需要完整历史 + tags 才能按提交生成 Release 说明
 
       - uses: actions/setup-node@v5
         with:
@@ -49,8 +51,19 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # npm 发布成功后再创建 GitHub Release，附自动生成的发布说明
+      # npm 发布成功后创建 GitHub Release：用「上一个 tag 到本 tag」之间的提交作为说明
+      # （本仓库直接提交到 main、无 PR，所以 --generate-notes 只会给出空白链接）
       - name: Create GitHub Release
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || echo "")"
+          if [ -n "$PREV" ]; then
+            CHANGES="$(git log "${PREV}..${GITHUB_REF_NAME}" --no-merges --pretty='- %s (%h)')"
+            COMPARE="**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${GITHUB_REF_NAME}"
+          else
+            CHANGES="$(git log "${GITHUB_REF_NAME}" --no-merges --pretty='- %s (%h)')"
+            COMPARE=""
+          fi
+          NOTES="$(printf '## 变更\n\n%s\n\n%s\n' "$CHANGES" "$COMPARE")"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$NOTES"
