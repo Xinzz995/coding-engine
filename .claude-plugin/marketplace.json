@@ -1,6 +1,6 @@
 {
   "name": "coding-x-marketplace",
-  "description": "Ralph 自动化 Coding 工作流：prd/ralph/agent-browser skills + prime/plan-feature/create-rules 命令，配合 npx coding-x 引擎。",
+  "description": "Ralph 自动化 Coding 工作流：prd-generate/prd-to-json/agent-browser skills + priming/planning/init-rules 命令，配合 npx coding-x 引擎。",
   "owner": { "name": "Xinzz" },
   "plugins": [
     { "name": "coding-x", "source": "./", "description": "Ralph auto-coding workflow + TS engine" }

@@ -1,5 +1,5 @@
 ---
-name: prd
+name: prd-generate
 description: "为新功能生成 Product Requirements Document (PRD)。在规划功能、启动新项目或需要创建 PRD 时使用。触发词：创建一个prd"
 ---
 

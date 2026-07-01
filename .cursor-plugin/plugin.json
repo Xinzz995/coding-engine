@@ -1,7 +1,7 @@
 {
   "name": "coding-x",
   "displayName": "coding-x",
-  "description": "Ralph auto-coding workflow: prd/ralph/agent-browser skills + prime/plan-feature/create-rules commands",
+  "description": "Ralph auto-coding workflow: prd-generate/prd-to-json/agent-browser skills + priming/planning/init-rules commands",
   "version": "0.1.0",
   "author": { "name": "Xinzz" },
   "homepage": "https://github.com/Xinzz995/coding-engine",

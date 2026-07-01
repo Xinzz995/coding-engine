@@ -5,7 +5,7 @@
 coding-x 同时是两样东西：
 
 - **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `prd` / `ralph` / `agent-browser` skills 和 `/prime` `/plan-feature` `/create-rules` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`。
+- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-rules` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`。
 
 ---
 
@@ -79,7 +79,7 @@ coding-x 同时是两样东西：
 /plugin install coding-x
 ```
 
-安装后即可使用 `/prime`、`/plan-feature`、`/create-rules` 命令以及 `prd` / `ralph` / `agent-browser` skills。
+安装后即可使用 `/priming`、`/planning`、`/init-rules` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
 
 ### Codex
 
@@ -126,9 +126,9 @@ npx coding-x codex           # 改用 codex
 ## 基本工作流程
 
 ```
-需求  ──/plan-feature──▶  实现计划
-      ──prd skill───────▶  PRD
-      ──ralph skill─────▶  .workspace/prd.json
+需求  ──/planning────────────▶  实现计划
+      ──prd-generate skill───▶  PRD
+      ──prd-to-json skill────▶  .workspace/prd.json
                                 │
                   npx coding-x  ▼
               Developer ⇄ Validator 循环（见「工作原理」）
@@ -145,10 +145,10 @@ npx coding-x codex           # 改用 codex
 
 在 Claude Code（或其他工具）中：
 
-1. （可选）`/prime` 让 agent 先理解你的代码库；`/create-rules` 生成根目录 `AGENTS.md` 作为项目技术指南。
-2. `/plan-feature 我要做的功能描述` 产出完整实现计划。
-3. 用 `prd` skill 生成 PRD（对它说「创建一个 prd」）。
-4. 用 `ralph` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。
+1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-rules` 生成根目录 `AGENTS.md` 作为项目技术指南。
+2. `/planning 我要做的功能描述` 产出完整实现计划。
+3. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」）。
+4. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。
 
 `prd.json` 结构：
 
@@ -228,19 +228,19 @@ npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/prime` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
-| `/create-rules` | 分析代码库并提取模式，生成全局规则文件 `AGENTS.md` |
-| `/plan-feature <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
+| `/priming` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
+| `/init-rules` | 分析代码库并提取模式，生成全局规则文件 `AGENTS.md` |
+| `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
 
 ### Skills（能力，Claude 按语境自动触发）
 
 | Skill | 作用 | 触发示例 |
 | --- | --- | --- |
-| `prd` | 为新功能生成结构清晰、可执行的 PRD | 「创建一个 prd」 |
-| `ralph` | 把已有 PRD 转换成引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
+| `prd-generate` | 为新功能生成结构清晰、可执行的 PRD | 「创建一个 prd」 |
+| `prd-to-json` | 把已有 PRD 转换成引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
 | `agent-browser` | 浏览器自动化：导航、填表、截图、数据提取，用于 UI story 验证 | 需要在浏览器中验证 UI 时 |
 
-> commands 与 skills 的区别：**command 是你敲 `/命令` 显式触发、支持传参的工作流；skill 是 Claude 根据你说的话自动选用的能力**。二者是 Claude Code 的两种不同原语，各由 `.claude-plugin/plugin.json` 的 `commands` / `skills` 键分别声明。
+> commands 与 skills 的区别：**command 是你敲 `/命令` 显式触发、支持传参的工作流；skill 是 Claude 根据你说的话自动选用的能力**。二者是 Claude Code 的两种不同原语，分别放在插件根目录的 `commands/` 与 `skills/`，由 Claude Code 自动发现。
 
 ---
 
@@ -251,14 +251,14 @@ skill / command 内容在整个仓库里**只存一份**，各工具用一个瘦
 ```
 coding-engine/
 ├── skills/                       # 唯一源：模型自主触发的能力
-│   ├── prd/SKILL.md
-│   ├── ralph/SKILL.md
+│   ├── prd-generate/SKILL.md
+│   ├── prd-to-json/SKILL.md
 │   └── agent-browser/SKILL.md
 ├── commands/                     # 唯一源：用户 /斜杠命令
-│   ├── prime.md
-│   ├── plan-feature.md
-│   └── create-rules.md
-├── AGENTS-template.md            # 项目级 AGENTS.md 模板（create-rules 引用）
+│   ├── priming.md
+│   ├── planning.md
+│   └── init-rules.md
+├── AGENTS-template.md            # 项目级 AGENTS.md 模板（init-rules 引用）
 │
 ├── .claude-plugin/               # Claude Code 插件清单
 │   ├── plugin.json               #   插件元数据（commands/ skills/ 自动发现）
