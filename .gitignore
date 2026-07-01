@@ -23,8 +23,12 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Git worktrees（superpowers:subagent-driven-development 隔离工作空间）
+# Git worktrees（隔离工作空间：harness 原生放在 .claude/worktrees/，superpowers 回退放在 .worktrees/）
+.claude/worktrees/
 .worktrees/
+
+# Claude Code 本地个人配置（含已批准权限，因人而异，不共享）
+.claude/settings.local.json
 
 # Node / coding-x
 node_modules/
