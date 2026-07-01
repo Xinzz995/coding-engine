@@ -4,85 +4,62 @@
 
 coding-x 同时是两样东西：
 
-- **Claude Code 插件** —— 提供 `prd` / `ralph` / `agent-browser` skills 和 `/prime` `/plan-feature` `/create-rules` 命令，帮你把一个需求拆解成可自动执行的 `prd.json`。
-- **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story 开发 → 验证 → 提交，直到全部完成，并提供实时 Web 仪表盘。
-
-核心理念：人只负责把需求讲清楚（生成 PRD），剩下的「写代码 → 自检 → 验收 → 修复 → 再验收」交给一个确定性的循环反复跑，直到所有验收标准通过。
+- **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
+- **多工具插件** —— 提供 `prd` / `ralph` / `agent-browser` skills 和 `/prime` `/plan-feature` `/create-rules` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`。
 
 ---
 
-## 功能清单
+## 理念
 
-### 引擎（`npx coding-x`）
+传统 AI 编码是「人不断盯着、一句句地喂」。coding-x 反过来：
 
-- **Developer → Validator 双 agent 循环**
-  - **Developer（builder）**：从 `prd.json` 中挑选优先级最高、未完成且未阻塞的 story，只实现这一个 story，跑质量检查（typecheck / lint / test），通过后以 `feat: [Story ID] - [Title]` 提交，并把进度追加写入 `progress.md`。
-  - **Validator**：独立的 QA agent，逐条核对该 story 的 `acceptanceCriteria`。通过则清空 `notes`、重置 `retryCount`；失败则把 `passes` 设回 `false`、写明失败原因、`retryCount + 1`。
-- **自动重试与阻塞保护**：同一 story 验证失败累计达 5 次后自动标记 `blocked: true` 并跳过，避免循环卡死。
-- **完成判定**：每轮结束后检查所有 story 是否都 `passes` 或 `blocked`，全部解决则成功退出（退出码 0），否则继续直到 `--max-iter` 上限（退出码 1）。
-- **支持两种 agent 后端**：默认 `claude`，可切换 `codex`。两者均以「跳过权限确认」模式运行，启动前会打印醒目警告。
-- **超时控制**：开发与验证阶段各有独立超时；超时的开发阶段会跳过验证、下一轮重试。
-- **实时 Web 仪表盘**：内置 HTTP 服务（默认 `http://localhost:7331`），展示迭代次数、当前阶段、当前 story、已用时长、story 列表与 `progress.md` 日志；自带普通视图与像素风视图（`/p`）。启动时默认自动在浏览器打开（可用 `--no-open` 关闭）。
-- **prd.json 修复命令**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json`。
-- **可配置工作区**：通过 `--workspace` 指定 `prd.json` / `progress.md` 所在目录（默认 `.workspace`）；指令模板用 `{{WORKSPACE}}` 占位符注入，agent 与引擎始终读写同一份文件。
+> **人只负责把需求讲清楚（生成 PRD），剩下的「写代码 → 自检 → 验收 → 修复 → 再验收」交给一个确定性的循环反复跑，直到所有验收标准通过。**
 
-### 插件命令（Slash Commands）
+三条核心原则：
 
-| 命令 | 作用 |
-| --- | --- |
-| `/prime` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
-| `/create-rules` | 分析代码库并提取模式，生成全局规则文件 `AGENTS.md`（项目技术架构 / harness 指南） |
-| `/plan-feature <功能描述>` | 通过系统化的代码库分析、外部调研与策略规划，把需求转化为完整实现计划 |
+1. **确定性 harness，而非一次性对话。** 循环、超时、重试、完成判定都由程序控制，不依赖模型「记得」自己该干什么。
+2. **开发与验收分离。** 写代码的 agent 和验收的 agent 是两个独立角色，验收方只认「验收标准」，不受开发方自述影响，避免「自己判自己及格」。
+3. **单一 story、频繁提交、进度可追溯。** 每轮只推进一个 user story，通过即提交，学习与踩坑写入 `progress.md` 供后续迭代复用。
 
-### 插件 Skills
+技法来源：Ralph 自主循环 + Anthropic harness 设计。
 
-| Skill | 作用 | 触发示例 |
-| --- | --- | --- |
-| `prd` | 为新功能生成结构清晰、可执行的 PRD（Product Requirements Document） | 「创建一个 prd」 |
-| `ralph` | 把已有 PRD 转换成 Ralph 引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
-| `agent-browser` | 浏览器自动化：导航、填表、截图、数据提取，用于 UI story 的实际验证 | 需要在浏览器中验证 UI 时 |
+---
 
-### 目录与资产布局
+## 工作原理
 
-skill / command 内容在整个仓库里**只存一份**（顶层 `skills/`、`commands/`），各工具用一个瘦清单（`plugin.json` / `marketplace.json`）指回这同一份，因此没有副本、不需要同步、也不会漂移。（做法参考 [superpowers](https://github.com/obra/superpowers)。）
-
-#### 唯一源：顶层 `skills/`、`commands/`
+引擎在项目根目录启动，围绕工作区里的两份文件运转：`prd.json`（需求与状态）和 `progress.md`（进度与学习日志）。
 
 ```
-skills/                 # 唯一源:prd / ralph / agent-browser 三个 skill 的 SKILL.md
-├── prd/SKILL.md
-├── ralph/SKILL.md
-└── agent-browser/SKILL.md
-commands/               # 唯一源:三个 slash 命令
-├── prime.md
-├── plan-feature.md
-└── create-rules.md
-AGENTS-template.md      # 唯一一份:项目级 AGENTS.md 模板，被 create-rules 命令引用
+                      npx coding-x
+   ┌─────────────────────────────────────────────────────────┐
+   │  for i in 1..maxIterations:                              │
+   │                                                          │
+   │   ┌── Developer（builder.md）──────────────────────────┐ │
+   │   │ 1. 读 prd.json，选优先级最高、未完成、未阻塞的 story │ │
+   │   │ 2. 只实现这一个 story                               │ │
+   │   │ 3. 跑质量检查（typecheck / lint / test）            │ │
+   │   │ 4. 通过则提交 feat: [ID] - [Title]                  │ │
+   │   │ 5. 把进度 + 学习追加到 progress.md                  │ │
+   │   └────────────────────────────────────────────────────┘ │
+   │                          ↓                               │
+   │   ┌── Validator（validator.md）────────────────────────┐ │
+   │   │ 1. 从 progress.md 找出刚完成的 story                │ │
+   │   │ 2. 逐条核对 acceptanceCriteria                      │ │
+   │   │ 3. 通过 → 清空 notes、retryCount 归零               │ │
+   │   │    失败 → passes=false、写失败原因、retryCount+1     │ │
+   │   │           （累计 5 次 → blocked=true 跳过）         │ │
+   │   └────────────────────────────────────────────────────┘ │
+   │                          ↓                               │
+   │   所有 story 都 passes 或 blocked ? ── 是 ──▶ 成功退出   │
+   │                                       否 ──▶ 下一轮       │
+   └─────────────────────────────────────────────────────────┘
+                          ↓
+        http://localhost:7331  实时查看进度
 ```
 
-Claude Code 按约定直接读取插件根目录的 `skills/`、`commands/`（`.claude-plugin/plugin.json` 里的 `skills: ./skills`、`commands: ./commands` 也显式指向它们）。**改内容只改这里,不需要跑任何生成脚本。**
-
-#### 各工具的瘦清单
-
-其余工具各自只放一个清单文件，用相对路径 `./skills/` `./commands/` 指回上面那份唯一源，目录里**不再存任何技能副本**：
-
-```
-.claude-plugin/plugin.json      # Claude Code:自动发现根目录 skills/ commands/
-.cursor-plugin/plugin.json      # Cursor:  { "skills": "./skills/", "commands": "./commands/" }
-.codex-plugin/plugin.json       # Codex:   { "skills": "./skills/", "commands": "./commands/" }
-.agents/plugins/marketplace.json  # 通用 agent:source 指向仓库根 "./"
-```
-
-#### 引擎专用资产：`assets/`
-
-`assets/` 只保留引擎运行时需要、而工具不读的两类资产。打包时 tsup 编译 `src/` 到 `dist/`，并在 `onSuccess` 钩子里把它们拷进 `dist/`：
-
-```
-assets/instructions/  ──build──▶  dist/instructions/   ← 引擎 cli.ts 读 builder.md / validator.md
-assets/dashboard/     ──build──▶  dist/public/         ← 引擎 server.ts 作为仪表盘静态页返回
-```
-
-引擎通过 `import.meta.url` 定位自身所在的 `dist/`，再拼出 `dist/instructions`、`dist/public`，所以 `npx coding-x` 无论在哪个项目里运行都能找到这两份资产。`package.json` 的 `files` 字段只发布 `dist`、`assets/instructions`、`assets/dashboard`。
+- **完成即退出**：全部 story 解决 → 退出码 0；跑满 `maxIterations` 仍未完成 → 退出码 1。
+- **超时保护**：开发/验证各有独立超时；开发阶段超时则跳过验证、下一轮重试。
+- **状态共享**：引擎与 agent 都在项目根目录运行，读写同一份 `prd.json` / `progress.md`；指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
 
 ---
 
@@ -91,11 +68,11 @@ assets/dashboard/     ──build──▶  dist/public/         ← 引擎 serv
 ### 环境要求
 
 - **Node.js ≥ 18**
-- 已安装并可在终端调用 **`claude`**（Claude Code CLI）或 **`codex`**（二选一，取决于你用哪个后端）
+- 已安装并可在终端调用 **`claude`**（Claude Code CLI）或 **`codex`**（取决于你用哪个后端）
 
-### 方式一：作为 Claude Code 插件安装
+### Claude Code
 
-在 Claude Code 中添加本仓库所在的 marketplace，然后安装 `coding-x` 插件：
+添加 marketplace 并安装插件：
 
 ```
 /plugin marketplace add Xinzz995/coding-engine
@@ -104,28 +81,49 @@ assets/dashboard/     ──build──▶  dist/public/         ← 引擎 serv
 
 安装后即可使用 `/prime`、`/plan-feature`、`/create-rules` 命令以及 `prd` / `ralph` / `agent-browser` skills。
 
-### 方式二：直接用引擎（无需安装）
+### Codex
 
-引擎已发布为 npm 包，`npx` 会自动拉取，无需预装：
-
-```bash
-npx coding-x
-```
-
-### 方式三：从源码运行（开发者）
+克隆仓库，仓库根目录的 `.codex-plugin/plugin.json` 清单会把顶层 `skills/`、`commands/` 暴露给 Codex：
 
 ```bash
 git clone https://github.com/Xinzz995/coding-engine.git
-cd coding-engine
-npm install
-npm run dev            # 用 tsx 直接运行 CLI
 ```
+
+按 Codex 的插件加载方式指向该目录即可（清单声明 `"skills": "./skills/"`、`"commands": "./commands/"`，指回仓库中唯一的一份内容）。引擎侧则直接用 `npx coding-x codex` 运行，无需额外安装。
+
+### Cursor
+
+同样克隆仓库，`.cursor-plugin/plugin.json` 清单把顶层 `skills/`、`commands/` 暴露给 Cursor：
+
+```bash
+git clone https://github.com/Xinzz995/coding-engine.git
+```
+
+按 Cursor 的插件/技能加载方式指向该目录即可。
+
+> 说明：三套工具共用**同一份** `skills/` 和 `commands/`，各自只多一个瘦清单指回它（详见下文「目录结构」）。引擎（`npx coding-x`）与用哪个工具无关，任何环境下都能独立运行。
 
 ---
 
-## 使用教程
+## 快速开始
 
-### 整体流程
+```bash
+# 1. 用插件的命令/skills 生成 .workspace/prd.json（见下文工作流程）
+
+# 2. 在项目根目录运行引擎
+npx coding-x                 # 默认用 claude
+npx coding-x codex           # 改用 codex
+
+# 3. 浏览器会自动打开仪表盘（也可手动访问）
+#    http://localhost:7331   普通视图
+#    http://localhost:7331/p 像素风视图
+```
+
+> ⚠️ coding-x 会以**跳过权限确认**模式运行 AI agent（`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`），它会在无人确认的情况下读写文件、执行命令、提交代码。请务必确认当前目录是你信任的项目工作区。
+
+---
+
+## 基本工作流程
 
 ```
 需求  ──/plan-feature──▶  实现计划
@@ -133,27 +131,26 @@ npm run dev            # 用 tsx 直接运行 CLI
       ──ralph skill─────▶  .workspace/prd.json
                                 │
                   npx coding-x  ▼
-        ┌──────────────────────────────────────┐
-        │  for 每一轮迭代:                       │
-        │    Developer 实现最高优先级 story      │
-        │    Validator 逐条验证验收标准          │
-        │    全部 story passes/blocked → 完成     │
-        └──────────────────────────────────────┘
+              Developer ⇄ Validator 循环（见「工作原理」）
                                 │
                                 ▼
               http://localhost:7331  实时查看进度
 ```
 
-### 第 1 步：生成 prd.json
+---
 
-在 Claude Code 中：
+## 使用教程（整体流程）
+
+### 第 1 步：生成 `prd.json`
+
+在 Claude Code（或其他工具）中：
 
 1. （可选）`/prime` 让 agent 先理解你的代码库；`/create-rules` 生成根目录 `AGENTS.md` 作为项目技术指南。
 2. `/plan-feature 我要做的功能描述` 产出完整实现计划。
-3. 用 `prd` skill 生成 PRD（「创建一个 prd」）。
+3. 用 `prd` skill 生成 PRD（对它说「创建一个 prd」）。
 4. 用 `ralph` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。
 
-`prd.json` 的每个 user story 结构如下：
+`prd.json` 结构：
 
 ```jsonc
 {
@@ -166,37 +163,32 @@ npm run dev            # 用 tsx 直接运行 CLI
       "title": "用户可以新建笔记",
       "description": "...",
       "acceptanceCriteria": ["Typecheck passes", "在浏览器中点击新建按钮能创建笔记"],
-      "priority": 1,
-      "passes": false,
-      "notes": "",
-      "retryCount": 0,
-      "blocked": false
+      "priority": 1,        // 数字越小越优先
+      "passes": false,      // 开发完成后置 true
+      "notes": "",          // 验证失败时由 Validator 写入原因
+      "retryCount": 0,      // 失败重试次数
+      "blocked": false      // 累计失败 5 次后置 true，跳过
     }
   ]
 }
 ```
 
-引擎会优先选择 `priority` 最高、`passes: false` 且 `blocked: false` 的 story。
+引擎每轮选择 `priority` 最高、`passes: false` 且 `blocked: false` 的 story。
 
 ### 第 2 步：运行引擎
 
 ```bash
-npx coding-x                    # 默认用 claude，max-iter 50
+npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x --max-iter 20      # 最多 20 轮迭代
 npx coding-x --no-open          # 不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / progress.md 所在目录
-npx coding-x repair             # 仅修复 .workspace/prd.json，不跑循环
+npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环）
 ```
-
-> ⚠️ coding-x 会以**跳过权限确认**模式运行 AI agent（`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`），它会在无人确认的情况下读写文件、执行命令、提交代码。请务必确认当前目录是你信任的项目工作区。
 
 ### 第 3 步：查看实时进度
 
-浏览器打开（默认会自动弹出）：
-
-- 普通视图：<http://localhost:7331>
-- 像素风视图：<http://localhost:7331/p>
+浏览器打开（默认自动弹出）：<http://localhost:7331>（像素风视图 `/p`）。仪表盘展示迭代次数、当前阶段、当前 story、已用时长、story 列表与 `progress.md` 日志。
 
 ### 命令行参数
 
@@ -219,11 +211,106 @@ npx coding-x repair             # 仅修复 .workspace/prd.json，不跑循环
 
 ---
 
+## 包含内容 / 功能清单
+
+### 引擎（`npx coding-x`）
+
+- **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
+- **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
+- **完成判定**：全部 story `passes` 或 `blocked` 即成功退出。
+- **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
+- **超时控制**：开发/验证阶段各有独立超时。
+- **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。
+- **prd.json 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 JSON。
+- **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
+
+### 命令（Slash Commands，用户显式触发）
+
+| 命令 | 作用 |
+| --- | --- |
+| `/prime` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
+| `/create-rules` | 分析代码库并提取模式，生成全局规则文件 `AGENTS.md` |
+| `/plan-feature <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
+
+### Skills（能力，Claude 按语境自动触发）
+
+| Skill | 作用 | 触发示例 |
+| --- | --- | --- |
+| `prd` | 为新功能生成结构清晰、可执行的 PRD | 「创建一个 prd」 |
+| `ralph` | 把已有 PRD 转换成引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
+| `agent-browser` | 浏览器自动化：导航、填表、截图、数据提取，用于 UI story 验证 | 需要在浏览器中验证 UI 时 |
+
+> commands 与 skills 的区别：**command 是你敲 `/命令` 显式触发、支持传参的工作流；skill 是 Claude 根据你说的话自动选用的能力**。二者是 Claude Code 的两种不同原语，各由 `.claude-plugin/plugin.json` 的 `commands` / `skills` 键分别声明。
+
+---
+
+## 目录结构详细说明
+
+skill / command 内容在整个仓库里**只存一份**，各工具用一个瘦清单指回它，因此没有副本、无需同步、不会漂移（做法参考 [superpowers](https://github.com/obra/superpowers)）。
+
+```
+coding-engine/
+├── skills/                       # 唯一源：模型自主触发的能力
+│   ├── prd/SKILL.md
+│   ├── ralph/SKILL.md
+│   └── agent-browser/SKILL.md
+├── commands/                     # 唯一源：用户 /斜杠命令
+│   ├── prime.md
+│   ├── plan-feature.md
+│   └── create-rules.md
+├── AGENTS-template.md            # 项目级 AGENTS.md 模板（create-rules 引用）
+│
+├── .claude-plugin/               # Claude Code 插件清单
+│   ├── plugin.json               #   声明 commands/ skills/（指向仓库根）
+│   └── marketplace.json          #   marketplace 元数据
+├── .cursor-plugin/plugin.json    # Cursor 瘦清单：{ skills: ./skills/, commands: ./commands/ }
+├── .codex-plugin/plugin.json     # Codex 瘦清单：同上
+├── .agents/plugins/marketplace.json  # 通用 agent 清单：source 指向仓库根
+│
+├── assets/                       # 引擎专用静态资产（构建时拷进 dist/，工具不读）
+│   ├── instructions/
+│   │   ├── builder.md            #   Developer 指令（含 {{WORKSPACE}} 占位符）
+│   │   └── validator.md          #   Validator 指令
+│   └── dashboard/
+│       ├── dashboard.html        #   仪表盘普通视图
+│       └── dashboard-p.html      #   仪表盘像素风视图
+│
+├── src/                          # TypeScript 引擎源码
+│   ├── cli.ts                    #   命令行入口、参数解析
+│   ├── engine/
+│   │   ├── loop.ts               #   主循环：Developer ⇄ Validator
+│   │   ├── agent.ts              #   拉起 claude / codex 子进程、超时控制
+│   │   ├── prd.ts                #   读取 prd.json、选 story、完成判定
+│   │   ├── progress.ts           #   读取 progress.md
+│   │   └── repair.ts             #   jsonrepair 修复 prd.json
+│   └── dashboard/
+│       └── server.ts             #   仪表盘 HTTP 服务 + 自动开浏览器
+│
+├── tsup.config.ts                # 打包配置（onSuccess 把 assets 拷进 dist/）
+├── tsconfig.json / vitest.config.ts
+├── package.json
+└── LICENSE                       # MIT
+```
+
+**两条资产链路：**
+
+- **面向工具**：`skills/`、`commands/` 是唯一源，各工具的瘦清单用相对路径 `./skills/` `./commands/` 指回它，随插件仓库分发。
+- **面向引擎**：`assets/instructions`、`assets/dashboard` 由 `npm run build`（tsup 的 `onSuccess` 钩子）拷进 `dist/instructions`、`dist/public`；引擎通过 `import.meta.url` 定位并读取。`package.json` 的 `files` 只发布 `dist`、`assets/instructions`、`assets/dashboard`。
+
+---
+
 ## 开发
 
-- `npm run dev` —— 用 tsx 直接运行 CLI
-- `npm test` —— Vitest 测试
-- `npm run typecheck` —— `tsc --noEmit` 类型检查
-- `npm run build` —— tsup 打包到 `dist/`
+```bash
+npm install
+npm run dev         # 用 tsx 直接运行 CLI
+npm test            # Vitest 测试
+npm run typecheck   # tsc --noEmit 类型检查
+npm run build       # tsup 打包到 dist/
+```
 
-技法来源：Ralph 自主循环 + Anthropic harness 设计。详见 `docs/superpowers/specs/`。
+---
+
+## 许可证
+
+本项目基于 [MIT 许可证](./LICENSE) 开源。

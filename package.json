@@ -2,6 +2,8 @@
   "name": "coding-x",
   "version": "0.1.0",
   "description": "Ralph auto-coding harness — Developer/Validator loop engine + Claude Code plugin",
+  "license": "MIT",
+  "author": "Xinzz",
   "type": "module",
   "bin": { "coding-x": "dist/cli.js" },
   "files": ["dist", "assets/instructions", "assets/dashboard"],
