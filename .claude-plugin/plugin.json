@@ -1,6 +1,6 @@
 {
   "name": "coding-x",
   "version": "0.1.0",
-  "description": "Ralph auto-coding workflow: prd-generate/prd-to-json/agent-browser skills + priming/planning/init-rules commands. Run the engine via `npx coding-x`.",
+  "description": "Ralph auto-coding workflow: prd-generate/prd-to-json/agent-browser skills + priming/planning/init-docs commands. Run the engine via `npx coding-x`.",
   "author": { "name": "Xinzz" }
 }

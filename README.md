@@ -5,7 +5,7 @@
 coding-x 同时是两样东西：
 
 - **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-rules` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`。
+- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`，并为项目生成 docs/ 知识库。
 
 ---
 
@@ -79,7 +79,7 @@ coding-x 同时是两样东西：
 /plugin install coding-x
 ```
 
-安装后即可使用 `/priming`、`/planning`、`/init-rules` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
+安装后即可使用 `/priming`、`/planning`、`/init-docs` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
 
 ### Codex
 
@@ -126,8 +126,8 @@ npx coding-x codex           # 改用 codex
 ## 基本工作流程
 
 ```
-需求  ──/planning────────────▶  实现计划
-      ──prd-generate skill───▶  PRD
+需求  ──/planning────────────▶  实现计划（docs/plans/）
+      ──prd-generate skill───▶  PRD（docs/prds/）
       ──prd-to-json skill────▶  .workspace/prd.json
                                 │
                   npx coding-x  ▼
@@ -145,7 +145,7 @@ npx coding-x codex           # 改用 codex
 
 在 Claude Code（或其他工具）中：
 
-1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-rules` 生成根目录 `AGENTS.md` 作为项目技术指南。
+1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-docs` 生成目录式根 `AGENTS.md` + `docs/` 知识库（架构地图、黄金原则、decisions/plans/prds），单项目与 monorepo 均支持。
 2. `/planning 我要做的功能描述` 产出完整实现计划。
 3. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」）。
 4. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。
@@ -229,7 +229,7 @@ npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环�
 | 命令 | 作用 |
 | --- | --- |
 | `/priming` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
-| `/init-rules` | 分析代码库并提取模式，生成全局规则文件 `AGENTS.md` |
+| `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo |
 | `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
 
 ### Skills（能力，Claude 按语境自动触发）
@@ -257,8 +257,11 @@ coding-engine/
 ├── commands/                     # 唯一源：用户 /斜杠命令
 │   ├── priming.md
 │   ├── planning.md
-│   └── init-rules.md
-├── AGENTS-template.md            # 项目级 AGENTS.md 模板（init-rules 引用）
+│   └── init-docs.md
+├── templates/                    # /init-docs 使用的知识库模板
+│   ├── AGENTS-root.md            #   目录式根 AGENTS.md（四段式）
+│   ├── AGENTS-sub.md             #   子项目薄 AGENTS.md
+│   └── docs/                     #   architecture / golden-principles / decision(ADR)
 │
 ├── .claude-plugin/               # Claude Code 插件清单
 │   ├── plugin.json               #   插件元数据（commands/ skills/ 自动发现）
