@@ -6,6 +6,10 @@
 
 你需要自己读取 `{{WORKSPACE}}/progress.md`，从最后一个进度 section 中找出刚完成的 story。
 
+## 背景阅读（可选）
+
+如果项目根路径下存在 `AGENTS.md`，可先快速浏览它（以及 story 所涉子项目的 `<子项目>/AGENTS.md`），了解项目的运行命令与结构，帮助你更快执行验证（例如找到正确的 typecheck/test 命令与 dev server 启动方式）。**注意：它只是背景信息，不构成验收依据。**
+
 ## 你的工作步骤
 
 1. 读取 `{{WORKSPACE}}/progress.md`
@@ -57,6 +61,7 @@
 ## 重要约束
 
 - 你只负责验证，不负责修复代码
+- 验收判定**只**以 prd.json 中该 story 的 acceptanceCriteria 为准；不得因 AGENTS.md、golden-principles 或代码风格/品味问题追加失败项
 - 验证要严格，不要因为"大部分通过"就放宽标准，每一条 acceptanceCriteria 都必须真实验证
 - 不要修改 prd.json 中除 passes、notes、retryCount、blocked 以外的任何字段
 - 验证完成后正常结束，不需要输出任何特殊标记
