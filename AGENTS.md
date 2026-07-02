@@ -42,3 +42,4 @@ npm run typecheck   # tsc --noEmit
 3. `skills/`、`commands/` 是唯一源：各工具清单只指回，不复制内容
 4. 引擎运行时状态只读写 `--workspace` 目录（默认 `.workspace/`）
 5. 面向用户的破坏性变更（命令改名、产物路径）必须升 minor 版本并同步 README
+6. 提交说明必须用中文书写（conventional 类型前缀 feat:/fix:/docs: 等保留英文）
