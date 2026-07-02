@@ -376,6 +376,22 @@ Add ability to mark tasks with different statuses.
 
 ---
 
+## 再派生：需求中途变更
+
+源 PRD 修改后重新执行本 skill，若 `.workspace/prd.json` 已存在且 `branchName` 与新转换结果**相同**（同一功能），进入再派生模式（branchName 不同则走上方「归档之前的运行」流程）：
+
+1. 先把现有 `prd.json` 复制到 `.workspace/archive/YYYY-MM-DD-rederive-[feature-name]/`（防合并出错；`progress.md` 不动）
+2. 按 story id 对齐合并：
+   - id 相同且 acceptanceCriteria 无实质变化 → 需求字段（title/description/acceptanceCriteria/priority）更新为新版，**保留** passes/notes/retryCount/blocked
+   - id 相同但 acceptanceCriteria 有实质变化 → 需求字段更新为新版，passes 置 `false`、retryCount 置 `0`、blocked 置 `false`，notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`
+   - 新增 id → 全新初始状态（`passes: false`、`notes: ""`、`retryCount: 0`、`blocked: false`）
+   - 源 md 已删除的 id → 从 prd.json 移除，在对照表标注「已移除」
+3. 输出对照表时增加「状态处理」列（保留/重置/新增/移除）
+
+实质变化的判定：AC 条目的增删、断言内容的改变算；纯错别字/措辞润色不算。拿不准时按「有实质变化」处理（宁可重验，不可漏验）。
+
+---
+
 ## 保存前检查清单
 
 在编写 prd.json 之前，验证：
@@ -394,5 +410,6 @@ Add ability to mark tasks with different statuses.
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
+- [ ] 同功能再派生时已先归档副本，并按 id 合并保留执行状态
 
 写入 prd.json 后运行：`npx coding-x repair`（引擎会用 jsonrepair 修复并二次校验）。
