@@ -21,7 +21,8 @@ description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统�
 {
   "project": "[Project Name]",
   "branchName": "ralph/[feature-name-kebab-case]",
-  "description": "[Feature description from PRD title/intro]",
+  "sourcePrd": "docs/prds/prd-[feature-name].md",
+  "description": "[Feature description from PRD title/intro]\n\n【溯源】本文件由 docs/prds/prd-[feature-name].md 派生：需求背景不明时先查阅该文档理解意图，但验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现源文档与 acceptanceCriteria 冲突、或某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
   "userStories": [
     {
       "id": "US-001",
@@ -41,6 +42,8 @@ description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统�
   ]
 }
 ```
+
+`sourcePrd` 仅当源是**仓库内 markdown 文件**时填写（仓库相对路径）；源是粘贴文本或仓库外文件时省略该字段，【溯源】段首句相应改为「本文件由用户提供的 PRD 文本派生」，其余仲裁文案保持不变。
 
 ---
 
@@ -186,6 +189,8 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 4. **所有 stories**：`passes: false`、空的 `notes`、`retryCount: 0`、`blocked: false`
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
+7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
+8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
 
 ### 转换时的增强规则
 
@@ -257,7 +262,7 @@ Add ability to mark tasks with different statuses.
 {
   "project": "任务应用",
   "branchName": "ralph/task-status",
-  "description": "任务状态功能 - 使用状态指示器跟踪任务进度",
+  "description": "任务状态功能 - 使用状态指示器跟踪任务进度\n\n【溯源】本文件由用户提供的 PRD 文本派生：验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
   "userStories": [
     {
       "id": "US-001",
@@ -362,5 +367,6 @@ Add ability to mark tasks with different statuses.
 - [ ] Acceptance criteria 是可验证的（不模糊）
 - [ ] 没有 story 依赖于后面的 story
 - [ ] 每个 story 包含 `retryCount: 0` 和 `blocked: false` 字段
+- [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 
 写入 prd.json 后运行：`npx coding-x repair`（引擎会用 jsonrepair 修复并二次校验）。
