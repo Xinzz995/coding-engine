@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
-import { repairPrdFile } from './engine/repair.js';
+import { repairWorkspaceFiles } from './engine/repair.js';
 import type { AgentKind } from './engine/agent.js';
 import * as dashboard from './dashboard/server.js';
 
@@ -93,8 +93,8 @@ export async function main(argv: string[]): Promise<number> {
   const cfg = parseCliArgs(argv);
 
   if (cfg.command === 'repair') {
-    repairPrdFile(join(cfg.workspace, 'prd.json'));
-    console.log('✅ prd.json 已修复');
+    const repaired = repairWorkspaceFiles(cfg.workspace);
+    console.log(`✅ 已修复: ${repaired.join('、')}`);
     return 0;
   }
 

@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { jsonrepair } from 'jsonrepair';
 
 export function repairJsonString(raw: string): string {
@@ -11,4 +12,16 @@ export function repairPrdFile(path: string): void {
   const raw = readFileSync(path, 'utf-8');
   const repaired = repairJsonString(raw); // throws before any write if unrepairable
   writeFileSync(path, repaired, 'utf-8');
+}
+
+// repair 子命令入口：prd.json 必修；state.json 存在才修（不存在不是错误）。
+export function repairWorkspaceFiles(workspace: string): string[] {
+  repairPrdFile(join(workspace, 'prd.json'));
+  const repaired = ['prd.json'];
+  const statePath = join(workspace, 'state.json');
+  if (existsSync(statePath)) {
+    repairPrdFile(statePath);
+    repaired.push('state.json');
+  }
+  return repaired;
 }

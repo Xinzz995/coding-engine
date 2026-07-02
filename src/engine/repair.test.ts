@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { repairJsonString, repairPrdFile } from './repair.js';
+import { repairJsonString, repairPrdFile, repairWorkspaceFiles } from './repair.js';
 
 describe('repairJsonString', () => {
   it('fixes trailing commas and returns valid JSON', () => {
@@ -22,6 +22,25 @@ describe('repairPrdFile', () => {
     writeFileSync(file, '{ "userStories": [], }');
     repairPrdFile(file);
     expect(JSON.parse(readFileSync(file, 'utf-8'))).toEqual({ userStories: [] });
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('repairWorkspaceFiles', () => {
+  it('repairs prd.json and state.json when both exist', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'repair-ws-'));
+    writeFileSync(join(dir, 'prd.json'), '{ "userStories": [], }');
+    writeFileSync(join(dir, 'state.json'), '{ "US-001": { "passes": true, }, }');
+    const repaired = repairWorkspaceFiles(dir);
+    expect(repaired).toEqual(['prd.json', 'state.json']);
+    expect(JSON.parse(readFileSync(join(dir, 'prd.json'), 'utf-8'))).toEqual({ userStories: [] });
+    expect(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf-8'))).toEqual({ 'US-001': { passes: true } });
+    rmSync(dir, { recursive: true, force: true });
+  });
+  it('skips state.json when absent', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'repair-ws-'));
+    writeFileSync(join(dir, 'prd.json'), '{ "userStories": [], }');
+    expect(repairWorkspaceFiles(dir)).toEqual(['prd.json']);
     rmSync(dir, { recursive: true, force: true });
   });
 });
