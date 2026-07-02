@@ -184,7 +184,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 ## 转换规则
 
 1. **每个 user story 成为一个 JSON 条目**
-2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延当前最大编号，不插号、不重排
+2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延历史最大编号（含源 PRD 中已删除 story 曾占用的编号，不回收），不插号、不重排
 3. **Priority**：基于依赖顺序，然后是文档顺序
 4. **所有 stories**：`passes: false`、空的 `notes`、`retryCount: 0`、`blocked: false`
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`

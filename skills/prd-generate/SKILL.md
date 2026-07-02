@@ -162,7 +162,7 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 story id 是源 PRD 与 prd.json 之间的对齐键（需求变更后再派生时按 id 合并保留执行状态），一旦分配即永久生效：
 
 - 编辑既有 PRD 时，不要重排、不要复用已有 story 的 id
-- 新增 story 一律顺延当前最大编号（US-007 之后是 US-008），即使中间有删除留下的空洞
+- 新增 story 一律顺延历史最大编号（含已删除 story 曾占用的编号，不回收），US-007 之后是 US-008，即使中间有删除留下的空洞
 - 删除 story 时保留编号空洞，不回收
 
 **重要提示：** 

@@ -269,7 +269,7 @@ git commit -m "feat: prd-to-json 产出 sourcePrd 溯源字段与需求冲突仲
 story id 是源 PRD 与 prd.json 之间的对齐键（需求变更后再派生时按 id 合并保留执行状态），一旦分配即永久生效：
 
 - 编辑既有 PRD 时，不要重排、不要复用已有 story 的 id
-- 新增 story 一律顺延当前最大编号（US-007 之后是 US-008），即使中间有删除留下的空洞
+- 新增 story 一律顺延历史最大编号（含已删除 story 曾占用的编号，不回收），US-007 之后是 US-008，即使中间有删除留下的空洞
 - 删除 story 时保留编号空洞，不回收
 ```
 
@@ -311,7 +311,7 @@ git commit -m "feat: prd-generate 增加 story id 稳定性硬规则"
 改为：
 
 ```markdown
-2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延当前最大编号，不插号、不重排
+2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延历史最大编号（含源 PRD 中已删除 story 曾占用的编号，不回收），不插号、不重排
 ```
 
 - [ ] **Step 2: 插入「转换闭环」章节**
@@ -406,7 +406,7 @@ git commit -m "feat: prd-to-json 转换闭环——沿用源 id、增强结果�
 - [ ] **Step 3: 验证与提交**
 
 ```bash
-grep -c "再派生" skills/prd-to-json/SKILL.md   # 预期 ≥ 4
+grep -c "再派生" skills/prd-to-json/SKILL.md   # 预期 3
 git add skills/prd-to-json/SKILL.md
 git commit -m "feat: prd-to-json 再派生模式——按 story id 合并、需求变更保状态"
 ```
@@ -451,7 +451,7 @@ git commit -m "feat: prd-to-json 再派生模式——按 story id 合并、需�
 - [ ] **Step 2: 验证与提交**
 
 ```bash
-grep -c "需求冲突" assets/instructions/builder.md   # 预期 ≥ 2
+grep -c "需求冲突" assets/instructions/builder.md   # 预期 1
 npm run build && grep -c "需求冲突" dist/instructions/builder.md   # 预期一致（onSuccess 拷贝生效）
 git add assets/instructions/builder.md
 git commit -m "feat: builder 指令——sourcePrd 背景查阅与需求冲突仲裁"
