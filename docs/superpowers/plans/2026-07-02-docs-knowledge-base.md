@@ -384,7 +384,7 @@ description: 分析代码库，生成目录式 AGENTS.md 与 docs/ 知识库（�
 
 对每个已确认子项目 `<sub>`：
 
-- `<sub>/AGENTS.md` ← `templates/AGENTS-sub.md`（薄索引；首行保留「先读根 AGENTS.md」声明）
+- `<sub>/AGENTS.md` ← `templates/AGENTS-sub.md`（薄索引；标题下方保留「先读根 AGENTS.md」声明，即模板前 3 行：标题 + 空行 + 该声明）
 - `<sub>/docs/decisions/README.md`、`<sub>/docs/plans/README.md`、`<sub>/docs/prds/README.md`（同上占位内容）
 - `<sub>/docs/architecture.md`：**仅当子项目达到规模阈值才生成**——源文件 > 20 个，或存在两层以上模块目录；拿不准时询问用户
 - 在根 `AGENTS.md` 文档索引表中为该子项目加一行：`| 子项目 <sub> | \`<path>/AGENTS.md\` | {一句话} |`

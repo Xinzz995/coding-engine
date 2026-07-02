@@ -262,6 +262,8 @@ coding-engine/
 │   ├── AGENTS-root.md            #   目录式根 AGENTS.md（四段式）
 │   ├── AGENTS-sub.md             #   子项目薄 AGENTS.md
 │   └── docs/                     #   architecture / golden-principles / decision(ADR)
+├── AGENTS.md                     # 本仓库自己的目录式索引（/init-docs dogfood 产物）
+├── docs/                         # 本仓库知识库：architecture / golden-principles / decisions / plans / prds
 │
 ├── .claude-plugin/               # Claude Code 插件清单
 │   ├── plugin.json               #   插件元数据（commands/ skills/ 自动发现）

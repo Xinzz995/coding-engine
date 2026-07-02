@@ -30,4 +30,4 @@ scope: root
 ## 5. 面向用户的破坏性变更必须升 minor 版本并同步 README
 
 - **为什么**：插件被外部安装，命令改名/产物路径变更会静默破坏用户工作流。
-- **怎么检查**：diff 触碰 `commands/` 文件名或产物路径时，`package.json` minor 位 +1 且 README 命令表已更新。
+- **怎么检查**：打 tag 发布前核对：若自上一 tag 以来的变更触碰了 `commands/` 文件名或产物路径，则 `package.json` minor 位必须已 +1 且 README 对应表已更新。

@@ -50,7 +50,7 @@
 
 只添加**通用且可重用**的 patterns，不要添加 story 特定的细节。
 
-**模式升格**：如果某条 pattern 已在 **≥2 个不同 story** 的「未来迭代的学习」中出现且依然成立，且项目存在 `docs/` 知识库，则将它升格为项目级文档：追加写入 `docs/architecture.md` 末尾的 `## 沉淀模式` 章节（该章节不存在则创建，条目带日期），并在 progress.md 原条目后标注 `[已升格 → docs/architecture.md]`。项目没有 `docs/architecture.md` 时跳过此步。已标注升格的条目不要重复升格。
+**模式升格**：如果某条 pattern 已在 **≥2 个不同 story** 的「未来迭代的学习」中出现且依然成立，且项目存在 `docs/` 知识库，则将它升格为项目级文档：追加写入 `docs/architecture.md` 末尾的 `## 沉淀模式` 章节（该章节不存在则创建，条目带日期），并在 progress.md 中触发本次升格的最新一条该 pattern 记录后标注 `[已升格 → docs/architecture.md]`。项目没有 `docs/architecture.md` 时跳过此步。已标注升格的条目不要重复升格。
 
 ## 质量要求
 

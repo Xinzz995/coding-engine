@@ -31,7 +31,7 @@
 | 设计决策 | `docs/decisions/` | ADR：一事一文件，编号递增 |
 | 实现计划 | `docs/plans/` | /planning 产出（active/done 靠 frontmatter status 区分） |
 | PRD | `docs/prds/` | prd-generate 产出 |
-| {子项目 <name>} | `{<path>/AGENTS.md}` | {monorepo 时每个子项目一行；单项目删除} |
+| {子项目 `<name>`} | `{<path>/AGENTS.md}` | {monorepo 时每个子项目一行；单项目删除} |
 
 ## 硬约束
 
