@@ -525,10 +525,10 @@ import { tryReadState, mergedStories } from '../engine/state.js';
   const prd = tryReadPrd(join(workspaceDir, 'prd.json'));
 ```
 
-之后加一行：
+之后加一行（命名为 `runState`——server.ts 模块级已有运行时相位变量 `const state: State`，同名局部会遮蔽它并在 `state.startedAt` 处触发 TDZ 引用错误）：
 
 ```ts
-  const state = tryReadState(join(workspaceDir, 'state.json'));
+  const runState = tryReadState(join(workspaceDir, 'state.json'));
 ```
 
 返回对象中，原：
@@ -540,7 +540,7 @@ import { tryReadState, mergedStories } from '../engine/state.js';
 改为：
 
 ```ts
-    stories: prd ? mergedStories(prd, state) : [],
+    stories: prd ? mergedStories(prd, runState) : [],
 ```
 
 - [ ] **Step 4: 确认绿灯**
