@@ -339,7 +339,7 @@ Add ability to mark tasks with different statuses.
 1. 如果存在，读取当前的 `prd.json`
 2. 检查 `branchName` 是否与新功能的 branch name 不同
 3. 如果不同且 `progress.md` 在 header 之外有内容：
-   - 创建归档文件夹：`archive/YYYY-MM-DD-feature-name/`
+   - 创建归档文件夹：`.workspace/archive/YYYY-MM-DD-feature-name/`
    - 将当前的 `prd.json` 和 `progress.md` 复制到归档
    - 使用新的 header 重置 `progress.md`
 
