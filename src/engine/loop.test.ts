@@ -135,6 +135,74 @@ describe('runLoop', () => {
   });
 });
 
+describe('runLoop keepOpen', () => {
+  it('keeps the dashboard serving after completion until interrupt resolves', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      const p = ${JSON.stringify(join(workspace, 'prd.json'))};
+      writeFileSync(p, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
+        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
+          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const port = 18100 + (process.pid % 1000);
+    let release!: () => void;
+    const interrupt = new Promise<void>((r) => { release = r; });
+    try {
+      const running = runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port, openBrowser: false,
+        keepOpen: true, interrupt,
+      });
+      // With keepOpen the loop must NOT resolve on its own after completion.
+      const pending = await Promise.race([
+        running.then(() => 'resolved'),
+        new Promise((r) => setTimeout(() => r('pending'), 300)),
+      ]);
+      expect(pending).toBe('pending');
+      // The dashboard must still answer while we wait.
+      const res = await fetch(`http://127.0.0.1:${port}/api/state`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { runtime: { phase: string } };
+      expect(body.runtime.phase).toBe('done');
+      // Releasing the interrupt lets the loop return its real exit code and close.
+      release();
+      expect(await running).toBe(0);
+      await expect(fetch(`http://127.0.0.1:${port}/api/state`)).rejects.toThrow();
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('closes immediately after completion when keepOpen is not set', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      const p = ${JSON.stringify(join(workspace, 'prd.json'))};
+      writeFileSync(p, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
+        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
+          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const port = 19100 + (process.pid % 1000);
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      await expect(fetch(`http://127.0.0.1:${port}/api/state`)).rejects.toThrow();
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+});
+
 describe('renderInstruction', () => {
   it('substitutes every {{WORKSPACE}} occurrence with the given path', () => {
     const out = renderInstruction('a {{WORKSPACE}}/prd.json b {{WORKSPACE}}/progress.md', '/abs/state');

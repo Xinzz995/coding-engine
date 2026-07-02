@@ -143,6 +143,7 @@
 </style>
 </head>
 <body>
+<div id="endedBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99;background:#7c2d12;color:#fed7aa;text-align:center;padding:6px 12px;font-size:13px;letter-spacing:.05em;">⏹ 运行已结束（仪表盘服务已停止），以下为最后状态 — 之后可用 <code>npx coding-x dashboard</code> 离线查看</div>
 <div class="app">
   <!-- Top Bar -->
   <div class="topbar glass">
@@ -281,8 +282,16 @@ function renderPhase(rt) {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN');
 }
 
-// ─── Data fetch (works with dashboard.py backend, or uses embedded fallback) ───
-let useFallback = false;
+// ─── Data fetch ───
+// 三种状态：正常轮询 / 服务器停止（曾有真实数据 → 冻结最后画面 + 横幅，继续探测以便恢复）
+// / 演示模式（从未连上过服务器，如直接打开本 HTML 预览 → 使用内置演示数据）
+let hadRealData = false;
+let demoMode = false;
+
+function setEndedBanner(visible) {
+  const el = document.getElementById('endedBanner');
+  if (el) el.style.display = visible ? 'block' : 'none';
+}
 
 const FALLBACK = {
   runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340 },
@@ -303,17 +312,25 @@ const FALLBACK = {
 
 async function poll() {
   let data;
-  if (!useFallback) {
+  if (demoMode) {
+    data = FALLBACK;
+    data.runtime.elapsed++;
+  } else {
     try {
       const res = await fetch('/api/state');
       data = await res.json();
+      hadRealData = true;
+      setEndedBanner(false);
     } catch (e) {
-      useFallback = true;
+      if (hadRealData) {
+        // 运行已结束（服务器停止）：冻结最后画面，只挂横幅；继续轮询以便服务重启后恢复
+        setEndedBanner(true);
+        return;
+      }
+      // 从未连上过服务器：本地直接打开 HTML 的预览场景，使用演示数据
+      demoMode = true;
       data = FALLBACK;
     }
-  } else {
-    data = FALLBACK;
-    data.runtime.elapsed++;
   }
   renderStories(data.stories, data.runtime.current_story);
   renderProgress(data.stories);

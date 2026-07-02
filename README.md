@@ -183,7 +183,9 @@ npx coding-x codex              # 改用 codex 后端
 npx coding-x --max-iter 20      # 最多 20 轮迭代
 npx coding-x --no-open          # 不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / progress.md 所在目录
+npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
 npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环）
+npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 ```
 
 ### 第 3 步：查看实时进度
@@ -196,11 +198,14 @@ npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环�
 | --- | --- | --- |
 | 位置参数 `codex` | — | 使用 codex 后端（缺省为 claude） |
 | 位置参数 `repair` | — | 仅修复 `<workspace>/prd.json` 后退出 |
+| 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
 | `--workspace <dir>` | `.workspace` | `prd.json` / `progress.md` 所在目录 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
+| `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
+| `--port <n>` | `7331` | 仪表盘端口 |
 
 ### 环境变量
 
@@ -220,7 +225,7 @@ npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环�
 - **完成判定**：全部 story `passes` 或 `blocked` 即成功退出。
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
-- **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。
+- **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
 - **prd.json 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 JSON。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 

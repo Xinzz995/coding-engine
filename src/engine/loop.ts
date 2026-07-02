@@ -13,6 +13,14 @@ export interface LoopConfig {
   instructionsDir: string;
   port?: number;
   openBrowser?: boolean;
+  /** 运行结束后保留仪表盘直到 interrupt（默认 Ctrl+C）；退出码仍是循环的真实结果 */
+  keepOpen?: boolean;
+  /** keepOpen 的放行信号，默认等待 SIGINT；测试注入用 */
+  interrupt?: Promise<void>;
+}
+
+function waitForSigint(): Promise<void> {
+  return new Promise((resolve) => process.once('SIGINT', () => resolve()));
 }
 
 function readInstruction(dir: string, file: string): string | null {
@@ -57,6 +65,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
     const agentCwd = process.cwd();
+    let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
       const before = tryReadPrd(prdPath);
       const currentStory = before ? getCurrentStoryId(before) : null;
@@ -88,10 +97,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const after = tryReadPrd(prdPath);
       if (after && allStoriesResolved(after)) {
         dashboard.setState({ phase: 'done' });
-        return 0;
+        exitCode = 0;
+        break;
       }
     }
-    return 1;
+    if (cfg.keepOpen) {
+      const url = `http://localhost:${server.address().port}`;
+      console.log(`\n✅ 运行结束（退出码 ${exitCode}）。仪表盘仍在 ${url} ，按 Ctrl+C 退出。`);
+      await (cfg.interrupt ?? waitForSigint());
+    }
+    return exitCode;
   } finally {
     server.close();
   }

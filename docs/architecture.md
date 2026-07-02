@@ -1,7 +1,7 @@
 ---
 title: 架构地图
 status: active
-updated: 2026-07-02
+updated: 2026-07-03
 scope: root
 ---
 
@@ -24,7 +24,7 @@ scope: root
 | PRD 读写 | `src/engine/prd.ts` | 读 prd.json、选 story、完成判定 |
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json |
-| 仪表盘 | `src/dashboard/server.ts` | HTTP 服务（:7331）+ 自动开浏览器 |
+| 仪表盘 | `src/dashboard/server.ts` | HTTP 服务（:7331）+ 自动开浏览器；`coding-x dashboard` 子命令可离线复用 |
 | 引擎指令 | `assets/instructions/` | builder.md / validator.md（{{WORKSPACE}} 占位符） |
 | 知识库模板 | `templates/` | /init-docs 使用的 AGENTS/docs 模板 |
 

@@ -4,15 +4,18 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairPrdFile } from './engine/repair.js';
 import type { AgentKind } from './engine/agent.js';
+import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair';
+  command: 'run' | 'repair' | 'dashboard';
   kind: AgentKind;
   maxIterations: number;
   devTimeoutMs: number;
   valTimeoutMs: number;
   workspace: string;
   openBrowser: boolean;
+  keepOpen: boolean;
+  port: number;
 }
 
 export function parseCliArgs(argv: string[]): CliConfig {
@@ -25,11 +28,14 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'val-timeout': { type: 'string' },
       workspace: { type: 'string' },
       'no-open': { type: 'boolean' },
+      'keep-open': { type: 'boolean' },
+      port: { type: 'string' },
     },
   });
 
   const first = positionals[0];
-  const command: 'run' | 'repair' = first === 'repair' ? 'repair' : 'run';
+  const command: 'run' | 'repair' | 'dashboard' =
+    first === 'repair' ? 'repair' : first === 'dashboard' ? 'dashboard' : 'run';
   const kind: AgentKind = first === 'codex' ? 'codex' : 'claude';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
 
@@ -41,6 +47,8 @@ export function parseCliArgs(argv: string[]): CliConfig {
     valTimeoutMs: min(values['val-timeout'], 60),
     workspace: values.workspace ?? '.workspace',
     openBrowser: !values['no-open'],
+    keepOpen: values['keep-open'] ?? false,
+    port: values.port ? Number(values.port) : 7331,
   };
 }
 
@@ -58,6 +66,29 @@ export function permissionWarning(kind: AgentKind): string {
   ].join('\n');
 }
 
+/**
+ * 独立仪表盘：不跑循环，只对着 workspace 起面板离线查看 prd.json / progress.md，
+ * 直到 interrupt（默认 Ctrl+C）。iteration/phase 等内存态保持初始值（未在运行）。
+ */
+export async function runDashboard(
+  opts: { workspace: string; port: number; openBrowser: boolean },
+  interrupt?: Promise<void>,
+): Promise<number> {
+  const server = dashboard.start({
+    workspace: opts.workspace,
+    maxIterations: 0,
+    port: opts.port,
+    openBrowser: opts.openBrowser,
+  });
+  console.log('📊 离线查看模式（未在运行循环），按 Ctrl+C 退出。');
+  try {
+    await (interrupt ?? new Promise<void>((r) => process.once('SIGINT', () => r())));
+    return 0;
+  } finally {
+    server.close();
+  }
+}
+
 export async function main(argv: string[]): Promise<number> {
   const cfg = parseCliArgs(argv);
 
@@ -65,6 +96,10 @@ export async function main(argv: string[]): Promise<number> {
     repairPrdFile(join(cfg.workspace, 'prd.json'));
     console.log('✅ prd.json 已修复');
     return 0;
+  }
+
+  if (cfg.command === 'dashboard') {
+    return runDashboard({ workspace: cfg.workspace, port: cfg.port, openBrowser: cfg.openBrowser });
   }
 
   console.warn(permissionWarning(cfg.kind));
@@ -77,7 +112,9 @@ export async function main(argv: string[]): Promise<number> {
     valTimeoutMs: cfg.valTimeoutMs,
     workspace: cfg.workspace,
     instructionsDir,
+    port: cfg.port,
     openBrowser: cfg.openBrowser,
+    keepOpen: cfg.keepOpen,
   });
 }
 

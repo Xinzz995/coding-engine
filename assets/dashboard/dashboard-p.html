@@ -228,6 +228,7 @@
 </style>
 </head>
 <body>
+<div id="endedBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:99;background:#7c2d12;color:#fed7aa;text-align:center;padding:6px 12px;font-size:12px;font-family:inherit;letter-spacing:.05em;">⏹ 运行已结束（仪表盘服务已停止），以下为最后状态 — 之后可用 npx coding-x dashboard 离线查看</div>
 <div class="pixel-bg-image"></div><div class="pixel-bg-overlay"></div><div class="pixel-bg-grid"></div><div class="pixel-game-root" id="app"></div>
 
 <script>
@@ -279,7 +280,13 @@ function cloneFallback() {
   return JSON.parse(JSON.stringify(FALLBACK));
 }
 
-let useFallback = false;
+let useFallback = false;      // 演示模式：从未连上过服务器（直接打开 HTML 预览）
+let hadRealData = false;      // 曾成功拿到真实数据：服务器停止时冻结画面而非落入演示数据
+
+function setEndedBanner(visible) {
+  const el = document.getElementById('endedBanner');
+  if (el) el.style.display = visible ? 'block' : 'none';
+}
 let dashboardData = cloneFallback();
 
 // ═══════ SPRITES ═══════
@@ -450,7 +457,15 @@ async function poll() {
       const res = await fetch('/api/state');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       dashboardData = await res.json();
+      hadRealData = true;
+      setEndedBanner(false);
     } catch (e) {
+      if (hadRealData) {
+        // 运行已结束（服务器停止）：冻结最后一次真实数据，只挂横幅；继续轮询以便服务重启后恢复
+        setEndedBanner(true);
+        return;
+      }
+      // 从未连上过服务器：本地直接打开 HTML 的预览场景，使用演示数据
       useFallback = true;
       dashboardData = cloneFallback();
     }
