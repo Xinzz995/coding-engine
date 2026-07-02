@@ -584,7 +584,7 @@ git push
 
 ```yaml
 ---
-title: PRD: [Feature Name]
+title: "PRD: [Feature Name]"
 status: active
 updated: YYYY-MM-DD（当天日期）
 scope: root 或子项目名

@@ -276,7 +276,7 @@ PRD 的读者可能是初级开发者或 AI agent。因此：
 
 ```yaml
 ---
-title: PRD: [Feature Name]
+title: "PRD: [Feature Name]"
 status: active
 updated: YYYY-MM-DD（当天日期）
 scope: root 或子项目名
