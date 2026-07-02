@@ -26,12 +26,12 @@
 
 **所有验收标准都通过时：**
 - 不修改任何字段（passes 保持 true，开发 Agent 已设好）
-- 清空 notes 字段为空字符串 `""`
+- 清理 notes 字段：若其中存在以 `[需求冲突]` 开头的行，只保留这些行；否则清空为空字符串 `""`（冲突记录必须留到人工裁决，不随验证通过消失）
 - 将 retryCount 重置为 `0`
 
 **存在任何一项验收标准未通过时：**
 - 将 passes 设回 `false`
-- 在 notes 字段写入失败详情，格式如下：
+- 在 notes 字段写入失败详情（若原 notes 中存在以 `[需求冲突]` 开头的行，将它们原样保留在新内容之前），格式如下：
   ```
   [验证失败 - 第N次] YYYY-MM-DD HH:mm
   - 失败项1：具体描述（例如：点击"新建笔记"按钮后无反应，控制台报错 TypeError: xxx）
@@ -62,6 +62,7 @@
 
 - 你只负责验证，不负责修复代码
 - 验收判定**只**以 prd.json 中该 story 的 acceptanceCriteria 为准；不得因 AGENTS.md、golden-principles 或代码风格/品味问题追加失败项
+- 即使 prd.json 顶层的 `sourcePrd` 或 description 指向源 PRD 文档，也**不得**去源文档中寻找验收依据或增删验收项；源文档只属于开发 Agent 的背景材料
 - 验证要严格，不要因为"大部分通过"就放宽标准，每一条 acceptanceCriteria 都必须真实验证
 - 不要修改 prd.json 中除 passes、notes、retryCount、blocked 以外的任何字段
 - 验证完成后正常结束，不需要输出任何特殊标记
