@@ -22,7 +22,7 @@ function setup(prdStories: unknown[]): { workspace: string; instructionsDir: str
 
 const story = (over: Record<string, unknown> = {}) => ({
   id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
-  priority: 1, passes: false, notes: '', retryCount: 0, blocked: false, ...over,
+  priority: 1, ...over,
 });
 
 describe('runLoop', () => {
@@ -32,10 +32,9 @@ describe('runLoop', () => {
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `
       import { writeFileSync } from 'node:fs';
-      const p = ${JSON.stringify(join(workspace, 'prd.json'))};
-      writeFileSync(p, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
-        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
-          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -71,14 +70,13 @@ describe('runLoop', () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake-cwd.mjs');
     const marker = join(workspace, 'agent-cwd.txt');
-    const prdPath = join(workspace, 'prd.json');
     writeFileSync(fake, `
       import { writeFileSync } from 'node:fs';
       const cwd = process.cwd();
       writeFileSync(${JSON.stringify(marker)}, cwd);
-      writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
-        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
-          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -107,15 +105,14 @@ describe('runLoop', () => {
     writeFileSync(join(instructionsDir, 'builder.md'), 'read {{WORKSPACE}}/prd.json and {{WORKSPACE}}/progress.md');
     const fake = join(workspace, 'fake-prompt.mjs');
     const marker = join(workspace, 'agent-prompt.txt');
-    const prdPath = join(workspace, 'prd.json');
     writeFileSync(fake, `
       import { writeFileSync, existsSync } from 'node:fs';
       // Capture only the first (Developer) invocation's prompt; the Validator
       // runs afterward with the same binary and would otherwise overwrite it.
       if (!existsSync(${JSON.stringify(marker)})) writeFileSync(${JSON.stringify(marker)}, process.argv[process.argv.length - 1]);
-      writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
-        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
-          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -133,6 +130,24 @@ describe('runLoop', () => {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
+
+  it('migrates legacy prd.json state fields into state.json on startup', async () => {
+    // v0.4 旧格式：story 自带 passes:true 且无 state.json —— 引擎启动即抽取迁移，
+    // 循环第一轮就判定全部完成并以 0 退出。
+    const { workspace, instructionsDir } = setup([story({ passes: true, notes: '', retryCount: 0, blocked: false })]);
+    process.env.CODING_X_CLAUDE_BIN = 'node -e process.exit(0)';
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const migrated = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+      expect(migrated['US-001'].passes).toBe(true);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
 });
 
 describe('runLoop keepOpen', () => {
@@ -141,10 +156,9 @@ describe('runLoop keepOpen', () => {
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `
       import { writeFileSync } from 'node:fs';
-      const p = ${JSON.stringify(join(workspace, 'prd.json'))};
-      writeFileSync(p, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
-        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
-          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -182,10 +196,9 @@ describe('runLoop keepOpen', () => {
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `
       import { writeFileSync } from 'node:fs';
-      const p = ${JSON.stringify(join(workspace, 'prd.json'))};
-      writeFileSync(p, JSON.stringify({ project:'p', branchName:'ralph/x', description:'d',
-        userStories:[{ id:'US-001', title:'t', description:'d', acceptanceCriteria:[],
-          priority:1, passes:true, notes:'', retryCount:0, blocked:false }] }));
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;

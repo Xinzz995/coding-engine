@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { runAgent, type AgentKind } from './agent.js';
-import { tryReadPrd, getCurrentStoryId, allStoriesResolved } from './prd.js';
+import { tryReadPrd } from './prd.js';
+import { ensureStateFile, initialStateFor, tryReadState, getCurrentStoryId, allStoriesResolved } from './state.js';
 import * as dashboard from '../dashboard/server.js';
 
 export interface LoopConfig {
@@ -42,6 +43,7 @@ export function renderInstruction(text: string, workspace: string): string {
 
 export async function runLoop(cfg: LoopConfig): Promise<number> {
   const prdPath = join(cfg.workspace, 'prd.json');
+  const statePath = join(cfg.workspace, 'state.json');
   const builderRaw = readInstruction(cfg.instructionsDir, 'builder.md');
   const validatorRaw = readInstruction(cfg.instructionsDir, 'validator.md');
   const builder = builderRaw === null ? null : renderInstruction(builderRaw, cfg.workspace);
@@ -55,6 +57,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   });
 
   try {
+    // 启动时保证 state.json 存在：v0.4 及更早的 prd.json 把状态写在 story 上，
+    // ensureStateFile 会把它们抽取成 state.json（一次性迁移）。
+    const bootPrd = tryReadPrd(prdPath);
+    if (bootPrd) ensureStateFile(cfg.workspace, bootPrd);
     // Agents must run at the project root (the engine process's cwd), NOT at
     // cfg.workspace. The engine reads/writes prd.json at join(cfg.workspace,
     // 'prd.json'), which for the default relative '.workspace' resolves against
@@ -68,7 +74,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
       const before = tryReadPrd(prdPath);
-      const currentStory = before ? getCurrentStoryId(before) : null;
+      const beforeState = before ? (tryReadState(statePath) ?? initialStateFor(before)) : null;
+      const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
       dashboard.setState({ iteration: i, phase: 'developing', currentStory });
 
       // Developer
@@ -95,7 +102,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Completion check
       dashboard.setState({ phase: 'idle' });
       const after = tryReadPrd(prdPath);
-      if (after && allStoriesResolved(after)) {
+      const afterState = after ? (tryReadState(statePath) ?? initialStateFor(after)) : null;
+      if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
         exitCode = 0;
         break;
