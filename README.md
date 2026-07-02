@@ -27,7 +27,7 @@ coding-x 同时是两样东西：
 
 ## 工作原理
 
-引擎在项目根目录启动，围绕工作区里的两份文件运转：`prd.json`（需求与状态）和 `progress.md`（进度与学习日志）。
+引擎在项目根目录启动，围绕工作区里的两份文件运转：`prd.json`（需求与状态）和 `progress.md`（进度与学习日志）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` 是**执行真相源**（机器与 agent 读写）；两者冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。
 
 ```
                       npx coding-x
@@ -148,7 +148,7 @@ npx coding-x codex           # 改用 codex
 1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-docs` 生成目录式根 `AGENTS.md` + `docs/` 知识库（架构地图、黄金原则、decisions/plans/prds），单项目与 monorepo 均支持。
 2. `/planning 我要做的功能描述` 产出完整实现计划。
 3. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」）。
-4. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。
+4. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
 
 `prd.json` 结构：
 
@@ -156,6 +156,7 @@ npx coding-x codex           # 改用 codex
 {
   "project": "我的项目",
   "branchName": "ralph/my-feature",
+  "sourcePrd": "docs/prds/prd-my-feature.md",  // 意图真相源（源 PRD）路径，冲突时以它为准重新派生
   "description": "...",
   "userStories": [
     {

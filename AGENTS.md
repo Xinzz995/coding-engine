@@ -30,7 +30,7 @@ npm run typecheck   # tsc --noEmit
 | 黄金原则 | `docs/golden-principles.md` | 机械可判定的强制规则 |
 | 设计决策 | `docs/decisions/` | ADR：一事一文件，编号递增 |
 | 实现计划 | `docs/plans/` | /planning 产出 |
-| PRD | `docs/prds/` | prd-generate 产出 |
+| PRD | `docs/prds/` | prd-generate 产出；意图真相源，`.workspace/prd.json` 由它派生（ADR-003） |
 | 功能设计文档 | `docs/superpowers/specs/` | brainstorming 产出的设计规格 |
 | 实施任务计划 | `docs/superpowers/plans/` | writing-plans 产出的分任务计划 |
 | 用户文档 | `README.md` | 安装、快速开始、CLI 参数、目录结构 |

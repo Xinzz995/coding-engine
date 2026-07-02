@@ -34,7 +34,7 @@ cli → engine（loop → agent / prd / progress / repair）；loop 启停 dashb
 
 ## 数据流
 
-`.workspace/` 里两份文件贯穿全程：`prd.json`（需求+状态）与 `progress.md`（日志+学习）。builder 实现单个 story 并更新两者 → validator 逐条核对 acceptanceCriteria 并回写 passes/notes/retryCount/blocked → 循环直到全部 passes 或 blocked。
+`.workspace/` 里两份文件贯穿全程：`prd.json`（需求+状态，由 `docs/prds/` 源 PRD 经 prd-to-json 派生，顶层 `sourcePrd` 记录来源）与 `progress.md`（日志+学习）。分层真相源（ADR-003）：md 是意图真相（人改），prd.json 是执行真相（机器改），冲突以 md 为准再派生，执行状态永不回流 md。builder 实现单个 story 并更新两者 → validator 逐条核对 acceptanceCriteria 并回写 passes/notes/retryCount/blocked → 循环直到全部 passes 或 blocked。
 
 ## 测试
 
