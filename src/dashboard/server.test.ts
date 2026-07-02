@@ -12,6 +12,7 @@ function tempWorkspace(): string {
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(join(dir, 'prd.json'), JSON.stringify({
     project: '任务应用', branchName: 'ralph/x', description: 'd',
+    sourcePrd: 'docs/prds/prd-x.md',
     userStories: [{ id: 'US-001', passes: false }],
   }));
   writeFileSync(join(dir, 'progress.md'), '## US-001\n- done');
@@ -28,6 +29,7 @@ describe('buildApiResponse', () => {
     expect(r.runtime.phase).toBe('validating');
     expect(r.project).toBe('任务应用');
     expect(r.branchName).toBe('ralph/x');
+    expect(r.sourcePrd).toBe('docs/prds/prd-x.md');
     expect(r.stories.length).toBe(1);
     expect(r.logs).toContain('US-001');
   });

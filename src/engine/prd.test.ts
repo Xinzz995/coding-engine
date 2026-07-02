@@ -50,4 +50,11 @@ describe('tryReadPrd', () => {
     expect(tryReadPrd(file)?.userStories[0].id).toBe('US-001');
     rmSync(dir, { recursive: true, force: true });
   });
+  it('preserves sourcePrd when present', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'prd-'));
+    const file = join(dir, 'prd.json');
+    writeFileSync(file, JSON.stringify({ ...makePrd([{ id: 'US-001' }]), sourcePrd: 'docs/prds/prd-x.md' }));
+    expect(tryReadPrd(file)?.sourcePrd).toBe('docs/prds/prd-x.md');
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

@@ -16,6 +16,8 @@ export interface Prd {
   project: string;
   branchName: string;
   description: string;
+  /** 意图真相源（源 PRD）的仓库相对路径；由 prd-to-json 写入，引擎只透传不解析 */
+  sourcePrd?: string;
   userStories: Story[];
 }
 

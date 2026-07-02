@@ -42,6 +42,7 @@ export interface ApiResponse {
   };
   project: string;
   branchName: string;
+  sourcePrd: string;
   stories: unknown[];
   logs: string;
 }
@@ -60,6 +61,7 @@ export function buildApiResponse(): ApiResponse {
     },
     project: prd?.project ?? '',
     branchName: prd?.branchName ?? '',
+    sourcePrd: prd?.sourcePrd ?? '',
     stories: prd?.userStories ?? [],
     logs,
   };
