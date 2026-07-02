@@ -157,6 +157,14 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 - [ ] **[仅 UI stories]** 使用 agent-browser 在浏览器中验证
 ```
 
+#### Story ID 稳定性（硬规则）
+
+story id 是源 PRD 与 prd.json 之间的对齐键（需求变更后再派生时按 id 合并保留执行状态），一旦分配即永久生效：
+
+- 编辑既有 PRD 时，不要重排、不要复用已有 story 的 id
+- 新增 story 一律顺延当前最大编号（US-007 之后是 US-008），即使中间有删除留下的空洞
+- 删除 story 时保留编号空洞，不回收
+
 **重要提示：** 
 - Acceptance criteria 必须是可验证的，不能模糊。"工作正常"是不好的。"删除前按钮显示确认对话框"是好的。
 - **对于任何有 UI 变更的 story：** 始终写明用 agent-browser 验证的页面、操作和预期结果，不要只写一句泛泛的“使用 agent-browser 在浏览器中验证”。
@@ -399,3 +407,4 @@ scope: root
 - [ ] Non-goals 部分定义了清晰的边界
 - [ ] 文件以统一 frontmatter 开头（title/status/updated/scope）
 - [ ] 已按归属规则保存到 `docs/prds/prd-[feature-name].md`（或 `<子项目>/docs/prds/`）
+- [ ] 编辑既有 PRD 时未重排/复用已有 story id；新增 story 顺延最大编号
