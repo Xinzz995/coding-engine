@@ -229,7 +229,7 @@ npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环�
 | 命令 | 作用 |
 | --- | --- |
 | `/priming` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
-| `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo |
+| `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo；并为 Claude Code 生成 `CLAUDE.md` 桥接（`@AGENTS.md` 导入） |
 | `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
 
 ### Skills（能力，Claude 按语境自动触发）
@@ -263,6 +263,7 @@ coding-engine/
 │   ├── AGENTS-sub.md             #   子项目薄 AGENTS.md
 │   └── docs/                     #   architecture / golden-principles / decision(ADR)
 ├── AGENTS.md                     # 本仓库自己的目录式索引（/init-docs dogfood 产物）
+├── CLAUDE.md                     # Claude Code 桥接：@AGENTS.md 导入（Claude Code 不读 AGENTS.md）
 ├── docs/                         # 本仓库知识库：architecture / golden-principles / decisions / plans / prds
 │
 ├── .claude-plugin/               # Claude Code 插件清单
