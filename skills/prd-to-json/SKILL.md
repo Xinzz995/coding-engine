@@ -184,7 +184,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 ## 转换规则
 
 1. **每个 user story 成为一个 JSON 条目**
-2. **IDs**：顺序（US-001、US-002 等）
+2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延当前最大编号，不插号、不重排
 3. **Priority**：基于依赖顺序，然后是文档顺序
 4. **所有 stories**：`passes: false`、空的 `notes`、`retryCount: 0`、`blocked: false`
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`
@@ -199,6 +199,30 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 3. 如果多个 story 合起来才构成一个真实用户流程，主动增加最后一个“闭环集成验证” story
 4. 不要让“调用接口”“保存 token”“完成接入”这种实现描述直接进入最终 `prd.json`
 5. 优先写 validator 可以用代码检查、curl、agent-browser、localStorage、URL、页面文案、截图来确认的标准
+
+---
+
+## 转换闭环：回写源 md 与对照表
+
+转换不是只读操作。凡是转换过程中做了增强（重写模糊 AC、扩写浏览器断言、新增前置/闭环 story、拆分大 story），源 PRD 与 prd.json 就已经不一致——必须闭环，否则 validator 实际执行的验收标准从未被人审过。
+
+**1. 回写源 md（仅当源是仓库内文件时）：**
+
+- 把增强/拆分后的最终 stories 回写进源 PRD 的 `## User Stories` 章节：标题保持 `### US-nnn: 标题` 格式，AC 一律写成未勾选的 `- [ ]` 清单（执行状态永不回流 md）
+- 更新 frontmatter 的 `updated` 为当天日期
+- 只允许改 User Stories 章节与 frontmatter `updated`；Goals、Non-Goals、Functional Requirements 等其余章节一律不动
+- 源是粘贴文本或仓库外文件时跳过回写，只输出对照表
+
+**2. 输出对照表（在会话中呈现给用户）：**
+
+| 源 story | 产出 story | 变化 |
+|---|---|---|
+| US-001 | US-001 | 沿用 |
+| US-002 | US-002 | AC 第 3 条改写为可执行断言 |
+| — | US-005 | 新增（US-002 的 dev proxy 前置） |
+| US-003 | US-006、US-007 | 拆分 |
+
+对照表让用户一眼看出机器即将执行的验收标准与他写的 PRD 差在哪里。用户有异议时，先改源 md 再重新转换；不要直接手改 prd.json。
 
 ---
 
@@ -368,5 +392,7 @@ Add ability to mark tasks with different statuses.
 - [ ] 没有 story 依赖于后面的 story
 - [ ] 每个 story 包含 `retryCount: 0` 和 `blocked: false` 字段
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
+- [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
+- [ ] 已在会话中输出转换对照表
 
 写入 prd.json 后运行：`npx coding-x repair`（引擎会用 jsonrepair 修复并二次校验）。
