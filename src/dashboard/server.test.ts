@@ -13,7 +13,10 @@ function tempWorkspace(): string {
   writeFileSync(join(dir, 'prd.json'), JSON.stringify({
     project: '任务应用', branchName: 'ralph/x', description: 'd',
     sourcePrd: 'docs/prds/prd-x.md',
-    userStories: [{ id: 'US-001', passes: false }],
+    userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
+  }));
+  writeFileSync(join(dir, 'state.json'), JSON.stringify({
+    'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
   }));
   writeFileSync(join(dir, 'progress.md'), '## US-001\n- done');
   return dir;
@@ -31,7 +34,22 @@ describe('buildApiResponse', () => {
     expect(r.branchName).toBe('ralph/x');
     expect(r.sourcePrd).toBe('docs/prds/prd-x.md');
     expect(r.stories.length).toBe(1);
+    expect((r.stories[0] as { passes: boolean }).passes).toBe(true); // 状态来自 state.json
     expect(r.logs).toContain('US-001');
+  });
+
+  it('falls back to legacy in-story state when state.json is absent (v0.4 workspace)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ws-legacy-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, 'prd.json'), JSON.stringify({
+      project: 'p', branchName: 'ralph/x', description: 'd',
+      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
+        priority: 1, passes: true, notes: '', retryCount: 0, blocked: false }],
+    }));
+    writeFileSync(join(dir, 'progress.md'), '');
+    configureWorkspace(dir, 50);
+    const r = buildApiResponse();
+    expect((r.stories[0] as { passes: boolean }).passes).toBe(true);
   });
 });
 

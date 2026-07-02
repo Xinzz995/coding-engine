@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { tryReadPrd } from '../engine/prd.js';
+import { tryReadState, mergedStories } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 
 export type Phase = 'idle' | 'developing' | 'validating' | 'done' | 'error';
@@ -50,6 +51,7 @@ export interface ApiResponse {
 export function buildApiResponse(): ApiResponse {
   const elapsed = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0;
   const prd = tryReadPrd(join(workspaceDir, 'prd.json'));
+  const runState = tryReadState(join(workspaceDir, 'state.json'));
   const logs = readProgress(join(workspaceDir, 'progress.md'));
   return {
     runtime: {
@@ -62,7 +64,7 @@ export function buildApiResponse(): ApiResponse {
     project: prd?.project ?? '',
     branchName: prd?.branchName ?? '',
     sourcePrd: prd?.sourcePrd ?? '',
-    stories: prd?.userStories ?? [],
+    stories: prd ? mergedStories(prd, runState) : [],
     logs,
   };
 }
