@@ -87,4 +87,16 @@
 - **monorepo**：如果当前 story 涉及某个子项目，除根 `AGENTS.md` 外，必须同时阅读该子项目的 `<子项目>/AGENTS.md`（如存在）。
 - **黄金原则**：如果存在 `docs/golden-principles.md`（含所涉子项目的），其中每条原则都是**强制规则**，实现与提交必须遵守；违反任何一条视为质量检查不通过。
 
-如果开发过程中对需求有不明确的地方，查看 `{{WORKSPACE}}/prd.json` 中该 story 的完整描述与验收标准；这是需求的唯一来源。
+## 需求来源与冲突处理
+
+如果开发过程中对需求有不明确的地方，先查看 `{{WORKSPACE}}/prd.json` 中该 story 的完整描述与验收标准——验收只以它的 acceptanceCriteria 为准。
+
+如果 prd.json 顶层存在 `sourcePrd` 字段，它指向本次需求派生自的源 PRD 文档（仓库相对路径）。当 story 的描述与验收标准不足以理解背景（目标、Non-Goals、设计约束）时，去读该文档补全上下文。
+
+如果你发现源文档与 acceptanceCriteria 冲突，或某条 acceptanceCriteria 无法成立：不要自行取舍、不要按源文档自由发挥——按 acceptanceCriteria 实现，并在该 story 的 `notes` 字段追加一行冲突记录（保留 notes 已有内容）：
+
+```
+[需求冲突] YYYY-MM-DD HH:mm 冲突点简述（源文档说 X，acceptanceCriteria 说 Y，已按 Y 实现）
+```
+
+冲突留给人工裁决：人工修订源 PRD 后会重新派生 prd.json，你不需要也不允许直接改源 PRD 或验收标准。
