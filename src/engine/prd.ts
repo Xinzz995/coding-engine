@@ -6,10 +6,6 @@ export interface Story {
   description: string;
   acceptanceCriteria: string[];
   priority: number;
-  passes: boolean;
-  notes: string;
-  retryCount: number;
-  blocked: boolean;
 }
 
 export interface Prd {
@@ -27,15 +23,4 @@ export function tryReadPrd(path: string): Prd | null {
   } catch {
     return null;
   }
-}
-
-export function getCurrentStoryId(prd: Prd): string | null {
-  for (const s of prd.userStories) {
-    if (!s.passes && !s.blocked) return s.id;
-  }
-  return null;
-}
-
-export function allStoriesResolved(prd: Prd): boolean {
-  return prd.userStories.every((s) => s.passes || s.blocked);
 }
