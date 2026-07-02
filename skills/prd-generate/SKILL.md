@@ -14,7 +14,7 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 1. 接收用户的功能描述
 2. 提出 3-5 个关键的澄清问题（带字母选项）
 3. 根据答案生成结构化的 PRD
-4. 保存到 `tasks/prd-[feature-name].md`
+4. 保存到 `docs/prds/prd-[feature-name].md`（monorepo 中按归属规则可能是 `<子项目>/docs/prds/`）
 
 **重要提示：** 不要开始实施。只需创建 PRD。
 
@@ -269,14 +269,32 @@ PRD 的读者可能是初级开发者或 AI agent。因此：
 ## 输出
 
 - **格式：** Markdown (`.md`)
-- **位置：** `tasks/`
+- **位置：** `docs/prds/`（目录不存在则创建）
+- **归属规则（monorepo）：** 功能只涉及一个子项目 → 保存到 `<子项目>/docs/prds/`；跨子项目或单项目 → 根 `docs/prds/`
 - **文件名：** `prd-[feature-name].md` (kebab-case)
+- **frontmatter：** 文件必须以统一 frontmatter 开头：
+
+```yaml
+---
+title: PRD: [Feature Name]
+status: active
+updated: YYYY-MM-DD（当天日期）
+scope: root 或子项目名
+---
+```
 
 ---
 
 ## PRD 示例
 
 ```markdown
+---
+title: "PRD: Task Priority System"
+status: active
+updated: 2026-07-02
+scope: root
+---
+
 # PRD: Task Priority System
 
 ## Introduction
@@ -379,4 +397,5 @@ PRD 的读者可能是初级开发者或 AI agent。因此：
 - [ ] 如功能跨多个 story，已增加最终集成验证 story
 - [ ] Functional requirements 已编号且无歧义
 - [ ] Non-goals 部分定义了清晰的边界
-- [ ] 已保存到 `tasks/prd-[feature-name].md`
+- [ ] 文件以统一 frontmatter 开头（title/status/updated/scope）
+- [ ] 已按归属规则保存到 `docs/prds/prd-[feature-name].md`（或 `<子项目>/docs/prds/`）

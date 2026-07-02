@@ -11,7 +11,7 @@ description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统�
 
 ## 工作流程
 
-获取 PRD（markdown 文件或文本）并将其转换为 ralph 目录中的 `prd.json` (保存到当前项目跟路径下/.workspace/prd.json)。
+获取 PRD（markdown 文件或文本；PRD 通常位于 `docs/prds/`，monorepo 中也可能在 `<子项目>/docs/prds/`——但对来源路径无硬依赖，任何路径或直接粘贴的文本都可以）并将其转换为 `prd.json`（保存到当前项目根路径下 `.workspace/prd.json`）。
 
 ---
 
