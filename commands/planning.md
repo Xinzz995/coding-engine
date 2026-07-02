@@ -144,6 +144,13 @@ description: "通过深入代码库分析与调研，创建完整的功能规划
 下面是需要你为实现代理填写的模板：
 
 ```markdown
+---
+title: <feature-name>
+status: active
+updated: <当天日期 YYYY-MM-DD>
+scope: <root 或子项目名>
+---
+
 # 功能: <feature-name>
 
 下面这份计划应尽可能完整，但在真正开始实现前，你仍然必须再次验证文档、代码库模式以及任务本身是否合理。
@@ -374,12 +381,16 @@ description: "通过深入代码库分析与调研，创建完整的功能规划
 
 ## 输出格式
 
-**文件名**: `.agents/plans/{kebab-case-descriptive-name}.md`
+**文件名**: `docs/plans/{kebab-case-descriptive-name}.md`
 
 - 将 `{kebab-case-descriptive-name}` 替换为简短且描述清晰的功能名
 - 示例：`add-user-authentication.md`、`implement-search-api.md`、`refactor-database-layer.md`
 
-**目录**：如果 `.agents/plans/` 不存在，则创建它
+**归属规则（monorepo）**：功能只涉及一个子项目 → 保存到 `<子项目>/docs/plans/`；跨子项目或单项目 → 保存到根 `docs/plans/`。
+
+**frontmatter**：计划文件必须以上方模板中的 frontmatter 开头（title/status/updated/scope）；`status` 初始为 `active`，功能完成后改为 `done`。
+
+**目录**：如果目标 `docs/plans/` 不存在，则创建它
 
 ## 质量标准
 
