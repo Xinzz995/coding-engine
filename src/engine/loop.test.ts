@@ -46,7 +46,7 @@ describe('runLoop', () => {
     delete process.env.CODING_X_CLAUDE_BIN;
   });
 
-  it('prints a /compound-docs hint when all stories resolve', async () => {
+  it('prints review-loop and compound-docs hints when all stories resolve', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `
@@ -67,6 +67,7 @@ describe('runLoop', () => {
       });
       expect(code).toBe(0);
       expect(logs.some((l) => l.includes('/compound-docs'))).toBe(true);
+      expect(logs.some((l) => l.includes('/review-loop'))).toBe(true);
     } finally {
       console.log = orig;
       delete process.env.CODING_X_CLAUDE_BIN;

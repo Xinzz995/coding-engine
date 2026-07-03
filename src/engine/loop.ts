@@ -113,7 +113,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
-        console.log('\n💡 全部 story 已通过。建议运行 /compound-docs 把本轮经验沉淀进项目文档。');
+        console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
         exitCode = 0;
         break;
       }
