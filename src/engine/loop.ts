@@ -1,8 +1,8 @@
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { runAgent, type AgentKind } from './agent.js';
-import { tryReadPrd } from './prd.js';
-import { ensureStateFile, initialStateFor, tryReadState, getCurrentStoryId, allStoriesResolved } from './state.js';
+import { tryReadPrd, type Prd } from './prd.js';
+import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
 import * as dashboard from '../dashboard/server.js';
 
 export interface LoopConfig {
@@ -41,6 +41,14 @@ export function renderInstruction(text: string, workspace: string): string {
   return text.replaceAll('{{WORKSPACE}}', workspace);
 }
 
+// 运行期读取执行状态；缺失/损坏时按全部未开始处理（绝不覆盖原文件，交给 repair）。
+function readRunState(statePath: string, prd: Prd): RunState {
+  const state = tryReadState(statePath);
+  if (state) return state;
+  console.warn('⚠️  state.json 缺失或不可读，本轮按全部 story 未开始处理；若文件损坏请运行 npx coding-x repair');
+  return blankStateFor(prd);
+}
+
 export async function runLoop(cfg: LoopConfig): Promise<number> {
   const prdPath = join(cfg.workspace, 'prd.json');
   const statePath = join(cfg.workspace, 'state.json');
@@ -74,7 +82,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
       const before = tryReadPrd(prdPath);
-      const beforeState = before ? (tryReadState(statePath) ?? initialStateFor(before)) : null;
+      const beforeState = before ? readRunState(statePath, before) : null;
       const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
       dashboard.setState({ iteration: i, phase: 'developing', currentStory });
 
@@ -102,7 +110,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Completion check
       dashboard.setState({ phase: 'idle' });
       const after = tryReadPrd(prdPath);
-      const afterState = after ? (tryReadState(statePath) ?? initialStateFor(after)) : null;
+      const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
         exitCode = 0;

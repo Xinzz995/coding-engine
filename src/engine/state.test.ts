@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  tryReadState, initialStateFor, ensureStateFile, mergedStories,
+  tryReadState, initialStateFor, blankStateFor, ensureStateFile, mergedStories,
   getCurrentStoryId, allStoriesResolved, INITIAL_STORY_STATE, type RunState,
 } from './state.js';
 import type { Prd } from './prd.js';
@@ -42,6 +42,17 @@ describe('tryReadState', () => {
     expect(tryReadState(file)?.['US-001'].retryCount).toBe(2);
     rmSync(dir, { recursive: true, force: true });
   });
+  it('rejects structurally invalid state (valid JSON, wrong shape)', () => {
+    const dir = tempDir();
+    const file = join(dir, 'state.json');
+    writeFileSync(file, JSON.stringify({ 'US-001': true }));
+    expect(tryReadState(file)).toBeNull();
+    writeFileSync(file, JSON.stringify(['US-001']));
+    expect(tryReadState(file)).toBeNull();
+    writeFileSync(file, JSON.stringify({ 'US-001': { passes: 'yes', notes: '', retryCount: 0, blocked: false } }));
+    expect(tryReadState(file)).toBeNull();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('initialStateFor', () => {
@@ -53,6 +64,13 @@ describe('initialStateFor', () => {
   it('extracts legacy state fields from v0.4-style stories (migration)', () => {
     const s = initialStateFor(contentPrd(['US-001'], { 'US-001': { passes: true, notes: 'x', retryCount: 3, blocked: true } }));
     expect(s['US-001']).toEqual({ passes: true, notes: 'x', retryCount: 3, blocked: true });
+  });
+});
+
+describe('blankStateFor', () => {
+  it('ignores legacy in-story fields (runtime fallback must not resurrect stale state)', () => {
+    const s = blankStateFor(contentPrd(['US-001'], { 'US-001': { passes: true, blocked: true } }));
+    expect(s['US-001']).toEqual(INITIAL_STORY_STATE);
   });
 });
 

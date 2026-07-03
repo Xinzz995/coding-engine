@@ -148,6 +148,24 @@ describe('runLoop', () => {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
+
+  it('does not resurrect legacy in-story state when state.json is corrupted mid-run', async () => {
+    // 胖 prd.json（story 自带 passes:true）+ 损坏的 state.json：
+    // 运行期回退必须按全部未开始处理（而非复活 legacy passes），循环跑满返回 1，且不覆盖损坏文件。
+    const { workspace, instructionsDir } = setup([story({ passes: true, notes: '', retryCount: 0, blocked: false })]);
+    writeFileSync(join(workspace, 'state.json'), '{ broken');
+    process.env.CODING_X_CLAUDE_BIN = 'node -e process.exit(0)';
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1);
+      expect(readFileSync(join(workspace, 'state.json'), 'utf-8')).toBe('{ broken');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
 });
 
 describe('runLoop keepOpen', () => {

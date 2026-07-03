@@ -19,9 +19,19 @@ export const INITIAL_STORY_STATE: StoryState = Object.freeze({
   passes: false, notes: '', retryCount: 0, blocked: false,
 });
 
+function isStoryState(v: unknown): v is StoryState {
+  if (typeof v !== 'object' || v === null) return false;
+  const s = v as Record<string, unknown>;
+  return typeof s.passes === 'boolean' && typeof s.notes === 'string'
+    && typeof s.retryCount === 'number' && typeof s.blocked === 'boolean';
+}
+
 export function tryReadState(path: string): RunState | null {
   try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as RunState;
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    if (!Object.values(parsed as Record<string, unknown>).every(isStoryState)) return null;
+    return parsed as RunState;
   } catch {
     return null;
   }
@@ -41,6 +51,13 @@ function legacyStateOf(story: Story): StoryState {
 export function initialStateFor(prd: Prd): RunState {
   const state: RunState = {};
   for (const s of prd.userStories) state[s.id] = legacyStateOf(s);
+  return state;
+}
+
+// 运行期回退用：不读 story 上的 legacy 字段（防止已迁移的旧状态“复活”），全部按初始值。
+export function blankStateFor(prd: Prd): RunState {
+  const state: RunState = {};
+  for (const s of prd.userStories) state[s.id] = INITIAL_STORY_STATE;
   return state;
 }
 
