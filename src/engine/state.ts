@@ -15,7 +15,7 @@ export type RunState = Record<string, StoryState>;
 /** 仪表盘/展示用合并视图 */
 export type StoryView = Story & StoryState;
 
-export const INITIAL_STORY_STATE: StoryState = Object.freeze({
+export const INITIAL_STORY_STATE: Readonly<StoryState> = Object.freeze({
   passes: false, notes: '', retryCount: 0, blocked: false,
 });
 

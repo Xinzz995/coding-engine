@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { repairJsonString, repairPrdFile, repairWorkspaceFiles } from './repair.js';
+import { repairJsonString, repairJsonFile, repairWorkspaceFiles } from './repair.js';
 
 describe('repairJsonString', () => {
   it('fixes trailing commas and returns valid JSON', () => {
@@ -15,12 +15,12 @@ describe('repairJsonString', () => {
   });
 });
 
-describe('repairPrdFile', () => {
+describe('repairJsonFile', () => {
   it('rewrites the file in place', () => {
     const dir = mkdtempSync(join(tmpdir(), 'repair-'));
     const file = join(dir, 'prd.json');
     writeFileSync(file, '{ "userStories": [], }');
-    repairPrdFile(file);
+    repairJsonFile(file);
     expect(JSON.parse(readFileSync(file, 'utf-8'))).toEqual({ userStories: [] });
     rmSync(dir, { recursive: true, force: true });
   });

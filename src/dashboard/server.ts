@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { tryReadPrd } from '../engine/prd.js';
-import { tryReadState, mergedStories } from '../engine/state.js';
+import { tryReadState, mergedStories, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 
 export type Phase = 'idle' | 'developing' | 'validating' | 'done' | 'error';
@@ -44,7 +44,7 @@ export interface ApiResponse {
   project: string;
   branchName: string;
   sourcePrd: string;
-  stories: unknown[];
+  stories: StoryView[];
   logs: string;
 }
 

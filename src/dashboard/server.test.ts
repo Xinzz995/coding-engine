@@ -34,7 +34,7 @@ describe('buildApiResponse', () => {
     expect(r.branchName).toBe('ralph/x');
     expect(r.sourcePrd).toBe('docs/prds/prd-x.md');
     expect(r.stories.length).toBe(1);
-    expect((r.stories[0] as { passes: boolean }).passes).toBe(true); // 状态来自 state.json
+    expect(r.stories[0].passes).toBe(true); // 状态来自 state.json
     expect(r.logs).toContain('US-001');
   });
 
@@ -49,7 +49,7 @@ describe('buildApiResponse', () => {
     writeFileSync(join(dir, 'progress.md'), '');
     configureWorkspace(dir, 50);
     const r = buildApiResponse();
-    expect((r.stories[0] as { passes: boolean }).passes).toBe(true);
+    expect(r.stories[0].passes).toBe(true);
   });
 });
 
