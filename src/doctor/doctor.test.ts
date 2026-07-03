@@ -3,7 +3,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseFrontmatter, runDoctor, renderDoctorReport } from './doctor.js';
+import {
+  parseFrontmatter,
+  extractAgentsIndexPaths,
+  extractInlineLinkTargets,
+  runDoctor,
+  renderDoctorReport,
+} from './doctor.js';
 
 const FULL_FM = ['---', 'title: 示例', 'status: active', 'updated: 2026-07-03', 'scope: root', '---', '', '# 正文'].join('\n');
 
@@ -185,6 +191,136 @@ describe('runDoctor — updated 新鲜度', () => {
   });
 });
 
+const AGENTS_MD = [
+  '# AGENTS.md',
+  '',
+  '| 主题 | 路径 | 说明 |',
+  '|---|---|---|',
+  '| 架构 | `docs/architecture.md` | 地图 |',
+  '| 决策 | `docs/decisions/` | ADR |',
+  '| 命令 | `npm run dev` | 含空格，非路径 |',
+  '',
+  '表格外的反引号路径不参与检查：`docs/not-in-table.md`。',
+].join('\n');
+
+describe('extractAgentsIndexPaths', () => {
+  it('extracts only path-like backtick content from table rows', () => {
+    expect(extractAgentsIndexPaths(AGENTS_MD)).toEqual(['docs/architecture.md', 'docs/decisions/']);
+  });
+  it('dedupes repeated paths and skips flags and version-like tokens', () => {
+    const content = '| a | `x/y.md` |\n| b | `x/y.md` 与 `--stale-days` 与 `0.6.0` |';
+    expect(extractAgentsIndexPaths(content)).toEqual(['x/y.md']);
+  });
+});
+
+describe('extractInlineLinkTargets', () => {
+  it('extracts inline link and image targets, not reference-style links', () => {
+    const content = '见 [a](a.md) 与 ![图](img/x.png "标题")，以及 [ref][1]。\n[1]: ref.md';
+    expect(extractInlineLinkTargets(content)).toEqual(['a.md', 'img/x.png']);
+  });
+  it('ignores link-like literals inside fenced code blocks and inline code', () => {
+    const content = ['```', '[fence](in-fence.md)', '```', '行内 `[code](in-code.md)` 不算链接，[真](real.md)。'].join('\n');
+    expect(extractInlineLinkTargets(content)).toEqual(['real.md']);
+  });
+});
+
+describe('runDoctor — AGENTS.md 索引', () => {
+  it('passes when indexed file and directory paths exist', () => {
+    withProject(
+      {
+        'AGENTS.md': AGENTS_MD,
+        'docs/architecture.md': FULL_FM,
+        'docs/decisions/adr-001.md': '# adr\n',
+      },
+      (root) => {
+        const idx = runDoctor(root).agentsIndex!;
+        expect(idx.agentsFound).toBe(true);
+        expect(idx.checked).toBe(2); // `npm run dev` 与表格外路径不计
+        expect(idx.issues).toEqual([]);
+      },
+    );
+  });
+  it('reports each missing indexed path, including directory paths', () => {
+    withProject({ 'AGENTS.md': AGENTS_MD, 'docs/a.md': FULL_FM }, (root) => {
+      const idx = runDoctor(root).agentsIndex!;
+      expect(idx.issues).toHaveLength(2);
+      expect(idx.issues[0].file).toBe('AGENTS.md');
+      const messages = idx.issues.map((i) => i.message).join('\n');
+      expect(messages).toContain('docs/architecture.md');
+      expect(messages).toContain('docs/decisions/');
+      expect(messages).not.toContain('not-in-table');
+      expect(messages).not.toContain('npm run dev');
+    });
+  });
+  it('skips the index check without failing when AGENTS.md is absent', () => {
+    withProject({ 'docs/a.md': FULL_FM }, (root) => {
+      const idx = runDoctor(root).agentsIndex!;
+      expect(idx.agentsFound).toBe(false);
+      expect(idx.checked).toBe(0);
+      expect(idx.issues).toEqual([]);
+    });
+  });
+});
+
+describe('runDoctor — 文档相对链接', () => {
+  it('passes when relative link targets exist', () => {
+    withProject(
+      {
+        'docs/a.md': `${FULL_FM}\n见 [b](./b.md) 与 [c](sub/c.md)。\n`,
+        'docs/b.md': '# b\n',
+        'docs/sub/c.md': '# c\n',
+      },
+      (root) => {
+        const links = runDoctor(root).links!;
+        expect(links.checked).toBe(2);
+        expect(links.issues).toEqual([]);
+      },
+    );
+  });
+  it('reports broken links with the containing file and the target', () => {
+    withProject({ 'docs/a.md': `${FULL_FM}\n[丢了](missing.md)\n` }, (root) => {
+      const links = runDoctor(root).links!;
+      expect(links.issues).toHaveLength(1);
+      expect(links.issues[0].file).toBe(join('docs', 'a.md'));
+      expect(links.issues[0].message).toContain('missing.md');
+    });
+  });
+  it('resolves targets relative to the containing file, not the project root', () => {
+    withProject(
+      { 'docs/sub/a.md': `${FULL_FM}\n[上级](../b.md)\n`, 'docs/b.md': '# b\n' },
+      (root) => {
+        expect(runDoctor(root).links!.issues).toEqual([]);
+      },
+    );
+  });
+  it('skips http(s) links, pure anchors and absolute paths', () => {
+    const body = '\n[外](https://e.com/x) [外2](http://e.com) [锚](#sec) [绝](/etc/hosts)\n';
+    withProject({ 'docs/a.md': FULL_FM + body }, (root) => {
+      const links = runDoctor(root).links!;
+      expect(links.checked).toBe(0);
+      expect(links.issues).toEqual([]);
+    });
+  });
+  it('strips the #anchor and checks only the file part', () => {
+    withProject(
+      { 'docs/a.md': `${FULL_FM}\n[有](b.md#sec) [无](missing.md#sec)\n`, 'docs/b.md': '# b\n' },
+      (root) => {
+        const links = runDoctor(root).links!;
+        expect(links.checked).toBe(2);
+        expect(links.issues).toHaveLength(1);
+        expect(links.issues[0].message).toContain('missing.md#sec');
+      },
+    );
+  });
+  it('does not scan links in files without frontmatter', () => {
+    withProject({ 'docs/README.md': '# 占位\n[断](nope.md)\n', 'docs/a.md': FULL_FM }, (root) => {
+      const links = runDoctor(root).links!;
+      expect(links.checked).toBe(0);
+      expect(links.issues).toEqual([]);
+    });
+  });
+});
+
 describe('renderDoctorReport — 输出与退出码', () => {
   it('exits 1 and lists file + missing fields when issues exist', () => {
     withProject({ 'docs/bad.md': '---\ntitle: x\n---\n' }, (root) => {
@@ -233,5 +369,39 @@ describe('renderDoctorReport — 输出与退出码', () => {
       const { text } = renderDoctorReport(runDoctor(root, { staleDays: 7 }));
       expect(text).toContain('7 天');
     });
+  });
+  it('counts missing index paths and broken links into exit code 1', () => {
+    withProject(
+      { 'AGENTS.md': '| x | `docs/gone.md` |', 'docs/a.md': `${FULL_FM}\n[断](nope.md)\n` },
+      (root) => {
+        const { text, exitCode } = renderDoctorReport(runDoctor(root));
+        expect(exitCode).toBe(1);
+        expect(text).toContain('docs/gone.md');
+        expect(text).toContain('nope.md');
+        expect(text).toContain('共发现 2 个问题');
+      },
+    );
+  });
+  it('notes the skipped index check when AGENTS.md is absent, still exiting 0', () => {
+    withProject({ 'docs/a.md': FULL_FM }, (root) => {
+      const { text, exitCode } = renderDoctorReport(runDoctor(root));
+      expect(exitCode).toBe(0);
+      expect(text).toContain('未找到 AGENTS.md');
+    });
+  });
+  it('shows pass lines for both index and link sections when everything is green', () => {
+    withProject(
+      {
+        'AGENTS.md': '| a | `docs/a.md` |',
+        'docs/a.md': `${FULL_FM}\n[b](b.md)\n`,
+        'docs/b.md': '# b\n',
+      },
+      (root) => {
+        const { text, exitCode } = renderDoctorReport(runDoctor(root));
+        expect(exitCode).toBe(0);
+        expect(text).toContain('AGENTS.md 索引');
+        expect(text).toContain('文档相对链接');
+      },
+    );
   });
 });

@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join, relative } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 
 export interface DoctorIssue {
   file: string;
@@ -20,6 +20,18 @@ export interface FreshnessCheckResult {
   issues: DoctorIssue[];
 }
 
+export interface AgentsIndexCheckResult {
+  /** 项目根是否存在 AGENTS.md；不存在时跳过本项检查，不计失败 */
+  agentsFound: boolean;
+  checked: number;
+  issues: DoctorIssue[];
+}
+
+export interface LinksCheckResult {
+  checked: number;
+  issues: DoctorIssue[];
+}
+
 export interface DoctorOptions {
   /** git 最后提交日期晚于 updated 超过该天数判过期；0 表示晚一天即过期。缺省 30。 */
   staleDays?: number;
@@ -29,6 +41,8 @@ export interface DoctorReport {
   docsFound: boolean;
   frontmatter: FrontmatterCheckResult | null;
   freshness: FreshnessCheckResult | null;
+  agentsIndex: AgentsIndexCheckResult | null;
+  links: LinksCheckResult | null;
 }
 
 const REQUIRED_FIELDS = ['title', 'status', 'updated', 'scope'] as const;
@@ -50,6 +64,60 @@ export function parseFrontmatter(content: string): Record<string, string> | null
     if (m) fm[m[1]] = m[2].trim().replace(/^(["'])(.*)\1$/, '$2');
   }
   return fm;
+}
+
+/** frontmatter 块之后的正文；无块或未闭合时原样返回。 */
+function bodyAfterFrontmatter(content: string): string {
+  const lines = content.replace(/^\uFEFF/, '').split(/\r?\n/);
+  if (lines[0]?.trim() !== '---') return content;
+  const end = lines.findIndex((line, i) => i > 0 && line.trim() === '---');
+  return end === -1 ? content : lines.slice(end + 1).join('\n');
+}
+
+/** 剥掉 fenced code block 与行内 code span——其中的 [text](target) 是字面文本，不是 markdown 链接。 */
+function stripCodeSegments(content: string): string {
+  const kept: string[] = [];
+  let inFence = false;
+  for (const line of content.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence) kept.push(line);
+  }
+  return kept.join('\n').replace(/`[^`\n]*`/g, '');
+}
+
+/**
+ * 相对路径判定：无空格、不以 / 或 - 开头（排除绝对路径与 `--flag`），
+ * 且含目录分隔符或字母扩展名（排除 `npm test`、`0.6.0` 这类非路径反引号内容）。
+ */
+function isRelativePathLike(value: string): boolean {
+  if (value === '' || /\s/.test(value)) return false;
+  if (value.startsWith('/') || value.startsWith('-')) return false;
+  return value.includes('/') || /\.[A-Za-z][A-Za-z0-9]*$/.test(value);
+}
+
+/** 从 AGENTS.md 的 markdown 表格行中提取反引号包裹的相对路径（去重）。 */
+export function extractAgentsIndexPaths(content: string): string[] {
+  const paths = new Set<string>();
+  for (const line of content.split(/\r?\n/)) {
+    if (!line.trimStart().startsWith('|')) continue; // 只解析表格行
+    for (const m of line.matchAll(/`([^`]+)`/g)) {
+      const candidate = m[1].trim();
+      if (isRelativePathLike(candidate)) paths.add(candidate);
+    }
+  }
+  return [...paths];
+}
+
+/** 提取正文中 markdown 内联链接 [text](target) 的 target（含图片链接；不含 reference-style）。 */
+export function extractInlineLinkTargets(content: string): string[] {
+  const targets: string[] = [];
+  for (const m of stripCodeSegments(content).matchAll(/\[[^\]]*\]\(\s*([^)\s]+)(?:\s+[^)]*)?\)/g)) {
+    targets.push(m[1]);
+  }
+  return targets;
 }
 
 function walkMarkdownFiles(dir: string): string[] {
@@ -105,22 +173,33 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   const staleDays = options.staleDays ?? DEFAULT_STALE_DAYS;
   const docsDir = join(root, 'docs');
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
-    return { docsFound: false, frontmatter: null, freshness: null };
+    return { docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null };
   }
   const files = walkMarkdownFiles(docsDir);
   const gitAvailable = isGitWorkTree(root);
   const fmIssues: DoctorIssue[] = [];
   const freshnessIssues: DoctorIssue[] = [];
+  const linkIssues: DoctorIssue[] = [];
   let checked = 0;
   let freshnessChecked = 0;
+  let linksChecked = 0;
   for (const file of files) {
-    const fm = parseFrontmatter(readFileSync(file, 'utf-8'));
+    const content = readFileSync(file, 'utf-8');
+    const fm = parseFrontmatter(content);
     if (fm === null) continue; // 无 frontmatter 的 .md（README 占位、工作产物）不参与本项检查
     checked++;
     const rel = relative(root, file);
     const missing = REQUIRED_FIELDS.filter((field) => !(field in fm));
     if (missing.length > 0) {
       fmIssues.push({ file: rel, message: `缺失字段 ${missing.join('、')}` });
+    }
+    for (const target of extractInlineLinkTargets(bodyAfterFrontmatter(content))) {
+      if (/^(https?:\/\/|#|\/)/.test(target)) continue; // 外链、纯锚点、绝对路径不属相对链接检查
+      linksChecked++;
+      const filePart = target.split('#')[0]; // 含锚点时只检查文件部分
+      if (filePart !== '' && !existsSync(join(dirname(file), filePart))) {
+        linkIssues.push({ file: rel, message: `断链 ${target}（目标不存在）` });
+      }
     }
     if (!('updated' in fm)) continue; // 缺 updated 已由完整性检查报告，新鲜度不重复计
     freshnessChecked++;
@@ -142,10 +221,26 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
       });
     }
   }
+  const agentsFile = join(root, 'AGENTS.md');
+  let agentsIndex: AgentsIndexCheckResult;
+  if (existsSync(agentsFile)) {
+    const indexPaths = extractAgentsIndexPaths(readFileSync(agentsFile, 'utf-8'));
+    agentsIndex = {
+      agentsFound: true,
+      checked: indexPaths.length,
+      issues: indexPaths
+        .filter((p) => !existsSync(join(root, p)))
+        .map((p) => ({ file: 'AGENTS.md', message: `索引路径 ${p} 不存在` })),
+    };
+  } else {
+    agentsIndex = { agentsFound: false, checked: 0, issues: [] };
+  }
   return {
     docsFound: true,
     frontmatter: { scanned: files.length, checked, issues: fmIssues },
     freshness: { staleDays, gitAvailable, checked: freshnessChecked, issues: freshnessIssues },
+    agentsIndex,
+    links: { checked: linksChecked, issues: linkIssues },
   };
 }
 
@@ -171,7 +266,23 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   } else {
     for (const issue of fresh.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
-  const total = fm.issues.length + fresh.issues.length;
+  const idx = report.agentsIndex!;
+  lines.push('', '📇 AGENTS.md 索引');
+  if (!idx.agentsFound) {
+    lines.push('  ℹ️  未找到 AGENTS.md：已跳过索引检查');
+  } else if (idx.issues.length === 0) {
+    lines.push(`  ✅ 通过（已检查 ${idx.checked} 条索引路径）`);
+  } else {
+    for (const issue of idx.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
+  }
+  const links = report.links!;
+  lines.push('', '🔗 文档相对链接');
+  if (links.issues.length === 0) {
+    lines.push(`  ✅ 通过（已检查 ${links.checked} 条相对链接）`);
+  } else {
+    for (const issue of links.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
+  }
+  const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
 }
