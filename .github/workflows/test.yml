@@ -1,0 +1,29 @@
+name: Test
+
+# 常态 CI：每次推送 main 与 PR 都跑 typecheck + 全套测试。
+# 版本一致性不变量（build/version-consistency.test.mjs）随 npm test 执行——
+# 插件清单曾在 0.5.1 停了三个版本无人发现（此前只有发版 tag 门禁，平时无 CI），
+# 此 workflow 让第一个漂移提交就红。tag 推送由 publish.yml 覆盖，这里不重复。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
