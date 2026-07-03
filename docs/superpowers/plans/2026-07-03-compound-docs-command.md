@@ -489,18 +489,21 @@ git commit -m "docs: dogfood /compound-docs——本仓库首次收口沉淀，p
 Run: `npm run typecheck && npm test && npm run build`
 Expected: 全部通过；`dist/instructions/builder.md` 为收编后版本（`grep -c "模式升格" dist/instructions/builder.md` → 0 hits）
 
-- [ ] **Step 3: Release commit + push**
+- [ ] **Step 3: Release commit + push + tag（CI 自动发布）**
+
+本仓库发布走 CI：推 `vX.Y.Z` tag 触发 `.github/workflows/publish.yml`（typecheck→test→build→`npm publish --provenance`→GitHub Release）。不要本地 `npm publish`（npm 2FA 下 CLI 交互 OTP 不可用，CI 用 Automation token）。
 
 ```bash
 git add package.json
 git commit -m "release: v0.6.0"
 git push
+git tag v0.6.0 && git push origin v0.6.0
 ```
 
-- [ ] **Step 4: npm publish**
+- [ ] **Step 4: 验证 CI 发布成功**
 
-Run: `npm publish`
-Expected: 成功发布 coding-x@0.6.0（若当前环境未登录 npm，把这一步交回给用户执行并说明）
+Run: `gh run watch --exit-status $(gh run list --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')`
+Expected: workflow success
 
 Run: `npm view coding-x version`
 Expected: `0.6.0`
