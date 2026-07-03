@@ -51,6 +51,8 @@
 
 **模式升格**：如果某条 pattern 已在 **≥2 个不同 story** 的「未来迭代的学习」中出现且依然成立，且项目存在 `docs/` 知识库，则将它升格为项目级文档：追加写入 `docs/architecture.md` 末尾的 `## 沉淀模式` 章节（该章节不存在则创建，条目带日期），并在 progress.md 中触发本次升格的最新一条该 pattern 记录后标注 `[已升格 → docs/architecture.md]`。项目没有 `docs/architecture.md` 时跳过此步。已标注升格的条目不要重复升格。
 
+**升格防污染**：升格条目必须是项目自身的知识（框架用法、数据边界、目录约定等）。禁止把自动化 harness 的运行机制写入项目文档——凡提及 `{{WORKSPACE}}/`、`prd.json`、`state.json`、`progress.md`、validator、agent-browser 等工具词的 pattern 一律不升格，只留在 progress.md。
+
 ## 质量要求
 
 - 所有 commits 必须通过项目的质量检查（typecheck、lint、test）
