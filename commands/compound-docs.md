@@ -17,7 +17,7 @@ description: 一轮循环或功能分支收口时，把 progress.md 与 git 历�
 ## 硬性约束
 
 1. 只允许修改文档文件；禁止修改业务代码、脚本、配置、测试
-2. 项目文档中禁止出现 harness 工具细节——凡提及 `.workspace/`、`prd.json`、`state.json`、`progress.md`、validator、agent-browser、coding-x 等工具词的条目一律不写入（工具知识只留在 `.workspace/progress.md`）
+2. 项目文档中禁止出现 harness 工具细节——凡提及 `.workspace/`、`prd.json`、`state.json`、`progress.md`、validator、agent-browser、coding-x 等工具词的条目一律不写入（工具知识只留在 `.workspace/progress.md`）。例外：若目标项目自身就是此类 harness 工具，这些词是它的领域词汇，按项目知识正常沉淀
 3. 只沉淀「项目相关、可复用、当前代码仍然成立」的知识
 4. 当前代码状态与历史记录冲突时，以当前代码状态为准
 5. 证据不足，宁可不写
