@@ -29,7 +29,8 @@ export function syncPluginVersions(rootDir, version) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const version =
     process.env.npm_package_version ??
-    JSON.parse(readFileSync('package.json', 'utf8')).version;
+    // 剥 UTF-8 BOM：Windows 编辑器可能给 JSON 加 BOM，不剥会 SyntaxError
+    JSON.parse(readFileSync('package.json', 'utf8').replace(/^\uFEFF/, '')).version;
   const changed = syncPluginVersions(process.cwd(), version);
   console.log(
     changed.length
