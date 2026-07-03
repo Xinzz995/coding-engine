@@ -27,7 +27,7 @@ scope: root
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
 | 仪表盘 | `src/dashboard/server.ts` | HTTP 服务（:7331）+ 自动开浏览器；`coding-x dashboard` 子命令可离线复用 |
 | 引擎指令 | `assets/instructions/` | builder.md / validator.md（{{WORKSPACE}} 占位符） |
-| 知识库模板 | `templates/` | /init-docs 使用的 AGENTS/docs 模板 |
+| 知识库模板 | `templates/` | /init-docs、/compound-docs 使用的 AGENTS/docs 模板 |
 
 ## 分层与依赖方向
 

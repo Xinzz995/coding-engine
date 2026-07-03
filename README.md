@@ -5,7 +5,7 @@
 coding-x 同时是两样东西：
 
 - **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`，并为项目生成 docs/ 知识库。
+- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`，并为项目生成与持续沉淀 docs/ 知识库。
 
 ---
 
@@ -79,7 +79,7 @@ coding-x 同时是两样东西：
 /plugin install coding-x
 ```
 
-安装后即可使用 `/priming`、`/planning`、`/init-docs` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
+安装后即可使用 `/priming`、`/planning`、`/init-docs`、`/compound-docs` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
 
 ### Codex
 
@@ -135,6 +135,8 @@ npx coding-x codex           # 改用 codex
                                 │
                                 ▼
               http://localhost:7331  实时查看进度
+                                │
+              ──/compound-docs─▶  经验沉淀回 docs/（收口，可选）
 ```
 
 ---
@@ -202,6 +204,10 @@ npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 
 浏览器打开（默认自动弹出）：<http://localhost:7331>（像素风视图 `/p`）。仪表盘展示迭代次数、当前阶段、当前 story、已用时长、story 列表与 `progress.md` 日志。
 
+### 第 4 步：收口沉淀（可选）
+
+循环全部 story 通过后（引擎会提示），回到 Claude Code 等工具运行 `/compound-docs`：它基于当前代码、git 历史与 `progress.md` 的学习记录做交叉取证，把仍然成立的结构变化、稳定约定与高频陷阱分层沉淀进项目 `docs/`（约定与陷阱进 `docs/patterns.md`）。只改文档不改代码，越用文档越准。
+
 ### 命令行参数
 
 | 参数 | 默认值 | 说明 |
@@ -246,6 +252,7 @@ npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 | `/priming` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
 | `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo；并为 Claude Code 生成 `CLAUDE.md` 桥接（`@AGENTS.md` 导入） |
 | `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
+| `/compound-docs` | 循环/分支收口时把经验提炼、验证、分层沉淀回项目文档（约定与陷阱进 `docs/patterns.md`）；只改文档不改代码 |
 
 ### Skills（能力，Claude 按语境自动触发）
 
@@ -272,11 +279,12 @@ coding-engine/
 ├── commands/                     # 唯一源：用户 /斜杠命令
 │   ├── priming.md
 │   ├── planning.md
-│   └── init-docs.md
-├── templates/                    # /init-docs 使用的知识库模板
+│   ├── init-docs.md
+│   └── compound-docs.md
+├── templates/                    # /init-docs、/compound-docs 使用的知识库模板
 │   ├── AGENTS-root.md            #   目录式根 AGENTS.md（四段式）
 │   ├── AGENTS-sub.md             #   子项目薄 AGENTS.md
-│   └── docs/                     #   architecture / golden-principles / decision(ADR)
+│   └── docs/                     #   architecture / golden-principles / patterns / decision(ADR)
 ├── AGENTS.md                     # 本仓库自己的目录式索引（/init-docs dogfood 产物）
 ├── CLAUDE.md                     # Claude Code 桥接：@AGENTS.md 导入（Claude Code 不读 AGENTS.md）
 ├── docs/                         # 本仓库知识库：architecture / golden-principles / decisions / plans / prds
