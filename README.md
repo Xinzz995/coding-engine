@@ -27,7 +27,7 @@ coding-x 同时是两样东西：
 
 ## 工作原理
 
-引擎在项目根目录启动，围绕工作区里的两份文件运转：`prd.json`（需求与状态）和 `progress.md`（进度与学习日志）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` 是**执行真相源**（机器与 agent 读写）；两者冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。
+引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读）、`state.json`（执行状态，按 story id 键控，agent 回写）和 `progress.md`（进度与学习日志）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理。
 
 ```
                       npx coding-x
@@ -35,7 +35,7 @@ coding-x 同时是两样东西：
    │  for i in 1..maxIterations:                              │
    │                                                          │
    │   ┌── Developer（builder.md）──────────────────────────┐ │
-   │   │ 1. 读 prd.json，选优先级最高、未完成、未阻塞的 story │ │
+   │   │ 1. 读 prd.json+state.json，选最高优先级未完成 story │ │
    │   │ 2. 只实现这一个 story                               │ │
    │   │ 3. 跑质量检查（typecheck / lint / test）            │ │
    │   │ 4. 通过则提交 feat: [ID] - [Title]                  │ │
@@ -45,7 +45,7 @@ coding-x 同时是两样东西：
    │   ┌── Validator（validator.md）────────────────────────┐ │
    │   │ 1. 从 progress.md 找出刚完成的 story                │ │
    │   │ 2. 逐条核对 acceptanceCriteria                      │ │
-   │   │ 3. 通过 → 清空 notes、retryCount 归零               │ │
+   │   │ 3. 通过 → 清理 notes（留[需求冲突]行）、重试归零    │ │
    │   │    失败 → passes=false、写失败原因、retryCount+1     │ │
    │   │           （累计 5 次 → blocked=true 跳过）         │ │
    │   └────────────────────────────────────────────────────┘ │
@@ -59,7 +59,7 @@ coding-x 同时是两样东西：
 
 - **完成即退出**：全部 story 解决 → 退出码 0；跑满 `maxIterations` 仍未完成 → 退出码 1。
 - **超时保护**：开发/验证各有独立超时；开发阶段超时则跳过验证、下一轮重试。
-- **状态共享**：引擎与 agent 都在项目根目录运行，读写同一份 `prd.json` / `progress.md`；指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
+- **状态共享**：引擎与 agent 都在项目根目录运行，读写同一组 `prd.json` / `state.json` / `progress.md`（需求只读，状态写 state.json）；指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
 
 ---
 
@@ -164,17 +164,26 @@ npx coding-x codex           # 改用 codex
       "title": "用户可以新建笔记",
       "description": "...",
       "acceptanceCriteria": ["Typecheck passes", "在浏览器中点击新建按钮能创建笔记"],
-      "priority": 1,        // 数字越小越优先
-      "passes": false,      // 开发完成后置 true
-      "notes": "",          // 验证失败时由 Validator 写入原因
-      "retryCount": 0,      // 失败重试次数
-      "blocked": false      // 累计失败 5 次后置 true，跳过
+      "priority": 1        // 数字越小越优先
     }
   ]
 }
 ```
 
-引擎每轮选择 `priority` 最高、`passes: false` 且 `blocked: false` 的 story。
+`state.json` 结构（引擎首跑自动生成；旧版含状态字段的 prd.json 会被自动抽取迁移）：
+
+```jsonc
+{
+  "US-001": {
+    "passes": false,      // 开发完成后置 true
+    "notes": "",          // 验证失败原因 / [需求冲突] / [需求已变更] 记录
+    "retryCount": 0,      // 失败重试次数
+    "blocked": false      // 累计失败 5 次后置 true，跳过
+  }
+}
+```
+
+引擎每轮选择 `priority` 最高、`passes: false` 且 `blocked: false` 的 story（状态读自 `state.json`）。
 
 ### 第 2 步：运行引擎
 
@@ -185,7 +194,7 @@ npx coding-x --max-iter 20      # 最多 20 轮迭代
 npx coding-x --no-open          # 不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / progress.md 所在目录
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
-npx coding-x repair             # 仅修复 .workspace/prd.json（不跑循环）
+npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 ```
 
@@ -198,12 +207,12 @@ npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | 位置参数 `codex` | — | 使用 codex 后端（缺省为 claude） |
-| 位置参数 `repair` | — | 仅修复 `<workspace>/prd.json` 后退出 |
+| 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
-| `--workspace <dir>` | `.workspace` | `prd.json` / `progress.md` 所在目录 |
+| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
@@ -227,7 +236,7 @@ npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
-- **prd.json 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 JSON。
+- **JSON 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json` / `state.json`。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 
 ### 命令（Slash Commands，用户显式触发）
@@ -292,9 +301,10 @@ coding-engine/
 │   ├── engine/
 │   │   ├── loop.ts               #   主循环：Developer ⇄ Validator
 │   │   ├── agent.ts              #   拉起 claude / codex 子进程、超时控制
-│   │   ├── prd.ts                #   读取 prd.json、选 story、完成判定
+│   │   ├── prd.ts                #   读取 prd.json（需求内容）
+│   │   ├── state.ts              #   state.json 读写、选 story、完成判定、合并视图
 │   │   ├── progress.ts           #   读取 progress.md
-│   │   └── repair.ts             #   jsonrepair 修复 prd.json
+│   │   └── repair.ts             #   jsonrepair 修复 prd.json / state.json
 │   └── dashboard/
 │       └── server.ts             #   仪表盘 HTTP 服务 + 自动开浏览器
 │
