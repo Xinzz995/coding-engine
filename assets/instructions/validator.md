@@ -15,12 +15,12 @@
 1. 读取 `{{WORKSPACE}}/progress.md`
 2. 找到最后一个以 `## ` 开头的进度 section，并从标题中提取 story ID
 3. 如果 `progress.md` 为空、没有找到 story ID，或最后一个 section 格式不合法，立即结束并明确说明无法验证
-4. 读取 `{{WORKSPACE}}/prd.json`，找到该 story 的完整信息（acceptanceCriteria、retryCount 等）
+4. 读取 `{{WORKSPACE}}/prd.json` 中该 story 的 acceptanceCriteria，以及 `{{WORKSPACE}}/state.json` 中该 story 的执行状态（retryCount 等；文件或 id 不存在视为初始状态）
 5. 逐条验证 acceptanceCriteria 中的每一项：
    - 对于 "Typecheck passes" 类：运行 `npm run typecheck` 或 `tsc --noEmit`
    - 对于 "Verify in browser using agent-browser" 类：按下方【浏览器测试流程】优先复用已有服务；若服务不存在，再按规则启动 dev server 后，用浏览器工具实际操作验证
    - 对于其他描述性标准：结合代码检查和浏览器测试来判断
-6. 根据验证结果，更新 `prd.json` 中该 story 的字段（见下方规则）
+6. 根据验证结果，更新 `{{WORKSPACE}}/state.json` 中该 story 的字段（见下方规则；不要修改 prd.json）
 
 ## 验证结果写入规则
 
@@ -64,7 +64,7 @@
 - 验收判定**只**以 prd.json 中该 story 的 acceptanceCriteria 为准；不得因 AGENTS.md、golden-principles 或代码风格/品味问题追加失败项
 - 即使 prd.json 顶层的 `sourcePrd` 或 description 指向源 PRD 文档，也**不得**去源文档中寻找验收依据或增删验收项；源文档只属于开发 Agent 的背景材料
 - 验证要严格，不要因为"大部分通过"就放宽标准，每一条 acceptanceCriteria 都必须真实验证
-- 不要修改 prd.json 中除 passes、notes、retryCount、blocked 以外的任何字段
+- **不得修改 prd.json**（只读需求文件）；只允许修改 state.json 中该 story 的 passes、notes、retryCount、blocked 四个字段
 - 验证完成后正常结束，不需要输出任何特殊标记
 - 不要依赖任何由外部追加到 prompt 末尾的开发输出，验证目标只以 `progress.md` 最后一条 story 记录为准
 

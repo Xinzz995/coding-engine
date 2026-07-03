@@ -2,23 +2,22 @@
 
 你是一个在软件项目上工作的自主编码 agent。
 
-以下文件都在 {{WORKSPACE}}/ 下: prd.json、progress.md
+以下文件都在 {{WORKSPACE}}/ 下: prd.json（需求，只读）、state.json（执行状态）、progress.md（进度日志）
 
 ## 你的任务
 
-1. 读取 `prd.json` 中的 PRD（与此文件在同一目录）
+1. 读取 `prd.json` 中的需求与 `state.json` 中的执行状态（同一目录；state.json 或某个 story id 不存在时，视该 story 为未开始）
 2. 读取 `progress.md` 中的进度日志（首先检查 Codebase Patterns 部分）
 3. 检查你是否在 PRD 中 `branchName` 指定的正确 branch 上。如果不是，checkout 或从 main 创建它。
-4. 选择满足以下所有条件的**最高 priority** 的 user story：
+4. 选择满足以下所有条件的**最高 priority** 的 user story（passes/blocked 以 `state.json` 中该 story id 的记录为准；id 不存在视为未开始）：
    - `passes: false`
-   - `blocked: false`（或 blocked 字段不存在）
+   - `blocked: false`
    
-   如果该 story 的 `notes` 字段不为空，说明 Validator 上次验证发现了问题，
-   请优先阅读 notes 中的失败原因，针对性地进行修复，而不是重新实现。
+   如果该 story 在 `state.json` 的 `notes` 不为空——可能是 Validator 的失败记录、需求变更记录（`[需求已变更]`）或待人工裁决的需求冲突（`[需求冲突]`）——请先阅读并针对性处理，而不是重新实现。
 5. 实现该单个 user story,只实现这一个user story的内容
 6. 运行质量检查（例如，typecheck、lint、test - 使用项目所需的任何工具）
 7. 如果检查通过，提交所有更改，消息为：`feat: [Story ID] - [Story Title]`
-8. 更新 PRD，将已完成的 story 的 `passes` 设置为 `true`
+8. 更新 `state.json`，将已完成 story 对应 id 的 `passes` 设为 `true`（**不要修改 prd.json**——它是只读的需求文件）
 9. 每次完成运行后, 将你的进度追加到 `progress.md`
 
 ## 进度报告格式
@@ -93,7 +92,7 @@
 
 如果 prd.json 顶层存在 `sourcePrd` 字段，它指向本次需求派生自的源 PRD 文档（仓库相对路径）。当 story 的描述与验收标准不足以理解背景（目标、Non-Goals、设计约束）时，去读该文档补全上下文。
 
-如果你发现源文档与 acceptanceCriteria 冲突，或某条 acceptanceCriteria 无法成立：不要自行取舍、不要按源文档自由发挥——按 acceptanceCriteria 实现，并在该 story 的 `notes` 字段追加一行冲突记录（保留 notes 已有内容）：
+如果你发现源文档与 acceptanceCriteria 冲突，或某条 acceptanceCriteria 无法成立：不要自行取舍、不要按源文档自由发挥——按 acceptanceCriteria 实现，并在 `{{WORKSPACE}}/state.json` 中该 story 的 `notes` 字段追加一行冲突记录（保留已有内容）：
 
 ```
 [需求冲突] YYYY-MM-DD HH:mm 冲突点简述（源文档说 X，acceptanceCriteria 说 Y，已按 Y 实现）
