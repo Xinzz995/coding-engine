@@ -46,6 +46,33 @@ describe('runLoop', () => {
     delete process.env.CODING_X_CLAUDE_BIN;
   });
 
+  it('prints a /compound-docs hint when all stories resolve', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const logs: string[] = [];
+    const orig = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      expect(logs.some((l) => l.includes('/compound-docs'))).toBe(true);
+    } finally {
+      console.log = orig;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('returns 1 when stories never resolve within maxIterations', async () => {
     const { workspace, instructionsDir } = setup([story()]); // never flips to passes
     process.env.CODING_X_CLAUDE_BIN = `node -e process.exit(0)`;
