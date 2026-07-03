@@ -40,6 +40,13 @@ describe('parseCliArgs', () => {
     expect(c.keepOpen).toBe(true);
     expect(c.port).toBe(8080);
   });
+  it('defaults staleDays to 30', () => {
+    expect(parseCliArgs(['doctor']).staleDays).toBe(30);
+  });
+  it('parses --stale-days overrides, including zero', () => {
+    expect(parseCliArgs(['doctor', '--stale-days', '7']).staleDays).toBe(7);
+    expect(parseCliArgs(['doctor', '--stale-days', '0']).staleDays).toBe(0);
+  });
 });
 
 describe('runDashboard', () => {

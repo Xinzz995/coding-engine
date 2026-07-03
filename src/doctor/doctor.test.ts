@@ -1,10 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseFrontmatter, runDoctor, renderDoctorReport } from './doctor.js';
 
 const FULL_FM = ['---', 'title: 示例', 'status: active', 'updated: 2026-07-03', 'scope: root', '---', '', '# 正文'].join('\n');
+
+/** 四字段齐全、updated 为指定值的 frontmatter 文档。 */
+function fmDoc(updated: string): string {
+  return ['---', 'title: 示例', 'status: active', `updated: ${updated}`, 'scope: root', '---', '', '# 正文'].join('\n');
+}
 
 /** 建临时项目根，写入 files（相对路径 → 内容），回调后清理。 */
 function withProject(files: Record<string, string>, fn: (root: string) => void): void {
@@ -18,6 +24,24 @@ function withProject(files: Record<string, string>, fn: (root: string) => void):
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+function gitInit(root: string): void {
+  const run = (...args: string[]) => execFileSync('git', args, { cwd: root, stdio: 'ignore' });
+  run('init', '-q');
+  run('config', 'user.email', 'doctor@test.local');
+  run('config', 'user.name', 'doctor-test');
+  run('config', 'commit.gpgsign', 'false');
+}
+
+/** 以固定 committer 日期提交全部文件（%cs 读的是 committer date）。 */
+function gitCommitAll(root: string, date: string): void {
+  execFileSync('git', ['add', '-A'], { cwd: root, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture'], {
+    cwd: root,
+    stdio: 'ignore',
+    env: { ...process.env, GIT_AUTHOR_DATE: `${date}T12:00:00Z`, GIT_COMMITTER_DATE: `${date}T12:00:00Z` },
+  });
 }
 
 describe('parseFrontmatter', () => {
@@ -82,6 +106,85 @@ describe('runDoctor — frontmatter 完整性', () => {
   });
 });
 
+describe('runDoctor — updated 新鲜度', () => {
+  it('flags a file whose git date is beyond the default 30-day threshold', () => {
+    withProject({ 'docs/stale.md': fmDoc('2026-01-01') }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-03-01'); // 落后 59 天 > 缺省 30
+      const fresh = runDoctor(root).freshness!;
+      expect(fresh.staleDays).toBe(30);
+      expect(fresh.checked).toBe(1);
+      expect(fresh.issues).toHaveLength(1);
+      expect(fresh.issues[0].file).toBe(join('docs', 'stale.md'));
+      expect(fresh.issues[0].message).toContain('2026-01-01');
+      expect(fresh.issues[0].message).toContain('2026-03-01');
+      expect(fresh.issues[0].message).toContain('59');
+    });
+  });
+  it('passes a file within the default threshold', () => {
+    withProject({ 'docs/ok.md': fmDoc('2026-01-01') }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-01-20'); // 落后 19 天 ≤ 30
+      expect(runDoctor(root).freshness!.issues).toEqual([]);
+    });
+  });
+  it('honours a custom --stale-days threshold, exactly-at-threshold passing', () => {
+    withProject({ 'docs/a.md': fmDoc('2026-01-01') }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-01-11'); // 落后 10 天
+      expect(runDoctor(root, { staleDays: 9 }).freshness!.issues).toHaveLength(1);
+      expect(runDoctor(root, { staleDays: 10 }).freshness!.issues).toEqual([]); // 「超过」阈值才算过期
+    });
+  });
+  it('treats any lag as stale when staleDays is 0, but same-day as fresh', () => {
+    withProject({ 'docs/a.md': fmDoc('2026-01-01') }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-01-02'); // 仅落后 1 天
+      expect(runDoctor(root, { staleDays: 0 }).freshness!.issues).toHaveLength(1);
+    });
+    withProject({ 'docs/b.md': fmDoc('2026-01-02') }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-01-02'); // 同一天
+      expect(runDoctor(root, { staleDays: 0 }).freshness!.issues).toEqual([]);
+    });
+  });
+  it('reports a malformed updated value even outside git', () => {
+    withProject({ 'docs/bad.md': fmDoc('07/01/2026') }, (root) => {
+      const fresh = runDoctor(root).freshness!;
+      expect(fresh.issues).toHaveLength(1);
+      expect(fresh.issues[0].message).toContain('YYYY-MM-DD');
+    });
+  });
+  it('reports a calendar-invalid updated value as malformed', () => {
+    withProject({ 'docs/bad.md': fmDoc('2026-13-01') }, (root) => {
+      expect(runDoctor(root).freshness!.issues).toHaveLength(1);
+    });
+  });
+  it('skips the git comparison outside a git repository, without issues', () => {
+    withProject({ 'docs/old.md': fmDoc('2020-01-01') }, (root) => {
+      const fresh = runDoctor(root).freshness!;
+      expect(fresh.gitAvailable).toBe(false);
+      expect(fresh.checked).toBe(1);
+      expect(fresh.issues).toEqual([]);
+    });
+  });
+  it('skips files with no commit history, without issues', () => {
+    withProject({ 'docs/new.md': fmDoc('2020-01-01') }, (root) => {
+      gitInit(root); // 有仓库但从未提交该文件
+      const fresh = runDoctor(root).freshness!;
+      expect(fresh.gitAvailable).toBe(true);
+      expect(fresh.issues).toEqual([]);
+    });
+  });
+  it('does not count files lacking an updated field toward the freshness check', () => {
+    withProject({ 'docs/no-updated.md': '---\ntitle: x\nstatus: active\nscope: root\n---\n' }, (root) => {
+      const fresh = runDoctor(root).freshness!;
+      expect(fresh.checked).toBe(0);
+      expect(fresh.issues).toEqual([]);
+    });
+  });
+});
+
 describe('renderDoctorReport — 输出与退出码', () => {
   it('exits 1 and lists file + missing fields when issues exist', () => {
     withProject({ 'docs/bad.md': '---\ntitle: x\n---\n' }, (root) => {
@@ -106,6 +209,29 @@ describe('renderDoctorReport — 输出与退出码', () => {
       const { text, exitCode } = renderDoctorReport(runDoctor(root));
       expect(exitCode).toBe(0);
       expect(text).toContain('/init-docs');
+    });
+  });
+  it('counts stale files into exit code 1 and prints the freshness detail', () => {
+    withProject({ 'docs/stale.md': fmDoc('2026-01-01') }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-06-01');
+      const { text, exitCode } = renderDoctorReport(runDoctor(root));
+      expect(exitCode).toBe(1);
+      expect(text).toContain('updated 新鲜度');
+      expect(text).toContain('落后');
+    });
+  });
+  it('counts a malformed updated value into exit code 1', () => {
+    withProject({ 'docs/bad.md': fmDoc('昨天') }, (root) => {
+      const { text, exitCode } = renderDoctorReport(runDoctor(root));
+      expect(exitCode).toBe(1);
+      expect(text).toContain('YYYY-MM-DD');
+    });
+  });
+  it('shows the threshold in the freshness section header', () => {
+    withProject({ 'docs/a.md': FULL_FM }, (root) => {
+      const { text } = renderDoctorReport(runDoctor(root, { staleDays: 7 }));
+      expect(text).toContain('7 天');
     });
   });
 });

@@ -17,6 +17,7 @@ export interface CliConfig {
   openBrowser: boolean;
   keepOpen: boolean;
   port: number;
+  staleDays: number;
 }
 
 export function parseCliArgs(argv: string[]): CliConfig {
@@ -31,6 +32,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'no-open': { type: 'boolean' },
       'keep-open': { type: 'boolean' },
       port: { type: 'string' },
+      'stale-days': { type: 'string' },
     },
   });
 
@@ -53,6 +55,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     openBrowser: !values['no-open'],
     keepOpen: values['keep-open'] ?? false,
     port: values.port ? Number(values.port) : 7331,
+    staleDays: values['stale-days'] !== undefined ? Number(values['stale-days']) : 30,
   };
 }
 
@@ -103,7 +106,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'doctor') {
-    const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd()));
+    const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd(), { staleDays: cfg.staleDays }));
     console.log(text);
     return exitCode;
   }
