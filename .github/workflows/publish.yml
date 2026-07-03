@@ -26,16 +26,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # 防呆：tag 必须与 package.json 的 version 一致，否则中止
-      - name: Verify tag matches package.json version
+      # 防呆：tag 必须与 package.json 及三个插件清单的 version 一致，否则中止
+      # （0.6.0–0.7.1 期间插件清单曾漂移在 0.5.1——发版只 bump package.json 的教训）
+      - name: Verify tag matches package.json and plugin manifests
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          PKG="$(node -p "require('./package.json').version")"
-          if [ "$TAG" != "$PKG" ]; then
-            echo "::error::tag v$TAG 与 package.json version $PKG 不一致"
-            exit 1
-          fi
-          echo "版本一致：$PKG"
+          FAIL=0
+          for f in package.json .claude-plugin/plugin.json .cursor-plugin/plugin.json .codex-plugin/plugin.json; do
+            V="$(node -p "require('./$f').version")"
+            if [ "$TAG" != "$V" ]; then
+              echo "::error::tag v$TAG 与 $f 的 version $V 不一致"
+              FAIL=1
+            fi
+          done
+          [ "$FAIL" -eq 0 ] || exit 1
+          echo "版本一致：$TAG（package.json + 3 个插件清单）"
 
       - name: Typecheck
         run: npm run typecheck
