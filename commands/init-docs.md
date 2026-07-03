@@ -59,6 +59,7 @@ description: 分析代码库，生成目录式 AGENTS.md 与 docs/ 知识库（�
 | `CLAUDE.md` | 下方桥接内容 | Claude Code 只自动加载 CLAUDE.md、不加载 AGENTS.md；用 `@` 导入桥接 |
 | `docs/architecture.md` | `templates/docs/architecture.md` | 填入模块表、分层、数据流、关键文件 |
 | `docs/golden-principles.md` | `templates/docs/golden-principles.md` | 按 3c 流程生成 |
+| `docs/patterns.md` | `templates/docs/patterns.md` | 约定与陷阱骨架（/compound-docs 收口的落点）；两章保留注释占位即可 |
 | `docs/decisions/README.md` | 下方占位内容 | |
 | `docs/plans/README.md` | 下方占位内容 | |
 | `docs/prds/README.md` | 下方占位内容 | |
