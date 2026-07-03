@@ -48,11 +48,11 @@ export function parseCliArgs(argv: string[]): CliConfig {
   let staleDays = 30;
   if (values['stale-days'] !== undefined) {
     const raw = values['stale-days'];
-    const n = Number(raw);
-    if (command === 'doctor' && !(Number.isInteger(n) && n >= 0)) {
+    // 字面量校验：只接受纯十进制数字串，排除 Number() 会静默接受的 ''/0x10/1e2 等写法
+    if (command === 'doctor' && !/^\d+$/.test(raw)) {
       throw new Error(`❌ --stale-days 必须是非负整数，收到「${raw}」`);
     }
-    staleDays = n;
+    staleDays = Number(raw);
   }
 
   return {

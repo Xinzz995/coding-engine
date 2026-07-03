@@ -52,6 +52,11 @@ describe('parseCliArgs', () => {
     expect(() => parseCliArgs(['doctor', '--stale-days', '-1'])).toThrow('--stale-days');
     expect(() => parseCliArgs(['doctor', '--stale-days', '1.5'])).toThrow('--stale-days');
   });
+  it('rejects non-decimal literals that Number() would silently coerce', () => {
+    expect(() => parseCliArgs(['doctor', '--stale-days', ''])).toThrow('--stale-days'); // Number('') === 0
+    expect(() => parseCliArgs(['doctor', '--stale-days', '0x10'])).toThrow('--stale-days'); // === 16
+    expect(() => parseCliArgs(['doctor', '--stale-days', '1e2'])).toThrow('--stale-days'); // === 100
+  });
 });
 
 describe('main — invalid --stale-days', () => {
