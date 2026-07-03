@@ -1,8 +1,8 @@
 {
   "name": "coding-x",
   "displayName": "coding-x",
-  "description": "Ralph auto-coding workflow: prd-generate/prd-to-json/agent-browser skills + priming/planning/init-docs commands",
-  "version": "0.5.1",
+  "description": "Ralph auto-coding workflow: PRD-driven deterministic Developer→Validator loop — skills, commands and the coding-x engine (`npx coding-x`).",
+  "version": "0.7.1",
   "author": { "name": "Xinzz" },
   "homepage": "https://github.com/Xinzz995/coding-engine",
   "repository": "https://github.com/Xinzz995/coding-engine",

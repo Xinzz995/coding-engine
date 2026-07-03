@@ -1,6 +1,6 @@
 {
   "name": "coding-x-marketplace",
-  "description": "Ralph 自动化 Coding 工作流：prd-generate/prd-to-json/agent-browser skills + priming/planning/init-docs 命令 + docs/ 知识库生成，配合 npx coding-x 引擎。",
+  "description": "Ralph 自动化 Coding 工作流：PRD 驱动的确定性 Developer→Validator 循环——skills、commands 与 coding-x 引擎（npx coding-x）。",
   "owner": { "name": "Xinzz" },
   "plugins": [
     { "name": "coding-x", "source": "./", "description": "Ralph auto-coding workflow + TS engine" }
