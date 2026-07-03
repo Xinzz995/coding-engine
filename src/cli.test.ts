@@ -1,8 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseCliArgs, permissionWarning, runDashboard } from './cli.js';
+import { parseCliArgs, permissionWarning, runDashboard, main } from './cli.js';
 
 describe('parseCliArgs', () => {
   it('defaults to claude run with standard timeouts', () => {
@@ -46,6 +46,27 @@ describe('parseCliArgs', () => {
   it('parses --stale-days overrides, including zero', () => {
     expect(parseCliArgs(['doctor', '--stale-days', '7']).staleDays).toBe(7);
     expect(parseCliArgs(['doctor', '--stale-days', '0']).staleDays).toBe(0);
+  });
+  it('throws a clear error instead of silently coercing an invalid --stale-days to NaN', () => {
+    expect(() => parseCliArgs(['doctor', '--stale-days', 'abc'])).toThrow('--stale-days');
+    expect(() => parseCliArgs(['doctor', '--stale-days', '-1'])).toThrow('--stale-days');
+    expect(() => parseCliArgs(['doctor', '--stale-days', '1.5'])).toThrow('--stale-days');
+  });
+});
+
+describe('main — invalid --stale-days', () => {
+  it('reports the error and exits 1 without printing a doctor report', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await main(['doctor', '--stale-days', 'abc']);
+      expect(code).toBe(1);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('--stale-days'));
+      expect(logSpy).not.toHaveBeenCalled(); // 未执行 doctor 检查，没有打印报告
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
   });
 });
 

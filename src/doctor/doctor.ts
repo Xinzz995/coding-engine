@@ -98,12 +98,19 @@ function isRelativePathLike(value: string): boolean {
   return value.includes('/') || /\.[A-Za-z][A-Za-z0-9]*$/.test(value);
 }
 
-/** 从 AGENTS.md 的 markdown 表格行中提取反引号包裹的相对路径（去重）。 */
+/**
+ * 从 AGENTS.md 的 markdown 表格行中提取反引号包裹的相对路径（去重）。
+ * 只认「整个单元格 trim 后正好是一个反引号 token」的情况——即路径独占整格；
+ * 说明列散文里内嵌的反引号路径（单元格内还有其他文字）不是索引项，不提取。
+ */
 export function extractAgentsIndexPaths(content: string): string[] {
   const paths = new Set<string>();
   for (const line of content.split(/\r?\n/)) {
     if (!line.trimStart().startsWith('|')) continue; // 只解析表格行
-    for (const m of line.matchAll(/`([^`]+)`/g)) {
+    for (const cell of line.split('|')) {
+      const trimmed = cell.trim();
+      const m = trimmed.match(/^`([^`]+)`$/); // 反引号 token 必须独占整格
+      if (!m) continue;
       const candidate = m[1].trim();
       if (isRelativePathLike(candidate)) paths.add(candidate);
     }

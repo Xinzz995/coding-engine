@@ -45,6 +45,16 @@ export function parseCliArgs(argv: string[]): CliConfig {
   const kind: AgentKind = first === 'codex' ? 'codex' : 'claude';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
 
+  let staleDays = 30;
+  if (values['stale-days'] !== undefined) {
+    const raw = values['stale-days'];
+    const n = Number(raw);
+    if (command === 'doctor' && !(Number.isInteger(n) && n >= 0)) {
+      throw new Error(`❌ --stale-days 必须是非负整数，收到「${raw}」`);
+    }
+    staleDays = n;
+  }
+
   return {
     command,
     kind,
@@ -55,7 +65,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     openBrowser: !values['no-open'],
     keepOpen: values['keep-open'] ?? false,
     port: values.port ? Number(values.port) : 7331,
-    staleDays: values['stale-days'] !== undefined ? Number(values['stale-days']) : 30,
+    staleDays,
   };
 }
 
@@ -97,7 +107,13 @@ export async function runDashboard(
 }
 
 export async function main(argv: string[]): Promise<number> {
-  const cfg = parseCliArgs(argv);
+  let cfg: CliConfig;
+  try {
+    cfg = parseCliArgs(argv);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    return 1;
+  }
 
   if (cfg.command === 'repair') {
     const repaired = repairWorkspaceFiles(cfg.workspace);

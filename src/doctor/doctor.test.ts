@@ -211,6 +211,13 @@ describe('extractAgentsIndexPaths', () => {
     const content = '| a | `x/y.md` |\n| b | `x/y.md` 与 `--stale-days` 与 `0.6.0` |';
     expect(extractAgentsIndexPaths(content)).toEqual(['x/y.md']);
   });
+  it('ignores a backtick path embedded in descriptive prose, only counting a cell the path occupies alone', () => {
+    const content =
+      '| 主题 | 路径 | 说明 |\n' +
+      '|---|---|---|\n' +
+      '| PRD | `docs/prds/` | 意图真相源，`.workspace/prd.json` 由它派生（ADR-003） |';
+    expect(extractAgentsIndexPaths(content)).toEqual(['docs/prds/']);
+  });
 });
 
 describe('extractInlineLinkTargets', () => {
@@ -259,6 +266,22 @@ describe('runDoctor — AGENTS.md 索引', () => {
       expect(idx.checked).toBe(0);
       expect(idx.issues).toEqual([]);
     });
+  });
+  it('does not flag a non-existent path embedded in the description column prose', () => {
+    const agentsWithEmbeddedDescPath = [
+      '| 主题 | 路径 | 说明 |',
+      '|---|---|---|',
+      '| PRD | `docs/prds/` | 意图真相源，`.workspace/prd.json` 由它派生（ADR-003） |',
+    ].join('\n');
+    withProject(
+      { 'AGENTS.md': agentsWithEmbeddedDescPath, 'docs/prds/.gitkeep': '' },
+      // 注意：故意不创建 .workspace/prd.json —— 它只是说明列散文里内嵌的反引号路径，不是索引项。
+      (root) => {
+        const idx = runDoctor(root).agentsIndex!;
+        expect(idx.checked).toBe(1); // 只有整格独占的 `docs/prds/` 计入
+        expect(idx.issues).toEqual([]);
+      },
+    );
   });
 });
 
