@@ -5,7 +5,7 @@
 coding-x 同时是两样东西：
 
 - **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`，并为项目生成与持续沉淀 docs/ 知识库。
+- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物，并为项目生成与持续沉淀 docs/ 知识库。
 
 ---
 
@@ -79,7 +79,7 @@ coding-x 同时是两样东西：
 /plugin install coding-x
 ```
 
-安装后即可使用 `/priming`、`/planning`、`/init-docs`、`/compound-docs` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
+安装后即可使用 `/priming`、`/planning`、`/init-docs`、`/review-loop`、`/compound-docs` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
 
 ### Codex
 
@@ -136,6 +136,7 @@ npx coding-x codex           # 改用 codex
                                 ▼
               http://localhost:7331  实时查看进度
                                 │
+              ──/review-loop───▶  合并前人审包（审查，建议）
               ──/compound-docs─▶  经验沉淀回 docs/（收口，可选）
 ```
 
@@ -206,9 +207,13 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 
 浏览器打开（默认自动弹出）：<http://localhost:7331>（像素风视图 `/p`）。仪表盘展示迭代次数、当前阶段、当前 story、已用时长、story 列表与 `progress.md` 日志。
 
-### 第 4 步：收口沉淀（可选）
+### 第 4 步：审查合并（建议）
 
-循环全部 story 通过后（引擎会提示），回到 Claude Code 等工具运行 `/compound-docs`：它基于当前代码、git 历史与 `progress.md` 的学习记录做交叉取证，把仍然成立的结构变化、稳定约定与高频陷阱分层沉淀进项目 `docs/`（约定与陷阱进 `docs/patterns.md`）。只改文档不改代码，越用文档越准。收口同时会汇总代码中的 `// 取舍:` 标记（builder 对带已知上限简化的就地记录）成取舍账本，提醒你处理未兑现的升级条件。
+循环全部 story 通过后（引擎会提示），先别急着合并：在 Claude Code 等工具中运行 `/review-loop`，它对本轮分支 diff 做独立审查，产出三层人审包——改动导读（每个 story 改了什么、数据怎么流）、发现清单（正确性与过度工程双维度，一行一发现）、风险聚焦（建议你重点细看的位置）。它是人审的加速器不是替代品：拿着包审完 diff、处理完发现，再把分支合并进主干。
+
+### 第 5 步：收口沉淀（可选）
+
+分支合并后，回到 Claude Code 等工具运行 `/compound-docs`：它基于当前代码、git 历史与 `progress.md` 的学习记录做交叉取证，把仍然成立的结构变化、稳定约定与高频陷阱分层沉淀进项目 `docs/`（约定与陷阱进 `docs/patterns.md`）。只改文档不改代码，越用文档越准。收口同时会汇总代码中的 `// 取舍:` 标记（builder 对带已知上限简化的就地记录）成取舍账本，提醒你处理未兑现的升级条件。
 
 ### 命令行参数
 
@@ -256,6 +261,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | `/priming` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
 | `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo；并为 Claude Code 生成 `CLAUDE.md` 桥接（`@AGENTS.md` 导入） |
 | `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
+| `/review-loop` | 循环结束后、合并默认分支前，对分支 diff 做独立审查并产出人审包（改动导读/双维度发现清单/风险聚焦）；只读不改，人保持最终裁决 |
 | `/compound-docs` | 循环/分支收口时把经验提炼、验证、分层沉淀回项目文档（约定与陷阱进 `docs/patterns.md`）；只改文档不改代码；并汇总代码中 `取舍:` 标记为账本 |
 
 ### Skills（能力，Claude 按语境自动触发）
@@ -284,6 +290,7 @@ coding-engine/
 │   ├── priming.md
 │   ├── planning.md
 │   ├── init-docs.md
+│   ├── review-loop.md
 │   └── compound-docs.md
 ├── templates/                    # /init-docs、/compound-docs 使用的知识库模板
 │   ├── AGENTS-root.md            #   目录式根 AGENTS.md（四段式）
