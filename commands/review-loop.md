@@ -8,7 +8,7 @@ description: 循环结束后、合并默认分支前，对本轮分支 diff 做�
 
 ## 硬性约束
 
-1. 只读不改：不修改业务代码与文档、不写 `.workspace/` 与任何文件；发现的问题列出来，修不修由人决定
+1. 只读不改：不修改业务代码与文档、不写 `.workspace/` 与任何项目文件（验证所需的临时探测文件放系统临时目录、用完即删，不留在项目内）；发现的问题列出来，修不修由人决定
 2. 独立复核：不得以「validator 已通过」「progress.md 说完成」作为任何结论的证据；验证必须独立重推（读代码、跑质量检查、必要时实际执行）
 3. 质量维度的发现只列出，不作为合并阻塞；正确性发现按严重度排序，最终裁决归人
 4. 例外（自指豁免）：若目标项目自身就是此类 harness 工具，其子命令名、CLI 参数名等是领域词汇，正常出现在审查输出中（同 /compound-docs 约定）
@@ -25,11 +25,11 @@ DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@
 DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}
 MERGE_BASE=$(git merge-base HEAD "origin/$DEFAULT_BRANCH" 2>/dev/null || git merge-base HEAD "$DEFAULT_BRANCH")
 git log --reverse --oneline "$MERGE_BASE"..HEAD
-git diff --stat "$MERGE_BASE"..HEAD
+git diff --stat "$MERGE_BASE"..HEAD -- . ':!package-lock.json' ':!*.lock' ':!dist'
 ```
 
 - 排除：lock 文件、构建产物、依赖目录的 diff 不进入审查与行数统计
-- **降级规则**：`.workspace/` 缺失 → 纯 git diff 审查（导读按提交组织，test-gap 降为「测试覆盖疑点」并注明无 AC 可对照）；与默认分支无分叉 → 明示「无可审内容」并结束
+- **降级规则**：`.workspace/` 缺失 → 纯 git diff 审查（导读按提交组织，test-gap 降为「测试覆盖疑点」并注明无 AC 可对照）；与默认分支无分叉 → 明示「无可审内容」并结束；两条同时成立时先判无分叉——直接明示「无可审内容」并结束，不进入降级审查
 
 ## 2. 独立审查（假绿嗅探清单）
 
