@@ -198,6 +198,8 @@ npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
 npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
+npx coding-x doctor             # docs/ 知识库健康检查（问题以退出码 1 结束，可作 CI 门禁）
+npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30）
 ```
 
 ### 第 3 步：查看实时进度
@@ -215,6 +217,7 @@ npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 | 位置参数 `codex` | — | 使用 codex 后端（缺省为 claude） |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
+| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter 完整性、`updated` 新鲜度、AGENTS.md 索引、文档相对链接），发现问题以退出码 1 结束，可作 CI 门禁 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
@@ -222,6 +225,7 @@ npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
+| `--stale-days <n>` | `30` | 仅 `doctor`：git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期 |
 
 ### 环境变量
 
