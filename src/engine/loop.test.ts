@@ -27,7 +27,7 @@ const story = (over: Record<string, unknown> = {}) => ({
 
 describe('runLoop', () => {
   it('returns 0 when all stories are already resolved after one pass', async () => {
-    // fake agent: developer pass marks the only story passes=true by rewriting prd.json
+    // fake agent: developer pass marks the only story passes=true by writing state.json
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `

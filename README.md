@@ -192,7 +192,7 @@ npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x --max-iter 20      # 最多 20 轮迭代
 npx coding-x --no-open          # 不自动打开浏览器
-npx coding-x --workspace ./run  # 指定 prd.json / progress.md 所在目录
+npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所在目录
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
 npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘

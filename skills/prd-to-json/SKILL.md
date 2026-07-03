@@ -391,6 +391,6 @@ Add ability to mark tasks with different statuses.
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
-- [ ] 同功能再派生时已先归档副本，并按 id 合并保留执行状态
+- [ ] 同功能再派生时已先归档副本（含 state.json），并按 id 对齐调整 state.json（保留/重置/移除）
 
 写入后运行：`npx coding-x repair`（用 jsonrepair 修复并二次校验 prd.json 与 state.json，后者不存在则跳过）。

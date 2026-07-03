@@ -67,7 +67,7 @@ export function permissionWarning(kind: AgentKind): string {
 }
 
 /**
- * 独立仪表盘：不跑循环，只对着 workspace 起面板离线查看 prd.json / progress.md，
+ * 独立仪表盘：不跑循环，只对着 workspace 起面板离线查看 prd.json / state.json / progress.md，
  * 直到 interrupt（默认 Ctrl+C）。iteration/phase 等内存态保持初始值（未在运行）。
  */
 export async function runDashboard(

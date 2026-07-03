@@ -36,7 +36,7 @@ function readInstruction(dir: string, file: string): string | null {
 // '.workspace/' prefix so a custom --workspace path reaches the agent. The
 // agent runs at the project root, and cfg.workspace is resolved the same way
 // the engine resolves it (relative to the project root, or absolute), so the
-// agent and engine always read/write the same prd.json / progress.md.
+// agent and engine always share the same prd.json / state.json / progress.md.
 export function renderInstruction(text: string, workspace: string): string {
   return text.replaceAll('{{WORKSPACE}}', workspace);
 }
@@ -62,7 +62,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     const bootPrd = tryReadPrd(prdPath);
     if (bootPrd) ensureStateFile(cfg.workspace, bootPrd);
     // Agents must run at the project root (the engine process's cwd), NOT at
-    // cfg.workspace. The engine reads/writes prd.json at join(cfg.workspace,
+    // cfg.workspace. The engine reads prd.json at join(cfg.workspace,
     // 'prd.json'), which for the default relative '.workspace' resolves against
     // the process cwd → <root>/.workspace/prd.json. The builder/validator
     // instructions also read '.workspace/prd.json' and root AGENTS.md/tasks/,
