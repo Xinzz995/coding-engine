@@ -3,11 +3,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
+import { runDoctor, renderDoctorReport } from './doctor/doctor.js';
 import type { AgentKind } from './engine/agent.js';
 import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor';
   kind: AgentKind;
   maxIterations: number;
   devTimeoutMs: number;
@@ -34,8 +35,11 @@ export function parseCliArgs(argv: string[]): CliConfig {
   });
 
   const first = positionals[0];
-  const command: 'run' | 'repair' | 'dashboard' =
-    first === 'repair' ? 'repair' : first === 'dashboard' ? 'dashboard' : 'run';
+  const command: CliConfig['command'] =
+    first === 'repair' ? 'repair'
+    : first === 'dashboard' ? 'dashboard'
+    : first === 'doctor' ? 'doctor'
+    : 'run';
   const kind: AgentKind = first === 'codex' ? 'codex' : 'claude';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
 
@@ -96,6 +100,12 @@ export async function main(argv: string[]): Promise<number> {
     const repaired = repairWorkspaceFiles(cfg.workspace);
     console.log(`✅ 已修复: ${repaired.join('、')}`);
     return 0;
+  }
+
+  if (cfg.command === 'doctor') {
+    const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd()));
+    console.log(text);
+    return exitCode;
   }
 
   if (cfg.command === 'dashboard') {

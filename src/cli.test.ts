@@ -27,6 +27,9 @@ describe('parseCliArgs', () => {
   it('recognizes the dashboard subcommand', () => {
     expect(parseCliArgs(['dashboard']).command).toBe('dashboard');
   });
+  it('recognizes the doctor subcommand', () => {
+    expect(parseCliArgs(['doctor']).command).toBe('doctor');
+  });
   it('defaults keepOpen to false and port to 7331', () => {
     const c = parseCliArgs([]);
     expect(c.keepOpen).toBe(false);
