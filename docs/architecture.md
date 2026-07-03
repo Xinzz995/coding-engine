@@ -25,6 +25,7 @@ scope: root
 | 执行状态 | `src/engine/state.ts` | state.json 读写与迁移、选 story、完成判定、合并视图 |
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
+| 知识库体检 | `src/doctor/doctor.ts` | `coding-x doctor` 四项健康检查（frontmatter 完整性 / updated 新鲜度 / AGENTS.md 索引 / 相对链接）；runDoctor/renderDoctorReport 纯函数，cli 渲染并定退出码 |
 | 仪表盘 | `src/dashboard/server.ts` | HTTP 服务（:7331）+ 自动开浏览器；`coding-x dashboard` 子命令可离线复用 |
 | 引擎指令 | `assets/instructions/` | builder.md / validator.md（{{WORKSPACE}} 占位符） |
 | 知识库模板 | `templates/` | /init-docs、/compound-docs 使用的 AGENTS/docs 模板 |
