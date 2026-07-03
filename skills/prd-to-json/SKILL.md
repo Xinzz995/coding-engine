@@ -1,6 +1,6 @@
 ---
 name: prd-to-json
-description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统使用。当你已有 PRD 并需要将其转换为 Ralph 的 JSON 格式时使用。触发词：将prd 转成 prd.json"
+description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把增强后的 stories 回写源 PRD（转换闭环）。当你已有 PRD 并需要将其转换为 Ralph 的 JSON 格式时使用。触发词：将prd 转成 prd.json"
 ---
 
 # PRD → prd.json 转换器
@@ -22,7 +22,7 @@ description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统�
   "project": "[Project Name]",
   "branchName": "ralph/[feature-name-kebab-case]",
   "sourcePrd": "docs/prds/prd-[feature-name].md",
-  "description": "[Feature description from PRD title/intro]\n\n【溯源】本文件由 docs/prds/prd-[feature-name].md 派生：需求背景不明时先查阅该文档理解意图，但验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现源文档与 acceptanceCriteria 冲突、或某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
+  "description": "[Feature description from PRD title/intro]\n\n【溯源】本文件由 docs/prds/prd-[feature-name].md 派生：需求背景不明时先查阅该文档理解意图，但验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现源文档与 acceptanceCriteria 冲突、或某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入同目录 state.json 中该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
   "userStories": [
     {
       "id": "US-001",
@@ -33,11 +33,7 @@ description: "将 PRD 转换为 prd.json 格式，供 Ralph 自主 agent 系统�
         "Criterion 2",
         "Typecheck passes"
       ],
-      "priority": 1,
-      "passes": false,
-      "notes": "",
-      "retryCount": 0,
-      "blocked": false
+      "priority": 1
     }
   ]
 }
@@ -186,7 +182,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 1. **每个 user story 成为一个 JSON 条目**
 2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延历史最大编号（含源 PRD 中已删除 story 曾占用的编号，不回收），不插号、不重排
 3. **Priority**：基于依赖顺序，然后是文档顺序
-4. **所有 stories**：`passes: false`、空的 `notes`、`retryCount: 0`、`blocked: false`
+4. **不写状态字段**：passes/notes/retryCount/blocked 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
@@ -286,7 +282,7 @@ Add ability to mark tasks with different statuses.
 {
   "project": "任务应用",
   "branchName": "ralph/task-status",
-  "description": "任务状态功能 - 使用状态指示器跟踪任务进度\n\n【溯源】本文件由用户提供的 PRD 文本派生：验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
+  "description": "任务状态功能 - 使用状态指示器跟踪任务进度\n\n【溯源】本文件由用户提供的 PRD 文本派生：验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入同目录 state.json 中该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
   "userStories": [
     {
       "id": "US-001",
@@ -297,11 +293,7 @@ Add ability to mark tasks with different statuses.
         "成功生成并运行 migration",
         "Typecheck 通过"
       ],
-      "priority": 1,
-      "passes": false,
-      "notes": "",
-      "retryCount": 0,
-      "blocked": false
+      "priority": 1
     },
     {
       "id": "US-002",
@@ -314,11 +306,7 @@ Add ability to mark tasks with different statuses.
         "Use agent-browser to open the task list page and confirm every visible task card shows a status badge",
         "No console errors are present on the page"
       ],
-      "priority": 2,
-      "passes": false,
-      "notes": "",
-      "retryCount": 0,
-      "blocked": false
+      "priority": 2
     },
     {
       "id": "US-003",
@@ -332,11 +320,7 @@ Add ability to mark tasks with different statuses.
         "Use agent-browser to change a task status from the list view and confirm the badge updates immediately",
         "Refresh the page and confirm the updated status persists"
       ],
-      "priority": 3,
-      "passes": false,
-      "notes": "",
-      "retryCount": 0,
-      "blocked": false
+      "priority": 3
     },
     {
       "id": "US-004",
@@ -349,11 +333,7 @@ Add ability to mark tasks with different statuses.
         "Use agent-browser to switch the filter and confirm only matching tasks remain visible",
         "Refresh the page and confirm the selected filter is restored from the URL params"
       ],
-      "priority": 4,
-      "passes": false,
-      "notes": "",
-      "retryCount": 0,
-      "blocked": false
+      "priority": 4
     }
   ]
 }
@@ -369,7 +349,7 @@ Add ability to mark tasks with different statuses.
 2. 检查 `branchName` 是否与新功能的 branch name 不同
 3. 如果不同且 `progress.md` 在 header 之外有内容：
    - 创建归档文件夹：`.workspace/archive/YYYY-MM-DD-feature-name/`
-   - 将当前的 `prd.json` 和 `progress.md` 复制到归档
+   - 将当前的 `prd.json`、`state.json`（如存在）和 `progress.md` 复制到归档
    - 使用新的 header 重置 `progress.md`
 
 如果你在运行之间手动更新 prd.json，请先按上述步骤归档旧运行，再写入新的 prd.json。
@@ -380,13 +360,14 @@ Add ability to mark tasks with different statuses.
 
 源 PRD 修改后重新执行本 skill，若 `.workspace/prd.json` 已存在且 `branchName` 与新转换结果**相同**（同一功能），进入再派生模式（branchName 不同则走上方「归档之前的运行」流程）：
 
-1. 先把现有 `prd.json` 复制到 `.workspace/archive/YYYY-MM-DD-rederive-[feature-name]/`（防合并出错；`progress.md` 不动）
-2. 按 story id 对齐合并：
-   - id 相同且 acceptanceCriteria 无实质变化 → 需求字段（title/description/acceptanceCriteria/priority）更新为新版，**保留** passes/notes/retryCount/blocked
-   - id 相同但 acceptanceCriteria 有实质变化 → 需求字段更新为新版，passes 置 `false`、retryCount 置 `0`、blocked 置 `false`，notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`
-   - 新增 id → 全新初始状态（`passes: false`、`notes: ""`、`retryCount: 0`、`blocked: false`）
-   - 源 md 已删除的 id → 从 prd.json 移除，在对照表标注「已移除」
-3. 输出对照表时增加「状态处理」列（保留/重置/新增/移除）
+1. 先把现有 `prd.json`（以及 `state.json`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）
+2. 用新转换结果**整体重写** `prd.json`（沿用源 id，纯需求字段——prd.json 不含状态）
+3. 若 `state.json` 存在，按 story id 对齐调整它（不存在则跳过，引擎会自动初始化）：
+   - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
+   - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 置 `false`、retryCount 置 `0`、blocked 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 开头的行，将它们原样保留在新内容之前（未裁决的冲突不得因再派生而丢失）
+   - 新增 id → 不写入 state.json（引擎按初始状态处理）
+   - 源 md 已删除的 id → 从 state.json 移除该键，在对照表标注「已移除」
+4. 输出对照表时增加「状态处理」列（保留/重置/新增/移除）
 
 实质变化的判定：AC 条目的增删、断言内容的改变算；纯错别字/措辞润色不算。拿不准时按「有实质变化」处理（宁可重验，不可漏验）。
 
@@ -406,10 +387,10 @@ Add ability to mark tasks with different statuses.
 - [ ] 复杂功能最后有一个闭环集成验证 story
 - [ ] Acceptance criteria 是可验证的（不模糊）
 - [ ] 没有 story 依赖于后面的 story
-- [ ] 每个 story 包含 `retryCount: 0` 和 `blocked: false` 字段
+- [ ] story 不含任何状态字段（passes/notes/retryCount/blocked 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
 - [ ] 同功能再派生时已先归档副本，并按 id 合并保留执行状态
 
-写入 prd.json 后运行：`npx coding-x repair`（引擎会用 jsonrepair 修复并二次校验）。
+写入后运行：`npx coding-x repair`（用 jsonrepair 修复并二次校验 prd.json 与 state.json，后者不存在则跳过）。
