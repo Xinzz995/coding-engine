@@ -1,7 +1,7 @@
 ---
 title: 架构地图
 status: active
-updated: 2026-07-03
+updated: 2026-07-04
 scope: root
 ---
 
@@ -26,6 +26,7 @@ scope: root
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
 | 知识库体检 | `src/doctor/doctor.ts` | `coding-x doctor` 四项健康检查（frontmatter 完整性 / updated 新鲜度 / AGENTS.md 索引 / 相对链接）；runDoctor/renderDoctorReport 纯函数，cli 渲染并定退出码 |
+| 状态速览 | `src/status/status.ts` | `coding-x status` 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与冲突标记、当前 story、最近进展；`--json` 输出机器可读单 JSON 对象）；collectStatus/renderStatusReport/renderStatusJson 纯函数，cli 渲染并定退出码，退出码 0/1/2 可作 CI 门禁 |
 | 仪表盘 | `src/dashboard/server.ts` | HTTP 服务（:7331）+ 自动开浏览器；`coding-x dashboard` 子命令可离线复用 |
 | 引擎指令 | `assets/instructions/` | builder.md / validator.md（{{WORKSPACE}} 占位符） |
 | 知识库模板 | `templates/` | /init-docs、/compound-docs 使用的 AGENTS/docs 模板 |
