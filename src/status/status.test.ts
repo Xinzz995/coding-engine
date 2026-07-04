@@ -393,6 +393,22 @@ describe('renderStatusReport', () => {
       // 文件存在但没有 ## 开头的记录
       writeFileSync(join(ws, 'progress.md'), '# Progress\n\n还没有迭代记录\n');
       expect(renderStatusReport(collectStatus(ws)).text).not.toContain('最近进展');
+      // 只有 Codebase Patterns 段、尚无日期开头的迭代记录：不把 Patterns 标题当最近进展
+      writeFileSync(join(ws, 'progress.md'), '# Progress\n\n## Codebase Patterns\n- 某个 pattern\n');
+      expect(renderStatusReport(collectStatus(ws)).text).not.toContain('最近进展');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('treats an empty userStories list as not-green: warns and exits 1', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [] }));
+      const { text, exitCode } = renderStatusReport(collectStatus(ws));
+      expect(text).toContain('没有任何 story');
+      expect(text).not.toContain('全部 story 已通过');
+      expect(exitCode).toBe(1);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -487,6 +503,18 @@ describe('renderStatusJson', () => {
       const obj = JSON.parse(renderStatusJson(collectStatus(ws)).text);
       expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });
       expect(obj.stories[0].notes).toBe('旧备注');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('treats an empty userStories list as not-green: exits 1, matching human-readable semantics', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [] }));
+      const { text, exitCode } = renderStatusJson(collectStatus(ws));
+      expect(JSON.parse(text).summary).toEqual({ total: 0, passed: 0, blocked: 0 });
+      expect(exitCode).toBe(1);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }

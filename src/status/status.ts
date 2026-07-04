@@ -19,10 +19,11 @@ export type StatusReport =
       stateCorrupted: boolean;
     };
 
-// progress.md 是追加式日志，最后一个 `## ` 标题行即最近一次迭代记录
+// progress.md 是追加式日志，迭代记录标题固定以日期开头（`## yyyy-mm-dd HH:mm - Story ID`），
+// 按日期前缀匹配以排除 `## Codebase Patterns` 等非记录标题；最后一条即最近一次迭代
 function latestProgressTitle(progress: string): string | null {
-  const headings = progress.split('\n').filter((l) => l.startsWith('## '));
-  const last = headings.at(-1);
+  const records = progress.split('\n').filter((l) => /^## \d{4}-\d{2}-\d{2}/.test(l));
+  const last = records.at(-1);
   return last ? last.slice(3).trim() : null;
 }
 
@@ -94,6 +95,11 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   if (current) extras.push(`👉 当前 story：${current.id} ${current.title}`);
   if (report.latestProgress !== null) extras.push(`🕐 最近进展：${report.latestProgress}`);
   if (extras.length > 0) lines.push('', ...extras);
+  // 空 story 列表不算全绿：status 的退出码用作 CI 门禁，对退化的 prd.json 必须保守
+  if (total === 0) {
+    lines.push('', '⚠️ prd.json 中没有任何 story');
+    return { text: lines.join('\n'), exitCode: 1 };
+  }
   const allPassed = passed === total;
   lines.push('', allPassed ? '✅ 全部 story 已通过' : `⏳ 还有 ${total - passed} 个 story 未完成`);
   return { text: lines.join('\n'), exitCode: allPassed ? 0 : 1 };
@@ -116,7 +122,7 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
   const view = {
     project: prd.project,
     branchName: prd.branchName,
-    ...(prd.sourcePrd !== undefined ? { sourcePrd: prd.sourcePrd } : {}),
+    sourcePrd: prd.sourcePrd, // undefined 时 JSON.stringify 自动省略该键
     stories: stories.map((s) => ({
       id: s.id,
       title: s.title,
@@ -128,5 +134,7 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
     })),
     summary,
   };
-  return { text: JSON.stringify(view, null, 2), exitCode: summary.passed === summary.total ? 0 : 1 };
+  // 与人类可读模式同一保守语义：空 story 列表不算全绿
+  const allPassed = summary.total > 0 && summary.passed === summary.total;
+  return { text: JSON.stringify(view, null, 2), exitCode: allPassed ? 0 : 1 };
 }
