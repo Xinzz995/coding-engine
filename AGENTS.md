@@ -30,7 +30,7 @@ npm run typecheck   # tsc --noEmit
 | 黄金原则 | `docs/golden-principles.md` | 机械可判定的强制规则 |
 | 设计决策 | `docs/decisions/` | ADR：一事一文件，编号递增 |
 | 实现计划 | `docs/plans/` | /planning 产出 |
-| PRD | `docs/prds/` | prd-generate 产出；意图真相源，`.workspace/prd.json` 由它派生（ADR-003）；scenario-alignment 的对齐稿（`align-*.md`）亦落此处，被正式 PRD 吸收后置 superseded |
+| PRD | `docs/prds/` | prd-generate 产出；意图真相源，`.workspace/prd.json` 由它派生（ADR-003）；两端对齐稿（scenario-alignment 的 `align-*.md`、technical-alignment 的 `tech-*.md`）亦落此处，被正式 PRD 吸收后置 superseded |
 | 约定与陷阱 | `docs/patterns.md` | /compound-docs 收口沉淀的稳定约定与高频陷阱 |
 | 功能设计文档 | `docs/superpowers/specs/` | brainstorming 产出的设计规格 |
 | 实施任务计划 | `docs/superpowers/plans/` | writing-plans 产出的分任务计划 |

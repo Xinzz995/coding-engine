@@ -18,6 +18,8 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 
 **输入是场景对齐稿时**（`docs/prds/align-*.md`，scenario-alignment 产出）：业务口径已经人工拍板，跳过澄清问题，直接从对齐稿的「业务场景」与「验收口径」派生 User Stories 与 acceptance criteria——不要重新发明需求、不要推翻已拍板的口径；技术粒度的取舍（拆分、排序、前置 story）照常执行。生成后把对齐稿 frontmatter 的 `status` 置为 `superseded`。
 
+**输入还包含技术对齐稿时**（`docs/prds/tech-*.md`，technical-alignment 产出）：技术合同也已拍板——PRD 的 Technical Considerations 从合同稿吸收（引用其可验证陈述，不重新发明方案）；story 拆分与排序参照合同的数据/边界结构（持久化与状态先行、UI 接线在后）；合同中的可验证陈述应逐条落进相应 story 的 acceptance criteria（如「报告记录只追加、永不覆盖」直接成为验收断言）；不可逆项对应的 story 优先级靠前。不得推翻已拍板的合同；发现合同与业务口径冲突时停下来向用户指出，不自行取舍。生成后把合同稿 frontmatter 的 `status` 也置为 `superseded`。
+
 **重要提示：** 不要开始实施。只需创建 PRD。
 
 ---

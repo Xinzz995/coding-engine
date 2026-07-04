@@ -115,4 +115,5 @@ scope: root 或子项目名
 
 - 用户确认（或要求保存）后，保存到 `docs/prds/align-<feature-name>.md`（kebab-case；目录不存在则创建）。monorepo 归属规则与 PRD 一致：功能只涉及一个子项目 → `<子项目>/docs/prds/`；跨子项目或单项目 → 根 `docs/prds/`。
 - 「需要对齐的问题」经用户拍板后，把确认口径合并进对应场景，再保存；未拍板的问题不得擅自按推荐答案落盘。
-- **对齐稿是 prd-generate 的一次性输入材料，不是持续维护的真相源**：用户要继续时，用 prd-generate 把对齐稿转成含 User Stories 的可执行 PRD（对它说「基于 docs/prds/align-xxx.md 创建 prd」）；正式 PRD 生成后，将对齐稿 frontmatter 的 `status` 置为 `superseded`。此后需求变更直接改正式 PRD，不回改对齐稿。
+- **口径确认后分流（杠铃第二端）**：功能涉及合同级技术决策（新增/变更持久化结构、对外接口、状态机、权限模型、存量数据迁移）时，建议先用 technical-alignment 产出技术对齐稿（`docs/prds/tech-*.md`），再把两稿一起交给 prd-generate；无此类决策的功能直接交 prd-generate。
+- **对齐稿是 prd-generate 的一次性输入材料，不是持续维护的真相源**：用户要继续时，用 prd-generate 把对齐稿转成含 User Stories 的可执行 PRD（对它说「基于 docs/prds/align-xxx.md 创建 prd」，如有技术对齐稿则一并给出）；正式 PRD 生成后，将对齐稿 frontmatter 的 `status` 置为 `superseded`。此后需求变更直接改正式 PRD，不回改对齐稿。
