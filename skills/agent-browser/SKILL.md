@@ -125,6 +125,7 @@ agent-browser find label "Email" fill "user@test.com"
 agent-browser find first ".item" click
 agent-browser find nth 2 "a" text
 ```
+注意：`find text` 是子串匹配——「发布」会命中「未发布」。点击短文案按钮时优先用 snapshot 的 @ref 或精确 CSS 选择器。
 
 ### Browser settings
 ```bash
