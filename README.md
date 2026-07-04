@@ -5,7 +5,7 @@
 coding-x 同时是两样东西：
 
 - **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物，并为项目生成与持续沉淀 docs/ 知识库。
+- **多工具插件** —— 提供 `scenario-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你对齐业务口径、把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物，并为项目生成与持续沉淀 docs/ 知识库。
 
 ---
 
@@ -79,7 +79,7 @@ coding-x 同时是两样东西：
 /plugin install coding-x
 ```
 
-安装后即可使用 `/priming`、`/planning`、`/init-docs`、`/review-loop`、`/compound-docs` 命令以及 `prd-generate` / `prd-to-json` / `agent-browser` skills。
+安装后即可使用 `/priming`、`/planning`、`/init-docs`、`/review-loop`、`/compound-docs` 命令以及 `scenario-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills。
 
 ### Codex
 
@@ -126,7 +126,8 @@ npx coding-x codex           # 改用 codex
 ## 基本工作流程
 
 ```
-需求  ──/planning────────────▶  实现计划（docs/plans/）
+需求  ──scenario-alignment──▶  业务对齐稿（可选：输入杂乱/口径未定时先对齐）
+      ──/planning────────────▶  实现计划（docs/plans/）
       ──prd-generate skill───▶  PRD（docs/prds/）
       ──prd-to-json skill────▶  .workspace/prd.json
                                 │
@@ -149,9 +150,10 @@ npx coding-x codex           # 改用 codex
 在 Claude Code（或其他工具）中：
 
 1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-docs` 生成目录式根 `AGENTS.md` + `docs/` 知识库（架构地图、黄金原则、decisions/plans/prds），单项目与 monorepo 均支持。
-2. `/planning 我要做的功能描述` 产出完整实现计划。
-3. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」）。
-4. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
+2. （可选）输入杂乱（口述/bug/页面调整混杂）或业务口径未定时，先用 `scenario-alignment` skill 对齐场景（对它说「align: 你的需求」）：产出无技术内容的业务 PRD 对齐稿（`docs/prds/align-*.md`），人只拍板 1-3 个关键问题；确认后交给 `prd-generate` 转成正式 PRD。需求本身已清楚时跳过。
+3. `/planning 我要做的功能描述` 产出完整实现计划。
+4. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」；输入是对齐稿时它会跳过澄清问题直接转）。
+5. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
 
 `prd.json` 结构：
 
@@ -272,7 +274,8 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 
 | Skill | 作用 | 触发示例 |
 | --- | --- | --- |
-| `prd-generate` | 为新功能生成结构清晰、可执行的 PRD | 「创建一个 prd」 |
+| `scenario-alignment` | 杠铃第一端「场景对齐」：把杂乱输入（口述/bug/调整混杂）整理成无技术内容的业务 PRD 对齐稿（`docs/prds/align-*.md`），最多问 1-3 个关键问题且必附推荐答案；口径确认后交 `prd-generate` 转正式 PRD | 「align: 你的需求」「场景对齐」 |
+| `prd-generate` | 为新功能生成结构清晰、可执行的 PRD（输入为对齐稿时跳过澄清直接转） | 「创建一个 prd」 |
 | `prd-to-json` | 把已有 PRD 转换成引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
 | `agent-browser` | 浏览器自动化：导航、填表、截图、数据提取，用于 UI story 验证 | 需要在浏览器中验证 UI 时 |
 
@@ -287,6 +290,7 @@ skill / command 内容在整个仓库里**只存一份**，各工具用一个瘦
 ```
 coding-engine/
 ├── skills/                       # 唯一源：模型自主触发的能力
+│   ├── scenario-alignment/SKILL.md
 │   ├── prd-generate/SKILL.md
 │   ├── prd-to-json/SKILL.md
 │   └── agent-browser/SKILL.md
