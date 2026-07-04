@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { collectStatus, renderStatusReport } from './status.js';
+import { collectStatus, renderStatusReport, renderStatusJson } from './status.js';
 
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), 'status-ws-'));
@@ -17,6 +17,17 @@ const PRD = {
   branchName: 'ralph/demo',
   description: 'd',
   userStories: [story('US-001', '第一个故事', 1), story('US-002', '第二个故事', 2), story('US-003', '第三个故事', 3)],
+};
+
+// v0.4 旧格式：状态字段内嵌在 story 上（无独立 state.json）
+const LEGACY_PRD = {
+  project: 'legacy-proj',
+  branchName: 'ralph/legacy',
+  description: 'd',
+  userStories: [
+    { ...story('US-001', '旧一', 1), passes: true, notes: '旧备注', retryCount: 2, blocked: false },
+    { ...story('US-002', '旧二', 2), passes: false, notes: '', retryCount: 0, blocked: true },
+  ],
 };
 
 describe('collectStatus', () => {
@@ -69,6 +80,51 @@ describe('collectStatus', () => {
       expect(report.stories.map((s) => s.passes)).toEqual([true, false, false]);
       expect(report.stories[1].retryCount).toBe(2);
       expect(report.stories[2].blocked).toBe(true);
+      expect(report.stateCorrupted).toBe(false);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back silently (stateCorrupted=false) when state.json is absent', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(LEGACY_PRD));
+      const report = collectStatus(ws);
+      if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
+      expect(report.stateCorrupted).toBe(false);
+      // 回退读 story 上的旧格式内嵌字段（v0.4 workspace / 历史归档零迁移可看）
+      expect(report.stories.map((s) => s.passes)).toEqual([true, false]);
+      expect(report.stories[0].notes).toBe('旧备注');
+      expect(report.stories[0].retryCount).toBe(2);
+      expect(report.stories[1].blocked).toBe(true);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('flags stateCorrupted and falls back to legacy fields when state.json is broken JSON', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(LEGACY_PRD));
+      writeFileSync(join(ws, 'state.json'), '{ not json');
+      const report = collectStatus(ws);
+      if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
+      expect(report.stateCorrupted).toBe(true);
+      expect(report.stories.map((s) => s.passes)).toEqual([true, false]); // 与缺失回退同语义
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('flags stateCorrupted when state.json parses but has an invalid shape', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(LEGACY_PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({ 'US-001': { passes: 'yes' } }));
+      const report = collectStatus(ws);
+      if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
+      expect(report.stateCorrupted).toBe(true);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -337,6 +393,100 @@ describe('renderStatusReport', () => {
       // 文件存在但没有 ## 开头的记录
       writeFileSync(join(ws, 'progress.md'), '# Progress\n\n还没有迭代记录\n');
       expect(renderStatusReport(collectStatus(ws)).text).not.toContain('最近进展');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('renderStatusJson', () => {
+  it('emits a single JSON.parse-able object with all required fields and exits 1 while unfinished', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, sourcePrd: 'docs/prds/demo.md' }));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-002': { passes: false, notes: '一条失败记录', retryCount: 2, blocked: false },
+        'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
+      }));
+      const { text, exitCode } = renderStatusJson(collectStatus(ws));
+      const obj = JSON.parse(text); // 可解析性
+      expect(obj.project).toBe('demo-proj');
+      expect(obj.branchName).toBe('ralph/demo');
+      expect(obj.sourcePrd).toBe('docs/prds/demo.md');
+      expect(obj.stories).toHaveLength(3);
+      expect(obj.stories[1]).toEqual({
+        id: 'US-002', title: '第二个故事', priority: 2,
+        passes: false, notes: '一条失败记录', retryCount: 2, blocked: false,
+      });
+      expect(obj.summary).toEqual({ total: 3, passed: 1, blocked: 1 });
+      expect(exitCode).toBe(1);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('omits sourcePrd when the prd.json has none', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      const obj = JSON.parse(renderStatusJson(collectStatus(ws)).text);
+      expect('sourcePrd' in obj).toBe(false);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 0 when every story passes, matching human-readable semantics', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
+        PRD.userStories.map((s) => [s.id, { passes: true, notes: '', retryCount: 0, blocked: false }]),
+      )));
+      const { text, exitCode } = renderStatusJson(collectStatus(ws));
+      expect(JSON.parse(text).summary).toEqual({ total: 3, passed: 3, blocked: 0 });
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('emits parseable error JSON and exits 2 for missing workspace and unparsable prd.json', () => {
+    const missing = renderStatusJson({ status: 'missing', workspace: '.workspace' });
+    expect(JSON.parse(missing.text)).toEqual({ error: 'missing', workspace: '.workspace' });
+    expect(missing.exitCode).toBe(2);
+    const unparsable = renderStatusJson({ status: 'unparsable', workspace: '.workspace' });
+    expect(JSON.parse(unparsable.text)).toEqual({ error: 'unparsable', workspace: '.workspace' });
+    expect(unparsable.exitCode).toBe(2);
+  });
+
+  it('reflects legacy embedded state when state.json is absent (old-format fallback)', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(LEGACY_PRD));
+      const { text, exitCode } = renderStatusJson(collectStatus(ws));
+      const obj = JSON.parse(text);
+      expect(obj.stories[0]).toEqual({
+        id: 'US-001', title: '旧一', priority: 1,
+        passes: true, notes: '旧备注', retryCount: 2, blocked: false,
+      });
+      expect(obj.stories[1].blocked).toBe(true);
+      expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });
+      expect(exitCode).toBe(1);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the same fallback view when state.json is corrupt', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(LEGACY_PRD));
+      writeFileSync(join(ws, 'state.json'), '{ not json');
+      const obj = JSON.parse(renderStatusJson(collectStatus(ws)).text);
+      expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });
+      expect(obj.stories[0].notes).toBe('旧备注');
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }

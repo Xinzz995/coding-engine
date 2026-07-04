@@ -38,6 +38,10 @@ describe('parseCliArgs', () => {
   it('passes --workspace through to the status subcommand', () => {
     expect(parseCliArgs(['status', '--workspace', 'ws-x']).workspace).toBe('ws-x');
   });
+  it('parses --json for status and defaults to false', () => {
+    expect(parseCliArgs(['status', '--json']).json).toBe(true);
+    expect(parseCliArgs(['status']).json).toBe(false);
+  });
   it('defaults keepOpen to false and port to 7331', () => {
     const c = parseCliArgs([]);
     expect(c.keepOpen).toBe(false);
@@ -111,6 +115,85 @@ describe('main — status subcommand', () => {
       const code = await main(['status', '--workspace', join(tmpdir(), 'status-cli-none')]);
       expect(code).toBe(2);
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('prd-to-json'));
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe('main — status --json', () => {
+  const writePrd = (workspace: string) => {
+    writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
+      project: 'cli-proj', branchName: 'ralph/s', description: 'd', sourcePrd: 'docs/prds/s.md',
+      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
+    }));
+  };
+
+  it('prints exactly one JSON.parse-able object to stdout with the same exit semantics', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      writePrd(workspace);
+      writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+        'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
+      }));
+      const code = await main(['status', '--workspace', workspace, '--json']);
+      expect(code).toBe(1);
+      expect(logSpy).toHaveBeenCalledTimes(1); // stdout 无装饰性文本混入
+      const obj = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(obj.project).toBe('cli-proj');
+      expect(obj.sourcePrd).toBe('docs/prds/s.md');
+      expect(obj.summary).toEqual({ total: 1, passed: 0, blocked: 0 });
+    } finally {
+      logSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('warns on stderr (suggesting repair) for corrupt state.json without polluting stdout', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      writePrd(workspace);
+      writeFileSync(join(workspace, 'state.json'), '{ not json');
+      const code = await main(['status', '--workspace', workspace, '--json']);
+      expect(code).toBe(1);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('npx coding-x repair'));
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(() => JSON.parse(logSpy.mock.calls[0][0] as string)).not.toThrow();
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('warns on stderr for corrupt state.json in human-readable mode too, but not when state.json is merely absent', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      writePrd(workspace);
+      await main(['status', '--workspace', workspace]); // state.json 缺失：静默回退
+      expect(errSpy).not.toHaveBeenCalled();
+      writeFileSync(join(workspace, 'state.json'), '{ not json');
+      await main(['status', '--workspace', workspace]);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('npx coding-x repair'));
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('emits parseable error JSON and exits 2 when the workspace is missing', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await main(['status', '--workspace', join(tmpdir(), 'status-json-none'), '--json']);
+      expect(code).toBe(2);
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(logSpy.mock.calls[0][0] as string).error).toBe('missing');
     } finally {
       logSpy.mockRestore();
     }
