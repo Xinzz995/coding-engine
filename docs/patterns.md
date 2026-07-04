@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-07-03
+updated: 2026-07-04
 scope: root
 ---
 
@@ -20,6 +20,8 @@ scope: root
 - 2026-07-03 新功能自成 `src/<feature>/` 目录，核心逻辑导出纯函数（签名收 root/数据、返回结构体），console 输出、`process.cwd()`、退出码等副作用全留在 `src/cli.ts` 薄胶水层——纯函数才能用临时目录 fixture 直接单测（见 `src/doctor/`、`src/dashboard/`）。
 - 2026-07-03 调外部命令用 `execFileSync('git', [...args])`（不经 shell、免转义），并 try/catch 失败即降级返回 null/false，让功能在缺该命令的环境温和退化而非抛栈（见 doctor 的 `isGitWorkTree`/`gitLastCommitDate`）。
 - 2026-07-03 CLI 参数非法值在 `parseCliArgs` 内抛错、由 `main()` try/catch 捕获打印并返回退出码 1，不把 `NaN`/越界值静默传给下游（见 `--stale-days` 只接受非负整数，且校验的是字面量 `/^\d+$/` 而非 `Number()` 转换结果——否则空串/`0x10`/`1e2` 会被静默接受）。
+- 2026-07-04 读 workspace 文件需要区分「文件不存在」与「内容损坏」两种降级时，先 `existsSync` 再 `tryReadX`——`tryReadPrd`/`tryReadState` 对两者都返回 `null`，只靠返回值无法分流（见 `collectStatus`：prd.json 缺失提示生成、损坏提示 repair；state.json 缺失静默回退、损坏 stderr 警告）。
+- 2026-07-04 机器可读输出（`--json` 类）的契约：stdout 恒为单个可 `JSON.parse` 的对象（错误态也输出 `{error, ...}` 对象而非裸文本），警告/提示一律走 stderr 且由 `src/cli.ts` 层发出（render 纯函数只产 stdout 文本与退出码）；测试断言用「`console.log` spy 恰被调用一次 + 对该次参数整体 `JSON.parse`」的不变式，强于正则匹配（见 `renderStatusJson` 与 cli.test.ts 的 status --json 用例）。
 
 ## 陷阱
 
@@ -29,3 +31,5 @@ scope: root
 - 2026-07-03 临时目录里跑 git 的单测须先 `git config commit.gpgsign false`（否则全局签名配置会让 commit 失败），并用 `GIT_COMMITTER_DATE`/`GIT_AUTHOR_DATE` 固定日期（`git log %cs` 取的是 committer date），否则依赖提交日期的断言不稳定（见 doctor.test.ts 的 git fixture）。
 - 2026-07-03 单测里的路径断言用 `join('docs', 'sub', 'x.md')` 拼接，不要硬编码 `/` 分隔的字面串，否则 Windows 上会假失败。
 - 2026-07-04 版本号除 package.json 外还有多处落点（package-lock、`.claude-plugin/`/`.cursor-plugin/`/`.codex-plugin/` 三个插件清单），靠人记必漂移——0.6.0–0.7.1 期间插件清单曾停在 0.5.1 三个版本没人发现。机械防线（三道）：`npm version` 生命周期钩子跑 `build/sync-plugin-versions.mjs` 自动同步；`build/version-consistency.test.mjs` 随 npm test 常态校验全部落点一致（本地与 CI test.yml，漂移提交即红）；publish.yml 发版门禁兜底。新增版本号落点时登记进 `PLUGIN_MANIFESTS`（或一致性测试的 entries）即可全线生效。同理，会随版本演进的枚举内容（如清单 description 里列 skills/commands 名单）不要复制到多处，写稳定表述。
+- 2026-07-04 `.workspace/` 换新 PRD（branchName 变更）时，归档后必须删除旧 `state.json`——story id 惯例都从 US-001 起编，新旧几乎必然撞车，而引擎 `ensureStateFile` 信任既存文件，会把旧轮的 `passes: true` 误判为新 story 已完成、循环空转结束。
+- 2026-07-04 progress.md 里 `## ` 开头的标题不全是迭代记录（顶部还有 `## Codebase Patterns` 汇总段）：结构化提取迭代记录必须按日期前缀 `/^## \d{4}-\d{2}-\d{2}/` 匹配，不能只按标题层级取（见 `latestProgressTitle` 的修复）。

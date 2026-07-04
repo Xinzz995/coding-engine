@@ -1,7 +1,7 @@
 ---
 title: 黄金原则
 status: active
-updated: 2026-07-02
+updated: 2026-07-04
 scope: root
 ---
 
@@ -9,7 +9,7 @@ scope: root
 
 ## 1. 提交前必须通过 `npm run typecheck` 与 `npm test`
 
-- **为什么**：CI 只在发布 tag 时跑检查，平时直接提交 main，坏提交会直接污染主干。
+- **为什么**：平时直接提交 main，坏提交会立刻污染主干；常态 CI（test.yml）事后会红，但主干已经脏了。
 - **怎么检查**：两条命令退出码为 0。
 
 ## 2. `src/` 内相对导入必须带 `.js` 扩展名
