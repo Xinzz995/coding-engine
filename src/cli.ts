@@ -4,11 +4,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
 import { runDoctor, renderDoctorReport } from './doctor/doctor.js';
+import { collectStatus, renderStatusReport } from './status/status.js';
 import type { AgentKind } from './engine/agent.js';
 import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status';
   kind: AgentKind;
   maxIterations: number;
   devTimeoutMs: number;
@@ -41,6 +42,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     first === 'repair' ? 'repair'
     : first === 'dashboard' ? 'dashboard'
     : first === 'doctor' ? 'doctor'
+    : first === 'status' ? 'status'
     : 'run';
   const kind: AgentKind = first === 'codex' ? 'codex' : 'claude';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
@@ -123,6 +125,12 @@ export async function main(argv: string[]): Promise<number> {
 
   if (cfg.command === 'doctor') {
     const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd(), { staleDays: cfg.staleDays }));
+    console.log(text);
+    return exitCode;
+  }
+
+  if (cfg.command === 'status') {
+    const { text, exitCode } = renderStatusReport(collectStatus(cfg.workspace));
     console.log(text);
     return exitCode;
   }

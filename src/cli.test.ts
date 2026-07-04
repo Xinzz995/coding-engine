@@ -30,6 +30,14 @@ describe('parseCliArgs', () => {
   it('recognizes the doctor subcommand', () => {
     expect(parseCliArgs(['doctor']).command).toBe('doctor');
   });
+  it('recognizes the status subcommand with default workspace', () => {
+    const c = parseCliArgs(['status']);
+    expect(c.command).toBe('status');
+    expect(c.workspace).toBe('.workspace');
+  });
+  it('passes --workspace through to the status subcommand', () => {
+    expect(parseCliArgs(['status', '--workspace', 'ws-x']).workspace).toBe('ws-x');
+  });
   it('defaults keepOpen to false and port to 7331', () => {
     const c = parseCliArgs([]);
     expect(c.keepOpen).toBe(false);
@@ -70,6 +78,40 @@ describe('main — invalid --stale-days', () => {
       expect(logSpy).not.toHaveBeenCalled(); // 未执行 doctor 检查，没有打印报告
     } finally {
       errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe('main — status subcommand', () => {
+  it('prints the workspace overview and returns 1 while stories are unfinished', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'status-cli-'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
+        project: 'cli-proj', branchName: 'ralph/s', description: 'd',
+        userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
+      }));
+      writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+        'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
+      }));
+      const code = await main(['status', '--workspace', workspace]);
+      expect(code).toBe(1);
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('cli-proj'));
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('0/1'));
+    } finally {
+      logSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('returns 2 and suggests prd-to-json when the workspace is missing', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await main(['status', '--workspace', join(tmpdir(), 'status-cli-none')]);
+      expect(code).toBe(2);
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('prd-to-json'));
+    } finally {
       logSpy.mockRestore();
     }
   });
