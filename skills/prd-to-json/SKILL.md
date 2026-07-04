@@ -350,6 +350,7 @@ Add ability to mark tasks with different statuses.
 3. 如果不同且 `progress.md` 在 header 之外有内容：
    - 创建归档文件夹：`.workspace/archive/YYYY-MM-DD-feature-name/`
    - 将当前的 `prd.json`、`state.json`（如存在）和 `progress.md` 复制到归档
+   - **删除工作区中的旧 `state.json`**——story id 惯例都从 US-001 起编，新旧几乎必然撞车；引擎信任既存 state.json，残留会把旧轮的 `passes: true` 误判为新 story 已完成、循环空转结束
    - 使用新的 header 重置 `progress.md`
 
 如果你在运行之间手动更新 prd.json，请先按上述步骤归档旧运行，再写入新的 prd.json。
@@ -377,7 +378,7 @@ Add ability to mark tasks with different statuses.
 
 在编写 prd.json 之前，验证：
 
-- [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档）
+- [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json）
 - [ ] 每个 story 可以在一次迭代中完成（足够小）
 - [ ] Stories 按依赖顺序排序（schema 到 backend 到 UI）
 - [ ] 每个 story 都有 "Typecheck passes" 作为标准
