@@ -4,11 +4,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
 import { runDoctor, renderDoctorReport } from './doctor/doctor.js';
+import { collectStatus, renderStatusReport, renderStatusJson } from './status/status.js';
 import type { AgentKind } from './engine/agent.js';
 import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status';
   kind: AgentKind;
   maxIterations: number;
   devTimeoutMs: number;
@@ -18,6 +19,7 @@ export interface CliConfig {
   keepOpen: boolean;
   port: number;
   staleDays: number;
+  json: boolean;
 }
 
 export function parseCliArgs(argv: string[]): CliConfig {
@@ -33,6 +35,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'keep-open': { type: 'boolean' },
       port: { type: 'string' },
       'stale-days': { type: 'string' },
+      json: { type: 'boolean' },
     },
   });
 
@@ -41,6 +44,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     first === 'repair' ? 'repair'
     : first === 'dashboard' ? 'dashboard'
     : first === 'doctor' ? 'doctor'
+    : first === 'status' ? 'status'
     : 'run';
   const kind: AgentKind = first === 'codex' ? 'codex' : 'claude';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
@@ -66,6 +70,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     keepOpen: values['keep-open'] ?? false,
     port: values.port ? Number(values.port) : 7331,
     staleDays,
+    json: values.json ?? false,
   };
 }
 
@@ -123,6 +128,17 @@ export async function main(argv: string[]): Promise<number> {
 
   if (cfg.command === 'doctor') {
     const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd(), { staleDays: cfg.staleDays }));
+    console.log(text);
+    return exitCode;
+  }
+
+  if (cfg.command === 'status') {
+    const report = collectStatus(cfg.workspace);
+    // 警告走 stderr：--json 模式下不污染 stdout，人类可读模式同样适用
+    if (report.status === 'ok' && report.stateCorrupted) {
+      console.error('⚠️  state.json 已损坏，已按 prd.json 内嵌旧格式状态回退显示。建议运行 npx coding-x repair。');
+    }
+    const { text, exitCode } = cfg.json ? renderStatusJson(report) : renderStatusReport(report);
     console.log(text);
     return exitCode;
   }

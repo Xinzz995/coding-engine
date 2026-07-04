@@ -199,6 +199,8 @@ npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
 npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
+npx coding-x status             # 终端一屏速览工作区执行状态（退出码 0/1/2 可作 CI 门禁）
+npx coding-x status --json      # 同上，stdout 输出单个 JSON 对象供脚本与 agent 消费
 npx coding-x doctor             # docs/ 知识库健康检查（问题以退出码 1 结束，可作 CI 门禁）
 npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30）
 ```
@@ -223,6 +225,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter 完整性、`updated` 新鲜度、AGENTS.md 索引、文档相对链接），发现问题以退出码 1 结束，可作 CI 门禁 |
+| 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与 `[需求冲突]` 醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
@@ -231,6 +234,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期 |
+| `--json` | 关闭 | 仅 `status`：向 stdout 输出单个 JSON 对象（project/branchName/sourcePrd/stories/summary），退出码语义与人类可读模式一致；state.json 损坏警告走 stderr 不污染 stdout |
 
 ### 环境变量
 
