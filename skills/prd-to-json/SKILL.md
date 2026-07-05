@@ -22,6 +22,7 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
   "project": "[Project Name]",
   "branchName": "ralph/[feature-name-kebab-case]",
   "sourcePrd": "docs/prds/prd-[feature-name].md",
+  "qualityChecks": ["npm run typecheck", "npm test"],
   "description": "[Feature description from PRD title/intro]\n\n【溯源】本文件由 docs/prds/prd-[feature-name].md 派生：需求背景不明时先查阅该文档理解意图，但验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现源文档与 acceptanceCriteria 冲突、或某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入同目录 state.json 中该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
   "userStories": [
     {
@@ -40,6 +41,19 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 ```
 
 `sourcePrd` 仅当源是**仓库内 markdown 文件**时填写（仓库相对路径）；源是粘贴文本或仓库外文件时省略该字段，【溯源】段首句相应改为「本文件由用户提供的 PRD 文本派生」，其余仲裁文案保持不变。
+
+---
+
+## qualityChecks：机械门禁命令（推荐配置）
+
+顶层可选字段。引擎每轮 builder 之后、validator 之前逐条 shell 执行这些命令（fail-fast），任一非零退出码即确定性打回当前 story（passes 设回 false、retryCount +1、notes 写 `[门禁失败]` 详情）并跳过该轮 validator。
+
+生成规则：
+
+- 从目标项目提取候选：`package.json` scripts 里的 typecheck / lint / test 类命令、根 `AGENTS.md` 的关键命令节
+- 廉价检查放前面（typecheck → lint → test）：fail-fast 下失败得更早
+- 把候选命令随转换对照表一并呈现，请用户确认
+- 提取不到可靠命令时省略该字段（门禁不启用），不要编造
 
 ---
 
@@ -191,6 +205,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
 8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
+9. **qualityChecks 提取**：按上方「qualityChecks」节从目标项目提取候选并请用户确认；提取不到可靠命令时省略该字段
 
 ### 转换时的增强规则
 
@@ -394,6 +409,7 @@ Add ability to mark tasks with different statuses.
 - [ ] 没有 story 依赖于后面的 story
 - [ ] story 不含任何状态字段（passes/notes/retryCount/blocked 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
+- [ ] qualityChecks 已配置时：写入前逐条真实跑一遍、确认当前基线全绿——命令不存在、命令写错、基线本来就红，都必须在这里（有人在场的派生环节）拦截，否则 builder 会在循环里白烧 5 轮到 blocked；基线绿同时保证循环中门禁失败必然是 builder 引入的
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
 - [ ] 同功能再派生时已先归档副本（含 state.json），并按 id 对齐调整 state.json（保留/重置/移除）
