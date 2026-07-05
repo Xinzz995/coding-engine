@@ -1,7 +1,13 @@
+---
+title: "引擎机械门禁（quality gate）设计"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # 引擎机械门禁（quality gate）设计
 
 日期：2026-07-05
-状态：已批准（用户逐项拍板：上限统一到引擎、缺失静默+doctor、gate.ts 独立模块；7 节设计整体确认「好的」）
 来源：雷哥《Agents增加指令遵从的方法》的「结果验证方向：Hooks 独立再校验」，映射到本项目——Hooks 的宿主不是 git hook（侵入目标仓库、可被 `--no-verify` 绕过），而是引擎自身这个确定性 TS 程序
 
 ## 背景与动机

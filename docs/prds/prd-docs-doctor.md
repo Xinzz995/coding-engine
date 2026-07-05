@@ -1,7 +1,7 @@
 ---
 title: "PRD: coding-x doctor——docs/ 知识库健康检查子命令"
-status: active
-updated: 2026-07-03
+status: done
+updated: 2026-07-06
 scope: root
 ---
 

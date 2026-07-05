@@ -1,3 +1,10 @@
+---
+title: "PRD 分层真相源（第一阶段 v0.4.0）实施计划"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # PRD 分层真相源（第一阶段 v0.4.0）实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -1,7 +1,13 @@
+---
+title: "设计文档：docs/ 知识库体系 —— AGENTS.md 目录化 + /init-docs + 产物统一收编"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # 设计文档：docs/ 知识库体系 —— AGENTS.md 目录化 + /init-docs + 产物统一收编
 
 日期：2026-07-02
-状态：已批准（brainstorming 逐节确认）
 来源：OpenAI《Harness engineering: leveraging Codex in an agent-first world》差距分析——coding-x 已覆盖「循环层」，本设计补齐「环境层」中的知识库部分。
 
 ## 1. 背景与目标

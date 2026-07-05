@@ -1,7 +1,13 @@
+---
+title: "设计文档：/compound-docs 收口命令 —— 循环经验的复利文档回收"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # 设计文档：/compound-docs 收口命令 —— 循环经验的复利文档回收
 
 日期：2026-07-03
-状态：已批准（brainstorming 逐节确认）
 来源：对照分析旧 Ralph 生态的 `compound-harness-docs` skill（xinzz-vault/Clippings）——其「分支收口时把经验提炼、验证、分层沉淀回项目文档」的模式正是 coding-x 差距分析中明确的 doc-gardening 空白；`agents-map` 的核心理念已被 `/init-docs` 覆盖，不独立移植，其残留价值点（monorepo 集成落点、刷新语义）并入本命令。
 
 ## 1. 背景与目标

@@ -1,7 +1,13 @@
+---
+title: "设计文档：coding-x —— Ralph 自动化 Coding 工作流插件化 + TypeScript 重写"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # 设计文档：coding-x —— Ralph 自动化 Coding 工作流插件化 + TypeScript 重写
 
 - 日期：2026-06-30
-- 状态：已批准（待落实施计划）
 - 作者：Xinzz + Claude
 
 ---

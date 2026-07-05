@@ -1,3 +1,10 @@
+---
+title: "docs/ 知识库体系 Implementation Plan"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # docs/ 知识库体系 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -1,7 +1,13 @@
+---
+title: "设计文档：builder 反过度工程阶梯与取舍标记收账"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # 设计文档：builder 反过度工程阶梯与取舍标记收账
 
 - 日期：2026-07-04
-- 状态：已批准
 - 来源：ponytail（github.com/DietrichGebert/ponytail）评估的 P1 借鉴项；上游脉络见 P0（版本防线三道 + 常态 CI，已随 7a8868e/2959c58 落地）
 
 ## 1. 背景与目标

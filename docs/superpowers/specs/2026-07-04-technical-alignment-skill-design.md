@@ -1,7 +1,13 @@
+---
+title: "technical-alignment 原创设计（杠铃策略第二端：技术对齐）"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # technical-alignment 原创设计（杠铃策略第二端：技术对齐）
 
 日期：2026-07-04
-状态：已批准（用户拍板「启动杠铃第二端，技术对齐：technical-alignment」）
 来源：雷哥《杠铃策略-场景对齐》一文对第二端的定义（「用户行为最终如何持久化？表、Redis、OSS、外部接口、权限系统、状态机和兼容策略怎么承接？」）；作者的 technical-contract-review 未发布，本 skill 为 coding-x 原创设计，名字遵用户指定 technical-alignment（与第一端对仗）
 
 ## 背景与动机

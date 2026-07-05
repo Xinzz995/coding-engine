@@ -1,7 +1,13 @@
+---
+title: "scenario-alignment 收编设计（杠铃策略第一端：场景对齐）"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # scenario-alignment 收编设计（杠铃策略第一端：场景对齐）
 
 日期：2026-07-04
-状态：已批准（用户拍板「启动收编」）
 来源：雷哥《杠铃策略-场景对齐》一文及其 scenario-alignment skill 源码（xinzz-vault/Clippings/scenario-alignment/SKILL.md）；评估结论见本轮会话
 
 ## 背景与动机

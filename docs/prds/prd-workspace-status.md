@@ -1,7 +1,7 @@
 ---
 title: "PRD: coding-x status——工作区执行状态终端速览子命令"
-status: active
-updated: 2026-07-04
+status: done
+updated: 2026-07-06
 scope: root
 ---
 

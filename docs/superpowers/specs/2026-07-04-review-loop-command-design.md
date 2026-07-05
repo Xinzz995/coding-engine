@@ -1,7 +1,13 @@
+---
+title: "设计文档：/review-loop 审查命令 —— 循环产物的人审辅助包"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # 设计文档：/review-loop 审查命令 —— 循环产物的人审辅助包
 
 - 日期：2026-07-04
-- 状态：已批准
 - 来源：0.7.0 闭环验证的关键教训「validator 也是 agent，会共谋假绿——引擎产物必须人审后合并」；审查线为 ponytail 评估的 P2 借鉴项（tag 化一行式格式）；改动导读层借鉴 beginner-learning-code 的贴码讲解法（先做什么/数据怎么流/哪部分是核心）
 
 ## 1. 背景与目标

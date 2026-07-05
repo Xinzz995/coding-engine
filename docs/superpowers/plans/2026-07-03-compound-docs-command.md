@@ -1,3 +1,10 @@
+---
+title: "/compound-docs 收口命令实施计划"
+status: done
+updated: 2026-07-06
+scope: root
+---
+
 # /compound-docs 收口命令实施计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
