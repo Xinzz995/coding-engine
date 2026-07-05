@@ -5,7 +5,7 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 
 # PRD Generator
 
-创建清晰、可执行且适合实施的详细 Product Requirements Document。
+创建清晰、可执行且适合实施的详细 Product Requirements Document。读者是无项目先验知识的 AI agent 或初级开发者：明确、无歧义、需求编号可引用，「如何判断真的完成」写进 acceptance criteria 而不是留给实施者猜。
 
 ---
 
@@ -38,19 +38,14 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 ### 问题格式如下：
 
 ```
-1. 这个功能的主要目标是什么？
-   A. 改善用户 onboarding 体验
-   B. 提高用户 retention
-   C. 减少 support 负担
-   D. 其他：[请说明]
-
-2. 目标用户是谁？
+1. 目标用户是谁？
    A. 仅新用户
    B. 仅现有用户
    C. 所有用户
    D. 仅管理员用户
+   推荐：C——入口对全部用户可见，材料中无按角色区分的信号
 
-3. 范围是什么？
+2. 范围是什么？
    A. 最小可行版本 (Minimal viable version)
    B. 完整功能实现 (Full-featured implementation)
    C. 仅 backend/API
@@ -58,7 +53,7 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
    推荐：A——先验证核心价值，避免一次做大
 ```
 
-这样用户可以快速回复 "1A, 2C, 3B"，或直接回「都按推荐」进行快速迭代。
+这样用户可以快速回复 "1A, 2C"，或直接回「都按推荐」进行快速迭代。
 
 ---
 
@@ -100,7 +95,7 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 - “页面正确跳转”
 - “支持浏览器验证”
 
-这些都不够。必须补成可观测的断言。
+这些都不够。必须补成可观测的断言（「工作正常」→「删除前按钮显示确认对话框」）。
 
 #### 对 UI stories 的硬规则
 
@@ -117,16 +112,7 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 
 #### 对认证、支付、上传、表单、多步流程的硬规则
 
-这类 story 不能只验证单点页面，必须写闭环。
-
-例如认证 story 至少要覆盖：
-
-- [ ] 使用一个全新账号完成注册，接口返回成功
-- [ ] 使用刚注册的账号立即登录成功
-- [ ] `localStorage` 中存在预期 token 或 session 标记
-- [ ] 页面跳转到预期受保护页面
-- [ ] 刷新页面后仍能恢复登录态
-- [ ] 错误凭证时显示明确失败信息
+这类 story 不能只验证单点页面，必须写闭环：成功路径端到端跑通、关键运行时状态可观察、刷新后状态保持、失败路径至少一条断言。具体断言直接套用下方「闭环验收模板」。
 
 #### 对前后端集成 story 的硬规则
 
@@ -137,20 +123,6 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 - [ ] 在本地开发环境中，前端发出的目标请求可以真实到达后端并返回预期响应
 
 如果存在 dev proxy、base URL、环境变量、网关重写等前置条件，应单独拆成前置 story，而不是混在页面 story 里隐含依赖。
-
-#### 对跨 story 功能的硬规则
-
-如果一个功能被拆成多个 story，但用户感知上是一个完整流程，PRD 末尾必须增加一个集成 story。
-
-例如：
-
-- “注册页改造”
-- “AuthContext 改造”
-- “HTTP client 改造”
-
-这种拆法还不够，必须再有：
-
-- “真实用户注册→登录→进入受保护页面→刷新恢复登录态的闭环验证”
 
 **格式：**
 ```markdown
@@ -172,11 +144,6 @@ story id 是源 PRD 与 prd.json 之间的对齐键（需求变更后再派生�
 - 编辑既有 PRD 时，不要重排、不要复用已有 story 的 id
 - 新增 story 一律顺延历史最大编号（含已删除 story 曾占用的编号，不回收），US-007 之后是 US-008，即使中间有删除留下的空洞
 - 删除 story 时保留编号空洞，不回收
-
-**重要提示：** 
-- Acceptance criteria 必须是可验证的，不能模糊。"工作正常"是不好的。"删除前按钮显示确认对话框"是好的。
-- **对于任何有 UI 变更的 story：** 始终写明用 agent-browser 验证的页面、操作和预期结果，不要只写一句泛泛的“使用 agent-browser 在浏览器中验证”。
-- **对于任何认证、注册、支付、上传、导入导出、多步表单、跨前后端联动 story：** 必须写真实闭环验收标准，至少包含一次成功路径的端到端验证；必要时再补失败路径。
 
 ### 4. Functional Requirements
 具体功能的编号列表：
@@ -208,19 +175,6 @@ story id 是源 PRD 与 prd.json 之间的对齐键（需求变更后再派生�
 
 ---
 
-## 为初级开发者编写
-
-PRD 的读者可能是初级开发者或 AI agent。因此：
-
-- 要明确且无歧义
-- 避免行话或解释它
-- 提供足够的细节以理解目的和核心逻辑
-- 为便于参考，对需求进行编号
-- 在有用时使用具体示例
-- 把“如何判断真的完成”写进 acceptance criteria，而不是留给实施者猜
-
----
-
 ## Story 拆分补充规则
 
 拆分 story 时，不要只按代码层分层，要按“可独立验证的结果”拆。
@@ -246,6 +200,8 @@ PRD 的读者可能是初级开发者或 AI agent。因此：
 
 - 前端认证请求链路可达
 - 登录页完成真实登录闭环
+
+跨 story 的完整用户流程（拆完后用户感知上仍是一件事）必须以一个闭环集成验证 story 收尾（推荐顺序的第 4 步），例如「真实用户注册→登录→进入受保护页面→刷新恢复登录态」——只有分层 story 而没有它，agent 容易把「代码接上了」误判成「功能完成了」。
 
 ---
 
