@@ -66,8 +66,10 @@ function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<G
       if (settled) return;
       settled = true;
       killTree('SIGTERM');
-      const killTimer = setTimeout(() => killTree('SIGKILL'), 5000);
-      child.once('exit', () => clearTimeout(killTimer));
+      // 组长（shell）先于孙进程退出是常态：不能在 exit 时取消升级，
+      // 否则陷 SIGTERM 的孙进程永远等不到组 SIGKILL。unref 防空转 timer 拖住进程退出；
+      // 组已全死时补刀是空操作（killTree 吞 ESRCH，win32 child.kill 对已退进程返回 false）
+      setTimeout(() => killTree('SIGKILL'), 5000).unref();
       resolve({ command, exitCode: null, timedOut: true, outputTail: tail });
     }, timeoutMs);
     child.once('exit', (code) => {

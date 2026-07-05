@@ -151,7 +151,7 @@ describe('runQualityChecks', () => {
     expect(r.failure!.exitCode).toBeNull();
   });
 
-  it('kills the whole process tree on timeout (no orphaned grandchildren)', async () => {
+  it.runIf(process.platform !== 'win32')('kills the whole process tree on timeout (no orphaned grandchildren)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-'));
     const marker = join(dir, 'orphan-pid.txt');
     try {
@@ -167,4 +167,22 @@ describe('runQualityChecks', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform !== 'win32')('escalates to SIGKILL for grandchildren that trap SIGTERM', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-'));
+    const marker = join(dir, 'trap-pid.txt');
+    try {
+      // 孙进程陷住 SIGTERM 模拟优雅退出挂死：只有组 SIGKILL 能终结它
+      const trap = `node -e "process.on('SIGTERM', () => {}); require('node:fs').writeFileSync('${marker}', String(process.pid)); setInterval(() => {}, 1000)" && echo done`;
+      const r = await runQualityChecks([trap], process.cwd(), 500);
+      expect(r.ok).toBe(false);
+      expect(r.failure!.timedOut).toBe(true);
+      // 等过 5s 升级窗口 + 传播余量：组 SIGKILL 必须已补刀
+      await new Promise((res) => setTimeout(res, 5800));
+      const pid = Number(readFileSync(marker, 'utf-8'));
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
