@@ -21,3 +21,11 @@ prd.json 顶层可选 `qualityChecks`（完整 shell 命令数组）；引擎在
 - **为什么跳过该轮 validator**：门禁失败已足以打回，validator 那轮 token 纯属浪费；失败信息（输出尾部）直接进 notes 供 builder 下轮重现。
 - **为什么 validator 不减负**（门禁通过后仍逐条验收含 Typecheck passes 类 AC）：让 validator 跳过已覆盖条目需要 AC↔命令映射，复杂度不值；保留冗余防线，有实证再优化。
 - **为什么不做独立子命令**（`coding-x gate`）：用户手动验证直接敲 npm test 即可，多余入口（YAGNI）。
+
+## 后果
+
+- 循环内新增一段确定性执行时间（每轮 builder 后跑一遍 qualityChecks，典型秒级到分钟级）；换来 builder 谎报「检查通过」被零成本戳穿、失败轮不再烧 validator 的 token。
+- `MAX_RETRIES` 成为 gate.ts 与 validator.md 的共享耦合点（经 `{{MAX_RETRIES}}` 渲染共享）：改上限只动引擎一处；新增渲染键时须同步 renderInstruction 测试。
+- 配置错的命令（不存在/写错）在循环内与真实失败不可区分（127 不特判）：拦截完全依赖 prd-to-json 派生环节的试跑检查项——绕过派生链手写 prd.json 的用户失去这层保护，门禁失败会烧满 5 轮到 blocked。
+- validator 的 token 成本有意不减：门禁通过后「Typecheck passes」类 AC 仍被 validator 重验（接受的冗余防线）。
+- detached 进程组使 Ctrl+C 不再传播给运行中的门禁命令：正常命令自会跑完；挂起命令+人工中断=有限孤儿（接受，见设计稿锁定决策 10）。
