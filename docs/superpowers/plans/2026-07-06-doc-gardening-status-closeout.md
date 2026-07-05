@@ -1,6 +1,6 @@
 ---
 title: "实施计划：doc-gardening 第一阶段——任务型文档状态收尾"
-status: active
+status: done
 updated: 2026-07-06
 scope: root
 ---
