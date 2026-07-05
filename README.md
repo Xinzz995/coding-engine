@@ -276,7 +276,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 
 | Skill | 作用 | 触发示例 |
 | --- | --- | --- |
-| `scenario-alignment` | 杠铃第一端「场景对齐」：把杂乱输入（口述/bug/调整混杂）整理成无技术内容的业务 PRD 对齐稿（`docs/prds/align-*.md`），最多问 1-3 个关键问题且必附推荐答案；口径确认后交 `prd-generate` 转正式 PRD | 「align: 你的需求」「场景对齐」 |
+| `scenario-alignment` | 杠铃第一端「场景对齐」：把杂乱输入（口述/bug/调整混杂）整理成无技术内容的业务 PRD 对齐稿（`docs/prds/align-*.md`），默认最多问 1-3 个关键问题且必附推荐答案；说「一个一个问」可切逐题深挖模式（逐题追问到剩余问题不再影响产品方向为止）；口径确认后交 `prd-generate` 转正式 PRD | 「align: 你的需求」「场景对齐」 |
 | `technical-alignment` | 杠铃第二端「技术对齐」：把改起来贵的合同级技术决策（持久化/对外接口/状态机/权限承接/兼容迁移）整理成技术对齐稿（`docs/prds/tech-*.md`）——每条合同是可验证陈述、不可逆项单列；实现细节不进合同 | 「tech: ...」「技术对齐」「技术合同」 |
 | `prd-generate` | 为新功能生成结构清晰、可执行的 PRD（输入为对齐稿/技术对齐稿时跳过澄清、吸收合同直接转） | 「创建一个 prd」 |
 | `prd-to-json` | 把已有 PRD 转换成引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
