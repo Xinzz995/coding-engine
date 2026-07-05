@@ -33,6 +33,7 @@ npm run typecheck   # tsc --noEmit
 | PRD | `docs/prds/` | prd-generate 产出；意图真相源，`.workspace/prd.json` 由它派生（ADR-003）；两端对齐稿（scenario-alignment 的 `align-*.md`、technical-alignment 的 `tech-*.md`）亦落此处，被正式 PRD 吸收后置 superseded |
 | 约定与陷阱 | `docs/patterns.md` | /compound-docs 收口沉淀的稳定约定与高频陷阱 |
 | 领域词汇表 | `docs/glossary.md` | 共享语言：核心术语定义与禁用同义词，命名与表述以它为准 |
+| Prompt 编写原则 | `docs/prompt-writing.md` | skills/commands/引擎指令的编写与修订判据（no-op 检验、完成判据、锚定词） |
 | 功能设计文档 | `docs/superpowers/specs/` | brainstorming 产出的设计规格 |
 | 实施任务计划 | `docs/superpowers/plans/` | writing-plans 产出的分任务计划 |
 | 用户文档 | `README.md` | 安装、快速开始、CLI 参数、目录结构 |
