@@ -91,6 +91,8 @@ status 约定：`active`（生效中，含带触发条件的暂缓）/ `supersed
 # PRD
 
 `prd-generate` skill 的产出目录，文件名 `prd-[feature-name].md`。
+
+status 约定：`active`（意图生效中/待实施）/ `done`（本轮意图已交付——story 全部通过且已合并；需求演进时翻回 active，修改后再派生）/ `superseded`（被后继 PRD 取代，注明替代者）。对齐稿（`align-*`/`tech-*`）被正式 PRD 吸收后置 `superseded`。
 ```
 
 `CLAUDE.md`（Claude Code 桥接，一字不差；不带 frontmatter）：
