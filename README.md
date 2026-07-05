@@ -42,6 +42,11 @@ coding-x 同时是两样东西：
    │   │ 5. 把进度 + 学习追加到 progress.md                  │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
+   │   ┌── 机械门禁（qualityChecks，可选）──────────────────┐ │
+   │   │ 引擎逐条 shell 执行质量检查命令（fail-fast）        │ │
+   │   │ 失败 → 确定性打回 story、跳过本轮 Validator         │ │
+   │   └────────────────────────────────────────────────────┘ │
+   │                          ↓                               │
    │   ┌── Validator（validator.md）────────────────────────┐ │
    │   │ 1. 从 progress.md 找出刚完成的 story                │ │
    │   │ 2. 逐条核对 acceptanceCriteria                      │ │
@@ -59,6 +64,7 @@ coding-x 同时是两样东西：
 
 - **完成即退出**：全部 story 解决 → 退出码 0；跑满 `maxIterations` 仍未完成 → 退出码 1。
 - **超时保护**：开发/验证各有独立超时；开发阶段超时则跳过验证、下一轮重试。
+- **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
 - **状态共享**：引擎与 agent 都在项目根目录运行，读写同一组 `prd.json` / `state.json` / `progress.md`（需求只读，状态写 state.json）；指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
 
 ---
@@ -164,6 +170,7 @@ npx coding-x codex           # 改用 codex
   "project": "我的项目",
   "branchName": "ralph/my-feature",
   "sourcePrd": "docs/prds/prd-my-feature.md",  // 意图真相源（源 PRD）路径，冲突时以它为准重新派生
+  "qualityChecks": ["npm run typecheck", "npm test"],  // 机械门禁（可选）：每轮 builder 后引擎逐条执行，失败确定性打回
   "description": "...",
   "userStories": [
     {
@@ -228,12 +235,12 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | 位置参数 `codex` | — | 使用 codex 后端（缺省为 claude） |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
-| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter 完整性、`updated` 新鲜度、AGENTS.md 索引、文档相对链接），发现问题以退出码 1 结束，可作 CI 门禁 |
+| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter 完整性、`updated` 新鲜度、AGENTS.md 索引、文档相对链接、机械门禁配置建议（建议级，不计失败）），发现问题以退出码 1 结束，可作 CI 门禁 |
 | 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与 `[需求冲突]` 醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
-| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录 |
+| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录；`doctor` 用它定位 prd.json 做门禁配置检查 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
@@ -255,6 +262,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 
 - **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
+- **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
 - **完成判定**：全部 story `passes` 或 `blocked` 即成功退出。
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
