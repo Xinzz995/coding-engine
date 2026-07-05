@@ -1,9 +1,9 @@
 import { join } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { runAgent, type AgentKind } from './agent.js';
 import { tryReadPrd, type Prd } from './prd.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
-import { MAX_RETRIES } from './gate.js';
+import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES } from './gate.js';
 import * as dashboard from '../dashboard/server.js';
 
 export interface LoopConfig {
@@ -99,6 +99,29 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (dev.timedOut) {
           dashboard.setState({ phase: 'idle' });
           continue; // skip validator, retry next iteration
+        }
+      }
+
+      // 机械门禁：builder 之后、validator 之前确定性执行质量检查（fail-fast）。
+      // 失败即机械打回并跳过本轮 validator——builder 谎报「检查通过」在此被零成本戳穿。
+      const checks = readQualityChecks(before);
+      if (checks === 'invalid') {
+        console.warn('⚠️  prd.json 的 qualityChecks 形状非法（应为字符串数组），机械门禁未启用');
+      } else if (checks && currentStory) {
+        dashboard.setState({ phase: 'gating' });
+        const gate = await runQualityChecks(checks, agentCwd);
+        if (!gate.ok) {
+          console.error(`\n❌ 机械门禁未通过（${gate.failure!.command}），打回 ${currentStory} 待下轮重试`);
+          const st = tryReadState(statePath);
+          if (st) {
+            const next = applyGateFailure(st, currentStory, gate.failure!, new Date());
+            writeFileSync(statePath, JSON.stringify(next, null, 2), 'utf-8');
+          } else {
+            // 缺失/损坏都不落盘打回：绝不覆盖可能损坏的文件（同 ensureStateFile 语义）
+            console.warn('⚠️  state.json 缺失或不可读，门禁打回未落盘；若文件损坏请运行 npx coding-x repair');
+          }
+          dashboard.setState({ phase: 'idle' });
+          continue;
         }
       }
 

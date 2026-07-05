@@ -7,13 +7,13 @@ import { runLoop, renderInstruction } from './loop.js';
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
 
-function setup(prdStories: unknown[]): { workspace: string; instructionsDir: string } {
+function setup(prdStories: unknown[], prdExtra: Record<string, unknown> = {}): { workspace: string; instructionsDir: string } {
   const workspace = mkdtempSync(join(tmpdir(), 'loop-ws-'));
   const instructionsDir = mkdtempSync(join(tmpdir(), 'loop-ins-'));
   cleanup.push(() => rmSync(workspace, { recursive: true, force: true }));
   cleanup.push(() => rmSync(instructionsDir, { recursive: true, force: true }));
   writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
-    project: 'p', branchName: 'ralph/x', description: 'd', userStories: prdStories,
+    project: 'p', branchName: 'ralph/x', description: 'd', userStories: prdStories, ...prdExtra,
   }));
   writeFileSync(join(instructionsDir, 'builder.md'), 'build it');
   writeFileSync(join(instructionsDir, 'validator.md'), 'validate it');
@@ -191,6 +191,89 @@ describe('runLoop', () => {
       expect(code).toBe(1);
       expect(readFileSync(join(workspace, 'state.json'), 'utf-8')).toBe('{ broken');
     } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+});
+
+describe('runLoop quality gate', () => {
+  // builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
+  function fakeCounting(workspace: string): { fake: string; calls: string } {
+    const fake = join(workspace, 'fake.mjs');
+    const calls = join(workspace, 'calls.txt');
+    writeFileSync(fake, `
+      import { writeFileSync, appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'call\\n');
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    return { fake, calls };
+  }
+
+  it('gate failure rolls the story back and skips the validator for that round', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "console.error(\'gate-boom\'); process.exit(7)"'],
+    });
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1); // 打回后 story 未完成，跑满 maxIterations
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+      expect(state['US-001'].passes).toBe(false);
+      expect(state['US-001'].retryCount).toBe(1);
+      expect(state['US-001'].blocked).toBe(false);
+      expect(state['US-001'].notes).toContain('[门禁失败 - 第1次]');
+      expect(state['US-001'].notes).toContain('退出码 7');
+      expect(state['US-001'].notes).toContain('gate-boom');
+      // builder 被调用、validator 被跳过：stub 恰好只跑了一次
+      expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(1);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('gate pass lets the validator run and the loop complete', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "process.exit(0)"'],
+    });
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      // builder + validator 都跑了
+      expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(2);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('warns and disables the gate on malformed qualityChecks without touching state', async () => {
+    const { workspace, instructionsDir } = setup([story()], { qualityChecks: 'npm test' });
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0); // 门禁未启用，行为与未配置一致
+      expect(warns.some((w) => w.includes('qualityChecks 形状非法'))).toBe(true);
+      expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(2);
+    } finally {
+      console.warn = orig;
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });

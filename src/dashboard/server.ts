@@ -7,7 +7,7 @@ import { tryReadPrd } from '../engine/prd.js';
 import { tryReadState, mergedStories, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 
-export type Phase = 'idle' | 'developing' | 'validating' | 'done' | 'error';
+export type Phase = 'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'error';
 
 interface State {
   iteration: number;
