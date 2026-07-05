@@ -271,4 +271,9 @@ describe('renderInstruction', () => {
   it('leaves text without the placeholder unchanged', () => {
     expect(renderInstruction('no placeholder here', '.workspace')).toBe('no placeholder here');
   });
+
+  it('substitutes {{MAX_RETRIES}} with the engine constant', () => {
+    const out = renderInstruction('如果 retryCount 已经达到 {{MAX_RETRIES}}：', '.workspace');
+    expect(out).toBe('如果 retryCount 已经达到 5：');
+  });
 });

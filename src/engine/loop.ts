@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { runAgent, type AgentKind } from './agent.js';
 import { tryReadPrd, type Prd } from './prd.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
+import { MAX_RETRIES } from './gate.js';
 import * as dashboard from '../dashboard/server.js';
 
 export interface LoopConfig {
@@ -38,7 +39,9 @@ function readInstruction(dir: string, file: string): string | null {
 // the engine resolves it (relative to the project root, or absolute), so the
 // agent and engine always share the same prd.json / state.json / progress.md.
 export function renderInstruction(text: string, workspace: string): string {
-  return text.replaceAll('{{WORKSPACE}}', workspace);
+  return text
+    .replaceAll('{{WORKSPACE}}', workspace)
+    .replaceAll('{{MAX_RETRIES}}', String(MAX_RETRIES));
 }
 
 // 运行期读取执行状态；缺失/损坏时按全部未开始处理（绝不覆盖原文件，交给 repair）。

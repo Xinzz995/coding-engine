@@ -39,7 +39,7 @@
   - 建议修复方向：...
   ```
 - 将 retryCount 加 1
-- 如果 retryCount 已经达到 5：还需将 blocked 设为 `true`，并在 notes 末尾追加 `[BLOCKED: 已达到最大重试次数，跳过此 story]`
+- 如果 retryCount 已经达到 {{MAX_RETRIES}}：还需将 blocked 设为 `true`，并在 notes 末尾追加 `[BLOCKED: 已达到最大重试次数，跳过此 story]`
 
 ## 浏览器测试流程（重要）
 
