@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES } from './gate.js';
@@ -149,5 +149,22 @@ describe('runQualityChecks', () => {
     expect(r.ok).toBe(false);
     expect(r.failure!.timedOut).toBe(true);
     expect(r.failure!.exitCode).toBeNull();
+  });
+
+  it('kills the whole process tree on timeout (no orphaned grandchildren)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-'));
+    const marker = join(dir, 'orphan-pid.txt');
+    try {
+      // 复合命令迫使 shell 保留自身进程：node 是孙进程，写下自己的 pid 后挂起
+      const hang = `node -e "require('node:fs').writeFileSync('${marker}', String(process.pid)); setInterval(() => {}, 1000)"`;
+      const r = await runQualityChecks([`${hang} && echo done`], process.cwd(), 500);
+      expect(r.ok).toBe(false);
+      expect(r.failure!.timedOut).toBe(true);
+      await new Promise((res) => setTimeout(res, 300)); // 给信号传播留时间
+      const pid = Number(readFileSync(marker, 'utf-8'));
+      expect(() => process.kill(pid, 0)).toThrow(); // signal 0 探活：已死则 ESRCH
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

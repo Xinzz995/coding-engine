@@ -41,7 +41,12 @@ function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<G
   return new Promise((resolve) => {
     // shell 语义：qualityChecks 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`）。
     // patterns.md 的「不经 shell」约定针对代码拼接固定命令+变量参数的场景，不适用于此。
-    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(command, {
+      cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'],
+      // detached: 命令自成进程组——shell:true 下 child.kill 只达 shell 本身，
+      // 超时必须对整组发信号，否则挂起的孙进程（npm 包裹的测试进程等）会泄漏
+      detached: process.platform !== 'win32',
+    });
     let tail = '';
     const keep = (chunk: Buffer) => {
       tail = (tail + String(chunk)).slice(-OUTPUT_TAIL_CHARS);
@@ -49,12 +54,19 @@ function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<G
     // tee：实时转发保证无人值守时进度可见，同时滚动缓冲尾部供打回 notes 用
     child.stdout.on('data', (c: Buffer) => { process.stdout.write(c); keep(c); });
     child.stderr.on('data', (c: Buffer) => { process.stderr.write(c); keep(c); });
+    // 对整个进程组发信号（POSIX 负 pid）；win32 回退单进程 kill。进程可能已死（ESRCH）——忽略
+    const killTree = (signal: NodeJS.Signals) => {
+      try {
+        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch { /* 已退出 */ }
+    };
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill('SIGTERM');
-      const killTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      killTree('SIGTERM');
+      const killTimer = setTimeout(() => killTree('SIGKILL'), 5000);
       child.once('exit', () => clearTimeout(killTimer));
       resolve({ command, exitCode: null, timedOut: true, outputTail: tail });
     }, timeoutMs);

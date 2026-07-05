@@ -21,7 +21,7 @@
 7. **fail-fast**：逐条执行，第一条非零退出码即停，后续不跑。典型排序 typecheck（秒级）→ test（分钟级），早失败早打回；builder 一次修一个焦点。
 8. **shell 语义执行**：`spawn(cmd, { shell: true })`。patterns.md 的「execFileSync 不经 shell」约定针对*代码拼接固定命令+变量参数*的场景；`qualityChecks` 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`），shell 语义才是声明者的预期，prd.json 不是不可信输入边界。
 9. **输出 tee**：实时转发到 console（无人值守跑分钟级命令不能黑屏），同时缓冲捕获；失败时取尾部 2000 字符进 notes（vitest/jest 失败摘要在尾部；全量会污染 builder 每轮要读的 notes）。
-10. **超时**：每条命令 10 分钟，SIGTERM→5s→SIGKILL（同 agent.ts 模式），超时算失败打回、notes 注明超时。不加 CLI 参数（YAGNI）。
+10. **超时**：每条命令 10 分钟，SIGTERM→5s→SIGKILL；shell:true 下命令 detached 自成进程组、信号发给整组（防复合命令/包裹进程的孙进程泄漏，win32 回退单进程 kill），超时算失败打回、notes 注明超时。不加 CLI 参数（YAGNI）。
 11. **命令不存在不特判**：`shell: true` 下 command not found 是退出码 127，与真实失败无法可靠区分（脚本自身也可能 exit 127，跨平台语义不一）→ 照常打回。配置错误的正确拦截层在派生环节（决策 15），不在无人值守的循环里。
 12. **validator 不减负**：门禁通过后 validator 仍逐条验收（含「Typecheck passes」类 AC）。让 validator 跳过已覆盖条目需要 AC↔命令映射，复杂度不值——保留冗余防线，有实证再优化。
 13. **dashboard**：`Phase` 枚举加 `'gating'`，门禁运行期间如实显示（跑分钟级测试时显示 developing/validating 都是误导）；前端消费点是 `assets/dashboard/dashboard.html` 的 `PHASE_MAP`（未知 phase 回退 idle 显示，不加条目不崩但会误显示「等待启动」）；phase 是运行态不落盘，对归档回看无影响。
