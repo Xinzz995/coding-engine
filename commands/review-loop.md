@@ -29,7 +29,7 @@ git diff --stat "$MERGE_BASE"..HEAD -- . ':!package-lock.json' ':!*.lock' ':!dis
 ```
 
 - 排除：lock 文件、构建产物、依赖目录的 diff 不进入审查与行数统计
-- **降级规则**：`.workspace/` 缺失 → 纯 git diff 审查（导读按提交组织，test-gap 降为「测试覆盖疑点」并注明无 AC 可对照）；与默认分支无分叉 → 明示「无可审内容」并结束；两条同时成立时先判无分叉——直接明示「无可审内容」并结束，不进入降级审查
+- **降级规则**：`.workspace/` 缺失 → 纯 git diff 审查（导读按提交组织；test-gap 降为「测试覆盖疑点」、scope 核对以提交说明声明的意图为参照，两者均注明无 AC 可对照）；与默认分支无分叉 → 明示「无可审内容」并结束；两条同时成立时先判无分叉——直接明示「无可审内容」并结束，不进入降级审查
 
 ## 2. 独立审查（假绿嗅探清单）
 
@@ -37,7 +37,8 @@ git diff --stat "$MERGE_BASE"..HEAD -- . ':!package-lock.json' ':!*.lock' ':!dis
 
 - 跑一遍项目质量检查（typecheck/lint/test），确认当前分支真实全绿
 - 业务逻辑读取的每个文件/路径：干净检出（CI）环境下存在吗？被 .gitignore 了吗？路径是绝对的吗？依赖本机特有状态吗？
-- 逐条 acceptanceCriteria：找到对应的测试断言；断言真的在测这条 AC 吗（不是测 mock、不是测自己）？
+- 逐条 acceptanceCriteria：找到对应的测试断言；断言真的在测这条 AC 吗（不是测 mock、期望值不是与实现同源计算出来的）？
+- 反向核对（scope 嗅探）：逐个改动 hunk 问「哪条 AC 要求它？」——映射不到任何 story acceptanceCriteria 的行为/文件变更，列为 `scope:` 发现（validator 按 AC 正向验收永远发现不了 AC 之外的私货，这条防线只在这里）
 - 新增的每个外部输入（CLI 参数、文件内容、环境变量）：空串/0/负数/非法格式会发生什么？
 - 修改过的共享函数：grep 其所有调用方，逐个核对语义仍成立
 - 对照反过度工程阶梯：有没有本可复用项目已有/标准库/平台原生/已装依赖而新写的代码？
@@ -60,7 +61,8 @@ git diff --stat "$MERGE_BASE"..HEAD -- . ':!package-lock.json' ':!*.lock' ':!dis
 
 - `bug:` 逻辑错误
 - `assume:` 环境隐含假设（gitignored 文件被业务逻辑读取、绝对路径、本机特有状态）
-- `test-gap:` 测试未真正覆盖 acceptanceCriteria（断言与 AC 不对应、测了 mock、测了自己）
+- `test-gap:` 测试未真正覆盖 acceptanceCriteria（断言与 AC 不对应、测了 mock、同义反复——断言的期望值用与实现相同的算法重新计算而非来自独立真相源，构造性通过、永远无法与代码不一致）
+- `scope:` 越权改动（任何 story 的 acceptanceCriteria 都不要求的行为/文件变更——自作主张的功能、顺手改的无关文件）
 - `edge:` 边界缺失（空串/0/负数/非法格式）
 
 质量族（在后，按可砍行数排序）：
