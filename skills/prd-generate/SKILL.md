@@ -161,7 +161,8 @@ description: "为新功能生成 Product Requirements Document (PRD)。在规划
 - [ ] 具体的可验证标准
 - [ ] 另一个标准
 - [ ] Typecheck/lint 通过
-- [ ] **[仅 UI stories]** 使用 agent-browser 在浏览器中验证
+- [ ] **[仅 UI stories]** 使用 agent-browser 打开 `[url/path]`，执行 `[具体操作]`
+- [ ] **[仅 UI stories]** 页面出现 `[具体文案/组件/状态]`，无控制台错误
 ```
 
 #### Story ID 稳定性（硬规则）

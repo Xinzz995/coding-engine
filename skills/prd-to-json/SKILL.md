@@ -108,8 +108,12 @@ Stories 按 priority 顺序执行。较早的 stories 不能依赖于较晚的�
 ```
 
 ### 对于更改 UI 的 stories，还应包含：
-```
-"Verify in browser using agent-browser"
+
+具体的 agent-browser 浏览器断言——打开哪个页面、执行什么操作、观察到什么结果（形态见下节的扩写示例）：
+
+```json
+"Use agent-browser to open [url/path] and [具体操作]",
+"[具体文案/组件/状态] is visible on the page"
 ```
 
 Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-browser 导航到页面，与 UI 交互，并确认更改有效。
