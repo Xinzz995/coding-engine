@@ -307,7 +307,7 @@ coding-engine/
 ├── templates/                    # /init-docs、/compound-docs 使用的知识库模板
 │   ├── AGENTS-root.md            #   目录式根 AGENTS.md（四段式）
 │   ├── AGENTS-sub.md             #   子项目薄 AGENTS.md
-│   └── docs/                     #   architecture / golden-principles / patterns / decision(ADR)
+│   └── docs/                     #   architecture / golden-principles / patterns / glossary / decision(ADR)
 ├── AGENTS.md                     # 本仓库自己的目录式索引（/init-docs dogfood 产物）
 ├── CLAUDE.md                     # Claude Code 桥接：@AGENTS.md 导入（Claude Code 不读 AGENTS.md）
 ├── docs/                         # 本仓库知识库：architecture / golden-principles / decisions / plans / prds

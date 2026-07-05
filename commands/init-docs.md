@@ -60,6 +60,7 @@ description: 分析代码库，生成目录式 AGENTS.md 与 docs/ 知识库（�
 | `docs/architecture.md` | `templates/docs/architecture.md` | 填入模块表、分层、数据流、关键文件 |
 | `docs/golden-principles.md` | `templates/docs/golden-principles.md` | 按 3c 流程生成 |
 | `docs/patterns.md` | `templates/docs/patterns.md` | 约定与陷阱骨架（/compound-docs 收口的落点）；两章保留注释占位即可 |
+| `docs/glossary.md` | `templates/docs/glossary.md` | 领域词汇表骨架（共享语言：术语定义 + 禁用同义词）；可从分析中提炼的核心实体名预填 2–3 个词条并标注「（待人工确认）」，没有把握就只留骨架 |
 | `docs/decisions/README.md` | 下方占位内容 | |
 | `docs/plans/README.md` | 下方占位内容 | |
 | `docs/prds/README.md` | 下方占位内容 | |
@@ -72,6 +73,8 @@ description: 分析代码库，生成目录式 AGENTS.md 与 docs/ 知识库（�
 # 设计决策（ADR）
 
 一事一文件，文件名 `NNN-标题.md`（编号从 001 递增），模板见 coding-x 插件 `templates/docs/decision.md`。
+
+status 约定：`active`（生效中，含带触发条件的暂缓）/ `superseded`（被后续决策取代，注明编号）/ `rejected`（评估后决定不做——拒绝也记录，防同一提案反复重议；新提案先查先例）。
 ```
 
 `docs/plans/README.md`：
