@@ -1,6 +1,7 @@
 import type { Prd } from './prd.js';
 import type { RunState } from './state.js';
 import { INITIAL_STORY_STATE } from './state.js';
+import { spawn } from 'node:child_process';
 
 /** 打回上限的单一真相源：validator.md 经 {{MAX_RETRIES}} 占位符共享此值 */
 export const MAX_RETRIES = 5;
@@ -29,6 +30,60 @@ export function readQualityChecks(prd: Prd | null): string[] | 'invalid' | null 
   const v: unknown = prd.qualityChecks;
   if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) return 'invalid';
   return v.length === 0 ? null : (v as string[]);
+}
+
+/** 每条门禁命令的执行超时（10 分钟）；超时按失败打回，notes 注明 */
+const GATE_TIMEOUT_MS = 600_000;
+/** 打回 notes 只保留输出尾部——失败摘要在尾部，全量会污染 builder 每轮要读的 notes */
+const OUTPUT_TAIL_CHARS = 2000;
+
+function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<GateFailure | null> {
+  return new Promise((resolve) => {
+    // shell 语义：qualityChecks 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`）。
+    // patterns.md 的「不经 shell」约定针对代码拼接固定命令+变量参数的场景，不适用于此。
+    const child = spawn(command, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let tail = '';
+    const keep = (chunk: Buffer) => {
+      tail = (tail + String(chunk)).slice(-OUTPUT_TAIL_CHARS);
+    };
+    // tee：实时转发保证无人值守时进度可见，同时滚动缓冲尾部供打回 notes 用
+    child.stdout.on('data', (c: Buffer) => { process.stdout.write(c); keep(c); });
+    child.stderr.on('data', (c: Buffer) => { process.stderr.write(c); keep(c); });
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      const killTimer = setTimeout(() => child.kill('SIGKILL'), 5000);
+      child.once('exit', () => clearTimeout(killTimer));
+      resolve({ command, exitCode: null, timedOut: true, outputTail: tail });
+    }, timeoutMs);
+    child.once('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(code === 0 ? null : { command, exitCode: code, timedOut: false, outputTail: tail });
+    });
+    child.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ command, exitCode: null, timedOut: false, outputTail: err.message });
+    });
+  });
+}
+
+/** 逐条 shell 执行质量检查，fail-fast：第一条失败即返回，不跑后续。 */
+export async function runQualityChecks(
+  checks: string[],
+  cwd: string,
+  timeoutMs: number = GATE_TIMEOUT_MS,
+): Promise<GateResult> {
+  for (const command of checks) {
+    const failed = await runOneCheck(command, cwd, timeoutMs);
+    if (failed) return { ok: false, failure: failed };
+  }
+  return { ok: true, failure: null };
 }
 
 function pad2(n: number): string {

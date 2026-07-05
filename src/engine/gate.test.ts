@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { readQualityChecks, applyGateFailure, MAX_RETRIES } from './gate.js';
+import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES } from './gate.js';
 import type { GateFailure } from './gate.js';
 import type { RunState } from './state.js';
 import type { Prd } from './prd.js';
@@ -90,5 +93,61 @@ describe('applyGateFailure', () => {
     expect(next['US-009'].retryCount).toBe(1);
     expect(next['US-009'].blocked).toBe(false);
     expect(next['US-009'].notes).toContain('执行超时被终止');
+  });
+});
+
+describe('runQualityChecks', () => {
+  it('passes when every command exits 0', async () => {
+    const r = await runQualityChecks(['node -e "process.exit(0)"'], process.cwd());
+    expect(r.ok).toBe(true);
+    expect(r.failure).toBeNull();
+  });
+
+  it('fails with the exit code and captured output tail', async () => {
+    const r = await runQualityChecks(
+      ['node -e "console.error(\'boom-marker\'); process.exit(3)"'],
+      process.cwd(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.failure!.command).toContain('boom-marker');
+    expect(r.failure!.exitCode).toBe(3);
+    expect(r.failure!.timedOut).toBe(false);
+    expect(r.failure!.outputTail).toContain('boom-marker');
+  });
+
+  it('fail-fast: does not run commands after the first failure', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-'));
+    const marker = join(dir, 'ran-second.txt');
+    try {
+      // 外层双引号内用单引号包路径：tmpdir 路径无空格与单引号，shell 下字面保留
+      const second = `node -e "require('node:fs').writeFileSync('${marker}', 'x')"`;
+      const r = await runQualityChecks(['node -e "process.exit(1)"', second], process.cwd());
+      expect(r.ok).toBe(false);
+      expect(r.failure!.command).toBe('node -e "process.exit(1)"');
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps only the tail of long output', async () => {
+    const r = await runQualityChecks(
+      [`node -e "console.log('x'.repeat(5000) + 'TAIL-END'); process.exit(1)"`],
+      process.cwd(),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.failure!.outputTail.length).toBeLessThanOrEqual(2000);
+    expect(r.failure!.outputTail).toContain('TAIL-END');
+  });
+
+  it('times out a hanging command and reports timedOut', async () => {
+    const r = await runQualityChecks(
+      ['node -e "setTimeout(() => {}, 30000)"'],
+      process.cwd(),
+      500,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.failure!.timedOut).toBe(true);
+    expect(r.failure!.exitCode).toBeNull();
   });
 });
