@@ -428,3 +428,52 @@ describe('renderDoctorReport — 输出与退出码', () => {
     );
   });
 });
+
+describe('runDoctor quality gate config check', () => {
+  it('reports prd missing as skipped (not a failure)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
+    try {
+      mkdirSync(join(root, 'docs'));
+      const report = runDoctor(root);
+      expect(report.gate).toEqual({
+        prdPath: join('.workspace', 'prd.json'), prdFound: false, configured: false,
+      });
+      expect(renderDoctorReport(report).exitCode).toBe(0);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('suggests configuring qualityChecks without failing the check', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
+    try {
+      mkdirSync(join(root, 'docs'));
+      mkdirSync(join(root, '.workspace'));
+      writeFileSync(join(root, '.workspace', 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+      }));
+      const report = runDoctor(root);
+      expect(report.gate.prdFound).toBe(true);
+      expect(report.gate.configured).toBe(false);
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('建议在 prd.json 顶层配置 qualityChecks');
+      expect(exitCode).toBe(0); // 建议级：不影响退出码
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('reports configured, honoring a custom workspace, and still works without docs/', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
+    try {
+      mkdirSync(join(root, 'run'));
+      writeFileSync(join(root, 'run', 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+        qualityChecks: ['npm test'],
+      }));
+      // 故意不建 docs/：gate 检查独立于知识库存在与否
+      const report = runDoctor(root, { workspace: 'run' });
+      expect(report.docsFound).toBe(false);
+      expect(report.gate).toEqual({
+        prdPath: join('run', 'prd.json'), prdFound: true, configured: true,
+      });
+      expect(renderDoctorReport(report).text).toContain('机械门禁');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});

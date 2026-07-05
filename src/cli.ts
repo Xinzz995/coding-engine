@@ -127,7 +127,7 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'doctor') {
-    const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd(), { staleDays: cfg.staleDays }));
+    const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd(), { staleDays: cfg.staleDays, workspace: cfg.workspace }));
     console.log(text);
     return exitCode;
   }

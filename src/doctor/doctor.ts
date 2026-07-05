@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, relative } from 'node:path';
+import { tryReadPrd } from '../engine/prd.js';
+import { readQualityChecks } from '../engine/gate.js';
 
 export interface DoctorIssue {
   file: string;
@@ -35,6 +37,17 @@ export interface LinksCheckResult {
 export interface DoctorOptions {
   /** git 最后提交日期晚于 updated 超过该天数判过期；0 表示晚一天即过期。缺省 30。 */
   staleDays?: number;
+  /** 引擎工作区目录（相对项目根），门禁配置检查用。缺省 .workspace。 */
+  workspace?: string;
+}
+
+export interface GateConfigCheckResult {
+  /** 展示用的相对路径（如 .workspace/prd.json） */
+  prdPath: string;
+  /** workspace/prd.json 是否存在；不存在时跳过本项检查，不计失败 */
+  prdFound: boolean;
+  /** prd.json 存在时：顶层是否配置了非空合法 qualityChecks */
+  configured: boolean;
 }
 
 export interface DoctorReport {
@@ -43,6 +56,7 @@ export interface DoctorReport {
   freshness: FreshnessCheckResult | null;
   agentsIndex: AgentsIndexCheckResult | null;
   links: LinksCheckResult | null;
+  gate: GateConfigCheckResult;
 }
 
 const REQUIRED_FIELDS = ['title', 'status', 'updated', 'scope'] as const;
@@ -178,9 +192,16 @@ function gitLastCommitDate(root: string, relFile: string): string | null {
 /** 对项目根 root 只读执行各项健康检查（无 docs/ 时温和降级）。 */
 export function runDoctor(root: string, options: DoctorOptions = {}): DoctorReport {
   const staleDays = options.staleDays ?? DEFAULT_STALE_DAYS;
+  const workspace = options.workspace ?? '.workspace';
+  const prdRel = join(workspace, 'prd.json');
+  let gate: GateConfigCheckResult = { prdPath: prdRel, prdFound: false, configured: false };
+  if (existsSync(join(root, prdRel))) {
+    const checks = readQualityChecks(tryReadPrd(join(root, prdRel)));
+    gate = { prdPath: prdRel, prdFound: true, configured: Array.isArray(checks) };
+  }
   const docsDir = join(root, 'docs');
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
-    return { docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null };
+    return { docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null, gate };
   }
   const files = walkMarkdownFiles(docsDir);
   const gitAvailable = isGitWorkTree(root);
@@ -248,13 +269,26 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     freshness: { staleDays, gitAvailable, checked: freshnessChecked, issues: freshnessIssues },
     agentsIndex,
     links: { checked: linksChecked, issues: linkIssues },
+    gate,
   };
+}
+
+function renderGateLines(gate: GateConfigCheckResult): string[] {
+  const lines = ['⚙️  机械门禁配置'];
+  if (!gate.prdFound) {
+    lines.push(`  ℹ️  未找到 ${gate.prdPath}：已跳过门禁配置检查`);
+  } else if (gate.configured) {
+    lines.push('  ✅ 已配置 qualityChecks（引擎每轮 builder 后确定性执行）');
+  } else {
+    lines.push('  💡 建议在 prd.json 顶层配置 qualityChecks（如 ["npm run typecheck", "npm test"]）：引擎将在每轮 builder 之后机械执行、失败确定性打回（建议项，不计失败）');
+  }
+  return lines;
 }
 
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
     return {
-      text: 'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
+      text: ['ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。', '', ...renderGateLines(report.gate)].join('\n'),
       exitCode: 0,
     };
   }
@@ -289,6 +323,7 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   } else {
     for (const issue of links.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
+  lines.push('', ...renderGateLines(report.gate));
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
