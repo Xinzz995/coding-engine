@@ -278,7 +278,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo；并为 Claude Code 生成 `CLAUDE.md` 桥接（`@AGENTS.md` 导入） |
 | `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
 | `/review-loop` | 循环结束后、合并默认分支前，对分支 diff 做独立审查并产出人审包（改动导读/双维度发现清单/风险聚焦）；只读不改，人保持最终裁决 |
-| `/compound-docs` | 循环/分支收口时把经验提炼、验证、分层沉淀回项目文档（约定与陷阱进 `docs/patterns.md`）；只改文档不改代码；并汇总代码中 `取舍:` 标记为账本 |
+| `/compound-docs` | 循环/分支收口时把经验提炼、验证、分层沉淀回项目文档（约定与陷阱进 `docs/patterns.md`）；只改文档不改代码；汇总代码中 `取舍:` 标记为账本；并核对任务型文档状态（交付的 PRD/计划/spec 置 done、被吸收对齐稿置 superseded） |
 
 ### Skills（能力，Claude 按语境自动触发）
 
