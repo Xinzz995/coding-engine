@@ -23,6 +23,7 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
   "branchName": "ralph/[feature-name-kebab-case]",
   "sourcePrd": "docs/prds/prd-[feature-name].md",
   "qualityChecks": ["npm run typecheck", "npm test"],
+  "models": { "builder": "sonnet", "validator": "opus", "escalation": "opus" },
   "description": "[Feature description from PRD title/intro]\n\n【溯源】本文件由 docs/prds/prd-[feature-name].md 派生：需求背景不明时先查阅该文档理解意图，但验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现源文档与 acceptanceCriteria 冲突、或某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入同目录 state.json 中该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
   "userStories": [
     {
@@ -54,6 +55,32 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 - 廉价检查放前面（typecheck → lint → test）：fail-fast 下失败得更早
 - 把候选命令随转换对照表一并呈现，请用户确认
 - 提取不到可靠命令时省略该字段（门禁不启用），不要编造
+
+---
+
+## models：模型路由（可选配置）
+
+顶层可选字段。引擎按它给 builder/validator 拉起命令追加 `--model <名字>`；缺失时不传（沿用用户 CLI 默认模型，行为与历史版本一致）。模型名是不透明字符串直接透传（claude 可用别名如 opus/sonnet/haiku，codex 用其 CLI 接受的名字），引擎不校验、不维护模型名单。
+
+```json
+"models": {
+  "builder": "sonnet",
+  "validator": "opus",
+  "escalation": "opus",
+  "escalateAfter": 1
+}
+```
+
+- `builder` / `validator`：两阶段各自的默认模型
+- `escalation`：story 被打回 `retryCount ≥ escalateAfter`（缺省 1）后 builder 的升级模型——失败才花大钱
+- story 级可选 `"model"` 字段覆盖 builder（只对该 story 生效；validator 恒定不受影响）
+
+生成规则：
+
+- 先问用户是否需要模型分层；不需要或拿不准时**整段省略**（缺省即现状，不要编造）
+- 配置时默认姿势：**validator 能力 ≥ builder**——validator 是把关方，降它的级会重开「共谋假绿」的门
+- 逐 story 评估复杂度再标 `model`：跨模块/数据迁移/状态机类留给强模型，纯样板/文案/单文件小改可标快模型；拿不准不标（回落顶层 builder）
+- 模型名必须与用户确认后写入：用户可用哪些模型只有用户知道，引擎不校验，名字写错会在循环里快速失败白烧迭代数
 
 ---
 
@@ -206,6 +233,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
 8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
 9. **qualityChecks 提取**：按上方「qualityChecks」节从目标项目提取候选并请用户确认；提取不到可靠命令时省略该字段
+10. **models 路由（可选）**：按上方「models」节与用户确认模型分层；用户不需要时省略整段
 
 ### 转换时的增强规则
 
@@ -410,6 +438,7 @@ Add ability to mark tasks with different statuses.
 - [ ] story 不含任何状态字段（passes/notes/retryCount/blocked 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] qualityChecks 已配置时：写入前逐条真实跑一遍、确认当前基线全绿——命令不存在、命令写错、基线本来就红，都必须在这里（有人在场的派生环节）拦截，否则 builder 会在循环里白烧 5 轮到 blocked；基线绿同时保证循环中门禁失败必然是 builder 引入的
+- [ ] models 已配置时：模型名已逐个与用户确认（引擎不校验名字），validator 能力 ≥ builder，不需要分层的 story 未强行标注
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
 - [ ] 同功能再派生时已先归档副本（含 state.json），并按 id 对齐调整 state.json（保留/重置/移除）
