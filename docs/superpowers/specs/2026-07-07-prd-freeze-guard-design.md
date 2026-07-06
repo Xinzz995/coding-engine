@@ -1,6 +1,6 @@
 ---
 title: "prd.json 运行期冻结（门禁配置防篡改）设计"
-status: active
+status: done
 updated: 2026-07-07
 scope: root
 ---
