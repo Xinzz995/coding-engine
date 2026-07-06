@@ -72,7 +72,7 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 ```
 
 - `builder` / `validator`：两阶段各自的默认模型
-- `escalation`：story 被打回 `retryCount ≥ escalateAfter`（缺省 1）后 builder 的升级模型——失败才花大钱
+- `escalation`：story 被打回 `retryCount ≥ escalateAfter`（缺省 1）后 builder 的升级模型——失败才花大钱；`escalateAfter` 须 < 5（打回上限，达 5 该 story 已 blocked），否则升级永不生效（引擎启动时会警告）
 - story 级可选 `"model"` 字段覆盖 builder（只对该 story 生效；validator 恒定不受影响）
 
 生成规则：
