@@ -977,7 +977,7 @@ npx coding-x --builder-model sonnet --validator-model opus  # 临时覆盖阶段
 - [ ] **Step 6: architecture.md——模块表加一行（「修复」行之后）**
 
 ```markdown
-| 模型路由 | `src/engine/models.ts` | 读取 prd.json 顶层 models 段（形状校验+警告），解析 builder/validator 阶段模型与重试升级：CLI 覆盖 > escalation（retryCount ≥ escalateAfter）> story.model > 顶层默认 > 不传 |
+| 模型路由 | `src/engine/models.ts` | 读取 prd.json 顶层 models 段（形状校验+警告），解析两阶段模型——builder：CLI 覆盖 > escalation（retryCount ≥ escalateAfter）> story.model > 顶层默认 > 不传；validator 恒定：CLI 覆盖 > 顶层 validator > 不传 |
 ```
 
 同时把 frontmatter `updated` 改为当天日期。
