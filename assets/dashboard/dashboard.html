@@ -274,7 +274,8 @@ function renderPhase(rt) {
   let label = cfg.label;
   if (cfg.animate) {
     const storyPart = rt.current_story ? ` · ${rt.current_story}` : '';
-    label += storyPart + ` · Round ${rt.iteration}`;
+    const modelPart = rt.model ? ` · ${rt.model}` : '';
+    label += storyPart + modelPart + ` · Round ${rt.iteration}`;
     label += '<span class="loading-dots"></span>';
   }
   text.innerHTML = label;
@@ -295,7 +296,7 @@ function setEndedBanner(visible) {
 }
 
 const FALLBACK = {
-  runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340 },
+  runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340, model: 'opus' },
   project: '简易笔记系统',
   stories: [
     { id:'US-001', title:'初始化项目结构与静态导出配置', passes:true, notes:'', retryCount:0, blocked:false },

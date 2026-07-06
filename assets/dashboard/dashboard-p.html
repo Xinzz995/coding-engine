@@ -271,7 +271,7 @@ const FALLBACK = {
 - **未来迭代的学习：**
   - page.tsx 需要 "use client" 指令才能使用 React hooks
   - 类型定义放在 app/types.ts，示例数据放在 app/sample-data.ts`,
-  runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340 }
+  runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus" }
 };
 
 const POLL_MS = 2000;
@@ -498,7 +498,7 @@ function render() {
       </div>
     </div>
     <div class="hud-right">
-      <span class="hud-phase">${phaseEmoji[runtime.phase]||'⏸'} ${phaseText[runtime.phase]||'等待启动'}${runtime.current_story ? ' · '+runtime.current_story : ''}${isActive ? '<span class="loading-dots"></span>' : ''}</span>
+      <span class="hud-phase">${phaseEmoji[runtime.phase]||'⏸'} ${phaseText[runtime.phase]||'等待启动'}${runtime.current_story ? ' · '+runtime.current_story : ''}${runtime.model ? ' · '+runtime.model : ''}${isActive ? '<span class="loading-dots"></span>' : ''}</span>
       <span class="hud-meta">Round ${runtime.iteration}/${runtime.max_iterations} · ${formatElapsed(runtime.elapsed)}</span>
     </div>
   </div>`;

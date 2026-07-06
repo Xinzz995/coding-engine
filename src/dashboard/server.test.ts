@@ -51,6 +51,13 @@ describe('buildApiResponse', () => {
     const r = buildApiResponse();
     expect(r.stories[0].passes).toBe(true);
   });
+
+  it('exposes the current model in runtime and defaults it to null', () => {
+    setState({ phase: 'developing', model: 'opus' });
+    expect(buildApiResponse().runtime.model).toBe('opus');
+    setState({ model: null });
+    expect(buildApiResponse().runtime.model).toBe(null);
+  });
 });
 
 describe('browserOpenCommand', () => {

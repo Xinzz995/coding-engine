@@ -108,7 +108,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       });
       warnModelsOnce(builderChoice.warnings);
 
-      dashboard.setState({ iteration: i, phase: 'developing', currentStory });
+      dashboard.setState({ iteration: i, phase: 'developing', currentStory, model: builderChoice.model ?? null });
 
       // Developer
       if (!builder) {
@@ -122,7 +122,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           model: builderChoice.model,
         });
         if (dev.timedOut) {
-          dashboard.setState({ phase: 'idle' });
+          dashboard.setState({ phase: 'idle', model: null });
           continue; // skip validator, retry next iteration
         }
       }
@@ -133,7 +133,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       if (checks === 'invalid') {
         console.warn('⚠️  prd.json 的 qualityChecks 形状非法（应为字符串数组），机械门禁未启用');
       } else if (checks && currentStory) {
-        dashboard.setState({ phase: 'gating' });
+        dashboard.setState({ phase: 'gating', model: null });
         const gate = await runQualityChecks(checks, agentCwd);
         if (!gate.ok) {
           console.error(`\n❌ 机械门禁未通过（${gate.failure!.command}），打回 ${currentStory} 待下轮重试`);
@@ -147,14 +147,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           }
           // 已知不对称：门禁把最后一个 story 打到 blocked 时，本轮 continue 跳过完成判定，
           // 完成要到下一轮才被发现；发生在末轮迭代时退出码为 1（validator 打回则当轮判定）。低频且 blocked→1 语义诚实，接受。
-          dashboard.setState({ phase: 'idle' });
+          dashboard.setState({ phase: 'idle', model: null });
           continue;
         }
       }
 
       // Validator
       const validatorModel = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: modelsRead.config });
-      dashboard.setState({ phase: 'validating' });
+      dashboard.setState({ phase: 'validating', model: validatorModel ?? null });
       if (validator) {
         if (validatorModel) console.log(`🧠 validator 模型: ${validatorModel}`);
         await runAgent({
@@ -164,7 +164,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
 
       // Completion check
-      dashboard.setState({ phase: 'idle' });
+      dashboard.setState({ phase: 'idle', model: null });
       const after = tryReadPrd(prdPath);
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {

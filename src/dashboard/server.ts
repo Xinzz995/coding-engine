@@ -14,11 +14,13 @@ interface State {
   maxIterations: number;
   phase: Phase;
   currentStory: string | null;
+  /** 当前阶段所用模型（未配置路由时为 null） */
+  model: string | null;
   startedAt: number | null;
 }
 
 const state: State = {
-  iteration: 0, maxIterations: 50, phase: 'idle', currentStory: null, startedAt: null,
+  iteration: 0, maxIterations: 50, phase: 'idle', currentStory: null, model: null, startedAt: null,
 };
 let workspaceDir = '.workspace';
 
@@ -29,17 +31,18 @@ export function configureWorkspace(workspace: string, maxIterations: number): vo
 }
 
 export function setState(patch: {
-  iteration?: number; phase?: Phase; currentStory?: string | null;
+  iteration?: number; phase?: Phase; currentStory?: string | null; model?: string | null;
 }): void {
   if (patch.iteration !== undefined) state.iteration = patch.iteration;
   if (patch.phase !== undefined) state.phase = patch.phase;
   if (patch.currentStory !== undefined) state.currentStory = patch.currentStory;
+  if (patch.model !== undefined) state.model = patch.model;
 }
 
 export interface ApiResponse {
   runtime: {
     iteration: number; max_iterations: number; phase: Phase;
-    current_story: string | null; elapsed: number;
+    current_story: string | null; elapsed: number; model: string | null;
   };
   project: string;
   branchName: string;
@@ -60,6 +63,7 @@ export function buildApiResponse(): ApiResponse {
       phase: state.phase,
       current_story: state.currentStory,
       elapsed,
+      model: state.model,
     },
     project: prd?.project ?? '',
     branchName: prd?.branchName ?? '',
