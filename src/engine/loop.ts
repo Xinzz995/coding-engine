@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { runAgent, type AgentKind } from './agent.js';
-import { tryReadPrd, type Prd } from './prd.js';
+import { type Prd } from './prd.js';
+import { createPrdGuard } from './prd-guard.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
 import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES } from './gate.js';
 import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
@@ -60,6 +61,7 @@ function readRunState(statePath: string, prd: Prd): RunState {
 export async function runLoop(cfg: LoopConfig): Promise<number> {
   const prdPath = join(cfg.workspace, 'prd.json');
   const statePath = join(cfg.workspace, 'state.json');
+  const guard = createPrdGuard(prdPath);
   const builderRaw = readInstruction(cfg.instructionsDir, 'builder.md');
   const validatorRaw = readInstruction(cfg.instructionsDir, 'validator.md');
   const builder = builderRaw === null ? null : renderInstruction(builderRaw, cfg.workspace);
@@ -75,7 +77,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   try {
     // 启动时保证 state.json 存在：v0.4 及更早的 prd.json 把状态写在 story 上，
     // ensureStateFile 会把它们抽取成 state.json（一次性迁移）。
-    const bootPrd = tryReadPrd(prdPath);
+    const bootPrd = guard.read().prd;
     if (bootPrd) ensureStateFile(cfg.workspace, bootPrd);
     // Agents must run at the project root (the engine process's cwd), NOT at
     // cfg.workspace. The engine reads prd.json at join(cfg.workspace,
@@ -96,7 +98,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     };
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
-      const before = tryReadPrd(prdPath);
+      const beforeRead = guard.read();
+      const before = beforeRead.prd;
+      // 写回失败=磁盘仍是篡改版=本轮 validator 读到的验收标准不可信 → 跳过（下轮开头重试恢复）
+      let skipValidator = beforeRead.restoreFailed;
       const beforeState = before ? readRunState(statePath, before) : null;
       const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
       const modelsRead = readModelsConfig(before);
@@ -129,7 +134,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
 
       // 机械门禁：builder 之后、validator 之前确定性执行质量检查（fail-fast）。
       // 失败即机械打回并跳过本轮 validator——builder 谎报「检查通过」在此被零成本戳穿。
-      const checks = readQualityChecks(before);
+      // 第四检测点：builder 刚跑完、validator 未拉起——本轮 builder 的篡改必须在此恢复，
+      // 否则 validator（独立进程直读磁盘）当轮就会按假 AC 验收（ADR-007）。
+      const gateRead = guard.read();
+      if (gateRead.restoreFailed) skipValidator = true;
+      const checks = readQualityChecks(gateRead.prd);
       if (checks === 'invalid') {
         console.warn('⚠️  prd.json 的 qualityChecks 形状非法（应为字符串数组），机械门禁未启用');
       } else if (checks && currentStory) {
@@ -155,7 +164,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Validator
       const validatorModel = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: modelsRead.config });
       dashboard.setState({ phase: 'validating', model: validatorModel ?? null });
-      if (validator) {
+      if (validator && skipValidator) {
+        console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
+      } else if (validator) {
         if (validatorModel) console.log(`🧠 validator 模型: ${validatorModel}`);
         await runAgent({
           kind: cfg.kind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
@@ -165,7 +176,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
 
       // Completion check
       dashboard.setState({ phase: 'idle', model: null });
-      const after = tryReadPrd(prdPath);
+      const after = guard.read().prd;
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
@@ -173,6 +184,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         exitCode = 0;
         break;
       }
+    }
+    const tamper = guard.summary();
+    if (tamper.count > 0) {
+      console.warn(
+        `\n⚠️  运行期间检测到 prd.json 被修改 ${tamper.count} 次（引擎已按启动快照恢复并继续）。` +
+        (tamper.archives.length > 0 ? `篡改存档：\n${tamper.archives.map((a) => `  - ${a}`).join('\n')}` : '（文件删除类篡改无存档）'),
+      );
     }
     if (cfg.keepOpen) {
       const url = `http://localhost:${server.address().port}`;

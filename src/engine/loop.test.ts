@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runLoop, renderInstruction } from './loop.js';
@@ -490,5 +490,157 @@ describe('renderInstruction', () => {
   it('substitutes {{MAX_RETRIES}} with the engine constant', () => {
     const out = renderInstruction('如果 retryCount 已经达到 {{MAX_RETRIES}}：', '.workspace');
     expect(out).toBe('如果 retryCount 已经达到 5：');
+  });
+});
+
+describe('runLoop prd freeze', () => {
+  it('builder 删除 qualityChecks 也架空不了门禁：文件被恢复、门禁照跑照打回', async () => {
+    // 漏洞路径：builder 改写 prd.json 删掉 qualityChecks → 下轮门禁静默失效。
+    // 修复后：builder 之后的检测点恢复文件，门禁按快照命令执行、失败打回并跳过 validator。
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "console.error(\'gate-boom\'); process.exit(7)"'],
+    });
+    const prdPath = join(workspace, 'prd.json');
+    const original = readFileSync(prdPath, 'utf-8');
+    const fake = join(workspace, 'fake-tamper.mjs');
+    const calls = join(workspace, 'calls.txt');
+    writeFileSync(fake, `
+      import { writeFileSync, readFileSync, appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'call\\n');
+      const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
+      delete prd.qualityChecks;
+      writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1);
+      // 门禁没有被架空：按快照命令执行并打回
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+      expect(state['US-001'].notes).toContain('[门禁失败 - 第1次]');
+      expect(state['US-001'].notes).toContain('gate-boom');
+      // 门禁失败跳过 validator：stub 只被调了一次（builder）
+      expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(1);
+      // 磁盘被恢复为原版、篡改版被存档
+      expect(readFileSync(prdPath, 'utf-8')).toBe(original);
+      const archived = readdirSync(workspace).filter((f) => f.startsWith('prd.tampered-'));
+      expect(archived).toHaveLength(1);
+      expect(warns.some((w) => w.includes('检测到 prd.json 在运行期被修改'))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('builder 改弱 AC 后 validator 读到的磁盘已是恢复的原版', async () => {
+    // validator 是独立进程直读磁盘——第四检测点（builder 后）必须先恢复文件。
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['原始验收标准'] })]);
+    const prdPath = join(workspace, 'prd.json');
+    const fake = join(workspace, 'fake-weaken.mjs');
+    const calls = join(workspace, 'calls.txt');
+    const seenByValidator = join(workspace, 'validator-saw.json');
+    writeFileSync(fake, `
+      import { writeFileSync, readFileSync, appendFileSync, existsSync, copyFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'call\\n');
+      const n = readFileSync(${JSON.stringify(calls)}, 'utf-8').trim().split('\\n').length;
+      if (n === 1) {
+        // builder：改弱 AC 并翻绿
+        const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
+        prd.userStories[0].acceptanceCriteria = ['被改弱的标准'];
+        writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+        writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        }));
+      } else {
+        // validator：记录此刻磁盘上的 prd.json（它验收时读到的东西）
+        copyFileSync(${JSON.stringify(prdPath)}, ${JSON.stringify(seenByValidator)});
+      }
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0); // builder 翻绿、validator 跑过、完成判定放行
+      const saw = JSON.parse(readFileSync(seenByValidator, 'utf-8'));
+      expect(saw.userStories[0].acceptanceCriteria).toEqual(['原始验收标准']); // 不是被改弱的
+    } finally {
+      console.warn = origWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('删 story 骗不过完成判定：完成判定用快照，未完成照样跑满返回 1', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const prdPath = join(workspace, 'prd.json');
+    const fake = join(workspace, 'fake-drop.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync, readFileSync } from 'node:fs';
+      const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
+      prd.userStories = []; // 删光 story：若完成判定读磁盘会误判全绿提前 exit 0
+      writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1); // story 从未通过，不被空列表骗成 0
+    } finally {
+      console.warn = origWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('写回失败的轮次跳过 validator，结束摘要报告篡改', async () => {
+    // builder 删 prd.json 并在原路径建同名目录：读抛 EISDIR（按删除篡改）、写回抛 EISDIR（恢复失败）。
+    const { workspace, instructionsDir } = setup([story()]);
+    const prdPath = join(workspace, 'prd.json');
+    const fake = join(workspace, 'fake-break.mjs');
+    const calls = join(workspace, 'calls.txt');
+    writeFileSync(fake, `
+      import { appendFileSync, unlinkSync, mkdirSync, existsSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'call\\n');
+      if (existsSync(${JSON.stringify(prdPath)})) {
+        unlinkSync(${JSON.stringify(prdPath)});
+        mkdirSync(${JSON.stringify(prdPath)});
+      }
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1);
+      // 写回失败 → 本轮 validator 被跳过：stub 只跑了一次
+      expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(1);
+      expect(warns.some((w) => w.includes('快照写回失败'))).toBe(true);
+      expect(warns.some((w) => w.includes('跳过本轮 validator'))).toBe(true);
+      // 结束摘要报告篡改事件
+      expect(warns.some((w) => w.includes('运行期间检测到 prd.json 被修改'))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
   });
 });
