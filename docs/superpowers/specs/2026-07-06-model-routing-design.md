@@ -1,7 +1,7 @@
 ---
 title: "设计：模型路由——不同任务使用不同能力的模型"
-status: active
-updated: 2026-07-06
+status: done
+updated: 2026-07-07
 scope: root
 ---
 
