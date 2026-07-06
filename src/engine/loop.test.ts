@@ -279,6 +279,138 @@ describe('runLoop quality gate', () => {
   });
 });
 
+describe('runLoop model routing', () => {
+  // fake 记录每次调用收到的 argv（一行一次），并把 story 翻绿让循环结束。
+  // 行 1 = builder、行 2 = validator（同轮内先后调用）。
+  function fakeArgvRecorder(workspace: string): { fake: string; argvLog: string } {
+    const fake = join(workspace, 'fake-argv.mjs');
+    const argvLog = join(workspace, 'argv.log');
+    writeFileSync(fake, `
+      import { writeFileSync, appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 1, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    return { fake, argvLog };
+  }
+
+  it('routes stage models and escalates the builder after a rollback', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      models: { builder: 'fast-m', validator: 'val-m', escalation: 'esc-m' },
+    });
+    // 预置：US-001 已被打回一次（retryCount=1 ≥ escalateAfter 缺省 1）→ builder 应升级
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': { passes: false, notes: '', retryCount: 1, blocked: false },
+    }));
+    const { fake, argvLog } = fakeArgvRecorder(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('--model esc-m'); // builder 升级
+      expect(lines[1]).toContain('--model val-m'); // validator 恒定
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('uses story.model for the builder before any rollback', async () => {
+    const { workspace, instructionsDir } = setup([story({ model: 'story-m' })], {
+      models: { builder: 'fast-m', validator: 'val-m', escalation: 'esc-m' },
+    });
+    const { fake, argvLog } = fakeArgvRecorder(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines[0]).toContain('--model story-m'); // retryCount=0，story 覆盖生效
+      expect(lines[1]).toContain('--model val-m');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('lets CLI overrides beat prd.json models', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      models: { builder: 'fast-m', validator: 'val-m', escalation: 'esc-m' },
+    });
+    const { fake, argvLog } = fakeArgvRecorder(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+        builderModel: 'cli-b', validatorModel: 'cli-v',
+      });
+      expect(code).toBe(0);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines[0]).toContain('--model cli-b');
+      expect(lines[1]).toContain('--model cli-v');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('passes no --model at all when nothing is configured', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const { fake, argvLog } = fakeArgvRecorder(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines[0]).not.toContain('--model');
+      expect(lines[1]).not.toContain('--model');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('warns only once across rounds and disables routing on malformed models', async () => {
+    const { workspace, instructionsDir } = setup([story()], { models: 'opus' });
+    // 只记录 argv、不翻绿：跑满 2 轮，真正验证跨轮警告去重（每轮都重读非法 models）
+    const fake = join(workspace, 'fake-argv-only.mjs');
+    const argvLog = join(workspace, 'argv.log');
+    writeFileSync(fake, `
+      import { appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1); // story 从未翻绿，跑满 maxIterations
+      expect(warns.filter((w) => w.includes('models 形状非法'))).toHaveLength(1); // 2 轮只警告一次
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines).toHaveLength(4); // 2 轮 × (builder + validator)
+      for (const line of lines) expect(line).not.toContain('--model');
+    } finally {
+      console.warn = orig;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+});
+
 describe('runLoop keepOpen', () => {
   it('keeps the dashboard serving after completion until interrupt resolves', async () => {
     const { workspace, instructionsDir } = setup([story()]);

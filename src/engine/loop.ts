@@ -4,6 +4,7 @@ import { runAgent, type AgentKind } from './agent.js';
 import { tryReadPrd, type Prd } from './prd.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
 import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES } from './gate.js';
+import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
 import * as dashboard from '../dashboard/server.js';
 
 export interface LoopConfig {
@@ -11,6 +12,10 @@ export interface LoopConfig {
   maxIterations: number;
   devTimeoutMs: number;
   valTimeoutMs: number;
+  /** 临时覆盖 builder 阶段模型（压过 prd.json models 与升级链） */
+  builderModel?: string;
+  /** 临时覆盖 validator 阶段模型（压过 prd.json models.validator） */
+  validatorModel?: string;
   workspace: string;
   instructionsDir: string;
   port?: number;
@@ -82,19 +87,39 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
     const agentCwd = process.cwd();
+    // 模型路由警告去重：prd.json 每轮重读（agent 可能改它），同一条警告只打一次
+    const warnedModels = new Set<string>();
+    const warnModelsOnce = (msgs: string[]) => {
+      for (const m of msgs) {
+        if (!warnedModels.has(m)) { warnedModels.add(m); console.warn(m); }
+      }
+    };
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
       const before = tryReadPrd(prdPath);
       const beforeState = before ? readRunState(statePath, before) : null;
       const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
+      const modelsRead = readModelsConfig(before);
+      warnModelsOnce(modelsRead.warnings);
+      const currentStoryObj = before?.userStories.find((s) => s.id === currentStory) ?? null;
+      const retryCount = currentStory && beforeState ? (beforeState[currentStory]?.retryCount ?? 0) : 0;
+      const builderChoice = resolveBuilderModel({
+        cliOverride: cfg.builderModel, config: modelsRead.config, story: currentStoryObj, retryCount,
+      });
+      warnModelsOnce(builderChoice.warnings);
+
       dashboard.setState({ iteration: i, phase: 'developing', currentStory });
 
       // Developer
       if (!builder) {
         console.error('❌ builder.md 不存在，跳过开发');
       } else {
+        if (builderChoice.model) {
+          console.log(`🧠 builder 模型: ${builderChoice.model}${builderChoice.escalated ? `（${currentStory} 第 ${retryCount} 次重试，升级）` : ''}`);
+        }
         const dev = await runAgent({
           kind: cfg.kind, prompt: builder, cwd: agentCwd, timeoutMs: cfg.devTimeoutMs,
+          model: builderChoice.model,
         });
         if (dev.timedOut) {
           dashboard.setState({ phase: 'idle' });
@@ -128,10 +153,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
 
       // Validator
+      const validatorModel = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: modelsRead.config });
       dashboard.setState({ phase: 'validating' });
       if (validator) {
+        if (validatorModel) console.log(`🧠 validator 模型: ${validatorModel}`);
         await runAgent({
           kind: cfg.kind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
+          model: validatorModel,
         });
       }
 

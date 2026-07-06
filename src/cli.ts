@@ -161,6 +161,8 @@ export async function main(argv: string[]): Promise<number> {
     maxIterations: cfg.maxIterations,
     devTimeoutMs: cfg.devTimeoutMs,
     valTimeoutMs: cfg.valTimeoutMs,
+    builderModel: cfg.builderModel,
+    validatorModel: cfg.validatorModel,
     workspace: cfg.workspace,
     instructionsDir,
     port: cfg.port,
