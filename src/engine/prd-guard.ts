@@ -1,0 +1,111 @@
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import type { Prd } from './prd.js';
+
+export interface PrdReadResult {
+  /** 快照建立后恒为快照解析结果；仅快照未建立且磁盘缺失/损坏时为 null */
+  prd: Prd | null;
+  /** 本次 read 检测到篡改且快照写回磁盘失败——磁盘仍是篡改版，本轮 validator 不可信 */
+  restoreFailed: boolean;
+}
+
+export interface TamperSummary {
+  /** 去重后的篡改事件数（同一磁盘内容反复出现计 1 次） */
+  count: number;
+  /** 已写入的篡改存档文件路径 */
+  archives: string[];
+}
+
+export interface PrdGuard {
+  read(): PrdReadResult;
+  summary(): TamperSummary;
+}
+
+function fileStamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/**
+ * 运行期 prd.json 冻结守卫（ADR-007）：第一次成功解析时建立快照，此后磁盘变更
+ * 一律视为篡改——存档（内容去重）、快照写回恢复、告警（内容去重），read 恒返回快照。
+ * 「运行期只读」由此从指令约束变为机械保证（补 ADR-005「不可共谋」的洞：
+ * validator 是独立进程直读磁盘，所以恢复必须写回磁盘而不能只用内存快照）。
+ */
+export function createPrdGuard(prdPath: string): PrdGuard {
+  let snapshotRaw: string | null = null;
+  let snapshotPrd: Prd | null = null;
+  /** 最近一次已处置的篡改内容（null=文件被删的篡改）；undefined=尚无篡改 */
+  let lastTampered: string | null | undefined;
+  let count = 0;
+  const archives: string[] = [];
+
+  function tryReadRaw(): string | null {
+    try {
+      return readFileSync(prdPath, 'utf-8');
+    } catch {
+      return null;
+    }
+  }
+
+  /** 处置篡改：存档（内容去重）→ 快照写回 → 告警（内容去重）。返回写回是否失败。 */
+  function handleTamper(raw: string | null): boolean {
+    const isNew = lastTampered === undefined || raw !== lastTampered;
+    if (isNew) {
+      lastTampered = raw;
+      count++;
+      let archiveNote = '文件被删除或不可读';
+      if (raw !== null) {
+        const base = join(dirname(prdPath), `prd.tampered-${fileStamp(new Date())}`);
+        let archivePath = `${base}.json`;
+        let seq = 1;
+        // fileStamp 仅到秒：同一秒内两种不同篡改内容会撞名互相覆盖，故命中已存在文件时追加序号。
+        while (existsSync(archivePath)) {
+          archivePath = `${base}-${seq}.json`;
+          seq++;
+        }
+        try {
+          writeFileSync(archivePath, raw, 'utf-8');
+          archives.push(archivePath);
+          archiveNote = `篡改版已存档：${archivePath}`;
+        } catch (e) {
+          archiveNote = `篡改版存档写入失败（${(e as Error).message}）`;
+        }
+      }
+      console.warn(
+        `⚠️  检测到 prd.json 在运行期被修改（${archiveNote}）。引擎已按启动快照恢复并继续；` +
+        `若是你本人想改需求：停引擎 → 修订源 PRD → prd-to-json 再派生 → 重跑。`,
+      );
+    }
+    try {
+      writeFileSync(prdPath, snapshotRaw!, 'utf-8');
+      return false;
+    } catch (e) {
+      console.warn(`⚠️  prd.json 快照写回失败（${(e as Error).message}）：磁盘仍是篡改版，本轮 validator 验收不可信`);
+      return true;
+    }
+  }
+
+  return {
+    read(): PrdReadResult {
+      const raw = tryReadRaw();
+      if (snapshotRaw === null) {
+        if (raw === null) return { prd: null, restoreFailed: false };
+        try {
+          const parsed = JSON.parse(raw) as Prd;
+          snapshotRaw = raw;
+          snapshotPrd = parsed;
+          return { prd: parsed, restoreFailed: false };
+        } catch {
+          return { prd: null, restoreFailed: false };
+        }
+      }
+      if (raw === snapshotRaw) return { prd: snapshotPrd, restoreFailed: false };
+      const restoreFailed = handleTamper(raw);
+      return { prd: snapshotPrd, restoreFailed };
+    },
+    summary(): TamperSummary {
+      return { count, archives: [...archives] };
+    },
+  };
+}
