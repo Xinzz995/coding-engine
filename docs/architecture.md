@@ -26,6 +26,7 @@ scope: root
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
 | 模型路由 | `src/engine/models.ts` | 读取 prd.json 顶层 models 段（形状校验+警告），解析两阶段模型——builder：CLI 覆盖 > escalation（retryCount ≥ escalateAfter）> story.model > 顶层默认 > 不传；validator 恒定：CLI 覆盖 > 顶层 validator > 不传 |
+| prd 守卫 | `src/engine/prd-guard.ts` | 运行期 prd.json 冻结：首次成功读取建快照，四处检测点校验，篡改自动存档（去重）+快照写回恢复+告警；写回失败信号驱动 loop 跳过该轮 validator（ADR-007） |
 | 知识库体检 | `src/doctor/doctor.ts` | `coding-x doctor` 四项健康检查（frontmatter 完整性 / updated 新鲜度 / AGENTS.md 索引 / 相对链接）；runDoctor/renderDoctorReport 纯函数，cli 渲染并定退出码 |
 | 状态速览 | `src/status/status.ts` | `coding-x status` 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与冲突标记、当前 story、最近进展；`--json` 输出机器可读单 JSON 对象）；collectStatus/renderStatusReport/renderStatusJson 纯函数，cli 渲染并定退出码，退出码 0/1/2 可作 CI 门禁 |
 | 仪表盘 | `src/dashboard/server.ts` | HTTP 服务（:7331）+ 自动开浏览器；`coding-x dashboard` 子命令可离线复用 |
@@ -38,7 +39,7 @@ cli → engine（loop → agent / prd / state / progress / repair）；loop 启�
 
 ## 数据流
 
-`.workspace/` 里三份文件贯穿全程：`prd.json`（需求，由 `docs/prds/` 源 PRD 经 prd-to-json 派生，顶层 `sourcePrd` 记录来源，运行期只读）、`state.json`（执行状态，按 story id 键控，引擎首跑初始化并自动从旧格式迁移，agent 回写）与 `progress.md`（日志+学习）。分层真相源（ADR-003）：md 是意图真相（人改），prd.json+state.json 是执行真相（机器改），冲突以 md 为准再派生，执行状态永不回流 md。builder 实现单个 story 并回写 state.json/progress.md → validator 逐条核对 acceptanceCriteria 并回写 passes/notes/retryCount/blocked → 循环直到全部 passes 或 blocked。
+`.workspace/` 里三份文件贯穿全程：`prd.json`（需求，由 `docs/prds/` 源 PRD 经 prd-to-json 派生，顶层 `sourcePrd` 记录来源，运行期只读——引擎以启动快照冻结，磁盘篡改自动恢复并存档，ADR-007）、`state.json`（执行状态，按 story id 键控，引擎首跑初始化并自动从旧格式迁移，agent 回写）与 `progress.md`（日志+学习）。分层真相源（ADR-003）：md 是意图真相（人改），prd.json+state.json 是执行真相（机器改），冲突以 md 为准再派生，执行状态永不回流 md。builder 实现单个 story 并回写 state.json/progress.md → validator 逐条核对 acceptanceCriteria 并回写 passes/notes/retryCount/blocked → 循环直到全部 passes 或 blocked。
 
 ## 测试
 

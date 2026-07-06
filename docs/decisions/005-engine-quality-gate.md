@@ -1,7 +1,7 @@
 ---
 title: 005-engine-quality-gate
 status: active
-updated: 2026-07-05
+updated: 2026-07-07
 scope: root
 ---
 
@@ -29,3 +29,4 @@ prd.json 顶层可选 `qualityChecks`（完整 shell 命令数组）；引擎在
 - 配置错的命令（不存在/写错）在循环内与真实失败不可区分（127 不特判）：拦截完全依赖 prd-to-json 派生环节的试跑检查项——绕过派生链手写 prd.json 的用户失去这层保护，门禁失败会烧满 5 轮到 blocked。
 - validator 的 token 成本有意不减：门禁通过后「Typecheck passes」类 AC 仍被 validator 重验（接受的冗余防线）。
 - detached 进程组使 Ctrl+C 不再传播给运行中的门禁命令：正常命令自会跑完；挂起命令+人工中断=有限孤儿（接受，见设计稿锁定决策 10）。
+- 「不可绕过、不可共谋」的论证隐含依赖 prd.json 运行期不可变——该前提当时无机械保证（builder 改写 qualityChecks 可延迟一轮静默架空门禁），由 ADR-007 运行期冻结闭环。
