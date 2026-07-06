@@ -171,6 +171,7 @@ npx coding-x codex           # 改用 codex
   "branchName": "ralph/my-feature",
   "sourcePrd": "docs/prds/prd-my-feature.md",  // 意图真相源（源 PRD）路径，冲突时以它为准重新派生
   "qualityChecks": ["npm run typecheck", "npm test"],  // 机械门禁（可选）：每轮 builder 后引擎逐条执行，失败确定性打回
+  "models": { "builder": "sonnet", "validator": "opus", "escalation": "opus" },  // 模型路由（可选）：阶段默认模型与打回升级模型；story 级可再加 "model" 覆盖 builder
   "description": "...",
   "userStories": [
     {
@@ -205,6 +206,7 @@ npx coding-x codex           # 改用 codex
 npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x --max-iter 20      # 最多 20 轮迭代
+npx coding-x --builder-model sonnet --validator-model opus  # 临时覆盖阶段模型（压过 prd.json models）
 npx coding-x --no-open          # 不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所在目录
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
@@ -218,7 +220,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 
 ### 第 3 步：查看实时进度
 
-浏览器打开（默认自动弹出）：<http://localhost:7331>（像素风视图 `/p`）。仪表盘展示迭代次数、当前阶段、当前 story、已用时长、story 列表与 `progress.md` 日志。
+浏览器打开（默认自动弹出）：<http://localhost:7331>（像素风视图 `/p`）。仪表盘展示迭代次数、当前阶段、当前 story、当前模型（配置了模型路由时）、已用时长、story 列表与 `progress.md` 日志。
 
 ### 第 4 步：审查合并（建议）
 
@@ -240,6 +242,8 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
+| `--builder-model <名字>` | — | builder 阶段模型，直接透传给 agent CLI 的 `--model`；压过 `prd.json` `models`（含升级链）。缺省依次回落 `models` 段、CLI 默认模型 |
+| `--validator-model <名字>` | — | validator 阶段模型；压过 `prd.json` `models.validator`，缺省同上回落 |
 | `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录；`doctor` 用它定位 prd.json 做门禁配置检查 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
@@ -263,6 +267,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 - **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
+- **模型路由（models）**：`prd.json` 顶层 `models` 段按阶段分配模型（builder/validator 各自默认），story 级 `model` 字段覆盖 builder，story 被打回后自动升级到 `escalation` 模型重试（阈值 `escalateAfter` 可配，缺省打回 1 次即升级）；模型名不透明透传给 agent CLI（claude/codex 均加 `--model`），未配置时行为与旧版完全一致。
 - **完成判定**：全部 story `passes` 或 `blocked` 即成功退出。
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
