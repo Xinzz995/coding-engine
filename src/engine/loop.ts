@@ -89,7 +89,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
     const agentCwd = process.cwd();
-    // 模型路由警告去重：prd.json 每轮重读（agent 可能改它），同一条警告只打一次
+    // 模型路由警告去重：非法 models 配置的警告每轮都会重新产生，同一条只打一次
     const warnedModels = new Set<string>();
     const warnModelsOnce = (msgs: string[]) => {
       for (const m of msgs) {
