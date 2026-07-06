@@ -69,6 +69,16 @@ describe('parseCliArgs', () => {
     expect(() => parseCliArgs(['doctor', '--stale-days', '0x10'])).toThrow('--stale-days'); // === 16
     expect(() => parseCliArgs(['doctor', '--stale-days', '1e2'])).toThrow('--stale-days'); // === 100
   });
+  it('parses --builder-model and --validator-model', () => {
+    const c = parseCliArgs(['--builder-model', 'haiku', '--validator-model', 'opus']);
+    expect(c.builderModel).toBe('haiku');
+    expect(c.validatorModel).toBe('opus');
+  });
+  it('defaults builder/validator model overrides to undefined', () => {
+    const c = parseCliArgs([]);
+    expect(c.builderModel).toBeUndefined();
+    expect(c.validatorModel).toBeUndefined();
+  });
 });
 
 describe('main — invalid --stale-days', () => {

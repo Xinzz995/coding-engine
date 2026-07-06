@@ -14,6 +14,8 @@ export interface CliConfig {
   maxIterations: number;
   devTimeoutMs: number;
   valTimeoutMs: number;
+  builderModel: string | undefined;
+  validatorModel: string | undefined;
   workspace: string;
   openBrowser: boolean;
   keepOpen: boolean;
@@ -30,6 +32,8 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'max-iter': { type: 'string' },
       'dev-timeout': { type: 'string' },
       'val-timeout': { type: 'string' },
+      'builder-model': { type: 'string' },
+      'validator-model': { type: 'string' },
       workspace: { type: 'string' },
       'no-open': { type: 'boolean' },
       'keep-open': { type: 'boolean' },
@@ -65,6 +69,8 @@ export function parseCliArgs(argv: string[]): CliConfig {
     maxIterations: values['max-iter'] ? Number(values['max-iter']) : 50,
     devTimeoutMs: min(values['dev-timeout'], 30),
     valTimeoutMs: min(values['val-timeout'], 60),
+    builderModel: values['builder-model'],
+    validatorModel: values['validator-model'],
     workspace: values.workspace ?? '.workspace',
     openBrowser: !values['no-open'],
     keepOpen: values['keep-open'] ?? false,
