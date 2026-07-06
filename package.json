@@ -1,6 +1,6 @@
 {
   "name": "coding-x",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Ralph auto-coding harness — Developer/Validator loop engine + Claude Code plugin",
   "license": "MIT",
   "author": "Xinzz",
