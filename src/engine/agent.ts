@@ -7,12 +7,13 @@ export function resolveBinary(kind: AgentKind): string {
   return process.env.CODING_X_CLAUDE_BIN ?? 'claude';
 }
 
-export function buildAgentArgs(kind: AgentKind, prompt: string): string[] {
+export function buildAgentArgs(kind: AgentKind, prompt: string, model?: string): string[] {
   const bin = resolveBinary(kind);
+  const modelArgs = model ? ['--model', model] : [];
   if (kind === 'codex') {
-    return [bin, 'exec', '--dangerously-bypass-approvals-and-sandbox', prompt];
+    return [bin, 'exec', '--dangerously-bypass-approvals-and-sandbox', ...modelArgs, prompt];
   }
-  return [bin, '--print', '--dangerously-skip-permissions', prompt];
+  return [bin, '--print', '--dangerously-skip-permissions', ...modelArgs, prompt];
 }
 
 export interface RunResult {
@@ -25,10 +26,12 @@ export function runAgent(opts: {
   prompt: string;
   cwd: string;
   timeoutMs: number;
+  /** 透传给 agent CLI 的 --model；undefined = 不传（用户 CLI 默认模型） */
+  model?: string;
 }): Promise<RunResult> {
   // buildAgentArgs()[0] may itself be "node /path mode" when overridden by an
   // env var in tests; split it so the stub receives its trailing args.
-  const argv = buildAgentArgs(opts.kind, opts.prompt);
+  const argv = buildAgentArgs(opts.kind, opts.prompt, opts.model);
   const head = argv[0].split(' ');
   const cmd = head[0];
   const args = [...head.slice(1), ...argv.slice(1)];

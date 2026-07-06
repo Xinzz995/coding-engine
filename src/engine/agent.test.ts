@@ -17,6 +17,16 @@ describe('buildAgentArgs', () => {
       'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', 'P',
     ]);
   });
+  it('appends --model before the prompt for claude when a model is given', () => {
+    expect(buildAgentArgs('claude', 'P', 'opus')).toEqual([
+      'claude', '--print', '--dangerously-skip-permissions', '--model', 'opus', 'P',
+    ]);
+  });
+  it('appends --model before the prompt for codex when a model is given', () => {
+    expect(buildAgentArgs('codex', 'P', 'gpt-5')).toEqual([
+      'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5', 'P',
+    ]);
+  });
 });
 
 describe('resolveBinary', () => {
