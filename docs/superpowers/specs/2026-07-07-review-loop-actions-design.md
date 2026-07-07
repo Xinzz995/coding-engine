@@ -1,6 +1,6 @@
 ---
 title: "/review-loop 动作维度与裁决留痕设计"
-status: active
+status: done
 updated: 2026-07-07
 scope: root
 ---
