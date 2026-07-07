@@ -5,11 +5,12 @@ import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
 import { runDoctor, renderDoctorReport } from './doctor/doctor.js';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status/status.js';
+import { writeReport } from './report/report.js';
 import type { AgentKind } from './engine/agent.js';
 import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report';
   kind: AgentKind;
   maxIterations: number;
   devTimeoutMs: number;
@@ -49,6 +50,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     : first === 'dashboard' ? 'dashboard'
     : first === 'doctor' ? 'doctor'
     : first === 'status' ? 'status'
+    : first === 'report' ? 'report'
     : 'run';
   const kind: AgentKind = first === 'codex' ? 'codex' : 'claude';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
@@ -147,6 +149,25 @@ export async function main(argv: string[]): Promise<number> {
     const { text, exitCode } = cfg.json ? renderStatusJson(report) : renderStatusReport(report);
     console.log(text);
     return exitCode;
+  }
+
+  if (cfg.command === 'report') {
+    try {
+      const result = writeReport(cfg.workspace, new Date());
+      if (result.status === 'missing') {
+        console.error(`❌ 未找到工作区：${join(cfg.workspace, 'prd.json')} 不存在。建议先用 prd-to-json 从源 PRD 生成工作区。`);
+        return 2;
+      }
+      if (result.status === 'unparsable') {
+        console.error(`❌ 无法解析 ${join(cfg.workspace, 'prd.json')}。建议运行 npx coding-x repair 修复后重试。`);
+        return 2;
+      }
+      console.log(`📄 验证报告: ${result.path}`);
+      return 0;
+    } catch (err) {
+      console.error(`❌ 验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
   }
 
   if (cfg.command === 'dashboard') {

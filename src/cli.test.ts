@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseCliArgs, permissionWarning, runDashboard, main } from './cli.js';
@@ -37,6 +37,14 @@ describe('parseCliArgs', () => {
   });
   it('passes --workspace through to the status subcommand', () => {
     expect(parseCliArgs(['status', '--workspace', 'ws-x']).workspace).toBe('ws-x');
+  });
+  it('recognizes the report subcommand with default workspace', () => {
+    const c = parseCliArgs(['report']);
+    expect(c.command).toBe('report');
+    expect(c.workspace).toBe('.workspace');
+  });
+  it('passes --workspace through to the report subcommand', () => {
+    expect(parseCliArgs(['report', '--workspace', 'ws-x']).workspace).toBe('ws-x');
   });
   it('parses --json for status and defaults to false', () => {
     expect(parseCliArgs(['status', '--json']).json).toBe(true);
@@ -249,5 +257,53 @@ describe('permissionWarning', () => {
   });
   it('mentions bypass-approvals for codex', () => {
     expect(permissionWarning('codex')).toMatch(/--dangerously-bypass-approvals-and-sandbox/);
+  });
+});
+
+describe('main — report subcommand', () => {
+  it('writes report.html and returns 0 on a valid workspace', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
+    try {
+      writeFileSync(join(dir, 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd',
+        userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
+      }));
+      const logs: string[] = [];
+      const orig = console.log;
+      console.log = (...a: unknown[]) => { logs.push(a.join(' ')); };
+      try {
+        expect(await main(['report', '--workspace', dir])).toBe(0);
+      } finally { console.log = orig; }
+      expect(logs.some((l) => l.includes('report.html'))).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('returns 2 when the workspace is missing', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
+    try {
+      const errs: string[] = [];
+      const orig = console.error;
+      console.error = (...a: unknown[]) => { errs.push(a.join(' ')); };
+      try {
+        expect(await main(['report', '--workspace', dir])).toBe(2);
+      } finally { console.error = orig; }
+      expect(errs.some((e) => e.includes('prd-to-json'))).toBe(true);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('returns 1 when writing report.html fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
+    try {
+      writeFileSync(join(dir, 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd',
+        userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
+      }));
+      mkdirSync(join(dir, 'report.html')); // 同名目录占位 → writeFileSync 抛 EISDIR
+      const orig = console.error;
+      console.error = () => {};
+      try {
+        expect(await main(['report', '--workspace', dir])).toBe(1);
+      } finally { console.error = orig; }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });

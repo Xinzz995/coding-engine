@@ -682,15 +682,18 @@ function renderGateConfig(data: ReportData): string {
     `<ul class="checks">${checks.map((c) => `<li><code>${escapeHtml(c)}</code></li>`).join('')}</ul>`;
 }
 
+// warnings 必须透出（T2 审查订正）：models 形状非法时 config=null 但 warnings 有描述，
+// 丢弃它会让「配置非法」与「未配置」在报告上不可区分——与 renderGateConfig 的诚实度一致。
 function renderModels(data: ReportData): string {
-  const { config } = readModelsConfig(data.prd);
-  if (!config) return '';
+  const { config, warnings } = readModelsConfig(data.prd);
+  const warnLines = warnings.map((w) => `<div class="meta-line warn">${escapeHtml(w)}</div>`).join('');
+  if (!config) return warnLines;
   const items: string[] = [];
   if (config.builder) items.push(`builder=<code>${escapeHtml(config.builder)}</code>`);
   if (config.validator) items.push(`validator=<code>${escapeHtml(config.validator)}</code>`);
   if (config.escalation) items.push(`escalation=<code>${escapeHtml(config.escalation)}</code>（第 ${config.escalateAfter} 次重试起）`);
-  if (items.length === 0) return '';
-  return `<div class="meta-line">模型路由：${items.join(' · ')}</div>`;
+  if (items.length === 0) return warnLines;
+  return `<div class="meta-line">模型路由：${items.join(' · ')}</div>${warnLines}`;
 }
 
 function renderRedFlags(tampered: string[]): string {
