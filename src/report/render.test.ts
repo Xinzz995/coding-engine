@@ -188,6 +188,22 @@ describe('renderReportHtml', () => {
     expect(html).toContain('esc-m');
   });
 
+  it('模型路由：models 形状非法显示警示，不与未配置混同', () => {
+    const invalid = data();
+    (invalid.prd as { models?: unknown }).models = 'opus';
+    const html = renderReportHtml(invalid);
+    expect(html).toContain('形状非法');
+    expect(html).not.toContain('模型路由：');
+  });
+
+  it('模型路由：escalateAfter 非法时模型路由行照常显示，并追加警示', () => {
+    const withInvalidEscalate = data();
+    withInvalidEscalate.prd.models = { builder: 'fast-m', escalateAfter: 0 };
+    const html = renderReportHtml(withInvalidEscalate);
+    expect(html).toContain('模型路由');
+    expect(html).toContain('escalateAfter');
+  });
+
   it('state 损坏警示条件渲染', () => {
     expect(renderReportHtml(data())).not.toContain('state.json 已损坏');
     expect(renderReportHtml(data({ stateCorrupted: true }))).toContain('state.json 已损坏');

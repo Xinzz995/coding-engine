@@ -139,14 +139,15 @@ function renderGateConfig(data: ReportData): string {
 }
 
 function renderModels(data: ReportData): string {
-  const { config } = readModelsConfig(data.prd);
-  if (!config) return '';
+  const { config, warnings } = readModelsConfig(data.prd);
+  const warnLines = warnings.map((w) => `<div class="meta-line warn">${escapeHtml(w)}</div>`).join('');
+  if (!config) return warnLines;
   const items: string[] = [];
   if (config.builder) items.push(`builder=<code>${escapeHtml(config.builder)}</code>`);
   if (config.validator) items.push(`validator=<code>${escapeHtml(config.validator)}</code>`);
   if (config.escalation) items.push(`escalation=<code>${escapeHtml(config.escalation)}</code>（第 ${config.escalateAfter} 次重试起）`);
-  if (items.length === 0) return '';
-  return `<div class="meta-line">模型路由：${items.join(' · ')}</div>`;
+  if (items.length === 0) return warnLines;
+  return `<div class="meta-line">模型路由：${items.join(' · ')}</div>${warnLines}`;
 }
 
 function renderRedFlags(tampered: string[]): string {
