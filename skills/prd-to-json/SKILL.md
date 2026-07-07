@@ -396,7 +396,7 @@ Add ability to mark tasks with different statuses.
 2. 检查 `branchName` 是否与新功能的 branch name 不同
 3. 如果不同且 `progress.md` 在 header 之外有内容：
    - 创建归档文件夹：`.workspace/archive/YYYY-MM-DD-feature-name/`
-   - 将当前的 `prd.json`、`state.json`（如存在）和 `progress.md` 复制到归档
+   - 将当前的 `prd.json`、`state.json`（如存在）、`progress.md` 和 `review-*.md` 留痕文件（如存在）复制到归档
    - **删除工作区中的旧 `state.json`**——story id 惯例都从 US-001 起编，新旧几乎必然撞车；引擎信任既存 state.json，残留会把旧轮的 `passes: true` 误判为新 story 已完成、循环空转结束
    - 使用新的 header 重置 `progress.md`
 

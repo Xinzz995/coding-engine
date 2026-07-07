@@ -5,7 +5,7 @@
 coding-x 同时是两样东西：
 
 - **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude 或 Codex）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `scenario-alignment` / `technical-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你对齐业务口径与技术合同、把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物，并为项目生成与持续沉淀 docs/ 知识库。
+- **多工具插件** —— 提供 `scenario-alignment` / `technical-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你对齐业务口径与技术合同、把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物并留痕人审裁决，且为项目生成与持续沉淀 docs/ 知识库。
 
 ---
 
