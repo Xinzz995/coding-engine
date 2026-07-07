@@ -7,6 +7,7 @@ import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allSto
 import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
 import * as dashboard from '../dashboard/server.js';
+import { writeReport } from '../report/report.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -199,6 +200,18 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         `\n⚠️  运行期间检测到 prd.json 被修改 ${tamper.count} 次（引擎已按启动快照恢复并继续）。` +
         (tamper.archives.length > 0 ? `篡改存档：\n${tamper.archives.map((a) => `  - ${a}`).join('\n')}` : '（文件删除类篡改无存档）'),
       );
+    }
+    // 循环结束无条件生成静态验证报告（进行中态也诚实存档）；
+    // 报告是副产物：任何失败只 warn，绝不影响循环退出码。
+    try {
+      const report = writeReport(cfg.workspace, new Date());
+      if (report.status === 'written') {
+        console.log(`📄 验证报告: ${report.path}`);
+      } else {
+        console.warn(`⚠️  验证报告未生成（prd.json ${report.status === 'missing' ? '缺失' : '不可解析'}）`);
+      }
+    } catch (err) {
+      console.warn(`⚠️  验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);
     }
     if (cfg.keepOpen) {
       const url = `http://localhost:${server.address().port}`;

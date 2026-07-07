@@ -9,7 +9,8 @@ export const MAX_RETRIES = 5;
 /**
  * 仲裁类标签前缀族的单一真相源：agent 请求人工裁决的 notes 行以这些前缀开头，
  * 打回与清理路径必须保全。消费方：applyGateFailure 过滤、status 醒目标记、
- * builder.md/validator.md 经 {{ARBITRATION_PREFIXES}} 占位符渲染（loop.ts renderInstruction）。
+ * builder.md/validator.md 经 {{ARBITRATION_PREFIXES}} 占位符渲染（loop.ts renderInstruction）、
+ * report/render.ts 报告内仲裁行高亮（isArbitrationLine）。
  */
 export const ARBITRATION_PREFIXES = ['[需求冲突]', '[需要人工核实]'] as const;
 

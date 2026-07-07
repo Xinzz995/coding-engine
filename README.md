@@ -216,6 +216,7 @@ npx coding-x status             # 终端一屏速览工作区执行状态（退�
 npx coding-x status --json      # 同上，stdout 输出单个 JSON 对象供脚本与 agent 消费
 npx coding-x doctor             # docs/ 知识库健康检查（问题以退出码 1 结束，可作 CI 门禁）
 npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30）
+npx coding-x report             # 手动（重）生成 .workspace/report.html 静态验证报告
 ```
 
 ### 第 3 步：查看实时进度
@@ -239,6 +240,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter 完整性、`updated` 新鲜度、AGENTS.md 索引、文档相对链接、机械门禁配置建议（建议级，不计失败）），发现问题以退出码 1 结束，可作 CI 门禁 |
 | 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
+| 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会自动生成；退出码 0=已生成 / 1=写入失败 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
@@ -272,6 +274,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
+- **静态验证报告**：循环结束自动生成 `.workspace/report.html`——story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页，双击打开；/review-loop 裁决回填后 `npx coding-x report` 随时刷新。截图为相对引用，分享报告需连同 `screenshots/` 目录。
 - **JSON 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json` / `state.json`。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 
@@ -349,6 +352,9 @@ coding-engine/
 │   │   ├── state.ts              #   state.json 读写、选 story、完成判定、合并视图
 │   │   ├── progress.ts           #   读取 progress.md
 │   │   └── repair.ts             #   jsonrepair 修复 prd.json / state.json
+│   ├── report/
+│   │   ├── report.ts             #   验证报告数据收集与写盘（collectReport/writeReport）
+│   │   └── render.ts             #   验证报告 HTML 渲染（零浏览器 JS、全文本转义）
 │   └── dashboard/
 │       └── server.ts             #   仪表盘 HTTP 服务 + 自动开浏览器
 │

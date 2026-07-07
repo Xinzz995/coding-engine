@@ -194,6 +194,48 @@ describe('runLoop', () => {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
+
+  it('writes report.html when the loop completes', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const html = readFileSync(join(workspace, 'report.html'), 'utf-8');
+      expect(html).toContain('<!DOCTYPE html>');
+      expect(html).toContain('US-001');
+      expect(html).toContain('全部通过');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('writes report.html even when the loop hits maxIterations unfinished', async () => {
+    const { workspace, instructionsDir } = setup([story()]); // never flips
+    process.env.CODING_X_CLAUDE_BIN = `node -e process.exit(0)`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1);
+      const html = readFileSync(join(workspace, 'report.html'), 'utf-8');
+      expect(html).toContain('进行中'); // 未完成态诚实存档
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
 });
 
 describe('runLoop quality gate', () => {
