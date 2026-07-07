@@ -1,6 +1,6 @@
 ---
 title: "静态 HTML 验证报告实施计划"
-status: active
+status: done
 updated: 2026-07-08
 scope: root
 ---
