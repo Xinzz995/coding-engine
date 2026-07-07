@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { collectReport, parseScreenshotEntry } from './report.js';
+import { collectReport, parseScreenshotEntry, writeReport } from './report.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
@@ -135,5 +135,35 @@ describe('parseScreenshotEntry 归属解析', () => {
     });
     expect(parseScreenshotEntry('builder-US-999-1.png', ids).storyId).toBe(null);
     expect(parseScreenshotEntry('builder-US-999-1.png', ids).phase).toBe('builder');
+  });
+});
+
+describe('writeReport', () => {
+  it('ok 时写 report.html 并返回路径', () => {
+    const dir = ws();
+    writePrd(dir, [story('US-001')]);
+    const result = writeReport(dir, new Date('2026-07-08T12:00:00'));
+    expect(result).toEqual({ status: 'written', path: join(dir, 'report.html') });
+    const html = readFileSync(join(dir, 'report.html'), 'utf-8');
+    expect(html).toContain('<!DOCTYPE html>');
+    expect(html).toContain('US-001');
+  });
+
+  it('missing/unparsable 透传且不写盘', () => {
+    const dir = ws();
+    expect(writeReport(dir, new Date()).status).toBe('missing');
+    writeFileSync(join(dir, 'prd.json'), '{ broken');
+    expect(writeReport(dir, new Date()).status).toBe('unparsable');
+  });
+
+  it('重生成幂等覆盖', () => {
+    const dir = ws();
+    writePrd(dir, [story('US-001')]);
+    writeReport(dir, new Date('2026-07-08T12:00:00'));
+    writePrd(dir, [story('US-001'), story('US-002')]);
+    writeReport(dir, new Date('2026-07-08T13:00:00'));
+    const html = readFileSync(join(dir, 'report.html'), 'utf-8');
+    expect(html).toContain('US-002');
+    expect(html).toContain('2026-07-08 13:00');
   });
 });

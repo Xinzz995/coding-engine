@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
 import { tryReadState, mergedStories, initialStateFor, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
+import { renderReportHtml } from './render.js';
 
 export interface ScreenshotEntry {
   filename: string;
@@ -92,4 +93,22 @@ export function collectReport(workspace: string, now: Date): ReportSource {
       screenshots: listFiles(join(workspace, 'screenshots')).sort().map((f) => parseScreenshotEntry(f, storyIds)),
     },
   };
+}
+
+export type WriteReportResult =
+  | { status: 'written'; path: string }
+  | { status: 'missing'; workspace: string }
+  | { status: 'unparsable'; workspace: string };
+
+/**
+ * 编排：collect → render → 落盘 <workspace>/report.html（幂等覆盖）。
+ * missing/unparsable 原样透传不写盘；写盘 IO 失败向上抛——调用方定语义
+ * （cli 退出 1 / loop 仅 warn，报告是副产物绝不影响循环结果）。
+ */
+export function writeReport(workspace: string, now: Date): WriteReportResult {
+  const source = collectReport(workspace, now);
+  if (source.status !== 'ok') return source;
+  const path = join(workspace, 'report.html');
+  writeFileSync(path, renderReportHtml(source.data), 'utf-8');
+  return { status: 'written', path };
 }
