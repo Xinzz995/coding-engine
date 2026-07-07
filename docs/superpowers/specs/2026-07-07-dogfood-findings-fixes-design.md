@@ -1,6 +1,6 @@
 ---
 title: "dogfood 发现修复轮（仲裁标签保全/blocked 保护/篡改凭证/断言校准/回流规范）设计"
-status: active
+status: done
 updated: 2026-07-07
 scope: root
 ---

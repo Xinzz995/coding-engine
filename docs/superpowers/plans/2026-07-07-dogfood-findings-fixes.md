@@ -1,6 +1,6 @@
 ---
 title: dogfood 发现修复轮实施计划（0.18.1）
-status: active
+status: done
 updated: 2026-07-07
 scope: root
 ---
