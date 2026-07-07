@@ -4,7 +4,7 @@ import { runAgent, type AgentKind } from './agent.js';
 import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
-import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES } from './gate.js';
+import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
 import * as dashboard from '../dashboard/server.js';
 
@@ -47,7 +47,8 @@ function readInstruction(dir: string, file: string): string | null {
 export function renderInstruction(text: string, workspace: string): string {
   return text
     .replaceAll('{{WORKSPACE}}', workspace)
-    .replaceAll('{{MAX_RETRIES}}', String(MAX_RETRIES));
+    .replaceAll('{{MAX_RETRIES}}', String(MAX_RETRIES))
+    .replaceAll('{{ARBITRATION_PREFIXES}}', ARBITRATION_PREFIXES.join('、'));
 }
 
 // 运行期读取执行状态；缺失/损坏时按全部未开始处理（绝不覆盖原文件，交给 repair）。
@@ -138,10 +139,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // 否则 validator（独立进程直读磁盘）当轮就会按假 AC 验收（ADR-007）。
       const gateRead = guard.read();
       if (gateRead.restoreFailed) skipValidator = true;
+      // agent 轮内显式置 blocked（仲裁上报，如 [需要人工核实]）：机械路径不得推进它——
+      // 当轮跳过门禁执行与验收，完成判定按 resolved 正常收敛。
+      // 第四检测点（上方 guard.read()）保持无条件执行：篡改恢复不因跳过而延后。
+      const agentBlocked = !!(currentStory && tryReadState(statePath)?.[currentStory]?.blocked);
+      if (agentBlocked) {
+        console.log(`⏭️  ${currentStory} 已被置 blocked（待人工处理），本轮跳过门禁与验收`);
+      }
       const checks = readQualityChecks(gateRead.prd);
       if (checks === 'invalid') {
         console.warn('⚠️  prd.json 的 qualityChecks 形状非法（应为字符串数组），机械门禁未启用');
-      } else if (checks && currentStory) {
+      } else if (!agentBlocked && checks && currentStory) {
         dashboard.setState({ phase: 'gating', model: null });
         const gate = await runQualityChecks(checks, agentCwd);
         if (!gate.ok) {
@@ -166,7 +174,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       dashboard.setState({ phase: 'validating', model: validatorModel ?? null });
       if (validator && skipValidator) {
         console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
-      } else if (validator) {
+      } else if (validator && !agentBlocked) {
         if (validatorModel) console.log(`🧠 validator 模型: ${validatorModel}`);
         await runAgent({
           kind: cfg.kind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,

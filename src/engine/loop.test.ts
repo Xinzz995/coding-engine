@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runLoop, renderInstruction } from './loop.js';
@@ -277,6 +277,41 @@ describe('runLoop quality gate', () => {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
+
+  it('an agent-set blocked story skips the gate and validator for that round and resolves the loop', async () => {
+    const gateMark = join(tmpdir(), `coding-x-gate-mark-${Date.now()}`);
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: [`node -e 'require("node:fs").writeFileSync("${gateMark}", "ran")'`],
+    });
+    // stub agent：不置 passes，而是显式置 blocked（模拟 dogfood US-009 的仲裁上报）
+    const fake = join(workspace, 'fake-blocking.mjs');
+    const calls = join(workspace, 'calls.txt');
+    writeFileSync(fake, `
+      import { writeFileSync, appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'call\\n');
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: false, notes: '[需要人工核实] 疑似配置异常，已附调查', retryCount: 0, blocked: true },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 3, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0); // blocked 属 resolved，完成判定当轮收敛
+      expect(existsSync(gateMark)).toBe(false); // 门禁命令未执行
+      expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(1); // 只有 builder，validator 未拉起
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+      expect(state['US-001'].blocked).toBe(true);
+      expect(state['US-001'].retryCount).toBe(0); // 未被门禁打回推进
+      expect(state['US-001'].notes).toContain('[需要人工核实]'); // 仲裁记录未被覆盖
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+      rmSync(gateMark, { force: true });
+    }
+  });
 });
 
 describe('runLoop model routing', () => {
@@ -490,6 +525,13 @@ describe('renderInstruction', () => {
   it('substitutes {{MAX_RETRIES}} with the engine constant', () => {
     const out = renderInstruction('如果 retryCount 已经达到 {{MAX_RETRIES}}：', '.workspace');
     expect(out).toBe('如果 retryCount 已经达到 5：');
+  });
+});
+
+describe('renderInstruction arbitration placeholder', () => {
+  it('renders {{ARBITRATION_PREFIXES}} as a 、-joined label list', () => {
+    const out = renderInstruction('保全 {{ARBITRATION_PREFIXES}} 行', '.workspace');
+    expect(out).toBe('保全 [需求冲突]、[需要人工核实] 行');
   });
 });
 
