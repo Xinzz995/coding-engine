@@ -50,7 +50,7 @@ coding-x 同时是两样东西：
    │   ┌── Validator（validator.md）────────────────────────┐ │
    │   │ 1. 从 progress.md 找出刚完成的 story                │ │
    │   │ 2. 逐条核对 acceptanceCriteria                      │ │
-   │   │ 3. 通过 → 清理 notes（留[需求冲突]行）、重试归零    │ │
+   │   │ 3. 通过 → 清理 notes（留仲裁标签行）、重试归零      │ │
    │   │    失败 → passes=false、写失败原因、retryCount+1     │ │
    │   │           （累计 5 次 → blocked=true 跳过）         │ │
    │   └────────────────────────────────────────────────────┘ │
@@ -191,7 +191,7 @@ npx coding-x codex           # 改用 codex
 {
   "US-001": {
     "passes": false,      // 开发完成后置 true
-    "notes": "",          // 验证失败原因 / [需求冲突] / [需求已变更] 记录
+    "notes": "",          // 验证失败原因 / 仲裁标签（[需求冲突]、[需要人工核实]）/ [需求已变更] 记录
     "retryCount": 0,      // 失败重试次数
     "blocked": false      // 累计失败 5 次后置 true，跳过
   }
@@ -238,7 +238,7 @@ npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30�
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter 完整性、`updated` 新鲜度、AGENTS.md 索引、文档相对链接、机械门禁配置建议（建议级，不计失败）），发现问题以退出码 1 结束，可作 CI 门禁 |
-| 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与 `[需求冲突]` 醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
+| 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |

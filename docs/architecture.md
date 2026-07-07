@@ -1,7 +1,7 @@
 ---
 title: 架构地图
 status: active
-updated: 2026-07-07
+updated: 2026-07-08
 scope: root
 ---
 
@@ -28,9 +28,9 @@ scope: root
 | 模型路由 | `src/engine/models.ts` | 读取 prd.json 顶层 models 段（形状校验+警告），解析两阶段模型——builder：CLI 覆盖 > escalation（retryCount ≥ escalateAfter）> story.model > 顶层默认 > 不传；validator 恒定：CLI 覆盖 > 顶层 validator > 不传 |
 | prd 守卫 | `src/engine/prd-guard.ts` | 运行期 prd.json 冻结：首次成功读取建快照，四处检测点校验，篡改自动存档（去重）+快照写回恢复+告警；写回失败信号驱动 loop 跳过该轮 validator（ADR-007） |
 | 知识库体检 | `src/doctor/doctor.ts` | `coding-x doctor` 四项健康检查（frontmatter 完整性 / updated 新鲜度 / AGENTS.md 索引 / 相对链接）；runDoctor/renderDoctorReport 纯函数，cli 渲染并定退出码 |
-| 状态速览 | `src/status/status.ts` | `coding-x status` 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与冲突标记、当前 story、最近进展；`--json` 输出机器可读单 JSON 对象）；collectStatus/renderStatusReport/renderStatusJson 纯函数，cli 渲染并定退出码，退出码 0/1/2 可作 CI 门禁 |
+| 状态速览 | `src/status/status.ts` | `coding-x status` 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签、当前 story、最近进展；`--json` 输出机器可读单 JSON 对象）；collectStatus/renderStatusReport/renderStatusJson 纯函数，cli 渲染并定退出码，退出码 0/1/2 可作 CI 门禁 |
 | 仪表盘 | `src/dashboard/server.ts` | HTTP 服务（:7331）+ 自动开浏览器；`coding-x dashboard` 子命令可离线复用 |
-| 引擎指令 | `assets/instructions/` | builder.md / validator.md（{{WORKSPACE}} 占位符） |
+| 引擎指令 | `assets/instructions/` | builder.md / validator.md（{{WORKSPACE}} / {{MAX_RETRIES}} / {{ARBITRATION_PREFIXES}} 占位符，loop.ts renderInstruction 渲染） |
 | 知识库模板 | `templates/` | /init-docs、/compound-docs 使用的 AGENTS/docs 模板 |
 
 ## 分层与依赖方向

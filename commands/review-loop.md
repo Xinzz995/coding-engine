@@ -17,7 +17,7 @@ description: 循环结束后、合并默认分支前，对本轮分支 diff 做�
 
 - 检查 `.workspace/prd.tampered-*.json`：存在即记入人审包顶部红旗区（见第 3 节；ADR-007 的运行期篡改存档）。`.workspace/` 目录不存在时跳过本检查。
 - 读 `.workspace/prd.json`：branchName、story 列表与各自 acceptanceCriteria（顶层 `sourcePrd` 存在时可读源 PRD 补背景）
-- 读 `.workspace/state.json`：notes 中的 `[需求冲突]` 与失败历史（理解背景用，不作证据）
+- 读 `.workspace/state.json`：notes 中的仲裁标签行（`[需求冲突]`、`[需要人工核实]`）与失败历史（理解背景用，不作证据）
 - 读 `.workspace/progress.md`：理解各 story 的实现意图（不作证据）
 - git 取证基线（同 /compound-docs）：
 
