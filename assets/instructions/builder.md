@@ -96,6 +96,8 @@
 
 如果开发过程中对需求有不明确的地方，先查看 `{{WORKSPACE}}/prd.json` 中该 story 的完整描述与验收标准——验收只以它的 acceptanceCriteria 为准。
 
+prd.json 受引擎运行期快照保护（运行中被改会被自动检测、恢复并存档）：你读到的内容就是本轮权威验收标准，无需自行审计它的来源与完整性。`{{WORKSPACE}}/prd.tampered-*.json` 是引擎已检测并处置的篡改存档，供人工审查，与你的任务无关。
+
 如果 prd.json 顶层存在 `sourcePrd` 字段，它指向本次需求派生自的源 PRD 文档（仓库相对路径）。当 story 的描述与验收标准不足以理解背景（目标、Non-Goals、设计约束）时，去读该文档补全上下文。
 
 如果你发现源文档与 acceptanceCriteria 冲突，或某条 acceptanceCriteria 无法成立：不要自行取舍、不要按源文档自由发挥——按 acceptanceCriteria 实现，并在 `{{WORKSPACE}}/state.json` 中该 story 的 `notes` 字段追加一行冲突记录（保留已有内容）：
@@ -105,3 +107,5 @@
 ```
 
 冲突留给人工裁决：人工修订源 PRD 后会重新派生 prd.json，你不需要也不允许直接改源 PRD 或验收标准。
+
+除需求冲突外，若你遇到其他必须人工介入才能安全继续的情况（例如怀疑运行配置异常、环境异常且无法自行排除）：在该 story 的 `notes` 追加一行以 `[需要人工核实]` 开头的记录（简述疑点与关键证据），并将该 story 的 `blocked` 设为 `true` 等待人工处理——引擎会因此跳过对该 story 的门禁与验收，不会推进重试。引擎与人工流程只把以 {{ARBITRATION_PREFIXES}} 开头的行识别为仲裁记录，不要发明新标签。

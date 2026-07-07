@@ -535,6 +535,23 @@ describe('renderInstruction arbitration placeholder', () => {
   });
 });
 
+describe('instruction assets arbitration contract', () => {
+  const read = (f: string) =>
+    readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
+
+  it('builder.md and validator.md reference the arbitration placeholder, not hardcoded label lists', () => {
+    expect(read('builder.md')).toContain('{{ARBITRATION_PREFIXES}}');
+    expect(read('validator.md')).toContain('{{ARBITRATION_PREFIXES}}');
+  });
+
+  it('both instructions carry the prd.json authority statement', () => {
+    for (const f of ['builder.md', 'validator.md']) {
+      expect(read(f)).toContain('prd.tampered-');
+      expect(read(f)).toContain('快照保护');
+    }
+  });
+});
+
 describe('runLoop prd freeze', () => {
   it('builder 删除 qualityChecks 也架空不了门禁：文件被恢复、门禁照跑照打回', async () => {
     // 漏洞路径：builder 改写 prd.json 删掉 qualityChecks → 下轮门禁静默失效。
