@@ -1,6 +1,6 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import type { StoryView } from '../engine/state.js';
-import { isArbitrationLine, readQualityChecks } from '../engine/gate.js';
+import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX } from '../engine/gate.js';
 import { readModelsConfig } from '../engine/models.js';
 
 export function escapeHtml(s: string): string {
@@ -71,8 +71,8 @@ function imgSrc(filename: string): string {
 
 function noteLineClass(line: string): string {
   if (isArbitrationLine(line)) return 'note-line arbitration';
-  if (line.startsWith('[门禁失败')) return 'note-line gate-fail';
-  if (line.startsWith('[BLOCKED')) return 'note-line blocked-line';
+  if (line.startsWith(GATE_FAIL_LINE_PREFIX)) return 'note-line gate-fail';
+  if (line.startsWith(BLOCKED_LINE_PREFIX)) return 'note-line blocked-line';
   return 'note-line';
 }
 

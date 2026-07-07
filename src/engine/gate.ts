@@ -14,6 +14,14 @@ export const MAX_RETRIES = 5;
  */
 export const ARBITRATION_PREFIXES = ['[需求冲突]', '[需要人工核实]'] as const;
 
+/**
+ * 门禁打回与阻塞上限的 notes 行前缀单源。生产方：applyGateFailure；
+ * 第二生产方 assets/instructions/validator.md 的 BLOCKED 文案模板（改措辞须同步）；
+ * 消费方：report/render.ts 行分类高亮。
+ */
+export const GATE_FAIL_LINE_PREFIX = '[门禁失败';
+export const BLOCKED_LINE_PREFIX = '[BLOCKED';
+
 /** 该 notes 行是否仲裁记录（保全对象） */
 export function isArbitrationLine(line: string): boolean {
   return ARBITRATION_PREFIXES.some((p) => line.startsWith(p));
@@ -141,13 +149,13 @@ export function applyGateFailure(
   const failDesc = failure.timedOut ? '执行超时被终止' : `退出码 ${failure.exitCode}`;
   const lines = [
     ...arbitrationLines,
-    `[门禁失败 - 第${retryCount}次] ${formatStamp(now)}`,
+    `${GATE_FAIL_LINE_PREFIX} - 第${retryCount}次] ${formatStamp(now)}`,
     `- 失败命令：${failure.command}（${failDesc}）`,
     '- 输出尾部：',
     failure.outputTail,
   ];
   // 上限文案只描述「本次打回达到上限」——agent 预先置的 blocked 不适用该归因
-  if (blocked && !prev.blocked) lines.push('[BLOCKED: 已达到最大重试次数，跳过此 story]');
+  if (blocked && !prev.blocked) lines.push(`${BLOCKED_LINE_PREFIX}: 已达到最大重试次数，跳过此 story]`);
   return {
     ...state,
     [storyId]: { passes: false, notes: lines.join('\n'), retryCount, blocked },
