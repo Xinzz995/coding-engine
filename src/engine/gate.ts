@@ -6,6 +6,18 @@ import { spawn } from 'node:child_process';
 /** 打回上限的单一真相源：validator.md 经 {{MAX_RETRIES}} 占位符共享此值 */
 export const MAX_RETRIES = 5;
 
+/**
+ * 仲裁类标签前缀族的单一真相源：agent 请求人工裁决的 notes 行以这些前缀开头，
+ * 打回与清理路径必须保全。消费方：applyGateFailure 过滤、status 醒目标记、
+ * builder.md/validator.md 经 {{ARBITRATION_PREFIXES}} 占位符渲染（loop.ts renderInstruction）。
+ */
+export const ARBITRATION_PREFIXES = ['[需求冲突]', '[需要人工核实]'] as const;
+
+/** 该 notes 行是否仲裁记录（保全对象） */
+export function isArbitrationLine(line: string): boolean {
+  return ARBITRATION_PREFIXES.some((p) => line.startsWith(p));
+}
+
 export interface GateFailure {
   command: string;
   /** 超时或 spawn 错误时为 null */
@@ -112,7 +124,7 @@ function formatStamp(d: Date): string {
 /**
  * 门禁失败打回（纯函数，不落盘）：与 validator 打回同构——passes 设回 false、
  * retryCount +1、达 MAX_RETRIES 转 blocked；notes 覆盖写失败详情，
- * 原有 [需求冲突] 行原样保留在前（与 validator 的 notes 规则一致）。
+ * 原有仲裁标签行（ARBITRATION_PREFIXES）原样保留在前（与 validator 的 notes 规则一致）。
  */
 export function applyGateFailure(
   state: RunState,
@@ -122,17 +134,19 @@ export function applyGateFailure(
 ): RunState {
   const prev = state[storyId] ?? INITIAL_STORY_STATE;
   const retryCount = prev.retryCount + 1;
-  const blocked = retryCount >= MAX_RETRIES;
-  const conflictLines = prev.notes.split('\n').filter((l) => l.startsWith('[需求冲突]'));
+  // agent 显式置过的 blocked 不被重算翻回（「停下等人」信号优先于机械重试推进）
+  const blocked = prev.blocked || retryCount >= MAX_RETRIES;
+  const arbitrationLines = prev.notes.split('\n').filter(isArbitrationLine);
   const failDesc = failure.timedOut ? '执行超时被终止' : `退出码 ${failure.exitCode}`;
   const lines = [
-    ...conflictLines,
+    ...arbitrationLines,
     `[门禁失败 - 第${retryCount}次] ${formatStamp(now)}`,
     `- 失败命令：${failure.command}（${failDesc}）`,
     '- 输出尾部：',
     failure.outputTail,
   ];
-  if (blocked) lines.push('[BLOCKED: 已达到最大重试次数，跳过此 story]');
+  // 上限文案只描述「本次打回达到上限」——agent 预先置的 blocked 不适用该归因
+  if (blocked && !prev.blocked) lines.push('[BLOCKED: 已达到最大重试次数，跳过此 story]');
   return {
     ...state,
     [storyId]: { passes: false, notes: lines.join('\n'), retryCount, blocked },

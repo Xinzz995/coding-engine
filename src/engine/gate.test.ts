@@ -94,6 +94,50 @@ describe('applyGateFailure', () => {
     expect(next['US-009'].blocked).toBe(false);
     expect(next['US-009'].notes).toContain('执行超时被终止');
   });
+
+  it('keeps [需要人工核实] arbitration lines the same way as [需求冲突]', () => {
+    const state: RunState = {
+      'US-001': {
+        passes: false,
+        notes: '[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已附调查过程\n普通旧失败行',
+        retryCount: 0,
+        blocked: false,
+      },
+    };
+    const next = applyGateFailure(state, 'US-001', failure(), now);
+    expect(next['US-001'].notes.startsWith(
+      '[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已附调查过程\n[门禁失败 - 第1次]',
+    )).toBe(true);
+    expect(next['US-001'].notes).not.toContain('普通旧失败行');
+  });
+
+  it('keeps mixed arbitration lines in original order before the failure block', () => {
+    const state: RunState = {
+      'US-001': {
+        passes: false,
+        notes: '[需求冲突] 冲突点 A\n[需要人工核实] 疑点 B\n其他旧内容',
+        retryCount: 0,
+        blocked: false,
+      },
+    };
+    const next = applyGateFailure(state, 'US-001', failure(), now);
+    expect(next['US-001'].notes.startsWith('[需求冲突] 冲突点 A\n[需要人工核实] 疑点 B\n[门禁失败 - 第1次]')).toBe(true);
+  });
+
+  it('preserves an explicit blocked=true set by the agent and skips the max-retries banner', () => {
+    const state: RunState = {
+      'US-001': {
+        passes: false,
+        notes: '[需要人工核实] 已置 blocked 待人工',
+        retryCount: 0,
+        blocked: true,
+      },
+    };
+    const next = applyGateFailure(state, 'US-001', failure(), now);
+    expect(next['US-001'].blocked).toBe(true);
+    expect(next['US-001'].retryCount).toBe(1);
+    expect(next['US-001'].notes).not.toContain('[BLOCKED: 已达到最大重试次数');
+  });
 });
 
 describe('runQualityChecks', () => {

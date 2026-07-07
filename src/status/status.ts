@@ -5,6 +5,7 @@ import {
   tryReadState, mergedStories, getCurrentStoryId, initialStateFor, type StoryView,
 } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
+import { isArbitrationLine } from '../engine/gate.js';
 
 export type StatusReport =
   | { status: 'missing'; workspace: string }
@@ -87,7 +88,7 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     for (const raw of s.notes.split('\n')) {
       const note = raw.trim();
       if (note === '') continue;
-      lines.push(note.startsWith('[需求冲突]') ? `      🚨 ${note}` : `      · ${note}`);
+      lines.push(isArbitrationLine(note) ? `      🚨 ${note}` : `      · ${note}`);
     }
   }
   const current = stories.find((s) => s.id === report.currentStoryId);

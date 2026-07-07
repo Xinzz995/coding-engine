@@ -271,6 +271,29 @@ describe('renderStatusReport', () => {
     }
   });
 
+  it('marks [需要人工核实] note lines with the same warning as [需求冲突]', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-002': {
+          passes: false,
+          notes: '普通失败说明\n[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已置 blocked 待人工',
+          retryCount: 0,
+          blocked: false,
+        },
+        'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
+      }));
+      const { text } = renderStatusReport(collectStatus(ws));
+      const line = text.split('\n').find((l) => l.includes('[需要人工核实]'));
+      expect(line).toBeDefined();
+      expect(line).toContain('🚨');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it('points the current-story hint at the highest-priority pending unblocked story', () => {
     const ws = makeWorkspace();
     try {
