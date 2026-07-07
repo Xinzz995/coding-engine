@@ -165,7 +165,7 @@ export async function main(argv: string[]): Promise<number> {
       console.log(`📄 验证报告: ${result.path}`);
       return 0;
     } catch (err) {
-      console.error(`❌ 验证报告写入失败：${err instanceof Error ? err.message : String(err)}`);
+      console.error(`❌ 验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
   }

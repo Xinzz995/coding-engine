@@ -7,6 +7,16 @@ export function escapeHtml(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 
+/**
+ * 插值兜底 helper：来自 prd/state 落盘数据的字段类型层声明为 string，但 tryReadPrd
+ * 无逐字段运行期校验（legacyStateOf 同理）——实际值可能是 undefined/数字/对象等
+ * 非字符串形状。String(x ?? '') 统一收敛：缺失值渲染为空串而非让 escapeHtml 内部
+ * 的 .replaceAll 在非字符串上抛错，其余值按 String() 语义转字符串后再转义。
+ */
+function text(x: unknown): string {
+  return escapeHtml(String(x ?? ''));
+}
+
 function inlineMd(s: string): string {
   return escapeHtml(s)
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -69,17 +79,19 @@ function noteLineClass(line: string): string {
 function renderNotes(notes: string): string {
   if (notes.trim() === '') return '';
   const lines = notes.split('\n')
-    .map((l) => `<div class="${noteLineClass(l)}">${escapeHtml(l)}</div>`)
+    .map((l) => `<div class="${noteLineClass(l)}">${text(l)}</div>`)
     .join('');
   return `<div class="notes">${lines}</div>`;
 }
 
 function renderShotFigure(s: ScreenshotEntry): string {
-  const name = escapeHtml(s.filename);
+  const name = text(s.filename);
   if (!s.isImage) {
-    return `<div class="artifact-link"><a href="${imgSrc(s.filename)}" target="_blank">📎 ${name}</a></div>`;
+    // download：非图片附件（pdf 等）不应在浏览器内联打开而应强制下载；
+    // rel 防 target="_blank" 的反向 window.opener 访问——此处非 _blank 也一并加固，成本为零
+    return `<div class="artifact-link"><a href="${imgSrc(s.filename)}" download rel="noopener noreferrer">📎 ${name}</a></div>`;
   }
-  return `<figure class="shot"><a href="${imgSrc(s.filename)}" target="_blank"><img src="${imgSrc(s.filename)}" alt="${name}" loading="lazy"></a><figcaption>${name}</figcaption></figure>`;
+  return `<figure class="shot"><a href="${imgSrc(s.filename)}" target="_blank" rel="noopener noreferrer"><img src="${imgSrc(s.filename)}" alt="${name}" loading="lazy"></a><figcaption>${name}</figcaption></figure>`;
 }
 
 function renderGallery(shots: ScreenshotEntry[]): string {
@@ -110,9 +122,9 @@ function renderStoryCard(s: StoryView, shots: ScreenshotEntry[]): string {
   const retry = s.retryCount > 0 ? ` <span class="retry">重试 ${s.retryCount} 次</span>` : '';
   // tryReadPrd 无逐字段守卫，acceptanceCriteria 可能形状非法——渲染层兜底为空列表
   const acList = Array.isArray(s.acceptanceCriteria) ? s.acceptanceCriteria : [];
-  const acs = acList.map((a) => `<li>${escapeHtml(String(a))}</li>`).join('');
+  const acs = acList.map((a) => `<li>${text(a)}</li>`).join('');
   return `<section class="card story">
-<h3>${escapeHtml(s.id)} ${escapeHtml(s.title)} ${storyBadge(s)}${retry}</h3>
+<h3>${text(s.id)} ${text(s.title)} ${storyBadge(s)}${retry}</h3>
 <ul class="acs">${acs}</ul>
 ${renderNotes(s.notes)}
 ${renderGallery(shots)}
@@ -121,6 +133,7 @@ ${renderGallery(shots)}
 
 function renderBanner(stories: StoryView[]): string {
   const total = stories.length;
+  if (total === 0) return '<div class="banner blocked">⚠️ prd.json 中没有任何 story</div>';
   const passed = stories.filter((x) => x.passes).length;
   const blocked = stories.filter((x) => x.blocked).length;
   if (total > 0 && passed === total) return `<div class="banner ok">✅ 全部通过 ${passed}/${total}</div>`;
@@ -152,7 +165,7 @@ function renderModels(data: ReportData): string {
 
 function renderRedFlags(tampered: string[]): string {
   if (tampered.length === 0) return '';
-  const files = tampered.map((f) => `<li><code>${escapeHtml(f)}</code></li>`).join('');
+  const files = tampered.map((f) => `<li><code>${text(f)}</code></li>`).join('');
   return `<section class="card red-flag">
 <h2>🚩 红旗区：运行期篡改存档</h2>
 <p>运行期间 prd.json 被修改过，引擎已按启动快照恢复并存档（ADR-007）。合并裁决前请逐个核对：</p>
@@ -171,9 +184,13 @@ function renderReviews(reviews: ReportData['reviews']): string {
   if (reviews.length === 0) {
     return '<section class="card"><h2>人审留痕</h2><p class="placeholder">尚无人审包——循环结束后运行 /review-loop，再跑 <code>coding-x report</code> 刷新本报告。</p></section>';
   }
-  return reviews.map((r) =>
-    `<section class="card review"><h2>人审留痕：${escapeHtml(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
+  // 免责标注：.workspace/ 是 agent 可写目录，report.html 本身也是渲染产物——
+  // 留痕内容的真实性以 git 提交历史中的 review-*.md 为准，报告只负责展示
+  const disclaimer = '<p class="placeholder">留痕真实性以 git 提交的 review-*.md 为准（.workspace/ 属 agent 可写目录）。</p>';
+  const sections = reviews.map((r) =>
+    `<section class="card review"><h2>人审留痕：${text(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
   ).join('\n');
+  return disclaimer + sections;
 }
 
 function renderProgressSection(progress: string): string {
@@ -249,9 +266,9 @@ export function renderReportHtml(data: ReportData): string {
   }
   const cards = stories.map((s) => renderStoryCard(s, byStory.get(s.id) ?? [])).join('\n');
   const stateWarn = data.stateCorrupted
-    ? '<div class="meta-line warn">⚠️ state.json 已损坏，story 状态按未开始显示（建议 npx coding-x repair）</div>'
+    ? '<div class="meta-line warn">⚠️ state.json 已损坏，已按 prd.json 内嵌旧格式状态回退显示，可能非最新执行结果（建议 npx coding-x repair）</div>'
     : '';
-  const title = `${escapeHtml(prd.project)} · 验证报告`;
+  const title = `${text(prd.project)} · 验证报告`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -265,8 +282,8 @@ export function renderReportHtml(data: ReportData): string {
 <header class="card">
 <h1>${title}</h1>
 ${renderBanner(stories)}
-<div class="meta-line">分支：<code>${escapeHtml(prd.branchName)}</code>${prd.sourcePrd ? ` · 源 PRD：<code>${escapeHtml(prd.sourcePrd)}</code>` : ''}</div>
-<div class="meta-line">生成时间：${formatStamp(data.generatedAt)} · workspace：<code>${escapeHtml(data.workspace)}</code></div>
+<div class="meta-line">分支：<code>${text(prd.branchName)}</code>${prd.sourcePrd ? ` · 源 PRD：<code>${text(prd.sourcePrd)}</code>` : ''}</div>
+<div class="meta-line">生成时间：${formatStamp(data.generatedAt)} · workspace：<code>${text(data.workspace)}</code></div>
 ${stateWarn}
 ${renderGateConfig(data)}
 ${renderModels(data)}

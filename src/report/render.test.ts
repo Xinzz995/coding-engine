@@ -63,6 +63,13 @@ describe('renderReportHtml', () => {
     expect(html).toContain('.workspace');
   });
 
+  it('prd 缺 project/branchName 等必填字段时不抛，仍输出报告骨架（tryReadPrd 无逐字段守卫的脏数据防御）', () => {
+    const brokenPrd = { description: 'd' } as unknown as ReportData['prd'];
+    expect(() => renderReportHtml(data({ prd: brokenPrd }))).not.toThrow();
+    const html = renderReportHtml(data({ prd: brokenPrd }));
+    expect(html).toContain('<!DOCTYPE html>');
+  });
+
   it('徽章三态：通过 ✅ / blocked ⛔ / 未完成 ⬜，重试次数仅 >0 显示', () => {
     const passed = renderReportHtml(data());
     expect(passed).toContain('✅ 通过');
@@ -90,12 +97,35 @@ describe('renderReportHtml', () => {
     }))).toContain('进行中');
   });
 
+  it('空 userStories 显式警示横幅：不落入「进行中 0/0」', () => {
+    const html = renderReportHtml(data({ stories: [] }));
+    expect(html).toContain('没有任何 story');
+    expect(html).not.toContain('进行中');
+  });
+
   it('AC 逐条呈现且转义', () => {
     const s = data().stories[0];
     const html = renderReportHtml(data({
       stories: [{ ...s, acceptanceCriteria: ['支持 <b> 标签展示'] }],
     }));
     expect(html).toContain('支持 &lt;b&gt; 标签展示');
+  });
+
+  it('AC 非数组形状时不抛，卡片仍渲染（tryReadPrd 无逐字段守卫的脏数据防御）', () => {
+    const s = data().stories[0];
+    const html = renderReportHtml(data({
+      stories: [{ ...s, acceptanceCriteria: 'nope' as unknown as string[] }],
+    }));
+    expect(html).toContain(s.id);
+  });
+
+  it('源 PRD：未设置整行省略；设置则显示路径', () => {
+    expect(renderReportHtml(data())).not.toContain('源 PRD');
+    const withSource = data();
+    withSource.prd.sourcePrd = 'docs/prds/x.md';
+    const html = renderReportHtml(withSource);
+    expect(html).toContain('源 PRD');
+    expect(html).toContain('docs/prds/x.md');
   });
 
   it('notes 行分类高亮：仲裁标签行/门禁失败行/BLOCKED 行', () => {
@@ -139,6 +169,17 @@ describe('renderReportHtml', () => {
     expect(html).toContain('random.png');
   });
 
+  it('非图片链接强制下载而非浏览器内联打开；所有 target="_blank" 链接加 rel 防 window.opener 反向访问', () => {
+    const html = renderReportHtml(data({
+      screenshots: [
+        { filename: 'builder-US-001-1.png', storyId: 'US-001', phase: 'builder', isImage: true },
+        { filename: 'builder-US-001-export.pdf', storyId: 'US-001', phase: 'builder', isImage: false },
+      ],
+    }));
+    expect(html).toContain(' download');
+    expect(html).toContain('rel="noopener noreferrer"');
+  });
+
   it('红旗区条件渲染：有 tampered 才出现', () => {
     expect(renderReportHtml(data())).not.toContain('红旗区');
     const html = renderReportHtml(data({ tamperedArchives: ['prd.tampered-20260708-010101.json'] }));
@@ -147,7 +188,7 @@ describe('renderReportHtml', () => {
     expect(html).toContain('ADR-007');
   });
 
-  it('review 留痕：无 → 占位指引；有 → 渲染 md 内容', () => {
+  it('review 留痕：无 → 占位指引；有 → 渲染 md 内容并附留痕真实性免责标注', () => {
     expect(renderReportHtml(data())).toContain('尚无人审包');
     const html = renderReportHtml(data({
       reviews: [{ filename: 'review-2026-07-08.md', content: '## 层 2 发现清单\n- 发现 A' }],
@@ -156,6 +197,7 @@ describe('renderReportHtml', () => {
     expect(html).toContain('<h5>层 2 发现清单</h5>');
     expect(html).toContain('<li>发现 A</li>');
     expect(html).not.toContain('尚无人审包');
+    expect(html).toContain('留痕真实性');
   });
 
   it('progress 折叠附录：空则整节省略，有则在 details 内', () => {
@@ -204,9 +246,11 @@ describe('renderReportHtml', () => {
     expect(html).toContain('escalateAfter');
   });
 
-  it('state 损坏警示条件渲染', () => {
+  it('state 损坏警示条件渲染，文案对齐真实回退语义（读 prd 内嵌旧格式字段，非"未开始"）', () => {
     expect(renderReportHtml(data())).not.toContain('state.json 已损坏');
-    expect(renderReportHtml(data({ stateCorrupted: true }))).toContain('state.json 已损坏');
+    const html = renderReportHtml(data({ stateCorrupted: true }));
+    expect(html).toContain('state.json 已损坏');
+    expect(html).toContain('回退');
   });
 
   it('报告零浏览器 JS', () => {

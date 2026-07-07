@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { collectReport, parseScreenshotEntry, writeReport } from './report.js';
@@ -129,6 +129,11 @@ describe('parseScreenshotEntry 归属解析', () => {
     expect(parseScreenshotEntry('builder-us-10-3.png', ids).storyId).toBe('US-10');
     expect(parseScreenshotEntry('builder-us-1-3.png', ids).storyId).toBe('US-1');
   });
+  it('tie-break 真双命中：两个 id 都实际匹配同一文件名时取最长，且与遍历顺序无关', () => {
+    const overlapIds = ['US-1', 'US-1-EXTRA'];
+    expect(parseScreenshotEntry('builder-us-1-extra-2.png', overlapIds).storyId).toBe('US-1-EXTRA');
+    expect(parseScreenshotEntry('builder-us-1-extra-2.png', [...overlapIds].reverse()).storyId).toBe('US-1-EXTRA');
+  });
   it('无相位前缀或匹配不到任何 story 落未归类', () => {
     expect(parseScreenshotEntry('random.png', ids)).toEqual({
       filename: 'random.png', storyId: null, phase: null, isImage: true,
@@ -152,8 +157,10 @@ describe('writeReport', () => {
   it('missing/unparsable 透传且不写盘', () => {
     const dir = ws();
     expect(writeReport(dir, new Date()).status).toBe('missing');
+    expect(existsSync(join(dir, 'report.html'))).toBe(false);
     writeFileSync(join(dir, 'prd.json'), '{ broken');
     expect(writeReport(dir, new Date()).status).toBe('unparsable');
+    expect(existsSync(join(dir, 'report.html'))).toBe(false);
   });
 
   it('重生成幂等覆盖', () => {
