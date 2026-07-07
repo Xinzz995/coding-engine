@@ -408,7 +408,7 @@ Add ability to mark tasks with different statuses.
 
 源 PRD 修改后重新执行本 skill，若 `.workspace/prd.json` 已存在且 `branchName` 与新转换结果**相同**（同一功能），进入再派生模式（branchName 不同则走上方「归档之前的运行」流程）：
 
-1. 先把现有 `prd.json`（以及 `state.json`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）
+1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）
 2. 用新转换结果**整体重写** `prd.json`（沿用源 id，纯需求字段——prd.json 不含状态）
 3. 若 `state.json` 存在，按 story id 对齐调整它（不存在则跳过，引擎会自动初始化）：
    - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
