@@ -73,13 +73,16 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
   }
 }
 
-/** 读全部记录；文件缺失按空处理（容错：有什么记什么）。 */
+/** 读全部记录；文件缺失按空处理（容错：有什么记什么）；其余 IO 故障向上抛。 */
 export function readEvidence(workspace: string): EvidenceReadResult {
   let raw: string;
   try {
     raw = readFileSync(join(workspace, EVIDENCE_FILE), 'utf-8');
-  } catch {
-    return { records: [], skippedLines: 0 };
+  } catch (err) {
+    // 仅「文件不存在」是合法的空态；其余 IO 故障（EACCES/EISDIR/磁盘错误）不得
+    // 伪装成「零记录」——审计信道的假阴性比报错更糟，向上抛由消费方定语义
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { records: [], skippedLines: 0 };
+    throw err;
   }
   const records: EvidenceRecord[] = [];
   let skippedLines = 0;

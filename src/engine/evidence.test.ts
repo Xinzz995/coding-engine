@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { appendEvidence, readEvidence, EVIDENCE_FILE, type EvidenceRecord } from './evidence.js';
@@ -34,6 +34,12 @@ describe('appendEvidence / readEvidence 往返', () => {
 
   it('文件不存在返回空且零跳过', () => {
     expect(readEvidence(ws())).toEqual({ records: [], skippedLines: 0 });
+  });
+
+  it('非 ENOENT 的读取故障向上抛，不伪装成零记录（EISDIR）', () => {
+    const dir = ws();
+    mkdirSync(join(dir, EVIDENCE_FILE)); // 同名目录占位 → readFileSync 抛 EISDIR
+    expect(() => readEvidence(dir)).toThrow();
   });
 });
 
