@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, readdirSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runLoop, renderInstruction } from './loop.js';
+import { readEvidence } from './evidence.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
@@ -24,6 +25,21 @@ const story = (over: Record<string, unknown> = {}) => ({
   id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
   priority: 1, ...over,
 });
+
+// builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
+function fakeCounting(workspace: string): { fake: string; calls: string } {
+  const fake = join(workspace, 'fake.mjs');
+  const calls = join(workspace, 'calls.txt');
+  writeFileSync(fake, `
+    import { writeFileSync, appendFileSync } from 'node:fs';
+    appendFileSync(${JSON.stringify(calls)}, 'call\\n');
+    writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+    }));
+    process.exit(0);
+  `);
+  return { fake, calls };
+}
 
 describe('runLoop', () => {
   it('returns 0 when all stories are already resolved after one pass', async () => {
@@ -239,21 +255,6 @@ describe('runLoop', () => {
 });
 
 describe('runLoop quality gate', () => {
-  // builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
-  function fakeCounting(workspace: string): { fake: string; calls: string } {
-    const fake = join(workspace, 'fake.mjs');
-    const calls = join(workspace, 'calls.txt');
-    writeFileSync(fake, `
-      import { writeFileSync, appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(calls)}, 'call\\n');
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-      process.exit(0);
-    `);
-    return { fake, calls };
-  }
-
   it('gate failure rolls the story back and skips the validator for that round', async () => {
     const { workspace, instructionsDir } = setup([story()], {
       qualityChecks: ['node -e "console.error(\'gate-boom\'); process.exit(7)"'],
@@ -352,6 +353,104 @@ describe('runLoop quality gate', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
       rmSync(gateMark, { force: true });
+    }
+  });
+});
+
+describe('runLoop evidence records', () => {
+  it('writes gate-run (pass) and iteration records for a completing run', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "process.exit(0)"'],
+    });
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const { records, skippedLines } = readEvidence(workspace);
+      expect(skippedLines).toBe(0);
+      const gateRuns = records.filter((r) => r.type === 'gate-run');
+      expect(gateRuns).toHaveLength(1);
+      expect(gateRuns[0]).toMatchObject({ source: 'engine', iteration: 1, storyId: 'US-001', ok: true, total: 1, ran: 1 });
+      const iters = records.filter((r) => r.type === 'iteration');
+      expect(iters).toHaveLength(1);
+      expect(iters[0]).toMatchObject({
+        source: 'engine', iteration: 1, storyId: 'US-001',
+        builderRan: true, validatorRan: true, skippedValidator: false, agentBlocked: false,
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('writes a failing gate-run and no iteration record for the rolled-back round', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "console.error(\'gate-boom\'); process.exit(7)"'],
+    });
+    const { fake } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1);
+      const { records } = readEvidence(workspace);
+      const gateRuns = records.filter((r) => r.type === 'gate-run');
+      expect(gateRuns).toHaveLength(1);
+      expect(gateRuns[0]).toMatchObject({
+        ok: false, total: 1, ran: 1, failedCommand: 'node -e "console.error(\'gate-boom\'); process.exit(7)"',
+        exitCode: 7, timedOut: false,
+      });
+      expect(records.filter((r) => r.type === 'iteration')).toHaveLength(0); // 打回轮 continue，不到轮末
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('writes a tamper record with the archive filename when builder tampers prd.json', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const prdPath = join(workspace, 'prd.json');
+    const fake = join(workspace, 'fake-tamper-ev.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+      // 只在 prd 未被篡改过时篡改一次，然后翻绿收敛
+      const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
+      if (prd.project !== 'evil') {
+        prd.project = 'evil';
+        writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+      }
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const origWarn = console.warn;
+    console.warn = () => {};
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const { records } = readEvidence(workspace);
+      const tampers = records.filter((r) => r.type === 'tamper');
+      expect(tampers).toHaveLength(1); // 同内容去重：只记新事件
+      expect(tampers[0].archive).toMatch(/^prd\.tampered-.*\.json$/); // 文件名而非路径
+    } finally {
+      console.warn = origWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
 });

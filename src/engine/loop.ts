@@ -1,13 +1,15 @@
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { runAgent, type AgentKind } from './agent.js';
 import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
+import type { PrdReadResult } from './prd-guard.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
 import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
+import { appendEvidence, type EvidenceRecord } from './evidence.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -91,6 +93,27 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
     const agentCwd = process.cwd();
+    // evidence 是增强不是关键路径：写入失败只 warn（去重一次），绝不影响循环
+    let warnedEvidence = false;
+    const recordEvidence = (record: EvidenceRecord) => {
+      try {
+        appendEvidence(cfg.workspace, record);
+      } catch (err) {
+        if (!warnedEvidence) {
+          warnedEvidence = true;
+          console.warn(`⚠️  evidence 记录写入失败（不影响循环）：${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    };
+    // 每次 guard.read() 都可能检出新篡改事件——三处读取点共用（archive 记文件名，与报告红旗区文件清单对齐）
+    const recordTamper = (read: PrdReadResult, iteration: number) => {
+      if (read.tamperedArchive !== undefined) {
+        recordEvidence({
+          type: 'tamper', source: 'engine', at: new Date().toISOString(), iteration,
+          archive: read.tamperedArchive === null ? null : basename(read.tamperedArchive),
+        });
+      }
+    };
     // 模型路由警告去重：非法 models 配置的警告每轮都会重新产生，同一条只打一次
     const warnedModels = new Set<string>();
     const warnModelsOnce = (msgs: string[]) => {
@@ -101,6 +124,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
       const beforeRead = guard.read();
+      recordTamper(beforeRead, i);
       const before = beforeRead.prd;
       // 写回失败=磁盘仍是篡改版=本轮 validator 读到的验收标准不可信 → 跳过（下轮开头重试恢复）
       let skipValidator = beforeRead.restoreFailed;
@@ -139,6 +163,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // 第四检测点：builder 刚跑完、validator 未拉起——本轮 builder 的篡改必须在此恢复，
       // 否则 validator（独立进程直读磁盘）当轮就会按假 AC 验收（ADR-007）。
       const gateRead = guard.read();
+      recordTamper(gateRead, i);
       if (gateRead.restoreFailed) skipValidator = true;
       // agent 轮内显式置 blocked（仲裁上报，如 [需要人工核实]）：机械路径不得推进它——
       // 当轮跳过门禁执行与验收，完成判定按 resolved 正常收敛。
@@ -153,6 +178,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       } else if (!agentBlocked && checks && currentStory) {
         dashboard.setState({ phase: 'gating', model: null });
         const gate = await runQualityChecks(checks, agentCwd);
+        recordEvidence({
+          type: 'gate-run', source: 'engine', at: new Date().toISOString(), iteration: i,
+          storyId: currentStory, ok: gate.ok, total: gate.total, ran: gate.ran, ms: gate.ms,
+          ...(gate.failure ? {
+            failedCommand: gate.failure.command, exitCode: gate.failure.exitCode, timedOut: gate.failure.timedOut,
+          } : {}),
+        });
         if (!gate.ok) {
           console.error(`\n❌ 机械门禁未通过（${gate.failure!.command}），打回 ${currentStory} 待下轮重试`);
           const st = tryReadState(statePath);
@@ -183,9 +215,23 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         });
       }
 
+      // 轮末机械记录：只覆盖走到这里的轮（builder 超时/门禁打回轮已 continue，
+      // 时间线轮号跳跃+gate-run 记录即可还原，不为补齐时间线改动 continue 路径）
+      recordEvidence({
+        type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+        storyId: currentStory,
+        builderRan: !!builder,
+        builderModel: builderChoice.model ?? null,
+        validatorRan: !!validator && !skipValidator && !agentBlocked,
+        validatorModel: validatorModel ?? null,
+        skippedValidator: skipValidator, agentBlocked,
+      });
+
       // Completion check
       dashboard.setState({ phase: 'idle', model: null });
-      const after = guard.read().prd;
+      const afterRead = guard.read();
+      recordTamper(afterRead, i);
+      const after = afterRead.prd;
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
