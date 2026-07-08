@@ -27,7 +27,7 @@ coding-x 同时是两样东西：
 
 ## 工作原理
 
-引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控，agent 回写）和 `progress.md`（进度与学习日志）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理。
+引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控，agent 回写）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（结构化证据索引：引擎机械记录+agent 截图登记）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理。
 
 ```
                       npx coding-x
@@ -274,7 +274,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
-- **静态验证报告**：循环结束自动生成 `.workspace/report.html`——story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页，双击打开；/review-loop 裁决回填后 `npx coding-x report` 随时刷新。截图为相对引用，分享报告需连同 `screenshots/` 目录。
+- **静态验证报告**：循环结束自动生成 `.workspace/report.html`——story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页，双击打开；0.20.0 起叠加 evidence 结构化索引：门禁执行历史（含通过轮）、轮次时间线、截图↔验收标准对账（agent 登记，报告诚实标注信任级别）；/review-loop 裁决回填后 `npx coding-x report` 随时刷新。截图为相对引用，分享报告需连同 `screenshots/` 目录。
 - **JSON 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json` / `state.json`。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 
