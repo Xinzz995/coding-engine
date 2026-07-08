@@ -1,6 +1,6 @@
 ---
 title: "evidence 结构化索引实施计划"
-status: active
+status: done
 updated: 2026-07-08
 scope: root
 ---
