@@ -151,3 +151,32 @@ describe('createPrdGuard: 篡改处置', () => {
     expect(r.restoreFailed).toBe(true);
   });
 });
+
+describe('createPrdGuard: read().tamperedArchive 三态', () => {
+  it('无篡改时为 undefined；新篡改给存档路径；同内容重复篡改回到 undefined', () => {
+    const original = JSON.stringify({ project: 'p', userStories: [] });
+    const { prdPath } = setup(original);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const guard = createPrdGuard(prdPath);
+    expect(guard.read().tamperedArchive).toBeUndefined(); // 建快照
+
+    writeFileSync(prdPath, JSON.stringify({ project: 'evil', userStories: [] }));
+    const first = guard.read();
+    expect(typeof first.tamperedArchive).toBe('string'); // 新篡改：给存档路径
+    expect(first.tamperedArchive).toContain('prd.tampered-');
+
+    writeFileSync(prdPath, JSON.stringify({ project: 'evil', userStories: [] }));
+    expect(guard.read().tamperedArchive).toBeUndefined(); // 同内容重复：去重不再报
+  });
+
+  it('删除类篡改给 null（有新事件但无存档）', () => {
+    const { prdPath } = setup(JSON.stringify({ project: 'p', userStories: [] }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const guard = createPrdGuard(prdPath);
+    guard.read();
+
+    unlinkSync(prdPath);
+    const r = guard.read();
+    expect(r.tamperedArchive).toBeNull();
+  });
+});

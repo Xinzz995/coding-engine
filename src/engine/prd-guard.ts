@@ -7,6 +7,12 @@ export interface PrdReadResult {
   prd: Prd | null;
   /** 本次 read 检测到篡改且快照写回磁盘失败——磁盘仍是篡改版，本轮 validator 不可信 */
   restoreFailed: boolean;
+  /**
+   * 本次 read 检测到的**新**篡改事件（去重语义与 archives/告警一致）：
+   * undefined=无新事件；string=已存档（完整路径）；null=新事件但无存档（删除类或存档写失败）。
+   * evidence 记录消费此字段（loop 据此写 tamper 记录）。
+   */
+  tamperedArchive?: string | null;
 }
 
 export interface TamperSummary {
@@ -48,12 +54,14 @@ export function createPrdGuard(prdPath: string): PrdGuard {
     }
   }
 
-  /** 处置篡改：存档（内容去重）→ 快照写回 → 告警（内容去重）。返回写回是否失败。 */
-  function handleTamper(raw: string | null): boolean {
+  /** 处置篡改：存档（内容去重）→ 快照写回 → 告警（内容去重）。 */
+  function handleTamper(raw: string | null): { restoreFailed: boolean; tamperedArchive?: string | null } {
     const isNew = lastTampered === undefined || raw !== lastTampered;
+    let tamperedArchive: string | null | undefined;
     if (isNew) {
       lastTampered = raw;
       count++;
+      tamperedArchive = null; // 新事件缺省无存档（删除类/写失败）
       let archiveNote = '文件被删除或不可读';
       if (raw !== null) {
         const base = join(dirname(prdPath), `prd.tampered-${fileStamp(new Date())}`);
@@ -67,6 +75,7 @@ export function createPrdGuard(prdPath: string): PrdGuard {
         try {
           writeFileSync(archivePath, raw, 'utf-8');
           archives.push(archivePath);
+          tamperedArchive = archivePath;
           archiveNote = `篡改版已存档：${archivePath}`;
         } catch (e) {
           archiveNote = `篡改版存档写入失败（${(e as Error).message}）`;
@@ -79,10 +88,10 @@ export function createPrdGuard(prdPath: string): PrdGuard {
     }
     try {
       writeFileSync(prdPath, snapshotRaw!, 'utf-8');
-      return false;
+      return { restoreFailed: false, tamperedArchive };
     } catch (e) {
       console.warn(`⚠️  prd.json 快照写回失败（${(e as Error).message}）：磁盘仍是篡改版，本轮 validator 验收不可信`);
-      return true;
+      return { restoreFailed: true, tamperedArchive };
     }
   }
 
@@ -101,8 +110,8 @@ export function createPrdGuard(prdPath: string): PrdGuard {
         }
       }
       if (raw === snapshotRaw) return { prd: snapshotPrd, restoreFailed: false };
-      const restoreFailed = handleTamper(raw);
-      return { prd: snapshotPrd, restoreFailed };
+      const handled = handleTamper(raw);
+      return { prd: snapshotPrd, restoreFailed: handled.restoreFailed, tamperedArchive: handled.tamperedArchive };
     },
     summary(): TamperSummary {
       return { count, archives: [...archives] };

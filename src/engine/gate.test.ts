@@ -229,4 +229,18 @@ describe('runQualityChecks', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it('returns total/ran/ms — pass runs all, fail-fast stops at the failing check', async () => {
+    const pass = await runQualityChecks(['node -e "process.exit(0)"', 'node -e "process.exit(0)"'], process.cwd());
+    expect(pass.ok).toBe(true);
+    expect(pass.total).toBe(2);
+    expect(pass.ran).toBe(2);
+    expect(pass.ms).toBeGreaterThanOrEqual(0);
+
+    const fail = await runQualityChecks(
+      ['node -e "process.exit(1)"', 'node -e "process.exit(0)"'], process.cwd());
+    expect(fail.ok).toBe(false);
+    expect(fail.total).toBe(2);
+    expect(fail.ran).toBe(1); // fail-fast：第 1 条失败，第 2 条未执行
+  });
 });
