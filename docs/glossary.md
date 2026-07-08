@@ -69,12 +69,17 @@ builder 有意识选择带已知上限的简单实现时就地留下的 `// 取�
 notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验收标准冲突，按验收标准实现后留待人工）与 `[需要人工核实]`（其他必须人工介入的异常，配合 blocked 使用）。所有机械路径（打回、清理、再派生）必须原样保全这些行。
 禁用：冲突标记、人工核实标记（统一用「仲裁标签」）
 
+**验证报告**
+一次运行的验证证据静态存档（`<workspace>/report.html`）：story 状态与验收标准、门禁配置、截图工件、人审包渲染、篡改红旗区汇总为零依赖单页；循环结束自动生成，`coding-x report` 子命令随时重生成。是存档不是门禁——生成成功即退出 0，循环成败的 CI 语义归 status。
+禁用：HTML 报告、静态报告（统一用「验证报告」）
+
 ## 关系
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
 - 打回递增 retryCount，达到上限转 blocked；全部 story passes 或 blocked 即循环结束
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含人审（/review-loop 产出人审包）与沉淀（/compound-docs，含取舍账本收账）
+- 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
 
 ## 已解决的歧义
 

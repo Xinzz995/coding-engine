@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-07-04
+updated: 2026-07-08
 scope: root
 ---
 
@@ -22,12 +22,14 @@ scope: root
 - 2026-07-03 CLI 参数非法值在 `parseCliArgs` 内抛错、由 `main()` try/catch 捕获打印并返回退出码 1，不把 `NaN`/越界值静默传给下游（见 `--stale-days` 只接受非负整数，且校验的是字面量 `/^\d+$/` 而非 `Number()` 转换结果——否则空串/`0x10`/`1e2` 会被静默接受）。
 - 2026-07-04 读 workspace 文件需要区分「文件不存在」与「内容损坏」两种降级时，先 `existsSync` 再 `tryReadX`——`tryReadPrd`/`tryReadState` 对两者都返回 `null`，只靠返回值无法分流（见 `collectStatus`：prd.json 缺失提示生成、损坏提示 repair；state.json 缺失静默回退、损坏 stderr 警告）。
 - 2026-07-04 机器可读输出（`--json` 类）的契约：stdout 恒为单个可 `JSON.parse` 的对象（错误态也输出 `{error, ...}` 对象而非裸文本），警告/提示一律走 stderr 且由 `src/cli.ts` 层发出（render 纯函数只产 stdout 文本与退出码）；测试断言用「`console.log` spy 恰被调用一次 + 对该次参数整体 `JSON.parse`」的不变式，强于正则匹配（见 `renderStatusJson` 与 cli.test.ts 的 status --json 用例）。
+- 2026-07-08 展示/渲染层消费宽松解析产物时（`tryReadPrd` 无逐字段守卫——与 `tryReadState` 的读入守卫模式不同，属历史设计），任何值插进输出标记前必须统一走「空值兜底+转义」helper（见 render.ts `text()`），不逐点裸插——缺字段的合法 JSON 会让裸插值抛 TypeError，造成「status 正常降级而验证报告崩」的消费端分叉；段级配置已有单源守卫的直接复用（`readQualityChecks`/`readModelsConfig`），并且其 warnings 必须透出到呈现面，否则「配置非法」与「未配置」不可区分。
+- 2026-07-08 跨文件消费的 notes 行前缀/标签一律从 gate.ts 导出常量做单源（`ARBITRATION_PREFIXES`、`GATE_FAIL_LINE_PREFIX`、`BLOCKED_LINE_PREFIX` 三例），生产/消费方 import 同一常量；无法 import 的指令模板类第二生产方（如 validator.md 的 BLOCKED 文案）在常量 doc comment 登记「改措辞须同步」；测试对这些前缀保留字面量断言、不 import 实现常量——字面量断言即格式契约守卫，任何一方单独改措辞立刻红。
 
 ## 陷阱
 
 <!-- 容易再次踩、与本项目框架/数据边界/路由方式强相关的坑 -->
 
-- 2026-07-03 运行期状态需要回退时用「全部归零」的空初始化，不要复用带历史字段抽取的迁移初始化——迁移路径会把已废弃的旧格式状态重新激活（对比 `blankStateFor` 只写初始常量、`initialStateFor` 读旧字段）。
+- 2026-07-03 运行期状态需要回退时用「全部归零」的空初始化，不要复用带历史字段抽取的迁移初始化——迁移路径会把已废弃的旧格式状态重新激活（对比 `blankStateFor` 只写初始常量、`initialStateFor` 读旧字段）。2026-07-08 补消费端语境规则：回看类端点（dashboard/status/验证报告）允许走迁移回退换离线可用性，但呈现处必须如实标注「可能非最新执行结果」（见 render.ts stateWarn）——在验证证据语境里，静默回退呈现陈旧的 passes:true 等于假绿面。
 - 2026-07-03 临时目录里跑 git 的单测须先 `git config commit.gpgsign false`（否则全局签名配置会让 commit 失败），并用 `GIT_COMMITTER_DATE`/`GIT_AUTHOR_DATE` 固定日期（`git log %cs` 取的是 committer date），否则依赖提交日期的断言不稳定（见 doctor.test.ts 的 git fixture）。
 - 2026-07-03 单测里的路径断言用 `join('docs', 'sub', 'x.md')` 拼接，不要硬编码 `/` 分隔的字面串，否则 Windows 上会假失败。
 - 2026-07-04 版本号除 package.json 外还有多处落点（package-lock、`.claude-plugin/`/`.cursor-plugin/`/`.codex-plugin/` 三个插件清单），靠人记必漂移——0.6.0–0.7.1 期间插件清单曾停在 0.5.1 三个版本没人发现。机械防线（三道）：`npm version` 生命周期钩子跑 `build/sync-plugin-versions.mjs` 自动同步；`build/version-consistency.test.mjs` 随 npm test 常态校验全部落点一致（本地与 CI test.yml，漂移提交即红）；publish.yml 发版门禁兜底。新增版本号落点时登记进 `PLUGIN_MANIFESTS`（或一致性测试的 entries）即可全线生效。同理，会随版本演进的枚举内容（如清单 description 里列 skills/commands 名单）不要复制到多处，写稳定表述。
