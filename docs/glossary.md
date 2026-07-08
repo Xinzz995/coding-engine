@@ -73,6 +73,10 @@ notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验�
 一次运行的验证证据静态存档（`<workspace>/report.html`）：story 状态与验收标准、门禁配置、截图工件、人审包渲染、篡改红旗区汇总为零依赖单页；循环结束自动生成，`coding-x report` 子命令随时重生成。是存档不是门禁——生成成功即退出 0，循环成败的 CI 语义归 status。
 禁用：HTML 报告、静态报告（统一用「验证报告」）
 
+**证据索引**
+一次运行的结构化证据记录文件（`<workspace>/evidence.jsonl`，append-only 每行一条）：引擎写机械记录（门禁执行含通过轮、轮次事件、篡改事件），builder/validator 按指令登记截图元数据（story/验收标准关联）。记录的 `source` 字段是信任级别标记——engine=机械事实、builder/validator=agent 声明；整个文件都在 agent 可写区，消费端按来源诚实标注、不假装防伪。
+禁用：evidence 结构化索引、结构化证据索引（统一用「证据索引」；指文件本身时用 `evidence.jsonl`）
+
 ## 关系
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
@@ -80,6 +84,7 @@ notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验�
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含人审（/review-loop 产出人审包）与沉淀（/compound-docs，含取舍账本收账）
 - 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
+- 验证报告消费证据索引（门禁执行历史、轮次时间线、验收标准↔截图对账均由它派生）；证据索引缺失时报告退回文件名猜测归属
 
 ## 已解决的歧义
 

@@ -24,6 +24,9 @@ scope: root
 - 2026-07-04 机器可读输出（`--json` 类）的契约：stdout 恒为单个可 `JSON.parse` 的对象（错误态也输出 `{error, ...}` 对象而非裸文本），警告/提示一律走 stderr 且由 `src/cli.ts` 层发出（render 纯函数只产 stdout 文本与退出码）；测试断言用「`console.log` spy 恰被调用一次 + 对该次参数整体 `JSON.parse`」的不变式，强于正则匹配（见 `renderStatusJson` 与 cli.test.ts 的 status --json 用例）。
 - 2026-07-08 展示/渲染层消费宽松解析产物时（`tryReadPrd` 无逐字段守卫——与 `tryReadState` 的读入守卫模式不同，属历史设计），任何值插进输出标记前必须统一走「空值兜底+转义」helper（见 render.ts `text()`），不逐点裸插——缺字段的合法 JSON 会让裸插值抛 TypeError，造成「status 正常降级而验证报告崩」的消费端分叉；段级配置已有单源守卫的直接复用（`readQualityChecks`/`readModelsConfig`），并且其 warnings 必须透出到呈现面，否则「配置非法」与「未配置」不可区分。
 - 2026-07-08 跨文件消费的 notes 行前缀/标签一律从 gate.ts 导出常量做单源（`ARBITRATION_PREFIXES`、`GATE_FAIL_LINE_PREFIX`、`BLOCKED_LINE_PREFIX` 三例），生产/消费方 import 同一常量；无法 import 的指令模板类第二生产方（如 validator.md 的 BLOCKED 文案）在常量 doc comment 登记「改措辞须同步」；测试对这些前缀保留字面量断言、不 import 实现常量——字面量断言即格式契约守卫，任何一方单独改措辞立刻红。
+- 2026-07-08 增强类副产物的写入（证据记录、验证报告生成等「记录/存档」动作）一律 try/catch 吞错仅 warn（同类告警去重一次），绝不影响主循环的控制流与退出码——副产物失败比主流程被副产物拖垮诚实得多（见 loop.ts `recordEvidence` 与 writeReport 调用两例）。
+- 2026-07-08 多写方共享的追加式记录文件用 JSONL（每行一条独立 JSON 带 `source` 字段）：读取端逐行解析+逐字段守卫+未知 type 跳过计数（前向兼容，新版本写的类型旧消费方不炸），坏行只损失自己；「文件不存在」（ENOENT）是唯一合法空态，其余 IO 故障必须上抛——把 EACCES/EISDIR 伪装成「零记录」是审计信道的假阴性（见 `evidence.ts readEvidence`）。
+- 2026-07-08 新增 workspace 运行产物时三处必须同步：prd-to-json 归档清单的**复制**动作、**删除**动作（残留旧轮数据会污染新轮）、以及报告等消费端的文件集合——任何一处缺席都是「归档回看断链」或「新轮红旗区被旧轮污染」（0.20.0 终审实证：tampered 存档曾三处全缺）。
 
 ## 陷阱
 
@@ -35,3 +38,5 @@ scope: root
 - 2026-07-04 版本号除 package.json 外还有多处落点（package-lock、`.claude-plugin/`/`.cursor-plugin/`/`.codex-plugin/` 三个插件清单），靠人记必漂移——0.6.0–0.7.1 期间插件清单曾停在 0.5.1 三个版本没人发现。机械防线（三道）：`npm version` 生命周期钩子跑 `build/sync-plugin-versions.mjs` 自动同步；`build/version-consistency.test.mjs` 随 npm test 常态校验全部落点一致（本地与 CI test.yml，漂移提交即红）；publish.yml 发版门禁兜底。新增版本号落点时登记进 `PLUGIN_MANIFESTS`（或一致性测试的 entries）即可全线生效。同理，会随版本演进的枚举内容（如清单 description 里列 skills/commands 名单）不要复制到多处，写稳定表述。
 - 2026-07-04 `.workspace/` 换新 PRD（branchName 变更）时，归档后必须删除旧 `state.json`——story id 惯例都从 US-001 起编，新旧几乎必然撞车，而引擎 `ensureStateFile` 信任既存文件，会把旧轮的 `passes: true` 误判为新 story 已完成、循环空转结束。
 - 2026-07-04 progress.md 里 `## ` 开头的标题不全是迭代记录（顶部还有 `## Codebase Patterns` 汇总段）：结构化提取迭代记录必须按日期前缀 `/^## \d{4}-\d{2}-\d{2}/` 匹配，不能只按标题层级取（见 `latestProgressTitle` 的修复）。
+- 2026-07-08 按「列表位置序号」关联到人可改写文档条目的数据（如证据登记的 acIndex → 验收标准列表），源文档再派生/条目改写后旧关联会静默错挂到新内容上——生命周期动作（再派生、换 PRD）必须归档并清空此类位置关联数据，旧证据一律作废重验（见 prd-to-json 再派生节清 evidence.jsonl；0.20.0 终审需人裁决项）。
+- 2026-07-08 macOS BSD grep 对多个中文模式的交替匹配（`grep -o "模式A\|模式B\|模式C"`）存在漏匹配怪癖（0.19.0/0.20.0 两轮发版冒烟均实证误报「未渲染」）：验证产物内容时用单模式逐一 grep，多模式交替的计数结果不可作为「区块缺失」的证据。
