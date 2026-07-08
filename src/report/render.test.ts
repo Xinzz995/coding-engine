@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { renderReportHtml, escapeHtml, renderMarkdownLite } from './render.js';
 import type { ReportData } from './report.js';
+import type { EvidenceRecord } from '../engine/evidence.js';
 
 function data(over: Partial<ReportData> = {}): ReportData {
   return {
@@ -23,8 +24,13 @@ function data(over: Partial<ReportData> = {}): ReportData {
     reviews: [],
     tamperedArchives: [],
     screenshots: [],
+    evidence: { records: [], skippedLines: 0 },
     ...over,
   };
+}
+
+function ev(records: EvidenceRecord[], skippedLines = 0) {
+  return { evidence: { records, skippedLines } };
 }
 
 describe('escapeHtml', () => {
@@ -255,5 +261,110 @@ describe('renderReportHtml', () => {
 
   it('报告零浏览器 JS', () => {
     expect(renderReportHtml(data())).not.toContain('<script');
+  });
+});
+
+describe('renderReportHtml evidence 增强', () => {
+  it('无 evidence 时不出现任何新增区块（与 0.19.0 视觉一致）', () => {
+    const html = renderReportHtml(data());
+    expect(html).not.toContain('门禁执行历史');
+    expect(html).not.toContain('轮次时间线');
+    expect(html).not.toContain('agent 声明');
+    expect(html).not.toContain('未登记');
+    expect(html).not.toContain('evidence.jsonl 有');
+  });
+
+  it('gate-run 记录渲染执行历史表：通过与失败两态', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', ok: true, total: 2, ran: 2, ms: 8000 },
+      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:10:00.000Z', iteration: 2, storyId: 'US-001', ok: false, total: 2, ran: 1, ms: 500, failedCommand: 'npm test', exitCode: 7, timedOut: false },
+    ])));
+    expect(html).toContain('门禁执行历史');
+    expect(html).toContain('✅ 通过');
+    expect(html).toContain('❌ 未通过');
+    expect(html).toContain('2/2');
+    expect(html).toContain('1/2');
+    expect(html).toContain('npm test');
+    expect(html).toContain('退出码 7');
+  });
+
+  it('claim 按 acIndex（1 起）挂到对应 AC 并带 agent 声明标注与免责行', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'screenshot-claim', source: 'validator', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'validator-us-001-pass-1.png', acIndex: 1, note: '页面打开成功' },
+    ])));
+    expect(html).toContain('ac-claim');
+    expect(html).toContain('validator-us-001-pass-1.png');
+    expect(html).toContain('页面打开成功');
+    expect(html).toContain('agent 声明');
+    expect(html).toContain('「agent 声明」类证据由 builder/validator 自行登记');
+  });
+
+  it('claim 的 storyId 大小写不敏感归对；acIndex 越界或缺省归 story 级登记', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'us-001', file: 'builder-US-001-1.png', acIndex: 99 },
+      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:01.000Z', storyId: 'US-001', file: 'builder-US-001-2.png' },
+    ])));
+    expect(html).toContain('story 级登记');
+    expect(html).toContain('builder-US-001-1.png');
+    expect(html).toContain('builder-US-001-2.png');
+  });
+
+  it('storyId 匹配不到任何 story 的孤儿 claim 落未归类工件区', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-999', file: 'mystery.png', note: '来历不明' },
+    ])));
+    expect(html).toContain('未归类工件');
+    expect(html).toContain('mystery.png');
+    expect(html).toContain('US-999');
+  });
+
+  it('画廊：有登记的截图排前显示 note，未登记的标「未登记」', () => {
+    const shots = [
+      { filename: 'builder-US-001-1.png', storyId: 'US-001', phase: 'builder' as const, isImage: true },
+      { filename: 'builder-US-001-2.png', storyId: 'US-001', phase: 'builder' as const, isImage: true },
+    ];
+    const html = renderReportHtml(data({
+      screenshots: shots,
+      ...ev([
+        { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'builder-US-001-2.png', note: '已登记的那张' },
+      ]),
+    }));
+    expect(html).toContain('已登记的那张');
+    expect(html).toContain('未登记');
+    // 登记的 -2 排在未登记的 -1 之前
+    expect(html.indexOf('builder-US-001-2.png')).toBeLessThan(html.indexOf('builder-US-001-1.png'));
+  });
+
+  it('iteration 记录渲染轮次时间线折叠区', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', builderRan: true, builderModel: 'fast-m', validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false },
+    ])));
+    expect(html).toContain('轮次时间线');
+    expect(html).toContain('fast-m');
+    expect(html).toContain('val-m');
+  });
+
+  it('tamper 记录给红旗区补轮次时刻（文件扫描保底仍在）', () => {
+    const html = renderReportHtml(data({
+      tamperedArchives: ['prd.tampered-20260708-060000.json'],
+      ...ev([
+        { type: 'tamper', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 3, archive: 'prd.tampered-20260708-060000.json' },
+      ]),
+    }));
+    expect(html).toContain('红旗区');
+    expect(html).toContain('第 3 轮');
+  });
+
+  it('skippedLines>0 头部警示', () => {
+    const html = renderReportHtml(data(ev([], 2)));
+    expect(html).toContain('evidence.jsonl 有 2 行无法解析已跳过');
+  });
+
+  it('claim 文本转义：note/file 注入不落地', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'a.png', acIndex: 1, note: '<script>alert(1)</script>' },
+    ])));
+    expect(html).not.toContain('<script>alert(1)');
+    expect(html).toContain('&lt;script&gt;');
   });
 });

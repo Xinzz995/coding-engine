@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
 import { tryReadState, mergedStories, initialStateFor, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
+import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
 import { renderReportHtml } from './render.js';
 
 export interface ScreenshotEntry {
@@ -26,6 +27,8 @@ export interface ReportData {
   reviews: { filename: string; content: string }[];
   tamperedArchives: string[];
   screenshots: ScreenshotEntry[];
+  /** evidence.jsonl 结构化证据（缺失=空记录零跳过） */
+  evidence: { records: EvidenceRecord[]; skippedLines: number };
 }
 
 export type ReportSource =
@@ -91,6 +94,7 @@ export function collectReport(workspace: string, now: Date): ReportSource {
       reviews,
       tamperedArchives: rootFiles.filter((n) => /^prd\.tampered-.*\.json$/.test(n)).sort(),
       screenshots: listFiles(join(workspace, 'screenshots')).sort().map((f) => parseScreenshotEntry(f, storyIds)),
+      evidence: readEvidence(workspace),
     },
   };
 }

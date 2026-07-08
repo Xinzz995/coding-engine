@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { collectReport, parseScreenshotEntry, writeReport } from './report.js';
+import { appendEvidence } from '../engine/evidence.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
@@ -172,5 +173,25 @@ describe('writeReport', () => {
     const html = readFileSync(join(dir, 'report.html'), 'utf-8');
     expect(html).toContain('US-002');
     expect(html).toContain('2026-07-08 13:00');
+  });
+});
+
+describe('collectReport evidence 收集', () => {
+  it('读入 evidence.jsonl 记录与跳过计数；缺失时为空', () => {
+    const dir = ws();
+    writePrd(dir, [story('US-001')]);
+    const empty = collectReport(dir, new Date());
+    if (empty.status !== 'ok') throw new Error('expected ok');
+    expect(empty.data.evidence).toEqual({ records: [], skippedLines: 0 });
+
+    appendEvidence(dir, {
+      type: 'gate-run', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1,
+      storyId: 'US-001', ok: true, total: 1, ran: 1, ms: 100,
+    });
+    writeFileSync(join(dir, 'evidence.jsonl'), readFileSync(join(dir, 'evidence.jsonl'), 'utf-8') + '{ bad\n');
+    const src = collectReport(dir, new Date());
+    if (src.status !== 'ok') throw new Error('expected ok');
+    expect(src.data.evidence.records).toHaveLength(1);
+    expect(src.data.evidence.skippedLines).toBe(1);
   });
 });
