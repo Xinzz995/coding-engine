@@ -286,6 +286,7 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('1/2');
     expect(html).toContain('npm test');
     expect(html).toContain('退出码 7');
+    expect(html).toContain('防伪加固属后续评估'); // engine 记录区免责标注（A3，发现 5 裁决）
   });
 
   it('claim 按 acIndex（1 起）挂到对应 AC 并带 agent 声明标注与免责行', () => {
@@ -307,6 +308,23 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('story 级登记');
     expect(html).toContain('builder-US-001-1.png');
     expect(html).toContain('builder-US-001-2.png');
+    // A5（triage 14）：越界/缺省 claim 只应落在 story 级登记行，不应混进 AC 徽标列表
+    const acsSection = /<ul class="acs">[\s\S]*?<\/ul>/.exec(html);
+    expect(acsSection).not.toBeNull();
+    expect(acsSection![0]).not.toContain('builder-US-001-1.png');
+    expect(acsSection![0]).not.toContain('builder-US-001-2.png');
+  });
+
+  it('claim 的 acIndex 非整数（如 1.5）归 story 级登记，不静默丢弃（发现 1）', () => {
+    const s = data().stories[0];
+    const html = renderReportHtml(data({
+      stories: [{ ...s, acceptanceCriteria: ['第一条', '第二条'] }],
+      ...ev([
+        { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'builder-US-001-noninteger.png', acIndex: 1.5 },
+      ]),
+    }));
+    expect(html).toContain('story 级登记');
+    expect(html).toContain('builder-US-001-noninteger.png');
   });
 
   it('storyId 匹配不到任何 story 的孤儿 claim 落未归类工件区', () => {
@@ -342,6 +360,21 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('轮次时间线');
     expect(html).toContain('fast-m');
     expect(html).toContain('val-m');
+    expect(html).toContain('防伪加固属后续评估'); // engine 记录区免责标注（A3，发现 5 裁决）
+  });
+
+  it('renderTimeline validator 列三种跳过归因：agent blocked / 快照写回失败 / 未跑（triage 13）', () => {
+    const base = {
+      type: 'iteration' as const, source: 'engine' as const, at: '2026-07-08T06:00:00.000Z',
+      iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null,
+    };
+    const blockedHtml = renderReportHtml(data(ev([{ ...base, skippedValidator: false, agentBlocked: true }])));
+    expect(blockedHtml).toContain('跳过（agent blocked）');
+    const skippedHtml = renderReportHtml(data(ev([{ ...base, skippedValidator: true, agentBlocked: false }])));
+    expect(skippedHtml).toContain('跳过（快照写回失败）');
+    const notRunHtml = renderReportHtml(data(ev([{ ...base, skippedValidator: false, agentBlocked: false }])));
+    expect(notRunHtml).toContain('未跑');
   });
 
   it('tamper 记录给红旗区补轮次时刻（文件扫描保底仍在）', () => {
@@ -353,6 +386,27 @@ describe('renderReportHtml evidence 增强', () => {
     }));
     expect(html).toContain('红旗区');
     expect(html).toContain('第 3 轮');
+  });
+
+  it('tamper 记录带 archive 名但文件清单无匹配（归档已不在工作区）时补独立行，不留空 <ul>（发现 2）', () => {
+    const html = renderReportHtml(data({
+      tamperedArchives: [],
+      ...ev([
+        { type: 'tamper', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 4, archive: 'prd.tampered-20260708-070000.json' },
+      ]),
+    }));
+    expect(html).toContain('红旗区');
+    expect(html).toContain('已不在工作区');
+    expect(html).not.toContain('<ul></ul>');
+  });
+
+  it('renderRedFlags 删除类篡改（archive:null）单独成行（triage 13）', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'tamper', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 5, archive: null },
+    ])));
+    expect(html).toContain('红旗区');
+    expect(html).toContain('删除类篡改（无存档）');
+    expect(html).toContain('第 5 轮');
   });
 
   it('skippedLines>0 头部警示', () => {

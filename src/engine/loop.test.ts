@@ -26,6 +26,10 @@ const story = (over: Record<string, unknown> = {}) => ({
   priority: 1, ...over,
 });
 
+// instruction assets 契约测试共享的文件读取 helper（两个 describe 曾各自重复定义，见 triage#9）。
+const read = (f: string) =>
+  readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
+
 // builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
 function fakeCounting(workspace: string): { fake: string; calls: string } {
   const fake = join(workspace, 'fake.mjs');
@@ -350,6 +354,11 @@ describe('runLoop quality gate', () => {
       expect(state['US-001'].blocked).toBe(true);
       expect(state['US-001'].retryCount).toBe(0); // 未被门禁打回推进
       expect(state['US-001'].notes).toContain('[需要人工核实]'); // 仲裁记录未被覆盖
+      // C2（triage 7）：轮末 iteration 记录须如实反映 agent blocked 与 validator 未跑
+      const { records } = readEvidence(workspace);
+      const iters = records.filter((r) => r.type === 'iteration');
+      expect(iters).toHaveLength(1);
+      expect(iters[0]).toMatchObject({ agentBlocked: true, validatorRan: false });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
       rmSync(gateMark, { force: true });
@@ -677,9 +686,6 @@ describe('renderInstruction arbitration placeholder', () => {
 });
 
 describe('instruction assets arbitration contract', () => {
-  const read = (f: string) =>
-    readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
-
   it('builder.md and validator.md reference the arbitration placeholder, not hardcoded label lists', () => {
     expect(read('builder.md')).toContain('{{ARBITRATION_PREFIXES}}');
     expect(read('validator.md')).toContain('{{ARBITRATION_PREFIXES}}');
@@ -694,9 +700,6 @@ describe('instruction assets arbitration contract', () => {
 });
 
 describe('instruction assets evidence contract', () => {
-  const read = (f: string) =>
-    readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
-
   it('builder.md and validator.md carry the screenshot-claim registration template', () => {
     for (const f of ['builder.md', 'validator.md']) {
       const content = read(f);
@@ -855,6 +858,10 @@ describe('runLoop prd freeze', () => {
       expect(warns.some((w) => w.includes('跳过本轮 validator'))).toBe(true);
       // 结束摘要报告篡改事件
       expect(warns.some((w) => w.includes('运行期间检测到 prd.json 被修改'))).toBe(true);
+      // C3（triage 8）：删除类篡改（读回抛 EISDIR）必须记一条 archive:null 的 tamper evidence
+      const { records } = readEvidence(workspace);
+      const tampers = records.filter((r) => r.type === 'tamper');
+      expect(tampers.some((t) => t.archive === null)).toBe(true);
     } finally {
       console.warn = origWarn;
       delete process.env.CODING_X_CLAUDE_BIN;

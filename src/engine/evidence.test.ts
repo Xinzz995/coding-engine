@@ -39,7 +39,7 @@ describe('appendEvidence / readEvidence 往返', () => {
   it('非 ENOENT 的读取故障向上抛，不伪装成零记录（EISDIR）', () => {
     const dir = ws();
     mkdirSync(join(dir, EVIDENCE_FILE)); // 同名目录占位 → readFileSync 抛 EISDIR
-    expect(() => readEvidence(dir)).toThrow();
+    expect(() => readEvidence(dir)).toThrow(/EISDIR/);
   });
 });
 
@@ -73,6 +73,21 @@ describe('readEvidence 容错', () => {
     expect(r.skippedLines).toBe(3);
   });
 
+  it('入口守卫负例：JSON 合法但非对象（字符串/数组/null）与缺 at/at 非 string 的对象行全部计入 skippedLines', () => {
+    const dir = ws();
+    const badLines = [
+      JSON.stringify('just a string'),
+      JSON.stringify([1, 2]),
+      JSON.stringify(null),
+      JSON.stringify({ type: 'gate-run', source: 'engine', iteration: 1, storyId: null, ok: true, total: 1, ran: 1, ms: 0 }), // 缺 at
+      JSON.stringify({ type: 'gate-run', source: 'engine', at: 12345, iteration: 1, storyId: null, ok: true, total: 1, ran: 1, ms: 0 }), // at 非 string
+    ];
+    writeFileSync(join(dir, EVIDENCE_FILE), badLines.join('\n') + '\n' + JSON.stringify(gateRun) + '\n');
+    const r = readEvidence(dir);
+    expect(r.records).toEqual([gateRun]);
+    expect(r.skippedLines).toBe(5);
+  });
+
   it('空行与末尾换行不计跳过', () => {
     const dir = ws();
     writeFileSync(join(dir, EVIDENCE_FILE), `\n${JSON.stringify(gateRun)}\n\n`);
@@ -104,5 +119,16 @@ describe('readEvidence 容错', () => {
     appendEvidence(dir, tamperDeleted);
     appendEvidence(dir, iter);
     expect(readEvidence(dir).records).toEqual([tamper, tamperDeleted, iter]);
+  });
+
+  it('exitCode:null（超时形态）的 gate-run 往返', () => {
+    const dir = ws();
+    const timedOutRun: EvidenceRecord = {
+      type: 'gate-run', source: 'engine', at: '2026-07-08T06:05:00.000Z', iteration: 3,
+      storyId: 'US-001', ok: false, total: 2, ran: 1, ms: 30000,
+      failedCommand: 'npm test', exitCode: null, timedOut: true,
+    };
+    appendEvidence(dir, timedOutRun);
+    expect(readEvidence(dir).records).toEqual([timedOutRun]);
   });
 });

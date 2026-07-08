@@ -396,9 +396,10 @@ Add ability to mark tasks with different statuses.
 2. 检查 `branchName` 是否与新功能的 branch name 不同
 3. 如果不同且 `progress.md` 在 header 之外有内容：
    - 创建归档文件夹：`.workspace/archive/YYYY-MM-DD-feature-name/`
-   - 将当前的 `prd.json`、`state.json`、`progress.md`、`review-*.md` 留痕、`evidence.jsonl`、`report.html` 与 `screenshots/` 目录（均为如存在）复制到归档
+   - 将当前的 `prd.json`、`state.json`、`progress.md`、`review-*.md` 留痕、`evidence.jsonl`、`report.html`、`screenshots/` 目录与 `prd.tampered-*.json`（均为如存在）复制到归档
    - **删除工作区中的旧 `state.json`**——story id 惯例都从 US-001 起编，新旧几乎必然撞车；引擎信任既存 state.json，残留会把旧轮的 `passes: true` 误判为新 story 已完成、循环空转结束
    - **同时删除工作区中的旧 `evidence.jsonl`**——记录按轮次追加且不含轮次归属标识以外的运行标记，残留旧轮记录会污染新轮验证报告的门禁历史与时间线
+   - **同时删除工作区中的旧 `prd.tampered-*.json`**——取证已随归档保留，残留会污染新轮报告红旗区
    - 使用新的 header 重置 `progress.md`
 
 如果你在运行之间手动更新 prd.json，请先按上述步骤归档旧运行，再写入新的 prd.json。
@@ -409,7 +410,7 @@ Add ability to mark tasks with different statuses.
 
 源 PRD 修改后重新执行本 skill，若 `.workspace/prd.json` 已存在且 `branchName` 与新转换结果**相同**（同一功能），进入再派生模式（branchName 不同则走上方「归档之前的运行」流程）：
 
-1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）
+1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件、`evidence.jsonl`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）；**同时删除工作区中的旧 `evidence.jsonl`**——需求变更后旧登记按 acIndex 位置匹配，会错挂到改写后的验收标准上，一律作废重验
 2. 用新转换结果**整体重写** `prd.json`（沿用源 id，纯需求字段——prd.json 不含状态）
 3. 若 `state.json` 存在，按 story id 对齐调整它（不存在则跳过，引擎会自动初始化）：
    - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
@@ -426,7 +427,7 @@ Add ability to mark tasks with different statuses.
 
 在编写 prd.json 之前，验证：
 
-- [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json）
+- [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json、evidence.jsonl、prd.tampered-*.json）
 - [ ] 每个 story 可以在一次迭代中完成（足够小）
 - [ ] Stories 按依赖顺序排序（schema 到 backend 到 UI）
 - [ ] 每个 story 都有 "Typecheck passes" 作为标准
@@ -442,6 +443,6 @@ Add ability to mark tasks with different statuses.
 - [ ] models 已配置时：模型名已逐个与用户确认（引擎不校验名字），validator 能力 ≥ builder，不需要分层的 story 未强行标注
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
-- [ ] 同功能再派生时已先归档副本（含 state.json），并按 id 对齐调整 state.json（保留/重置/移除）
+- [ ] 同功能再派生时已先归档副本（含 state.json、evidence.jsonl），已删除工作区中的旧 evidence.jsonl，并按 id 对齐调整 state.json（保留/重置/移除）
 
 写入后运行：`npx coding-x repair`（用 jsonrepair 修复并二次校验 prd.json 与 state.json，后者不存在则跳过）。

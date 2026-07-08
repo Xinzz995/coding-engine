@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync, mkdirSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync, mkdirSync, unlinkSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createPrdGuard } from './prd-guard.js';
@@ -178,5 +178,26 @@ describe('createPrdGuard: read().tamperedArchive 三态', () => {
     unlinkSync(prdPath);
     const r = guard.read();
     expect(r.tamperedArchive).toBeNull();
+  });
+
+  it('内容篡改（非删除）但存档写入失败（目录不可写）时 tamperedArchive 仍为 null（D1）', () => {
+    // 目录 chmod 555（只读+可执行）：阻止在该目录内创建新文件（存档写），
+    // 但不影响改写已存在的 prd.json（打开既有文件写入不需要目录写权限）——
+    // 借真实文件系统权限而非 mock 隔离出「内容篡改 + 仅存档这一步失败」的组合。
+    const { dir, prdPath } = setup(PRD);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const guard = createPrdGuard(prdPath);
+    guard.read(); // 建快照
+    writeFileSync(prdPath, PRD.replace('原始验收标准', '被改弱的标准'));
+    chmodSync(dir, 0o555);
+    try {
+      const r = guard.read();
+      expect(r.prd?.userStories[0].acceptanceCriteria).toEqual(['原始验收标准']); // 引擎仍用快照
+      expect(r.tamperedArchive).toBeNull(); // 存档写入失败：保持 null，不误报存档路径
+      expect(r.restoreFailed).toBe(false); // 恢复写的是既有文件，不受目录写权限影响
+      expect(readdirSync(dir).filter((f) => f.startsWith('prd.tampered-'))).toHaveLength(0); // 确实未落盘
+    } finally {
+      chmodSync(dir, 0o755); // 交还可写权限，afterEach 的 rmSync 才能递归清理临时目录
+    }
   });
 });

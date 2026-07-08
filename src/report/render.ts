@@ -128,8 +128,9 @@ function renderStoryCard(s: StoryView, shots: ScreenshotEntry[], claims: Screens
   const retry = s.retryCount > 0 ? ` <span class="retry">重试 ${s.retryCount} 次</span>` : '';
   // tryReadPrd 无逐字段守卫，acceptanceCriteria 可能形状非法——渲染层兜底为空列表
   const acList = Array.isArray(s.acceptanceCriteria) ? s.acceptanceCriteria : [];
-  // acIndex 从 1 数起；越界（<1 或 >AC 数）与缺省一律归 story 级登记，不静默丢弃
-  const isStoryLevel = (c: ScreenshotClaim) => c.acIndex === undefined || c.acIndex < 1 || c.acIndex > acList.length;
+  // acIndex 从 1 数起；越界（<1 或 >AC 数）、非整数（如 1.5）与缺省一律归 story 级登记，不静默丢弃
+  const isStoryLevel = (c: ScreenshotClaim) =>
+    c.acIndex === undefined || !Number.isInteger(c.acIndex) || c.acIndex < 1 || c.acIndex > acList.length;
   const acs = acList.map((a, idx) => {
     const own = claims.filter((c) => c.acIndex === idx + 1);
     const badges = own.map((c) => ` ${claimLink(c)}${c.note ? `<span class="claim-note">${text(c.note)}</span>` : ''}`).join('');
@@ -186,7 +187,8 @@ function renderGateHistory(records: EvidenceRecord[]): string {
     return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
   }).join('');
   return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
-    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>`;
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>`;
 }
 
 function renderTimeline(records: EvidenceRecord[]): string {
@@ -197,6 +199,7 @@ function renderTimeline(records: EvidenceRecord[]): string {
   ).join('');
   return `<section class="card"><details><summary><h2>轮次时间线（engine 记录）</h2></summary>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>builder</th><th>validator</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>` +
     `<p class="placeholder">仅记录走到轮末的轮；轮号跳跃=该轮被打回或超时（对照门禁执行历史）。</p></details></section>`;
 }
 
@@ -227,10 +230,15 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
   const deletions = tamperEvents.filter((t) => t.archive === null).map((t) =>
     `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出删除类篡改（无存档）</li>`,
   ).join('');
+  // 存档已记名但工作区找不到对应文件（如归档目录未携带 tampered 文件、或人工清理过）：
+  // 不能静默消失——单独成行提示「已不在工作区」，取证链断裂时红旗区不得只剩空 <ul>
+  const missing = tamperEvents.filter((t) => t.archive !== null && !tampered.includes(t.archive as string)).map((t) =>
+    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出，存档 <code>${text(t.archive)}</code> 已不在工作区</li>`,
+  ).join('');
   return `<section class="card red-flag">
 <h2>🚩 红旗区：运行期篡改存档</h2>
 <p>运行期间 prd.json 被修改过，引擎已按启动快照恢复并存档（ADR-007）。合并裁决前请逐个核对：</p>
-<ul>${files}${deletions}</ul>
+<ul>${files}${deletions}${missing}</ul>
 <p>指引：<code>diff</code> 存档与 <code>prd.json</code>，核对运行期被改了什么；与预期不符须停止合并。</p>
 </section>`;
 }
