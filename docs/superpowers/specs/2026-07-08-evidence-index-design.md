@@ -14,7 +14,7 @@ scope: root
 
 0.19.0 验证报告让证据可见，但证据链本身有四个缺口：
 
-1. **截图归属靠文件名猜测**：`parseScreenshotEntry` 按命名约定解析，validator 的命名甚至没有契约（builder.md 有 `builder-[story-id]-[序号].png` 规范，validator.md 只说「存到 screenshots/」——dogfood 里 `validator-us-008-pass-N` 是 agent 自发约定）；「哪张截图证明哪条 AC」的关联不存在。
+1. **截图归属靠文件名猜测**：`parseScreenshotEntry` 按命名约定解析（builder.md 契约 `builder-[story-id]-[序号].png`、validator.md 契约 `validator-[story-id]-[pass/fail]-[序号].png`——两端契约齐备且 dogfood 实测遵守），但命名只能携带 story 级归属；「哪张截图证明哪条 AC」的关联不存在，且解析对命名偏差是猜测式容错。
 2. **门禁通过零留痕**：只有失败写 notes；报告能展示门禁配置，无法证明「每轮真实跑过、哪轮通过」。
 3. **轮次时间线无落盘**：第 N 轮谁跑了/什么模型/什么结果只在 console，报告只有终态没有过程。
 4. **验证方式散在 progress.md 叙述里**，无结构化。
@@ -58,7 +58,7 @@ export type EvidenceRecord =
 **指令层**（assets/instructions/，经 `{{WORKSPACE}}` 渲染管线）：
 
 - builder.md 截图段后扩登记约定：最终验证的每张截图追加一行登记，给死单行 JSON 模板（type/source/at/storyId/file 必填，acIndex（从 1 数起）/note 可选）；明示「登记失败不阻塞你完成 story」（弱依赖）。
-- validator.md 同样扩登记约定；**顺手补上命名契约** `validator-[story-id]-[序号].png`（0.19.0 报告解析已兼容历史命名，契约让未登记回退更准）。
+- validator.md 同样扩登记约定（其截图要求节已有命名契约 `validator-[story-id]-[pass/fail]-[序号].png`，登记模板的 file 即该契约产物，无需另立规范）。
 
 **报告消费**（collectReport 读 evidence 入 `ReportData`；render 四点增强，全部条件渲染）：
 
