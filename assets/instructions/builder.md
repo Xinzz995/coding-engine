@@ -68,6 +68,12 @@
 
 实现完成后的**最终浏览器验证**中，每个验证操作都把截图保存到 `{{WORKSPACE}}/screenshots/`（不要存项目根目录，避免被提交扫进用户仓库），文件名 `builder-[story-id]-[序号].png`。截图是「真实操作过」的工件证据——**没有截图的浏览器验证视为未验证**。开发过程中的反复试错不需要截图，只有最终那次完整验证需要留证。
 
+每张最终验证截图保存后，向 `{{WORKSPACE}}/evidence.jsonl` 追加一行登记（单行 JSON；`acIndex` 是该截图证明的验收标准在 acceptanceCriteria 列表中的序号，**从 1 数起**，证明不了具体某条时省略该字段；`note` 用一句话说明截图证明了什么）：
+
+    echo '{"type":"screenshot-claim","source":"builder","at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","storyId":"US-XXX","acIndex":1,"file":"builder-US-XXX-1.png","note":"一句话说明"}' >> {{WORKSPACE}}/evidence.jsonl
+
+登记让验证报告能把截图对到具体验收标准；登记失败不阻塞你完成 story（evidence 是证据增强，不是完成条件）。
+
 重要约束：
 
 - 优先复用**已经在运行且可访问**的本地服务；只有在确实无法访问时，才允许自行启动 dev server。

@@ -239,13 +239,16 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
   }
 }
 
-/** 读全部记录；文件缺失按空处理（容错：有什么记什么）。 */
+/** 读全部记录；文件缺失（ENOENT）按空处理，其余 IO 故障向上抛（E-T1 审查订正：
+ *  EACCES/EISDIR 伪装成「零记录」是审计信道的假阴性——消费方定语义，报告端沿
+ *  writeReport 既有 catch 面走「生成失败」而非假装无证据）。 */
 export function readEvidence(workspace: string): EvidenceReadResult {
   let raw: string;
   try {
     raw = readFileSync(join(workspace, EVIDENCE_FILE), 'utf-8');
-  } catch {
-    return { records: [], skippedLines: 0 };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { records: [], skippedLines: 0 };
+    throw err;
   }
   const records: EvidenceRecord[] = [];
   let skippedLines = 0;

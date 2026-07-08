@@ -39,6 +39,12 @@ export interface GateFailure {
 export interface GateResult {
   ok: boolean;
   failure: GateFailure | null;
+  /** 配置的检查总条数 */
+  total: number;
+  /** fail-fast 实际执行到的条数（通过=total；失败=失败那条的序号） */
+  ran: number;
+  /** 已执行检查的总耗时（毫秒） */
+  ms: number;
 }
 
 /**
@@ -114,11 +120,14 @@ export async function runQualityChecks(
   cwd: string,
   timeoutMs: number = GATE_TIMEOUT_MS,
 ): Promise<GateResult> {
+  const started = Date.now();
+  let ran = 0;
   for (const command of checks) {
+    ran++;
     const failed = await runOneCheck(command, cwd, timeoutMs);
-    if (failed) return { ok: false, failure: failed };
+    if (failed) return { ok: false, failure: failed, total: checks.length, ran, ms: Date.now() - started };
   }
-  return { ok: true, failure: null };
+  return { ok: true, failure: null, total: checks.length, ran, ms: Date.now() - started };
 }
 
 function pad2(n: number): string {

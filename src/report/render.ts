@@ -2,6 +2,7 @@ import type { ReportData, ScreenshotEntry } from './report.js';
 import type { StoryView } from '../engine/state.js';
 import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX } from '../engine/gate.js';
 import { readModelsConfig } from '../engine/models.js';
+import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
 
 export function escapeHtml(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -84,17 +85,19 @@ function renderNotes(notes: string): string {
   return `<div class="notes">${lines}</div>`;
 }
 
-function renderShotFigure(s: ScreenshotEntry): string {
+function renderShotFigure(s: ScreenshotEntry, markUnclaimed: boolean): string {
   const name = text(s.filename);
+  const tag = markUnclaimed ? '<span class="unclaimed">未登记</span>' : '';
   if (!s.isImage) {
     // download：非图片附件（pdf 等）不应在浏览器内联打开而应强制下载；
     // rel 防 target="_blank" 的反向 window.opener 访问——此处非 _blank 也一并加固，成本为零
-    return `<div class="artifact-link"><a href="${imgSrc(s.filename)}" download rel="noopener noreferrer">📎 ${name}</a></div>`;
+    return `<div class="artifact-link"><a href="${imgSrc(s.filename)}" download rel="noopener noreferrer">📎 ${name}</a>${tag}</div>`;
   }
-  return `<figure class="shot"><a href="${imgSrc(s.filename)}" target="_blank" rel="noopener noreferrer"><img src="${imgSrc(s.filename)}" alt="${name}" loading="lazy"></a><figcaption>${name}</figcaption></figure>`;
+  return `<figure class="shot"><a href="${imgSrc(s.filename)}" target="_blank" rel="noopener noreferrer"><img src="${imgSrc(s.filename)}" alt="${name}" loading="lazy"></a><figcaption>${name}${tag}</figcaption></figure>`;
 }
 
-function renderGallery(shots: ScreenshotEntry[]): string {
+// claimedFiles=null：全局无任何 claim（无 evidence 或无登记）——不标注不排序，视觉与 0.19.0 一致
+function renderGallery(shots: ScreenshotEntry[], claimedFiles: ReadonlySet<string> | null = null): string {
   if (shots.length === 0) return '';
   const groups = [
     { phase: 'builder' as const, label: 'builder 截图' },
@@ -104,9 +107,12 @@ function renderGallery(shots: ScreenshotEntry[]): string {
   for (const g of groups) {
     const own = shots.filter((s) => s.phase === g.phase);
     if (own.length === 0) continue;
+    // 登记优先：有 claim 的排前（组内稳定排序，登记态相同保持名序）；无 claim 语境保持名序
+    const sorted = claimedFiles === null ? own
+      : [...own].sort((a, b) => Number(claimedFiles.has(b.filename)) - Number(claimedFiles.has(a.filename)));
     parts.push(
       `<div class="gallery-group"><div class="gallery-label">${g.label}（${own.length}）</div>` +
-      `<div class="gallery">${own.map(renderShotFigure).join('')}</div></div>`,
+      `<div class="gallery">${sorted.map((s) => renderShotFigure(s, claimedFiles !== null && !claimedFiles.has(s.filename))).join('')}</div></div>`,
     );
   }
   return parts.join('');
@@ -118,16 +124,28 @@ function storyBadge(s: StoryView): string {
   return '<span class="badge pending">⬜ 未完成</span>';
 }
 
-function renderStoryCard(s: StoryView, shots: ScreenshotEntry[]): string {
+function renderStoryCard(s: StoryView, shots: ScreenshotEntry[], claims: ScreenshotClaim[], anyClaims: boolean): string {
   const retry = s.retryCount > 0 ? ` <span class="retry">重试 ${s.retryCount} 次</span>` : '';
   // tryReadPrd 无逐字段守卫，acceptanceCriteria 可能形状非法——渲染层兜底为空列表
   const acList = Array.isArray(s.acceptanceCriteria) ? s.acceptanceCriteria : [];
-  const acs = acList.map((a) => `<li>${text(a)}</li>`).join('');
+  // acIndex 从 1 数起；越界（<1 或 >AC 数）、非整数（如 1.5）与缺省一律归 story 级登记，不静默丢弃
+  const isStoryLevel = (c: ScreenshotClaim) =>
+    c.acIndex === undefined || !Number.isInteger(c.acIndex) || c.acIndex < 1 || c.acIndex > acList.length;
+  const acs = acList.map((a, idx) => {
+    const own = claims.filter((c) => c.acIndex === idx + 1);
+    const badges = own.map((c) => ` ${claimLink(c)}${c.note ? `<span class="claim-note">${text(c.note)}</span>` : ''}`).join('');
+    return `<li>${text(a)}${badges}</li>`;
+  }).join('');
+  const storyClaims = claims.filter(isStoryLevel);
+  const storyClaimsHtml = storyClaims.length
+    ? `<div class="meta-line">story 级登记：${storyClaims.map((c) => `${claimLink(c)}${c.note ? `（${text(c.note)}）` : ''}`).join(' · ')}</div>`
+    : '';
   return `<section class="card story">
 <h3>${text(s.id)} ${text(s.title)} ${storyBadge(s)}${retry}</h3>
 <ul class="acs">${acs}</ul>
+${storyClaimsHtml}
 ${renderNotes(s.notes)}
-${renderGallery(shots)}
+${renderGallery(shots, anyClaims ? new Set(claims.map((c) => c.file)) : null)}
 </section>`;
 }
 
@@ -151,6 +169,44 @@ function renderGateConfig(data: ReportData): string {
     `<ul class="checks">${checks.map((c) => `<li><code>${escapeHtml(c)}</code></li>`).join('')}</ul>`;
 }
 
+/** ISO at → 本地 YYYY-MM-DD HH:mm；非法输入原样转义呈现（evidence 是 agent 可写区数据） */
+function stampOf(at: string): string {
+  const d = new Date(at);
+  return Number.isNaN(d.getTime()) ? text(at) : formatStamp(d);
+}
+
+function gateRunsOf(records: EvidenceRecord[]): Extract<EvidenceRecord, { type: 'gate-run' }>[] {
+  return records.filter((r): r is Extract<EvidenceRecord, { type: 'gate-run' }> => r.type === 'gate-run');
+}
+
+function renderGateHistory(records: EvidenceRecord[]): string {
+  const runs = gateRunsOf(records);
+  if (runs.length === 0) return '';
+  const rows = runs.map((r) => {
+    const failNote = r.ok ? '' : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}`;
+    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
+  }).join('');
+  return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>`;
+}
+
+function renderTimeline(records: EvidenceRecord[]): string {
+  const iters = records.filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration');
+  if (iters.length === 0) return '';
+  const rows = iters.map((r) =>
+    `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.builderRan ? text(r.builderModel ?? '默认') : '未跑'}</td><td>${r.validatorRan ? text(r.validatorModel ?? '默认') : (r.agentBlocked ? '跳过（agent blocked）' : r.skippedValidator ? '跳过（快照写回失败）' : '未跑')}</td><td>${stampOf(r.at)}</td></tr>`,
+  ).join('');
+  return `<section class="card"><details><summary><h2>轮次时间线（engine 记录）</h2></summary>` +
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>builder</th><th>validator</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>` +
+    `<p class="placeholder">仅记录走到轮末的轮；轮号跳跃=该轮被打回或超时（对照门禁执行历史）。</p></details></section>`;
+}
+
+function claimLink(c: ScreenshotClaim): string {
+  return `<a class="ac-claim" href="${imgSrc(c.file)}" target="_blank" rel="noopener noreferrer"${c.note ? ` title="${text(c.note)}"` : ''}>📎 ${text(c.file)}</a><span class="claim-tag">agent 声明</span>`;
+}
+
 function renderModels(data: ReportData): string {
   const { config, warnings } = readModelsConfig(data.prd);
   const warnLines = warnings.map((w) => `<div class="meta-line warn">${escapeHtml(w)}</div>`).join('');
@@ -163,21 +219,37 @@ function renderModels(data: ReportData): string {
   return `<div class="meta-line">模型路由：${items.join(' · ')}</div>${warnLines}`;
 }
 
-function renderRedFlags(tampered: string[]): string {
-  if (tampered.length === 0) return '';
-  const files = tampered.map((f) => `<li><code>${text(f)}</code></li>`).join('');
+function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
+  const tamperEvents = records.filter((r): r is Extract<EvidenceRecord, { type: 'tamper' }> => r.type === 'tamper');
+  if (tampered.length === 0 && tamperEvents.length === 0) return '';
+  const eventOf = new Map(tamperEvents.filter((t) => t.archive !== null).map((t) => [t.archive as string, t]));
+  const files = tampered.map((f) => {
+    const ev = eventOf.get(f);
+    return `<li><code>${text(f)}</code>${ev ? `（第 ${ev.iteration} 轮 ${stampOf(ev.at)} 检出）` : ''}</li>`;
+  }).join('');
+  const deletions = tamperEvents.filter((t) => t.archive === null).map((t) =>
+    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出删除类篡改（无存档）</li>`,
+  ).join('');
+  // 存档已记名但工作区找不到对应文件（如归档目录未携带 tampered 文件、或人工清理过）：
+  // 不能静默消失——单独成行提示「已不在工作区」，取证链断裂时红旗区不得只剩空 <ul>
+  const missing = tamperEvents.filter((t) => t.archive !== null && !tampered.includes(t.archive as string)).map((t) =>
+    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出，存档 <code>${text(t.archive)}</code> 已不在工作区</li>`,
+  ).join('');
   return `<section class="card red-flag">
 <h2>🚩 红旗区：运行期篡改存档</h2>
 <p>运行期间 prd.json 被修改过，引擎已按启动快照恢复并存档（ADR-007）。合并裁决前请逐个核对：</p>
-<ul>${files}</ul>
+<ul>${files}${deletions}${missing}</ul>
 <p>指引：<code>diff</code> 存档与 <code>prd.json</code>，核对运行期被改了什么；与预期不符须停止合并。</p>
 </section>`;
 }
 
-function renderUnattributed(shots: ScreenshotEntry[]): string {
+function renderUnattributed(shots: ScreenshotEntry[], orphanClaims: ScreenshotClaim[]): string {
   const orphan = shots.filter((s) => s.storyId === null);
-  if (orphan.length === 0) return '';
-  return `<section class="card"><h2>未归类工件</h2><div class="gallery">${orphan.map(renderShotFigure).join('')}</div></section>`;
+  if (orphan.length === 0 && orphanClaims.length === 0) return '';
+  const claimLines = orphanClaims.map((c) =>
+    `<div class="artifact-link">${claimLink(c)}（登记 storyId：<code>${text(c.storyId)}</code> 未匹配任何 story）${c.note ? ` ${text(c.note)}` : ''}</div>`,
+  ).join('');
+  return `<section class="card"><h2>未归类工件</h2><div class="gallery">${orphan.map((s) => renderShotFigure(s, false)).join('')}</div>${claimLines}</section>`;
 }
 
 function renderReviews(reviews: ReportData['reviews']): string {
@@ -253,6 +325,13 @@ a { color: var(--blue); }
 summary { cursor: pointer; }
 summary h2 { display: inline; }
 footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 24px; }
+.evidence-table { border-collapse: collapse; font-size: 12px; margin: 6px 0 10px; }
+.evidence-table th, .evidence-table td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
+.evidence-table th { background: hsl(240 4% 93%); font-weight: 600; }
+.ac-claim { font-size: 12px; margin-left: 6px; word-break: break-all; }
+.claim-tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: hsl(36 100% 50% / 0.15); color: hsl(36 100% 32%); margin-left: 4px; vertical-align: middle; }
+.claim-note { font-size: 12px; color: var(--muted); margin-left: 6px; }
+.unclaimed { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: hsl(0 0% 72% / 0.25); color: var(--muted); margin-left: 4px; vertical-align: middle; }
 `;
 
 export function renderReportHtml(data: ReportData): string {
@@ -264,9 +343,27 @@ export function renderReportHtml(data: ReportData): string {
     list.push(s);
     byStory.set(s.storyId, list);
   }
-  const cards = stories.map((s) => renderStoryCard(s, byStory.get(s.id) ?? [])).join('\n');
+  // claim 归属：storyId 大小写不敏感匹配（对齐 parseScreenshotEntry 先例）；匹配不到的落未归类
+  const allClaims = data.evidence.records.filter((r): r is ScreenshotClaim => r.type === 'screenshot-claim');
+  const idByLower = new Map(stories.map((s) => [String(s.id).toLowerCase(), s.id]));
+  const claimsByStory = new Map<string, ScreenshotClaim[]>();
+  const orphanClaims: ScreenshotClaim[] = [];
+  for (const c of allClaims) {
+    const realId = idByLower.get(c.storyId.toLowerCase());
+    if (realId === undefined) { orphanClaims.push(c); continue; }
+    const list = claimsByStory.get(realId) ?? [];
+    list.push(c);
+    claimsByStory.set(realId, list);
+  }
+  const cards = stories.map((s) => renderStoryCard(s, byStory.get(s.id) ?? [], claimsByStory.get(s.id) ?? [], allClaims.length > 0)).join('\n');
+  const claimDisclaimer = allClaims.length > 0
+    ? '<p class="placeholder">「agent 声明」类证据由 builder/validator 自行登记，真实性以截图内容与 git 历史为准。</p>'
+    : '';
   const stateWarn = data.stateCorrupted
     ? '<div class="meta-line warn">⚠️ state.json 已损坏，已按 prd.json 内嵌旧格式状态回退显示，可能非最新执行结果（建议 npx coding-x repair）</div>'
+    : '';
+  const evidenceWarn = data.evidence.skippedLines > 0
+    ? `<div class="meta-line warn">⚠️ evidence.jsonl 有 ${data.evidence.skippedLines} 行无法解析已跳过</div>`
     : '';
   const title = `${text(prd.project)} · 验证报告`;
   return `<!DOCTYPE html>
@@ -285,14 +382,18 @@ ${renderBanner(stories)}
 <div class="meta-line">分支：<code>${text(prd.branchName)}</code>${prd.sourcePrd ? ` · 源 PRD：<code>${text(prd.sourcePrd)}</code>` : ''}</div>
 <div class="meta-line">生成时间：${formatStamp(data.generatedAt)} · workspace：<code>${text(data.workspace)}</code></div>
 ${stateWarn}
+${evidenceWarn}
 ${renderGateConfig(data)}
+${renderGateHistory(data.evidence.records)}
 ${renderModels(data)}
 <div class="meta-line">统计：${stories.length} story · ${data.screenshots.length} 个截图工件 · ${data.reviews.length} 份人审留痕</div>
 </header>
-${renderRedFlags(data.tamperedArchives)}
+${renderRedFlags(data.tamperedArchives, data.evidence.records)}
 <h2 class="section-title">story 证据</h2>
+${claimDisclaimer}
 ${cards}
-${renderUnattributed(data.screenshots)}
+${renderUnattributed(data.screenshots, orphanClaims)}
+${renderTimeline(data.evidence.records)}
 ${renderReviews(data.reviews)}
 ${renderProgressSection(data.progress)}
 <footer>由 coding-x report 生成 · ${formatStamp(data.generatedAt)}</footer>
