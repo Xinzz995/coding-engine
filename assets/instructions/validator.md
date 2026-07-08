@@ -57,6 +57,11 @@
 
 - 如果使用了浏览器工具进行验证，无论通过还是失败，每个执行操作都把截图保存到 `{{WORKSPACE}}/screenshots/` 目录（不要保存到项目根目录，避免被后续提交扫进用户仓库）
 - 文件名格式：`validator-[story-id]-[pass/fail]-[序号].png`（例如 `validator-us-002-fail-1.png`）
+- 每张截图保存后，向 `{{WORKSPACE}}/evidence.jsonl` 追加一行登记（单行 JSON；`acIndex` 是该截图对应的验收标准序号，**从 1 数起**，对不到具体某条时省略；`note` 一句话说明验证了什么）：
+
+      echo '{"type":"screenshot-claim","source":"validator","at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","storyId":"US-XXX","acIndex":1,"file":"validator-us-xxx-pass-1.png","note":"一句话说明"}' >> {{WORKSPACE}}/evidence.jsonl
+
+- 登记失败不阻塞验证流程（evidence 是证据增强，不是验证条件）
 
 ## 重要约束
 

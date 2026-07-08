@@ -693,6 +693,23 @@ describe('instruction assets arbitration contract', () => {
   });
 });
 
+describe('instruction assets evidence contract', () => {
+  const read = (f: string) =>
+    readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
+
+  it('builder.md and validator.md carry the screenshot-claim registration template', () => {
+    for (const f of ['builder.md', 'validator.md']) {
+      const content = read(f);
+      expect(content).toContain('evidence.jsonl');
+      expect(content).toContain('screenshot-claim');
+      expect(content).toContain('从 1 数起'); // acIndex 1-based 明示
+      expect(content).toContain('登记失败不阻塞'); // 弱依赖声明
+    }
+    expect(read('builder.md')).toContain('"source":"builder"');
+    expect(read('validator.md')).toContain('"source":"validator"');
+  });
+});
+
 describe('runLoop prd freeze', () => {
   it('builder 删除 qualityChecks 也架空不了门禁：文件被恢复、门禁照跑照打回', async () => {
     // 漏洞路径：builder 改写 prd.json 删掉 qualityChecks → 下轮门禁静默失效。
