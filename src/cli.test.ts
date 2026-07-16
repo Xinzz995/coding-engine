@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseCliArgs, permissionWarning, runDashboard, main } from './cli.js';
@@ -305,5 +305,45 @@ describe('main — report subcommand', () => {
         expect(await main(['report', '--workspace', dir])).toBe(1);
       } finally { console.error = orig; }
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('repair 与工作区锁', () => {
+  const validPrd = JSON.stringify({
+    project: 'p', branchName: 'ralph/x', description: 'd',
+    userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
+  });
+
+  it('refuses to repair while an alive lock exists (exit 2, files untouched)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-repair-lock-'));
+    const brokenRaw = '{"project":"p","branchName":"b","description":"d","userStories":[],}'; // 尾逗号：可修复的坏 JSON
+    writeFileSync(join(dir, 'prd.json'), brokenRaw);
+    writeFileSync(join(dir, 'engine.lock'), JSON.stringify({
+      pid: process.pid, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
+    }));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const code = await main(['repair', '--workspace', dir]);
+      expect(code).toBe(2);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('已被另一个 coding-x 进程锁定'));
+      expect(readFileSync(join(dir, 'prd.json'), 'utf-8')).toBe(brokenRaw); // 未动文件
+    } finally {
+      errSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('acquires and releases the lock across a successful repair', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-repair-ok-'));
+    writeFileSync(join(dir, 'prd.json'), validPrd);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const code = await main(['repair', '--workspace', dir]);
+      expect(code).toBe(0);
+      expect(existsSync(join(dir, 'engine.lock'))).toBe(false); // 修完锁已释放
+    } finally {
+      logSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

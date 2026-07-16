@@ -3,6 +3,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
+import { acquireLock, LockConflictError } from './engine/lock.js';
 import { runDoctor, renderDoctorReport } from './doctor/doctor.js';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status/status.js';
 import { writeReport } from './report/report.js';
@@ -129,9 +130,24 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'repair') {
-    const repaired = repairWorkspaceFiles(cfg.workspace);
-    console.log(`✅ 已修复: ${repaired.join('、')}`);
-    return 0;
+    // repair 重写 prd.json/state.json，与运行中的引擎互踩——与 run 同锁互斥（ADR-008）
+    let lock;
+    try {
+      lock = acquireLock(cfg.workspace, 'repair');
+    } catch (err) {
+      if (err instanceof LockConflictError) {
+        console.error(err.message);
+        return 2;
+      }
+      throw err;
+    }
+    try {
+      const repaired = repairWorkspaceFiles(cfg.workspace);
+      console.log(`✅ 已修复: ${repaired.join('、')}`);
+      return 0;
+    } finally {
+      lock.release();
+    }
   }
 
   if (cfg.command === 'doctor') {
