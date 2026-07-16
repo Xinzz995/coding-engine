@@ -477,3 +477,47 @@ describe('runDoctor quality gate config check', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
+
+describe('runDoctor workspace lock check', () => {
+  it('reports found=false when no engine.lock exists', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-'));
+    try {
+      const report = runDoctor(root);
+      expect(report.lock).toEqual({ found: false, stale: false, pid: null });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('flags a stale lock (dead pid) as advisory without failing the exit code', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-stale-'));
+    try {
+      mkdirSync(join(root, '.workspace'), { recursive: true });
+      writeFileSync(join(root, '.workspace', 'engine.lock'), JSON.stringify({
+        pid: 999999999, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
+      }));
+      const report = runDoctor(root);
+      expect(report.lock).toEqual({ found: true, stale: true, pid: 999999999 });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('自动接管');
+      expect(exitCode).toBe(0); // 建议项不计失败
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a live lock as engine-running info', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-live-'));
+    try {
+      mkdirSync(join(root, '.workspace'), { recursive: true });
+      writeFileSync(join(root, '.workspace', 'engine.lock'), JSON.stringify({
+        pid: process.pid, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
+      }));
+      const report = runDoctor(root);
+      expect(report.lock).toEqual({ found: true, stale: false, pid: process.pid });
+      expect(renderDoctorReport(report).text).toContain('引擎运行中');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

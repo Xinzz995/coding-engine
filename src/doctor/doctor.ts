@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { dirname, join, relative } from 'node:path';
 import { tryReadPrd } from '../engine/prd.js';
 import { readQualityChecks } from '../engine/gate.js';
+import { isPidAlive, readLockInfo, LOCK_FILE } from '../engine/lock.js';
 
 export interface DoctorIssue {
   file: string;
@@ -50,6 +51,14 @@ export interface GateConfigCheckResult {
   configured: boolean;
 }
 
+export interface LockCheckResult {
+  /** engine.lock 是否存在；不存在=无引擎实例在运行，正常态 */
+  found: boolean;
+  /** 存在时：持锁 pid 已死或锁损坏（stale，上次异常退出遗留）；引擎运行中为 false */
+  stale: boolean;
+  pid: number | null;
+}
+
 export interface DoctorReport {
   docsFound: boolean;
   frontmatter: FrontmatterCheckResult | null;
@@ -57,6 +66,7 @@ export interface DoctorReport {
   agentsIndex: AgentsIndexCheckResult | null;
   links: LinksCheckResult | null;
   gate: GateConfigCheckResult;
+  lock: LockCheckResult;
 }
 
 const REQUIRED_FIELDS = ['title', 'status', 'updated', 'scope'] as const;
@@ -199,9 +209,15 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     const checks = readQualityChecks(tryReadPrd(join(root, prdRel)));
     gate = { prdPath: prdRel, prdFound: true, configured: Array.isArray(checks) };
   }
+  const lockPath = join(root, workspace, LOCK_FILE);
+  let lock: LockCheckResult = { found: false, stale: false, pid: null };
+  if (existsSync(lockPath)) {
+    const info = readLockInfo(lockPath);
+    lock = { found: true, stale: !(info !== null && isPidAlive(info.pid)), pid: info?.pid ?? null };
+  }
   const docsDir = join(root, 'docs');
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
-    return { docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null, gate };
+    return { docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null, gate, lock };
   }
   const files = walkMarkdownFiles(docsDir);
   const gitAvailable = isGitWorkTree(root);
@@ -270,6 +286,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     agentsIndex,
     links: { checked: linksChecked, issues: linkIssues },
     gate,
+    lock,
   };
 }
 
@@ -285,10 +302,22 @@ function renderGateLines(gate: GateConfigCheckResult): string[] {
   return lines;
 }
 
+function renderLockLines(lock: LockCheckResult): string[] {
+  const lines = ['🔒 workspace 锁'];
+  if (!lock.found) {
+    lines.push('  ✅ 无 engine.lock（当前没有引擎实例在运行）');
+  } else if (lock.stale) {
+    lines.push(`  💡 发现 stale 锁${lock.pid !== null ? `（pid ${lock.pid} 已不存在）` : '（锁文件损坏）'}：上次异常退出遗留，下次 coding-x 运行将自动接管（建议项，不计失败）`);
+  } else {
+    lines.push(`  ℹ️  引擎运行中（pid ${lock.pid}）：请勿对同一 workspace 并行启动 run/repair`);
+  }
+  return lines;
+}
+
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
     return {
-      text: ['ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。', '', ...renderGateLines(report.gate)].join('\n'),
+      text: ['ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。', '', ...renderGateLines(report.gate), '', ...renderLockLines(report.lock)].join('\n'),
       exitCode: 0,
     };
   }
@@ -324,6 +353,7 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
     for (const issue of links.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
   lines.push('', ...renderGateLines(report.gate));
+  lines.push('', ...renderLockLines(report.lock));
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
