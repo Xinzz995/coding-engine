@@ -63,7 +63,7 @@ coding-x 同时是两样东西：
 ```
 
 - **完成即退出**：全部 story 解决 → 退出码 0；跑满 `maxIterations` 仍未完成 → 退出码 1。
-- **单实例锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
+- **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；开发阶段超时则跳过验证、下一轮重试。
 - **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。门禁配置受快照保护：运行期改写 prd.json（含删改 `qualityChecks` / 验收标准）会被检测、恢复并存档，无法架空门禁与验收（ADR-007）。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
 - **状态共享**：引擎与 agent 都在项目根目录运行，读写同一组 `prd.json` / `state.json` / `progress.md`（需求只读，状态写 state.json）；指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
