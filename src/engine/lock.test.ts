@@ -113,3 +113,69 @@ describe('release', () => {
     expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
   });
 });
+
+describe('verify（轮首自愈）', () => {
+  it('rebuilds the lock when it was deleted', () => {
+    const dir = ws();
+    const lock = acquireLock(dir, 'run');
+    const orig = console.warn;
+    const warns: string[] = [];
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      rmSync(join(dir, LOCK_FILE)); // 模拟 agent 误删
+      lock.verify();
+      expect(readLockInfo(join(dir, LOCK_FILE))!.pid).toBe(process.pid);
+      expect(warns.some((w) => w.includes('已重建'))).toBe(true);
+    } finally {
+      console.warn = orig;
+      lock.release();
+    }
+  });
+
+  it('rebuilds the lock when it was overwritten by someone else', () => {
+    const dir = ws();
+    const lock = acquireLock(dir, 'run');
+    const orig = console.warn;
+    console.warn = () => {};
+    try {
+      writeFileSync(join(dir, LOCK_FILE), lockJson(DEAD_PID)); // 模拟 agent 改写
+      lock.verify();
+      expect(readLockInfo(join(dir, LOCK_FILE))!.pid).toBe(process.pid);
+    } finally {
+      console.warn = orig;
+      lock.release();
+    }
+  });
+
+  it('is a no-op when the lock is intact', () => {
+    const dir = ws();
+    const lock = acquireLock(dir, 'run');
+    const orig = console.warn;
+    const warns: string[] = [];
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      lock.verify();
+      expect(warns).toEqual([]);
+    } finally {
+      console.warn = orig;
+      lock.release();
+    }
+  });
+});
+
+describe('tmp 残留清理', () => {
+  it('removes *.tmp-<digits> residue on acquire but keeps other temp files', () => {
+    const dir = ws();
+    writeFileSync(join(dir, 'state.json.tmp-12345'), 'residue');
+    writeFileSync(join(dir, 'note.tmp'), 'keep');       // 无数字后缀：不是 fs-atomic 模式
+    writeFileSync(join(dir, 'foo.tmp-abc'), 'keep');    // 非纯数字：不清
+    const lock = acquireLock(dir, 'run');
+    try {
+      expect(existsSync(join(dir, 'state.json.tmp-12345'))).toBe(false);
+      expect(existsSync(join(dir, 'note.tmp'))).toBe(true);
+      expect(existsSync(join(dir, 'foo.tmp-abc'))).toBe(true);
+    } finally {
+      lock.release();
+    }
+  });
+});
