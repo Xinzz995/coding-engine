@@ -744,14 +744,21 @@ describe('workspace 并发锁', () => {
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    // interrupt 注入口（LoopConfig.interrupt）：等待期采样锁是否已释放
+    // interrupt 注入口（LoopConfig.interrupt）：以 keepOpen 分支「运行结束」日志行为事件驱动
+    // 同步点采样锁是否已释放——该行在 lock.release() 之后、await interrupt 之前打印（见
+    // loop.ts），比固定墙钟 setTimeout 更可靠：后者与真实子进程冷启动赛跑，冷启动超时窗口
+    // 就会误采到「循环仍在跑」的假失败。
     let lockDuringWait = true;
-    const interrupt = new Promise<void>((resolve) => {
-      setTimeout(() => {
+    let resolveInterrupt!: () => void;
+    const interrupt = new Promise<void>((resolve) => { resolveInterrupt = resolve; });
+    const orig = console.log;
+    console.log = (...args: unknown[]) => {
+      const line = args.join(' ');
+      if (line.includes('运行结束')) {
         lockDuringWait = existsSync(join(workspace, LOCK_FILE));
-        resolve();
-      }, 50);
-    });
+        resolveInterrupt();
+      }
+    };
     try {
       const code = await runLoop({
         kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
@@ -761,11 +768,14 @@ describe('workspace 并发锁', () => {
       expect(code).toBe(0);
       expect(lockDuringWait).toBe(false); // keepOpen 等待期间锁已不在
     } finally {
+      console.log = orig;
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
 });
 ```
+
+（执行中订正：原 50ms 墙钟采样有时序抖动，已换事件驱动同步点，见 T4 修复轮）
 
 - [ ] **Step 2: 跑测试确认失败**
 

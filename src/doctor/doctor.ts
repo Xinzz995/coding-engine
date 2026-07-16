@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { tryReadPrd } from '../engine/prd.js';
 import { readQualityChecks } from '../engine/gate.js';
 import { isPidAlive, readLockInfo, LOCK_FILE } from '../engine/lock.js';
@@ -205,11 +205,14 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   const workspace = options.workspace ?? '.workspace';
   const prdRel = join(workspace, 'prd.json');
   let gate: GateConfigCheckResult = { prdPath: prdRel, prdFound: false, configured: false };
-  if (existsSync(join(root, prdRel))) {
-    const checks = readQualityChecks(tryReadPrd(join(root, prdRel)));
+  // resolve（非 join）：workspace 可能是绝对路径（如 --workspace 巡检异地目录）；join 会把
+  // 已是绝对路径的第二段原样拼在 root 之下产生不存在的路径，resolve 则在遇到绝对路径段时
+  // 正确丢弃 root，相对 workspace 的既有行为不变（终审 2026-07-16 发现 1）。
+  if (existsSync(resolve(root, prdRel))) {
+    const checks = readQualityChecks(tryReadPrd(resolve(root, prdRel)));
     gate = { prdPath: prdRel, prdFound: true, configured: Array.isArray(checks) };
   }
-  const lockPath = join(root, workspace, LOCK_FILE);
+  const lockPath = resolve(root, workspace, LOCK_FILE);
   let lock: LockCheckResult = { found: false, stale: false, pid: null };
   if (existsSync(lockPath)) {
     const info = readLockInfo(lockPath);
