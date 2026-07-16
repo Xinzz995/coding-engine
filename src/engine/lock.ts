@@ -27,7 +27,11 @@ export class LockConflictError extends Error {
 export interface LockHandle {
   /** 幂等：删锁 + 注销信号/exit 钩子。失败只 warn（锁残留由下次 stale 接管兜底）。 */
   release(): void;
-  /** 轮首自愈：锁丢失/被改写（pid 非本进程）→ 告警 + 重建；重建失败只告警不中断循环。 */
+  /**
+   * 轮首自愈：锁丢失/被改写（pid 非本进程）→ 告警 + 重建；重建失败只告警不中断循环。
+   * 前提假设：verify 只在本进程合法持锁的运行期间被循环调用，故锁内容 pid 与本进程不符
+   * 只能来自外部篡改，无条件夺回（删旧建新）是正确语义。
+   */
   verify(): void;
 }
 
@@ -97,10 +101,16 @@ export function acquireLock(workspace: string, command: LockCommand): LockHandle
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'EEXIST') return false;
       if (code === 'ENOENT') {
-        // workspace 目录尚不存在（首跑）：建目录重试一次
+        // workspace 目录尚不存在（首跑）：建目录重试一次；
+        // 重试撞 EEXIST（两实例同时首建目录抢锁）转 false 走外层活性判定，其余错误照抛
         mkdirSync(workspace, { recursive: true });
-        writeFileSync(lockPath, payload(), { flag: 'wx' });
-        return true;
+        try {
+          writeFileSync(lockPath, payload(), { flag: 'wx' });
+          return true;
+        } catch (err2) {
+          if ((err2 as NodeJS.ErrnoException).code === 'EEXIST') return false;
+          throw err2;
+        }
       }
       throw err;
     }
