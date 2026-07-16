@@ -1,6 +1,6 @@
 ---
 title: "workspace 并发锁设计"
-status: active
+status: done
 updated: 2026-07-16
 scope: root
 ---
