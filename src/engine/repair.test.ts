@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { repairJsonString, repairJsonFile, repairWorkspaceFiles } from './repair.js';
@@ -22,6 +22,17 @@ describe('repairJsonFile', () => {
     writeFileSync(file, '{ "userStories": [], }');
     repairJsonFile(file);
     expect(JSON.parse(readFileSync(file, 'utf-8'))).toEqual({ userStories: [] });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('落盘走 rename 语义（inode 必变）：中途被杀不留半截目标文件', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'repair-'));
+    const file = join(dir, 'prd.json');
+    writeFileSync(file, '{ "userStories": [], }');
+    const inoBefore = statSync(file).ino;
+    repairJsonFile(file);
+    // 覆盖写保留 inode；tmp+rename 替换必换 inode——rename 语义的可观测面
+    expect(statSync(file).ino).not.toBe(inoBefore);
     rmSync(dir, { recursive: true, force: true });
   });
 });

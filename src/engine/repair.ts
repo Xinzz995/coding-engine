@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { jsonrepair } from 'jsonrepair';
+import { writeFileAtomicSync } from './fs-atomic.js';
 
 export function repairJsonString(raw: string): string {
   const repaired = jsonrepair(raw);
@@ -11,7 +12,7 @@ export function repairJsonString(raw: string): string {
 export function repairJsonFile(path: string): void {
   const raw = readFileSync(path, 'utf-8');
   const repaired = repairJsonString(raw); // throws before any write if unrepairable
-  writeFileSync(path, repaired, 'utf-8');
+  writeFileAtomicSync(path, repaired);
 }
 
 // repair 子命令入口：prd.json 必修；state.json 存在才修（不存在不是错误）。

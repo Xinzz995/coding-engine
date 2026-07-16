@@ -27,7 +27,7 @@ scope: root
 - 2026-07-08 增强类副产物的写入（证据记录、验证报告生成等「记录/存档」动作）一律 try/catch 吞错仅 warn（同类告警去重一次），绝不影响主循环的控制流与退出码——副产物失败比主流程被副产物拖垮诚实得多（见 loop.ts `recordEvidence` 与 writeReport 调用两例）。
 - 2026-07-08 多写方共享的追加式记录文件用 JSONL（每行一条独立 JSON 带 `source` 字段）：读取端逐行解析+逐字段守卫+未知 type 跳过计数（前向兼容，新版本写的类型旧消费方不炸），坏行只损失自己；「文件不存在」（ENOENT）是唯一合法空态，其余 IO 故障必须上抛——把 EACCES/EISDIR 伪装成「零记录」是审计信道的假阴性（见 `evidence.ts readEvidence`）。
 - 2026-07-08 新增 workspace 运行产物时三处必须同步：prd-to-json 归档清单的**复制**动作、**删除**动作（残留旧轮数据会污染新轮）、以及报告等消费端的文件集合——任何一处缺席都是「归档回看断链」或「新轮红旗区被旧轮污染」（0.20.0 终审实证：tampered 存档曾三处全缺）。
-- 2026-07-16 引擎对 workspace 关键 JSON（prd.json、state.json 及其归档）的覆盖写一律走 `writeFileAtomicSync`（fs-atomic 的 tmp+rename），不裸用 `writeFileSync`——进程中途被杀只损失 tmp、目标文件永远完整（见 state 落盘/门禁打回/prd 篡改归档与快照恢复四调用点）。例外：幂等可重生成的副产物（report.html）与 append-only 信道（evidence.jsonl）不适用。
+- 2026-07-16 引擎对 workspace 关键 JSON（prd.json、state.json 及其归档）的覆盖写一律走 `writeFileAtomicSync`（fs-atomic 的 tmp+rename），不裸用 `writeFileSync`——进程中途被杀只损失 tmp、目标文件永远完整（见 state 落盘/门禁打回/prd 篡改归档与快照恢复/repair 落盘五调用点）。例外：幂等可重生成的副产物（report.html）与 append-only 信道（evidence.jsonl）不适用。
 - 2026-07-16 把 CLI 传入的 workspace 路径与项目根拼接时用 `resolve` 不用 `join`——`--workspace` 可传绝对路径，`join` 会把已是绝对路径的段原样拼在 root 之下产生不存在的路径，检查类消费方表现为假阴性（doctor 的锁检查「引擎运行中却报无锁」与门禁配置检查同款实翻，0.21.0 终审端到端实测检出）。
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。
 
