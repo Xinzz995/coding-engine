@@ -90,7 +90,7 @@ writeFileAtomicSync(path: string, data: string): void  // 写 `${path}.tmp-${pro
 3. `prd-guard.ts` 快照恢复写 prd.json（现 :90）；
 4. `prd-guard.ts` 篡改归档写（现 :76）——归档是证据文件，半截=证据损坏，顺手同换。
 
-report.html 不换（幂等副产物，重生成即可）；evidence.jsonl 不适用（append-only）。acquire 成功后顺带清理 workspace 根遗留的原子写残留：只清匹配 `<既有文件名>.tmp-<纯数字>` 模式的文件（写与 rename 之间崩溃的无害垃圾；旧 pid 已死才可能遗留，故不限定本进程 pid），不碰其他任何临时文件。
+report.html 不换（幂等副产物，重生成即可）；evidence.jsonl 不适用（append-only）。acquire 成功后顺带清理 workspace 根遗留的原子写残留：只清文件名匹配 `*.tmp-<纯数字>`（fs-atomic 的命名模式，写与 rename 之间崩溃的无害垃圾；遗留者 pid 已死，故不限定本进程 pid）的文件，不碰其他任何临时文件；不要求去掉后缀后的原文件存在（首次写 state.json 即崩溃时原文件尚不存在）。
 
 ## 错误处理与退出码
 
