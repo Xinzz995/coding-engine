@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-08
+updated: 2026-07-16
 scope: root
 ---
 
@@ -64,6 +64,10 @@ builder 有意识选择带已知上限的简单实现时就地留下的 `// 取�
 **workspace**
 引擎运行时状态目录（默认 `.workspace/`），prd.json、state.json、progress.md 所在地；引擎只读写这里。
 禁用：工作区（泛指编辑器工作区时易混淆，指本概念时统一用「workspace」）
+
+**工作区锁（engine.lock）**
+引擎在 workspace 根以 O_EXCL 原子创建的单写者互斥文件（pid/startedAt/command）；run 与 repair 持锁互斥、只读子命令不锁，持锁进程死亡遗留的 stale 锁下次启动自动接管，运行中每轮自愈核对。
+禁用：进程锁、文件锁、互斥文件（统一用「工作区锁」，文件本体称 engine.lock）
 
 **仲裁标签**
 notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验收标准冲突，按验收标准实现后留待人工）与 `[需要人工核实]`（其他必须人工介入的异常，配合 blocked 使用）。所有机械路径（打回、清理、再派生）必须原样保全这些行。

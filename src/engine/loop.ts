@@ -1,5 +1,6 @@
 import { join, basename } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { writeFileAtomicSync } from './fs-atomic.js';
 import { runAgent, type AgentKind } from './agent.js';
 import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
@@ -10,6 +11,7 @@ import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
 import { appendEvidence, type EvidenceRecord } from './evidence.js';
+import { acquireLock, LockConflictError, type LockHandle } from './lock.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -63,6 +65,17 @@ function readRunState(statePath: string, prd: Prd): RunState {
 }
 
 export async function runLoop(cfg: LoopConfig): Promise<number> {
+  // 单写者互斥（ADR-008）：活锁 fail-fast、stale 自动接管；冲突时未启动任何资源，直接退出码 2
+  let lock: LockHandle;
+  try {
+    lock = acquireLock(cfg.workspace, 'run');
+  } catch (err) {
+    if (err instanceof LockConflictError) {
+      console.error(err.message);
+      return 2;
+    }
+    throw err;
+  }
   const prdPath = join(cfg.workspace, 'prd.json');
   const statePath = join(cfg.workspace, 'state.json');
   const guard = createPrdGuard(prdPath);
@@ -123,6 +136,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     };
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
+      lock.verify(); // 轮首自愈：agent 误删/改写锁时告警重建（同 prd-guard 的机械防护哲学）
       const beforeRead = guard.read();
       recordTamper(beforeRead, i);
       const before = beforeRead.prd;
@@ -190,7 +204,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           const st = tryReadState(statePath);
           if (st) {
             const next = applyGateFailure(st, currentStory, gate.failure!, new Date());
-            writeFileSync(statePath, JSON.stringify(next, null, 2), 'utf-8');
+            writeFileAtomicSync(statePath, JSON.stringify(next, null, 2));
           } else {
             // 缺失/损坏都不落盘打回：绝不覆盖可能损坏的文件（同 ensureStateFile 语义）
             console.warn('⚠️  state.json 缺失或不可读，门禁打回未落盘；若文件损坏请运行 npx coding-x repair');
@@ -259,6 +273,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     } catch (err) {
       console.warn(`⚠️  验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);
     }
+    // keepOpen 等待阶段只读、无需持锁；此处释放同时注销信号 handler，
+    // 等待期 Ctrl+C 完全走既有 waitForSigint 语义（真实退出码保留）
+    lock.release();
     if (cfg.keepOpen) {
       const url = `http://localhost:${server.address().port}`;
       console.log(`\n✅ 运行结束（退出码 ${exitCode}）。仪表盘仍在 ${url} ，按 Ctrl+C 退出。`);
@@ -266,6 +283,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     }
     return exitCode;
   } finally {
+    lock.release(); // 幂等：正常路径已释放则短路；异常路径在此兜底
     server.close();
   }
 }

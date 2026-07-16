@@ -476,4 +476,99 @@ describe('runDoctor quality gate config check', () => {
       expect(renderDoctorReport(report).text).toContain('机械门禁');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+
+  it('finds prd.json when workspace is an absolute path pointing elsewhere on disk', () => {
+    // 绝对路径 workspace 巡检异地目录（终审 2026-07-16 发现 1）：旧实现 join(root, prdRel) 把
+    // 已绝对化的 prdRel 错误拼在 root 之下，existsSync 恒假；resolve 则正确丢弃 root。
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-abs-root-'));
+    const workspaceAbs = mkdtempSync(join(tmpdir(), 'doc-gate-abs-ws-'));
+    try {
+      writeFileSync(join(workspaceAbs, 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+        qualityChecks: ['npm test'],
+      }));
+      const report = runDoctor(root, { workspace: workspaceAbs });
+      expect(report.gate.prdFound).toBe(true);
+      expect(report.gate.configured).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(workspaceAbs, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runDoctor workspace lock check', () => {
+  it('reports found=false when no engine.lock exists', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-'));
+    try {
+      const report = runDoctor(root);
+      expect(report.lock).toEqual({ found: false, stale: false, pid: null });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('flags a stale lock (dead pid) as advisory without failing the exit code', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-stale-'));
+    try {
+      mkdirSync(join(root, '.workspace'), { recursive: true });
+      writeFileSync(join(root, '.workspace', 'engine.lock'), JSON.stringify({
+        pid: 999999999, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
+      }));
+      const report = runDoctor(root);
+      expect(report.lock).toEqual({ found: true, stale: true, pid: 999999999 });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('自动接管');
+      expect(exitCode).toBe(0); // 建议项不计失败
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a live lock as engine-running info', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-live-'));
+    try {
+      mkdirSync(join(root, '.workspace'), { recursive: true });
+      writeFileSync(join(root, '.workspace', 'engine.lock'), JSON.stringify({
+        pid: process.pid, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
+      }));
+      const report = runDoctor(root);
+      expect(report.lock).toEqual({ found: true, stale: false, pid: process.pid });
+      expect(renderDoctorReport(report).text).toContain('引擎运行中');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // 绝对路径 workspace 巡检异地目录（终审 2026-07-16 发现 1）：旧实现 join(root, workspace, LOCK_FILE)
+  // 把已是绝对路径的 workspace 错误拼在 root 之下，existsSync 恒假；两例覆盖活锁与 stale 锁。
+  it('detects a live lock when workspace is an absolute path pointing elsewhere on disk', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-abs-root-'));
+    const workspaceAbs = mkdtempSync(join(tmpdir(), 'doc-lock-abs-ws-'));
+    try {
+      writeFileSync(join(workspaceAbs, 'engine.lock'), JSON.stringify({
+        pid: process.pid, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
+      }));
+      const report = runDoctor(root, { workspace: workspaceAbs });
+      expect(report.lock).toEqual({ found: true, stale: false, pid: process.pid });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(workspaceAbs, { recursive: true, force: true });
+    }
+  });
+
+  it('detects a stale lock when workspace is an absolute path pointing elsewhere on disk', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-lock-abs-root-'));
+    const workspaceAbs = mkdtempSync(join(tmpdir(), 'doc-lock-abs-ws-'));
+    try {
+      writeFileSync(join(workspaceAbs, 'engine.lock'), JSON.stringify({
+        pid: 999999999, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
+      }));
+      const report = runDoctor(root, { workspace: workspaceAbs });
+      expect(report.lock).toEqual({ found: true, stale: true, pid: 999999999 });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(workspaceAbs, { recursive: true, force: true });
+    }
+  });
 });
