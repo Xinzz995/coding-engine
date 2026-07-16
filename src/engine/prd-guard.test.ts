@@ -145,7 +145,7 @@ describe('createPrdGuard: 篡改处置', () => {
     const guard = createPrdGuard(prdPath);
     guard.read();
     unlinkSync(prdPath);
-    mkdirSync(prdPath); // 同名目录：读抛 EISDIR→按删除篡改；写回 writeFileSync 抛 EISDIR→失败
+    mkdirSync(prdPath); // 同名目录：读抛 EISDIR→按删除篡改；写回时 tmp 写入成功、rename 到目录路径抛 EISDIR→失败
     const r = guard.read();
     expect(r.prd?.project).toBe('p'); // 引擎自身仍用快照
     expect(r.restoreFailed).toBe(true);

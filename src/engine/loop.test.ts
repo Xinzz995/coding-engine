@@ -829,7 +829,7 @@ describe('runLoop prd freeze', () => {
   });
 
   it('写回失败的轮次跳过 validator，结束摘要报告篡改', async () => {
-    // builder 删 prd.json 并在原路径建同名目录：读抛 EISDIR（按删除篡改）、写回抛 EISDIR（恢复失败）。
+    // builder 删 prd.json 并在原路径建同名目录：读抛 EISDIR（按删除篡改）、写回时 tmp 写入成功、rename 到目录路径抛 EISDIR（恢复失败）。
     const { workspace, instructionsDir } = setup([story()]);
     const prdPath = join(workspace, 'prd.json');
     const fake = join(workspace, 'fake-break.mjs');
