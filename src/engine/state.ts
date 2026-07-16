@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { writeFileAtomicSync } from './fs-atomic.js';
 import { join } from 'node:path';
 import type { Prd, Story } from './prd.js';
 
@@ -69,7 +70,7 @@ export function ensureStateFile(workspace: string, prd: Prd): RunState {
     return tryReadState(path) ?? initialStateFor(prd);
   }
   const state = initialStateFor(prd);
-  writeFileSync(path, JSON.stringify(state, null, 2), 'utf-8');
+  writeFileAtomicSync(path, JSON.stringify(state, null, 2));
   return state;
 }
 

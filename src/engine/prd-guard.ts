@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { writeFileAtomicSync } from './fs-atomic.js';
 import { join, dirname } from 'node:path';
 import type { Prd } from './prd.js';
 
@@ -73,7 +74,8 @@ export function createPrdGuard(prdPath: string): PrdGuard {
           seq++;
         }
         try {
-          writeFileSync(archivePath, raw, 'utf-8');
+          // 篡改归档写（原 writeFileSync(archivePath, raw, 'utf-8')）——归档是证据文件，半截=证据损坏
+          writeFileAtomicSync(archivePath, raw);
           archives.push(archivePath);
           tamperedArchive = archivePath;
           archiveNote = `篡改版已存档：${archivePath}`;
@@ -87,7 +89,8 @@ export function createPrdGuard(prdPath: string): PrdGuard {
       );
     }
     try {
-      writeFileSync(prdPath, snapshotRaw!, 'utf-8');
+      // 快照恢复写（原 writeFileSync(prdPath, snapshotRaw!, 'utf-8')）
+      writeFileAtomicSync(prdPath, snapshotRaw!);
       return { restoreFailed: false, tamperedArchive };
     } catch (e) {
       console.warn(`⚠️  prd.json 快照写回失败（${(e as Error).message}）：磁盘仍是篡改版，本轮 validator 验收不可信`);

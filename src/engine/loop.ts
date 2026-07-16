@@ -1,5 +1,6 @@
 import { join, basename } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { writeFileAtomicSync } from './fs-atomic.js';
 import { runAgent, type AgentKind } from './agent.js';
 import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
@@ -190,7 +191,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           const st = tryReadState(statePath);
           if (st) {
             const next = applyGateFailure(st, currentStory, gate.failure!, new Date());
-            writeFileSync(statePath, JSON.stringify(next, null, 2), 'utf-8');
+            writeFileAtomicSync(statePath, JSON.stringify(next, null, 2));
           } else {
             // 缺失/损坏都不落盘打回：绝不覆盖可能损坏的文件（同 ensureStateFile 语义）
             console.warn('⚠️  state.json 缺失或不可读，门禁打回未落盘；若文件损坏请运行 npx coding-x repair');

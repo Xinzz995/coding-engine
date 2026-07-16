@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -95,6 +95,13 @@ describe('ensureStateFile', () => {
     const state = ensureStateFile(dir, contentPrd(['US-001']));
     expect(state['US-001']).toEqual(INITIAL_STORY_STATE);            // 内存回退
     expect(readFileSync(join(dir, 'state.json'), 'utf-8')).toBe('{ broken'); // 文件原样
+    rmSync(dir, { recursive: true, force: true });
+  });
+  it('ensureStateFile leaves no atomic-write tmp residue', () => {
+    const dir = tempDir();
+    ensureStateFile(dir, contentPrd(['US-001']));
+    expect(readdirSync(dir).filter((n) => /\.tmp-\d+$/.test(n))).toEqual([]);
+    expect(existsSync(join(dir, 'state.json'))).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
 });
