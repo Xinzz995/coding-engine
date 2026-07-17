@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES } from './gate.js';
+import { readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES, applyAbortRollback, ABORT_LINE_PREFIX } from './gate.js';
 import type { GateFailure } from './gate.js';
 import type { RunState } from './state.js';
 import type { Prd } from './prd.js';
@@ -242,5 +242,44 @@ describe('runQualityChecks', () => {
     expect(fail.ok).toBe(false);
     expect(fail.total).toBe(2);
     expect(fail.ran).toBe(1); // fail-fast：第 1 条失败，第 2 条未执行
+  });
+});
+
+describe('applyAbortRollback', () => {
+  const at = new Date('2026-07-17T10:00:00');
+
+  it('回写 passes=false 并写入中断标记行；retryCount 与 blocked 不动', () => {
+    const state = { 'US-001': { passes: true, notes: '', retryCount: 2, blocked: false } };
+    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
+    expect(next['US-001'].passes).toBe(false);
+    expect(next['US-001'].retryCount).toBe(2);
+    expect(next['US-001'].blocked).toBe(false);
+    expect(next['US-001'].notes).toContain(ABORT_LINE_PREFIX);
+    expect(next['US-001'].notes).toContain('builder');
+    expect(next['US-001'].notes).toContain('执行超时被终止');
+    // 不可变：原 state 不被就地修改
+    expect(state['US-001'].passes).toBe(true);
+  });
+
+  it('error 结局的标记行含退出码', () => {
+    const state = { 'US-001': { passes: true, notes: '', retryCount: 0, blocked: false } };
+    const next = applyAbortRollback(state, 'US-001', { side: 'validator', timedOut: false, exitCode: 143 }, at);
+    expect(next['US-001'].notes).toContain('validator');
+    expect(next['US-001'].notes).toContain('退出码 143');
+  });
+
+  it('保全既有仲裁标签行在标记行之前', () => {
+    const state = { 'US-001': { passes: true, notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录', retryCount: 0, blocked: false } };
+    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
+    const lines = next['US-001'].notes.split('\n');
+    expect(lines[0]).toBe('[需求冲突] AC2 与源 PRD 矛盾');
+    expect(lines[1].startsWith(ABORT_LINE_PREFIX)).toBe(true);
+    expect(next['US-001'].notes).not.toContain('其他记录');
+  });
+
+  it('prev.blocked 时原样返回不回写（停下等人信号优先）', () => {
+    const state = { 'US-001': { passes: true, notes: '[需要人工核实] x', retryCount: 1, blocked: true } };
+    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
+    expect(next).toBe(state);
   });
 });
