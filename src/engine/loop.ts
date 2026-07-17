@@ -6,7 +6,7 @@ import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
 import type { PrdReadResult } from './prd-guard.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
-import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
+import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
@@ -106,6 +106,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
     const agentCwd = process.cwd();
+    const progressPath = join(cfg.workspace, 'progress.md');
+    const rawOf = (p: string): string | null => {
+      try { return readFileSync(p, 'utf-8'); } catch { return null; }
+    };
+    const outcomeOf = (r: { timedOut: boolean; exitCode: number | null }): 'completed' | 'timeout' | 'error' =>
+      r.timedOut ? 'timeout' : r.exitCode === 0 ? 'completed' : 'error';
     // evidence 是增强不是关键路径：写入失败只 warn（去重一次），绝不影响循环
     let warnedEvidence = false;
     const recordEvidence = (record: EvidenceRecord) => {
@@ -148,6 +154,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       warnModelsOnce(modelsRead.warnings);
       const currentStoryObj = before?.userStories.find((s) => s.id === currentStory) ?? null;
       const retryCount = currentStory && beforeState ? (beforeState[currentStory]?.retryCount ?? 0) : 0;
+      // 异常轮回写：本轮把当前 story 的 passes 从 false 翻到 true 且未 blocked → 回写待复核。
+      // state 读取失败（缺失/损坏）不回写不覆盖（同门禁打回的保守语义）。返回是否发生回写。
+      const rollbackIfUnvalidatedPass = (side: 'builder' | 'validator', r: { timedOut: boolean; exitCode: number | null }): boolean => {
+        if (!currentStory) return false;
+        const passedBefore = beforeState?.[currentStory]?.passes ?? false;
+        const st = tryReadState(statePath);
+        const cur = st?.[currentStory];
+        if (!st || !cur || !cur.passes || cur.blocked || passedBefore) return false;
+        const next = applyAbortRollback(st, currentStory, { side, timedOut: r.timedOut, exitCode: r.exitCode }, new Date());
+        writeFileAtomicSync(statePath, JSON.stringify(next, null, 2));
+        console.warn(`⚠️  ${currentStory} 在中断轮被置为通过，未经完整验收——已回写待复核（${side} ${r.timedOut ? '超时' : `退出码 ${r.exitCode}`}）`);
+        return true;
+      };
       const builderChoice = resolveBuilderModel({
         cliOverride: cfg.builderModel, config: modelsRead.config, story: currentStoryObj, retryCount,
       });
@@ -156,6 +175,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       dashboard.setState({ iteration: i, phase: 'developing', currentStory, model: builderChoice.model ?? null });
 
       // Developer
+      let builderOutcome: 'completed' | 'timeout' | 'error' | undefined;
+      let builderRollback = false;
       if (!builder) {
         console.error('❌ builder.md 不存在，跳过开发');
       } else {
@@ -166,9 +187,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           kind: cfg.kind, prompt: builder, cwd: agentCwd, timeoutMs: cfg.devTimeoutMs,
           model: builderChoice.model,
         });
-        if (dev.timedOut) {
+        builderOutcome = outcomeOf(dev);
+        if (builderOutcome !== 'completed') {
+          builderRollback = rollbackIfUnvalidatedPass('builder', dev);
+          recordEvidence({
+            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+            storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
+            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+            builderOutcome, ...(builderRollback ? { abortRollback: { storyId: currentStory! } } : {}),
+          });
           dashboard.setState({ phase: 'idle', model: null });
-          continue; // skip validator, retry next iteration
+          continue; // 异常轮：跳过门禁与验收，下轮重试（回写已保证不带走未验收的 true）
         }
       }
 
@@ -229,8 +258,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         });
       }
 
-      // 轮末机械记录：只覆盖走到这里的轮（builder 超时/门禁打回轮已 continue，
-      // 时间线轮号跳跃+gate-run 记录即可还原，不为补齐时间线改动 continue 路径）
       recordEvidence({
         type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
         storyId: currentStory,
@@ -239,6 +266,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         validatorRan: !!validator && !skipValidator && !agentBlocked,
         validatorModel: validatorModel ?? null,
         skippedValidator: skipValidator, agentBlocked,
+        ...(builderOutcome ? { builderOutcome } : {}),
       });
 
       // Completion check

@@ -184,7 +184,15 @@ describe('runLoop', () => {
     // v0.4 旧格式：story 自带 passes:true 且无 state.json —— 引擎启动即抽取迁移，
     // 循环第一轮就判定全部完成并以 0 退出。
     const { workspace, instructionsDir } = setup([story({ passes: true, notes: '', retryCount: 0, blocked: false })]);
-    process.env.CODING_X_CLAUDE_BIN = 'node -e process.exit(0)';
+    // 用真实 stub 文件而非 `node -e` 一行式：后者的脚本字符串后面还跟着
+    // buildAgentArgs 拼的 --print --dangerously-skip-permissions 等参数，
+    // node 会把它们当成自己的 CLI 选项重新解析（非脚本 argv），导致
+    // "bad option" 报错、以非 0 码退出——`-e` 从未真正跑到 process.exit(0)。
+    // 旧实现只看 timedOut 不看 exitCode，这个假崩溃被无声吞掉；
+    // 本任务后 exitCode!=0 会被判 error 并 continue，必须让 stub 真的干净退出 0。
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, 'process.exit(0);');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
@@ -986,5 +994,62 @@ describe('workspace 并发锁', () => {
       console.log = orig;
       delete process.env.CODING_X_CLAUDE_BIN;
     }
+  });
+});
+
+describe('异常轮回写（builder 侧）', () => {
+  it('builder 写 true 后非零退出：回写 false+待复核标记，evidence 记 error 结局与回写', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    // fake：置 US-001 通过后以非零码退出（对应「干完活但进程异常收尾」）
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(1);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    // 每轮都回写 → 永不 resolved → 跑满 maxIterations，exit 1
+    expect(code).toBe(1);
+    const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+    expect(state['US-001'].passes).toBe(false);
+    expect(state['US-001'].notes).toContain('[中断轮待复核]');
+    expect(state['US-001'].retryCount).toBe(0);
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters).toHaveLength(2);
+    expect(iters[0]).toMatchObject({
+      iteration: 1, storyId: 'US-001',
+      builderOutcome: 'error', abortRollback: { storyId: 'US-001' },
+    });
+    expect((iters[0] as { validatorRan: boolean }).validatorRan).toBe(false);
+  });
+
+  it('builder 超时且未动 state：不回写、不产生标记，iteration 记 timeout', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    // fake：不写任何文件，睡到被引擎 SIGTERM（devTimeoutMs=400 触发超时）
+    writeFileSync(fake, `
+      await new Promise((r) => setTimeout(r, 60_000));
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 1, devTimeoutMs: 400, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(1);
+    const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+    expect(state['US-001'].passes).toBe(false);
+    expect(state['US-001'].notes).toBe('');
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters).toHaveLength(1);
+    expect(iters[0]).toMatchObject({ iteration: 1, builderOutcome: 'timeout' });
+    expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
   });
 });
