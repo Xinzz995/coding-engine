@@ -1052,4 +1052,36 @@ describe('异常轮回写（builder 侧）', () => {
     expect(iters[0]).toMatchObject({ iteration: 1, builderOutcome: 'timeout' });
     expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
   });
+
+  it('agent 同轮置 blocked 且非零退出：不回写、evidence 如实记 agentBlocked', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '[需要人工核实] 环境异常', retryCount: 0, blocked: true },
+      }));
+      process.exit(1);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+    // blocked 优先：不回写（passes 保持 true）、notes 不被改写
+    expect(state['US-001'].blocked).toBe(true);
+    expect(state['US-001'].passes).toBe(true);
+    expect(state['US-001'].notes).toContain('[需要人工核实]');
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters).toHaveLength(1);
+    expect(iters[0]).toMatchObject({ builderOutcome: 'error', agentBlocked: true });
+    expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
+    // 本轮 builder 非零退出触发 :191 早退 continue，整段（门禁/validator/完成判定）本轮跳过；
+    // blocked→resolved 的收敛判定只在“到达完成判定”的轮次生效，需等下一轮 builder 干净退出才会跑到
+    // （Task 3 报告 self-review 已记录此边界：“识别会推迟到下一轮…而非当轮收敛”）。
+    // maxIterations=1 没有下一轮，故本轮跑满退出码是 1——不是 0，也不是 Task 6 才引入的 3。
+    expect(code).toBe(1);
+  });
 });

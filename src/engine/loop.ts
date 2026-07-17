@@ -190,10 +190,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         builderOutcome = outcomeOf(dev);
         if (builderOutcome !== 'completed') {
           builderRollback = rollbackIfUnvalidatedPass('builder', dev);
+          // evidence=引擎机械事实：agentBlocked 不能硬编码 false——agent 可能同轮已置 blocked:true
+          // 又以非零码退出（如仲裁上报后环境异常收尾），此处需实时读一次 state 反映真实情况。
+          const blockedNow = !!(currentStory && tryReadState(statePath)?.[currentStory]?.blocked);
           recordEvidence({
             type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
             storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
-            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: blockedNow,
             builderOutcome, ...(builderRollback ? { abortRollback: { storyId: currentStory! } } : {}),
           });
           dashboard.setState({ phase: 'idle', model: null });
