@@ -11,7 +11,16 @@ import { join } from 'node:path';
 export type EvidenceRecord =
   | { type: 'iteration'; source: 'engine'; at: string; iteration: number; storyId: string | null;
       builderRan: boolean; builderModel: string | null; validatorRan: boolean;
-      validatorModel: string | null; skippedValidator: boolean; agentBlocked: boolean }
+      validatorModel: string | null; skippedValidator: boolean; agentBlocked: boolean;
+      /** agent 进程结局（异常轮语义，v0.22.0 起）；缺省=该侧未拉起或旧版本记录 */
+      builderOutcome?: 'completed' | 'timeout' | 'error';
+      validatorOutcome?: 'completed' | 'timeout' | 'error' | 'skipped';
+      /** builder completed 但 state.json 与 progress.md 双无变化（空转轮） */
+      noop?: true;
+      /** 本轮门禁打回（细节在同轮 gate-run 记录；此处保「每轮一条 iteration」的轮语义） */
+      gateRejected?: true;
+      /** 本轮发生异常回写（applyAbortRollback） */
+      abortRollback?: { storyId: string } }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
       ok: boolean; total: number; ran: number; ms: number;
       failedCommand?: string; exitCode?: number | null; timedOut?: boolean }
@@ -51,7 +60,12 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && typeof v.validatorRan === 'boolean'
         && (typeof v.validatorModel === 'string' || v.validatorModel === null)
         && typeof v.skippedValidator === 'boolean'
-        && typeof v.agentBlocked === 'boolean';
+        && typeof v.agentBlocked === 'boolean'
+        && (v.builderOutcome === undefined || v.builderOutcome === 'completed' || v.builderOutcome === 'timeout' || v.builderOutcome === 'error')
+        && (v.validatorOutcome === undefined || v.validatorOutcome === 'completed' || v.validatorOutcome === 'timeout' || v.validatorOutcome === 'error' || v.validatorOutcome === 'skipped')
+        && (v.noop === undefined || v.noop === true)
+        && (v.gateRejected === undefined || v.gateRejected === true)
+        && (v.abortRollback === undefined || (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string'));
     case 'gate-run':
       return v.source === 'engine' && typeof v.iteration === 'number'
         && (typeof v.storyId === 'string' || v.storyId === null)

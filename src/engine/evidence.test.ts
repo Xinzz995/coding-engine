@@ -132,3 +132,37 @@ describe('readEvidence 容错', () => {
     expect(readEvidence(dir).records).toEqual([timedOutRun]);
   });
 });
+
+describe('iteration 新可选字段（异常轮语义）', () => {
+  it('带 outcome/noop/gateRejected/abortRollback 的记录往返保真', () => {
+    const dir = ws();
+    appendEvidence(dir, {
+      type: 'iteration', source: 'engine', at: '2026-07-17T10:00:00.000Z', iteration: 5,
+      storyId: 'US-004', builderRan: true, builderModel: 'sonnet',
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      builderOutcome: 'timeout', abortRollback: { storyId: 'US-004' },
+    });
+    appendEvidence(dir, {
+      type: 'iteration', source: 'engine', at: '2026-07-17T10:01:00.000Z', iteration: 6,
+      storyId: 'US-005', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      builderOutcome: 'completed', noop: true,
+    });
+    const recs = readEvidence(dir).records.filter((r) => r.type === 'iteration');
+    expect(recs).toHaveLength(2);
+    expect(recs[0]).toMatchObject({ builderOutcome: 'timeout', abortRollback: { storyId: 'US-004' } });
+    expect(recs[1]).toMatchObject({ noop: true, builderOutcome: 'completed' });
+  });
+
+  it('旧格式 iteration 行（无新字段）读取不受影响', () => {
+    const dir = ws();
+    appendEvidence(dir, {
+      type: 'iteration', source: 'engine', at: '2026-07-17T10:00:00.000Z', iteration: 1,
+      storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+    });
+    const recs = readEvidence(dir).records;
+    expect(recs).toHaveLength(1);
+    expect((recs[0] as { noop?: true }).noop).toBeUndefined();
+  });
+});
