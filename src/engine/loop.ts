@@ -66,6 +66,19 @@ function readRunState(statePath: string, prd: Prd): RunState {
   return blankStateFor(prd);
 }
 
+// 收敛出口单源：两个 allStoriesResolved 出口（no-op 快路径/轮末完成判定）共用，
+// blocked>0 时 exit 3——「收敛但待人工」对所有出口成立（ADR-009/发现 D）
+const convergedExit = (prd: Prd, state: RunState): number => {
+  const blockedIds = prd.userStories.filter((s) => state[s.id]?.blocked).map((s) => s.id);
+  if (blockedIds.length > 0) {
+    const passedCount = prd.userStories.length - blockedIds.length;
+    console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
+    return 3;
+  }
+  console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
+  return 0;
+};
+
 export async function runLoop(cfg: LoopConfig): Promise<number> {
   // 单写者互斥（ADR-008）：活锁 fail-fast、stale 自动接管；冲突时未启动任何资源，直接退出码 2
   let lock: LockHandle;
@@ -245,8 +258,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           });
           tamperCheckBeforeExit(i);
           dashboard.setState({ phase: 'done' });
-          console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
-          exitCode = 0;
+          exitCode = convergedExit(before, beforeState);
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
@@ -364,15 +376,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
-        const blockedIds = after.userStories.filter((s) => afterState[s.id]?.blocked).map((s) => s.id);
-        if (blockedIds.length > 0) {
-          const passedCount = after.userStories.length - blockedIds.length;
-          console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
-          exitCode = 3;
-        } else {
-          console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
-          exitCode = 0;
-        }
+        exitCode = convergedExit(after, afterState);
         break;
       }
     }

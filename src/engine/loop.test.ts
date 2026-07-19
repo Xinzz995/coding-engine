@@ -1273,6 +1273,30 @@ describe('no-op 检测与 stall 熔断', () => {
     expect(iters).toHaveLength(1);
     expect(iters[0]).toMatchObject({ iteration: 1, noop: true, builderOutcome: 'completed' });
   });
+
+  it('已收敛但含 blocked 的工作区重跑：no-op 快路径同样 exit 3 并列出 blocked story', async () => {
+    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      'US-002': { passes: false, notes: '[需要人工核实] 待裁决', retryCount: 0, blocked: true },
+    }));
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `process.exit(0);`);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...a: unknown[]) => { logs.push(a.join(' ')); origLog(...a); };
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    console.log = origLog;
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(3);
+    const banner = logs.find((l) => l.includes('blocked'));
+    expect(banner).toContain('US-002');
+    expect(logs.some((l) => l.includes('全部 story 已通过'))).toBe(false);
+  });
 });
 
 describe('blocked 收敛出口', () => {
