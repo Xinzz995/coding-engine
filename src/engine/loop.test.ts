@@ -1252,4 +1252,24 @@ describe('no-op 检测与 stall 熔断', () => {
     delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(0);
   });
+
+  it('已完工工作区的空转终轮也留一条 iteration 记录（每轮一条不变式）', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    // 预置已完工 state；fake 不写任何文件（空转）
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+    }));
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `process.exit(0);`);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(0);
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters).toHaveLength(1);
+    expect(iters[0]).toMatchObject({ iteration: 1, noop: true, builderOutcome: 'completed' });
+  });
 });

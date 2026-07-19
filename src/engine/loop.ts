@@ -135,6 +135,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         });
       }
     };
+    // 三处提前退出（builder 异常轮熔断 / no-op 全部 resolved 快路径 / validator 异常轮熔断）
+    // break 前统一补一次 guard.read()+recordTamper()——它们都复用轮首快照提前结束本轮，
+    // 若 builder 在本轮篡改了 prd.json，不补这一读就不会被检测/恢复/存档（与标准完成判定
+    // 路径:344-345 的读点同形态）。guard.read() 幂等：磁盘未变时是真无操作。
+    const tamperCheckBeforeExit = (iteration: number) => {
+      const r = guard.read();
+      recordTamper(r, iteration);
+    };
     // 模型路由警告去重：非法 models 配置的警告每轮都会重新产生，同一条只打一次
     const warnedModels = new Set<string>();
     const warnModelsOnce = (msgs: string[]) => {
@@ -213,7 +221,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             builderOutcome, ...(builderRollback ? { abortRollback: { storyId: currentStory! } } : {}),
           });
           dashboard.setState({ phase: 'idle', model: null });
-          if (stalled()) break;
+          if (stalled()) { tamperCheckBeforeExit(i); break; }
           continue; // 异常轮：跳过门禁与验收，下轮重试（回写已保证不带走未验收的 true）
         }
       }
@@ -227,6 +235,15 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         // before/beforeState 就是这轮唯一会有的磁盘状态（没变化），完成判定照样要跑，
         // 否则已完工的工作区会被当成空转一路吃到熔断。
         if (before && beforeState && allStoriesResolved(before, beforeState)) {
+          // 每轮一条 iteration 不变式：这条快路径 break 前也要留痕，否则已完工工作区
+          // 重跑的终轮在 evidence 时间线上是空洞（其余所有退出路径都恰写一条）。
+          recordEvidence({
+            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+            storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
+            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+            builderOutcome: 'completed', noop: true,
+          });
+          tamperCheckBeforeExit(i);
           dashboard.setState({ phase: 'done' });
           console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
           exitCode = 0;
@@ -334,7 +351,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       });
 
       if (validatorOutcome === 'timeout' || validatorOutcome === 'error') {
-        if (stalled()) break;
+        if (stalled()) { tamperCheckBeforeExit(i); break; }
       } else {
         stallCount = 0; // 正常走完的轮（含 agentBlocked/skipValidator 跳过轮）清零
       }
