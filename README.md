@@ -211,6 +211,7 @@ npx coding-x --builder-model sonnet --validator-model opus  # 临时覆盖阶段
 npx coding-x --no-open          # 不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所在目录
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
+npx coding-x --stall-limit 5    # 连续无进展轮（空转/超时/异常退出）达 5 次才熔断（缺省 3）
 npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 npx coding-x status             # 终端一屏速览工作区执行状态（退出码 0/1/2 可作 CI 门禁）
@@ -251,6 +252,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
+| `--stall-limit <n>` | `3` | 仅 `run`：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期 |
 | `--json` | 关闭 | 仅 `status`：向 stdout 输出单个 JSON 对象（project/branchName/sourcePrd/stories/summary），退出码语义与人类可读模式一致；state.json 损坏警告走 stderr 不污染 stdout |
 
@@ -269,6 +271,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 
 - **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
+- **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
 - **模型路由（models）**：`prd.json` 顶层 `models` 段按阶段分配模型（builder/validator 各自默认），story 级 `model` 字段覆盖 builder，story 被打回后自动升级到 `escalation` 模型重试（阈值 `escalateAfter` 可配，缺省打回 1 次即升级）；模型名不透明透传给 agent CLI（claude/codex 均加 `--model`），未配置时行为与旧版完全一致。
 - **完成判定**：全部 story `passes` 或 `blocked` 即成功退出。

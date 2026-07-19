@@ -411,7 +411,7 @@ describe('runLoop evidence records', () => {
     }
   });
 
-  it('writes a failing gate-run and no iteration record for the rolled-back round', async () => {
+  it('writes a failing gate-run and a gateRejected iteration record for the rolled-back round', async () => {
     const { workspace, instructionsDir } = setup([story()], {
       qualityChecks: ['node -e "console.error(\'gate-boom\'); process.exit(7)"'],
     });
@@ -430,7 +430,10 @@ describe('runLoop evidence records', () => {
         ok: false, total: 1, ran: 1, failedCommand: 'node -e "console.error(\'gate-boom\'); process.exit(7)"',
         exitCode: 7, timedOut: false,
       });
-      expect(records.filter((r) => r.type === 'iteration')).toHaveLength(0); // 打回轮 continue，不到轮末
+      // 每轮一条 iteration 不变式（Task 5）：打回轮 continue 前补记录，不再是空洞
+      const iters = records.filter((r) => r.type === 'iteration');
+      expect(iters).toHaveLength(1);
+      expect(iters[0]).toMatchObject({ gateRejected: true, validatorOutcome: 'skipped', validatorRan: false });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -582,6 +585,9 @@ describe('runLoop model routing', () => {
     writeFileSync(fake, `
       import { appendFileSync } from 'node:fs';
       appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      // progress.md 每次调用递增写入：让每轮都有非空转产出，本用例只关心 models 警告去重，
+      // 不是 Task 5 的 no-op 检测——真空转会跳过 validator，把 builder+validator 各跑一次的假设打破。
+      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'x');
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -739,6 +745,9 @@ describe('runLoop prd freeze', () => {
       const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
       delete prd.qualityChecks;
       writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+      // progress.md 留痕：这轮的 tamper 只碰了 prd.json，state/progress 双静止会被
+      // Task 5 的 no-op 检测提前跳过门禁，抹掉本用例要验的“门禁按快照命令执行”。
+      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'x');
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -815,10 +824,13 @@ describe('runLoop prd freeze', () => {
     const prdPath = join(workspace, 'prd.json');
     const fake = join(workspace, 'fake-drop.mjs');
     writeFileSync(fake, `
-      import { writeFileSync, readFileSync } from 'node:fs';
+      import { writeFileSync, readFileSync, appendFileSync } from 'node:fs';
       const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
       prd.userStories = []; // 删光 story：若完成判定读磁盘会误判全绿提前 exit 0
       writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+      // 只碰 prd.json、不碰 state/progress 会被 Task 5 的 no-op 检测提前 continue，
+      // 完成判定压根不会跑到——留痕 progress.md 保住本用例要测的完成判定代码路径。
+      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'x');
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -849,6 +861,9 @@ describe('runLoop prd freeze', () => {
         unlinkSync(${JSON.stringify(prdPath)});
         mkdirSync(${JSON.stringify(prdPath)});
       }
+      // state/progress 双静止会被 Task 5 的 no-op 检测提前 continue，跳过本用例要测的
+      // 门禁前检测点（正是发现写回失败、跳过 validator 的那一步）——留痕 progress.md 保住它。
+      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'x');
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -1143,5 +1158,98 @@ describe('异常轮回写（validator 侧）', () => {
     const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
     expect(iters[0]).toMatchObject({ validatorOutcome: 'completed' });
     expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
+  });
+});
+
+describe('no-op 检测与 stall 熔断', () => {
+  it('builder 空转（双无变化）：跳过验收只跑 builder，连续 3 轮熔断 exit 1', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    const calls = join(workspace, 'calls.txt');
+    // fake：只计数，什么都不写，正常退出（completed 但零产出 = no-op）
+    writeFileSync(fake, `
+      import { appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'x');
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 10, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(1);
+    // 缺省 stallLimit=3：恰 3 轮、每轮只有 builder 一次调用（validator 从未拉起）
+    expect(readFileSync(calls, 'utf-8').length).toBe(3);
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters).toHaveLength(3);
+    expect(iters.every((r) => (r as { noop?: true }).noop === true)).toBe(true);
+  });
+
+  it('门禁打回轮不计 stall 且清零：打回多于 stallLimit 也不熔断', async () => {
+    // qualityChecks 必败（false 命令）+ builder 每轮置 true → 每轮门禁打回（有 state 写入=有活动）
+    const { workspace, instructionsDir } = setup([story()], { qualityChecks: ['false'] });
+    const fake = join(workspace, 'fake.mjs');
+    const calls = join(workspace, 'calls.txt');
+    writeFileSync(fake, `
+      import { writeFileSync, appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'x');
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 4, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    // 4 轮全是门禁打回（stallLimit=3 未触发熔断）→ 跑满，builder 每轮都拉起
+    expect(readFileSync(calls, 'utf-8').length).toBe(4);
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters).toHaveLength(4);
+    expect(iters.every((r) => (r as { gateRejected?: true }).gateRejected === true)).toBe(true);
+    expect(iters.every((r) => (r as { validatorOutcome?: string }).validatorOutcome === 'skipped')).toBe(true);
+    expect(code).toBe(1);
+  });
+
+  it('stallLimit 可经配置调整', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    const calls = join(workspace, 'calls.txt');
+    writeFileSync(fake, `
+      import { appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'x');
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 10, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 1,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(1);
+    expect(readFileSync(calls, 'utf-8').length).toBe(1);
+  });
+
+  it('轮首已全部 resolved 的空转轮：完成判定优先于 stall 计数，当轮 exit 0', async () => {
+    // 回归用例：no-op 分支的“双无变化”不等于“无事发生”——工作区可能在这轮开始前
+    // 就已经全部通过（如断点续跑接手一个已完工的工作区，或 legacy 迁移在 bootstrap
+    // 就把 passes 写进 state.json）。这类轮次的 builder 调用同样是空转（state/progress
+    // 双无变化），但完成判定必须照跑，否则已完工的工作区会被当成卡死一路吃到 stall 熔断。
+    const { workspace, instructionsDir } = setup([story()]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+    }));
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, 'process.exit(0);'); // 干净退出、不碰任何文件 = 真空转
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 3, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(0);
   });
 });

@@ -30,6 +30,8 @@ export interface LoopConfig {
   keepOpen?: boolean;
   /** keepOpen 的放行信号，默认等待 SIGINT；测试注入用 */
   interrupt?: Promise<void>;
+  /** 连续无进展轮（no-op/超时/异常退出）熔断上限；缺省 3 */
+  stallLimit?: number;
 }
 
 function waitForSigint(): Promise<void> {
@@ -140,9 +142,20 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (!warnedModels.has(m)) { warnedModels.add(m); console.warn(m); }
       }
     };
+    const stallLimit = cfg.stallLimit ?? 3;
+    let stallCount = 0;
+    // stall 熔断判定：stall 轮调用；达限打横幅并返回 true（调用方 break）
+    const stalled = (): boolean => {
+      stallCount += 1;
+      if (stallCount < stallLimit) return false;
+      console.error(`\n🛑 连续 ${stallLimit} 轮无进展（no-op/超时/异常退出），提前终止。排查 agent CLI 可用性、模型名与网络后重跑（引擎幂等续跑）。`);
+      return true;
+    };
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
       lock.verify(); // 轮首自愈：agent 误删/改写锁时告警重建（同 prd-guard 的机械防护哲学）
+      const stateRawBefore = rawOf(statePath);
+      const progressRawBefore = rawOf(progressPath);
       const beforeRead = guard.read();
       recordTamper(beforeRead, i);
       const before = beforeRead.prd;
@@ -200,8 +213,35 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             builderOutcome, ...(builderRollback ? { abortRollback: { storyId: currentStory! } } : {}),
           });
           dashboard.setState({ phase: 'idle', model: null });
+          if (stalled()) break;
           continue; // 异常轮：跳过门禁与验收，下轮重试（回写已保证不带走未验收的 true）
         }
+      }
+
+      // no-op 空转检测：builder 正常结束但 state 与 progress 双无变化（机械信号）——
+      // 跳过门禁与验收（省一次强模型调用），计入 stall。
+      if (builder && builderOutcome === 'completed'
+          && rawOf(statePath) === stateRawBefore && rawOf(progressPath) === progressRawBefore) {
+        // 双无变化不等于「无事发生」：本轮开始时可能已经全部 resolved（如 legacy 迁移在
+        // bootstrap 就把 passes 写进 state.json，或断点续跑接手一个已完成的工作区）——
+        // before/beforeState 就是这轮唯一会有的磁盘状态（没变化），完成判定照样要跑，
+        // 否则已完工的工作区会被当成空转一路吃到熔断。
+        if (before && beforeState && allStoriesResolved(before, beforeState)) {
+          dashboard.setState({ phase: 'done' });
+          console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
+          exitCode = 0;
+          break;
+        }
+        console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
+        recordEvidence({
+          type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+          storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
+          validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+          builderOutcome: 'completed', noop: true,
+        });
+        dashboard.setState({ phase: 'idle', model: null });
+        if (stalled()) break;
+        continue;
       }
 
       // 机械门禁：builder 之后、validator 之前确定性执行质量检查（fail-fast）。
@@ -241,6 +281,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             // 缺失/损坏都不落盘打回：绝不覆盖可能损坏的文件（同 ensureStateFile 语义）
             console.warn('⚠️  state.json 缺失或不可读，门禁打回未落盘；若文件损坏请运行 npx coding-x repair');
           }
+          recordEvidence({
+            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+            storyId: currentStory, builderRan: !!builder, builderModel: builderChoice.model ?? null,
+            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+            ...(builderOutcome ? { builderOutcome } : {}), validatorOutcome: 'skipped', gateRejected: true,
+          });
+          stallCount = 0; // 有 state 写入=有活动；打回预算由 MAX_RETRIES 独立约束
           // 已知不对称：门禁把最后一个 story 打到 blocked 时，本轮 continue 跳过完成判定，
           // 完成要到下一轮才被发现；发生在末轮迭代时退出码为 1（validator 打回则当轮判定）。低频且 blocked→1 语义诚实，接受。
           dashboard.setState({ phase: 'idle', model: null });
@@ -271,6 +318,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         validatorOutcome = 'skipped';
       }
 
+      // 每轮一条 iteration 不变式：continue 路径（builder 异常/no-op/门禁打回）各自留痕后跳出，
+      // 走到这里的轮在此记录——evidence 时间线零空洞（v0.22.0，dogfood 发现 B）。
       recordEvidence({
         type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
         storyId: currentStory,
@@ -283,6 +332,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(validatorOutcome ? { validatorOutcome } : {}),
         ...(validatorRollback ? { abortRollback: { storyId: currentStory! } } : {}),
       });
+
+      if (validatorOutcome === 'timeout' || validatorOutcome === 'error') {
+        if (stalled()) break;
+      } else {
+        stallCount = 0; // 正常走完的轮（含 agentBlocked/skipValidator 跳过轮）清零
+      }
 
       // Completion check
       dashboard.setState({ phase: 'idle', model: null });

@@ -87,6 +87,23 @@ describe('parseCliArgs', () => {
     expect(c.builderModel).toBeUndefined();
     expect(c.validatorModel).toBeUndefined();
   });
+  it('defaults stallLimit to 3', () => {
+    expect(parseCliArgs([]).stallLimit).toBe(3);
+    expect(parseCliArgs(['codex']).stallLimit).toBe(3);
+  });
+  it('parses --stall-limit overrides', () => {
+    expect(parseCliArgs(['--stall-limit', '5']).stallLimit).toBe(5);
+    expect(parseCliArgs(['--stall-limit', '1']).stallLimit).toBe(1);
+  });
+  it('throws a clear error instead of silently accepting a non-positive-integer --stall-limit', () => {
+    expect(() => parseCliArgs(['--stall-limit', '0'])).toThrow('--stall-limit');
+    expect(() => parseCliArgs(['--stall-limit', 'abc'])).toThrow('--stall-limit');
+    expect(() => parseCliArgs(['--stall-limit', '-1'])).toThrow('--stall-limit');
+    expect(() => parseCliArgs(['--stall-limit', '1.5'])).toThrow('--stall-limit');
+  });
+  it('does not validate --stall-limit outside the run command', () => {
+    expect(() => parseCliArgs(['doctor', '--stall-limit', 'abc'])).not.toThrow();
+  });
 });
 
 describe('main — invalid --stale-days', () => {
