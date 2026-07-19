@@ -1085,3 +1085,63 @@ describe('异常轮回写（builder 侧）', () => {
     expect(code).toBe(1);
   });
 });
+
+describe('异常轮回写（validator 侧）', () => {
+  it('builder 置 true 后 validator 非零退出：回写 false，iteration 记 validator error 与回写', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    const calls = join(workspace, 'calls.txt');
+    // 同一 stub 以调用次数区分：第 1 次（builder）置 true 正常退出；第 2 次（validator）非零退出
+    writeFileSync(fake, `
+      import { writeFileSync, readFileSync, appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'x');
+      const n = readFileSync(${JSON.stringify(calls)}, 'utf-8').length;
+      if (n === 1) {
+        writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        }));
+        process.exit(0);
+      }
+      process.exit(1);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(1); // 回写后未 resolved，跑满 1 轮
+    const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+    expect(state['US-001'].passes).toBe(false);
+    expect(state['US-001'].notes).toContain('[中断轮待复核]');
+    expect(state['US-001'].notes).toContain('validator');
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters).toHaveLength(1);
+    expect(iters[0]).toMatchObject({
+      builderOutcome: 'completed', validatorOutcome: 'error',
+      abortRollback: { storyId: 'US-001' },
+    });
+  });
+
+  it('validator 正常完成：iteration 记 validatorOutcome completed，无回写', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(0);
+    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+    expect(iters[0]).toMatchObject({ validatorOutcome: 'completed' });
+    expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
+  });
+});

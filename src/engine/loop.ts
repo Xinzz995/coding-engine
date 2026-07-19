@@ -251,14 +251,24 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Validator
       const validatorModel = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: modelsRead.config });
       dashboard.setState({ phase: 'validating', model: validatorModel ?? null });
+      let validatorOutcome: 'completed' | 'timeout' | 'error' | 'skipped' | undefined;
+      let validatorRollback = false;
       if (validator && skipValidator) {
         console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
+        validatorOutcome = 'skipped';
       } else if (validator && !agentBlocked) {
         if (validatorModel) console.log(`🧠 validator 模型: ${validatorModel}`);
-        await runAgent({
+        const val = await runAgent({
           kind: cfg.kind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
           model: validatorModel,
         });
+        validatorOutcome = outcomeOf(val);
+        if (validatorOutcome !== 'completed') {
+          // validator 异常结局：本轮 builder 置的 true 未经复核 → 回写待复核
+          validatorRollback = rollbackIfUnvalidatedPass('validator', val);
+        }
+      } else if (validator && agentBlocked) {
+        validatorOutcome = 'skipped';
       }
 
       recordEvidence({
@@ -270,6 +280,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         validatorModel: validatorModel ?? null,
         skippedValidator: skipValidator, agentBlocked,
         ...(builderOutcome ? { builderOutcome } : {}),
+        ...(validatorOutcome ? { validatorOutcome } : {}),
+        ...(validatorRollback ? { abortRollback: { storyId: currentStory! } } : {}),
       });
 
       // Completion check
