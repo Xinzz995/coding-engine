@@ -364,8 +364,15 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
-        console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
-        exitCode = 0;
+        const blockedIds = after.userStories.filter((s) => afterState[s.id]?.blocked).map((s) => s.id);
+        if (blockedIds.length > 0) {
+          const passedCount = after.userStories.length - blockedIds.length;
+          console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
+          exitCode = 3;
+        } else {
+          console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
+          exitCode = 0;
+        }
         break;
       }
     }

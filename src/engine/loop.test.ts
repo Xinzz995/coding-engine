@@ -356,7 +356,7 @@ describe('runLoop quality gate', () => {
         kind: 'claude', maxIterations: 3, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
       });
-      expect(code).toBe(0); // blocked 属 resolved，完成判定当轮收敛
+      expect(code).toBe(3); // blocked 属 resolved，完成判定当轮收敛为 exit 3（Task 6：M>0 走 blocked 收敛出口）
       expect(existsSync(gateMark)).toBe(false); // 门禁命令未执行
       expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(1); // 只有 builder，validator 未拉起
       const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
@@ -1093,10 +1093,11 @@ describe('异常轮回写（builder 侧）', () => {
     expect(iters).toHaveLength(1);
     expect(iters[0]).toMatchObject({ builderOutcome: 'error', agentBlocked: true });
     expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
-    // 本轮 builder 非零退出触发 :191 早退 continue，整段（门禁/validator/完成判定）本轮跳过；
+    // 本轮 builder 非零退出触发早退 continue（loop.ts 异常轮熔断分支），整段（门禁/validator/完成判定）本轮跳过；
     // blocked→resolved 的收敛判定只在“到达完成判定”的轮次生效，需等下一轮 builder 干净退出才会跑到
     // （Task 3 报告 self-review 已记录此边界：“识别会推迟到下一轮…而非当轮收敛”）。
-    // maxIterations=1 没有下一轮，故本轮跑满退出码是 1——不是 0，也不是 Task 6 才引入的 3。
+    // maxIterations=1 没有下一轮，故跑满收尾，退出码 1 是跑满语义——与 Task 6 的 blocked 收敛 exit 3 无关：
+    // exit 3 要求到达完成判定分支，本用例的异常轮 continue 到不了那里。
     expect(code).toBe(1);
   });
 });
@@ -1271,5 +1272,56 @@ describe('no-op 检测与 stall 熔断', () => {
     const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
     expect(iters).toHaveLength(1);
     expect(iters[0]).toMatchObject({ iteration: 1, noop: true, builderOutcome: 'completed' });
+  });
+});
+
+describe('blocked 收敛出口', () => {
+  it('全部 resolved 但存在 blocked：文案列出 story 号，exit 3', async () => {
+    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
+    const fake = join(workspace, 'fake.mjs');
+    // fake：US-001 通过、US-002 置 blocked（agent 仲裁上报形态）
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-002': { passes: false, notes: '[需要人工核实] 环境缺失', retryCount: 0, blocked: true },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const logs: string[] = [];
+    const origLog = console.log;
+    console.log = (...a: unknown[]) => { logs.push(a.join(' ')); origLog(...a); };
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 3, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    console.log = origLog;
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(3);
+    const banner = logs.find((l) => l.includes('blocked'));
+    expect(banner).toBeDefined();
+    expect(banner).toContain('US-002');
+    expect(banner).toContain('1 个 story 通过');
+    expect(logs.some((l) => l.includes('全部 story 已通过'))).toBe(false);
+  });
+
+  it('全部通过无 blocked：维持 exit 0 与既有文案', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const code = await runLoop({
+      kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port: 0, openBrowser: false,
+    });
+    delete process.env.CODING_X_CLAUDE_BIN;
+    expect(code).toBe(0);
   });
 });
