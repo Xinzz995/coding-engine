@@ -1,6 +1,6 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import type { StoryView } from '../engine/state.js';
-import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX } from '../engine/gate.js';
+import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX } from '../engine/gate.js';
 import { readModelsConfig } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
 
@@ -74,6 +74,8 @@ function noteLineClass(line: string): string {
   if (isArbitrationLine(line)) return 'note-line arbitration';
   if (line.startsWith(GATE_FAIL_LINE_PREFIX)) return 'note-line gate-fail';
   if (line.startsWith(BLOCKED_LINE_PREFIX)) return 'note-line blocked-line';
+  // 中断轮待复核：与门禁失败行同属「引擎机械回写」性质，样式复用 gate-fail（不新开 CSS 类）
+  if (line.startsWith(ABORT_LINE_PREFIX)) return 'note-line gate-fail';
   return 'note-line';
 }
 
@@ -194,11 +196,20 @@ function renderGateHistory(records: EvidenceRecord[]): string {
 function renderTimeline(records: EvidenceRecord[]): string {
   const iters = records.filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration');
   if (iters.length === 0) return '';
-  const rows = iters.map((r) =>
-    `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.builderRan ? text(r.builderModel ?? '默认') : '未跑'}</td><td>${r.validatorRan ? text(r.validatorModel ?? '默认') : (r.agentBlocked ? '跳过（agent blocked）' : r.skippedValidator ? '跳过（快照写回失败）' : '未跑')}</td><td>${stampOf(r.at)}</td></tr>`,
-  ).join('');
+  const rows = iters.map((r) => {
+    const flags: string[] = [];
+    if (r.builderOutcome === 'timeout') flags.push('builder 超时');
+    if (r.builderOutcome === 'error') flags.push('builder 异常退出');
+    if (r.noop) flags.push('空转（无产出）');
+    if (r.gateRejected) flags.push('门禁打回');
+    if (r.validatorOutcome === 'timeout') flags.push('validator 超时');
+    if (r.validatorOutcome === 'error') flags.push('validator 异常退出');
+    if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
+    const flagCell = flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—';
+    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.builderRan ? text(r.builderModel ?? '默认') : '未跑'}</td><td>${r.validatorRan ? text(r.validatorModel ?? '默认') : (r.agentBlocked ? '跳过（agent blocked）' : r.skippedValidator ? '跳过（快照写回失败）' : '未跑')}</td><td>${flagCell}</td><td>${stampOf(r.at)}</td></tr>`;
+  }).join('');
   return `<section class="card"><details><summary><h2>轮次时间线（engine 记录）</h2></summary>` +
-    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>builder</th><th>validator</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>builder</th><th>validator</th><th>状态</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>` +
     `<p class="placeholder">仅记录走到轮末的轮；轮号跳跃=该轮被打回或超时（对照门禁执行历史）。</p></details></section>`;
 }
