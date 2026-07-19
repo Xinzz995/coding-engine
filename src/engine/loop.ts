@@ -135,7 +135,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         });
       }
     };
-    // 三处提前退出（builder 异常轮熔断 / no-op 全部 resolved 快路径 / validator 异常轮熔断）
+    // 四处提前退出（builder 异常轮熔断 / no-op 全部 resolved 快路径 / no-op 非 resolved 熔断 / validator 异常轮熔断）
     // break 前统一补一次 guard.read()+recordTamper()——它们都复用轮首快照提前结束本轮，
     // 若 builder 在本轮篡改了 prd.json，不补这一读就不会被检测/恢复/存档（与标准完成判定
     // 路径:344-345 的读点同形态）。guard.read() 幂等：磁盘未变时是真无操作。
@@ -257,7 +257,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           builderOutcome: 'completed', noop: true,
         });
         dashboard.setState({ phase: 'idle', model: null });
-        if (stalled()) break;
+        if (stalled()) { tamperCheckBeforeExit(i); break; }
         continue;
       }
 
