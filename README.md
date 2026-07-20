@@ -62,7 +62,7 @@ coding-x 同时是两样东西：
         http://localhost:7331  实时查看进度
 ```
 
-- **完成即退出**：全部 story 解决 → 退出码 0；跑满 `maxIterations` 仍未完成 → 退出码 1。
+- **完成即退出**：全部 story `passes`（无 blocked）→ 退出码 0；全部收敛但存在 blocked 待人工 → 退出码 3；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断 → 退出码 1（完整对照见「命令行参数」后的「退出码」表）。
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；开发阶段超时则跳过验证、下一轮重试。
 - **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。门禁配置受快照保护：运行期改写 prd.json（含删改 `qualityChecks` / 验收标准）会被检测、恢复并存档，无法架空门禁与验收（ADR-007）。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
@@ -211,6 +211,7 @@ npx coding-x --builder-model sonnet --validator-model opus  # 临时覆盖阶段
 npx coding-x --no-open          # 不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所在目录
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
+npx coding-x --stall-limit 5    # 连续无进展轮（空转/超时/异常退出）达 5 次才熔断（缺省 3）
 npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 npx coding-x status             # 终端一屏速览工作区执行状态（退出码 0/1/2 可作 CI 门禁）
@@ -251,8 +252,22 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
+| `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期 |
 | `--json` | 关闭 | 仅 `status`：向 stdout 输出单个 JSON 对象（project/branchName/sourcePrd/stories/summary），退出码语义与人类可读模式一致；state.json 损坏警告走 stderr 不污染 stdout |
+
+### 退出码
+
+默认命令（`run`，即无 `repair`/`dashboard`/`doctor`/`status`/`report` 位置参数时；位置参数 `codex` 只切换 agent 后端，仍属 `run`，退出码规则相同）循环结束的进程退出码：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部 story 通过（`passes`），且无 `blocked` |
+| `1` | 跑满 `--max-iter` 仍未全部收敛；或连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 `--stall-limit` 提前熔断 |
+| `2` | workspace 锁（`engine.lock`）被占用，本次 `run`/`repair` 直接拒绝（ADR-008） |
+| `3` | 全部 story 已收敛（`passes` 或 `blocked`），但存在 `blocked` story 待人工处理 |
+
+`repair`/`doctor`/`status`/`report` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
 
 ### 环境变量
 
@@ -269,9 +284,10 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 
 - **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
+- **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
 - **模型路由（models）**：`prd.json` 顶层 `models` 段按阶段分配模型（builder/validator 各自默认），story 级 `model` 字段覆盖 builder，story 被打回后自动升级到 `escalation` 模型重试（阈值 `escalateAfter` 可配，缺省打回 1 次即升级）；模型名不透明透传给 agent CLI（claude/codex 均加 `--model`），未配置时行为与旧版完全一致。
-- **完成判定**：全部 story `passes` 或 `blocked` 即成功退出。
+- **完成判定**：全部 story `passes` 或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。

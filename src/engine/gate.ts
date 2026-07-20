@@ -22,6 +22,12 @@ export const ARBITRATION_PREFIXES = ['[需求冲突]', '[需要人工核实]'] a
 export const GATE_FAIL_LINE_PREFIX = '[门禁失败';
 export const BLOCKED_LINE_PREFIX = '[BLOCKED';
 
+/**
+ * 中断轮回写的 notes 行前缀单源。生产方：applyAbortRollback；
+ * 消费方：report/render.ts 行分类高亮。标记文本自带下轮指令，builder 读 notes 即知处置。
+ */
+export const ABORT_LINE_PREFIX = '[中断轮待复核]';
+
 /** 该 notes 行是否仲裁记录（保全对象） */
 export function isArbitrationLine(line: string): boolean {
   return ARBITRATION_PREFIXES.some((p) => line.startsWith(p));
@@ -168,5 +174,37 @@ export function applyGateFailure(
   return {
     ...state,
     [storyId]: { passes: false, notes: lines.join('\n'), retryCount, blocked },
+  };
+}
+
+export interface AbortInfo {
+  side: 'builder' | 'validator';
+  timedOut: boolean;
+  exitCode: number | null;
+}
+
+/**
+ * 异常轮回写（纯函数，不落盘）：agent 进程异常结局（超时/非零退出）的轮里
+ * passes 被置 true 但未经完整验收——回写 false + 机械标记行，仲裁标签行保全在前。
+ * 与 applyGateFailure 的关键差异：不涨 retryCount（中断≠能力不足，不触发 escalation）、
+ * 不重算 blocked；prev.blocked 时原样返回（「停下等人」优先于机械回写）。
+ */
+export function applyAbortRollback(
+  state: RunState,
+  storyId: string,
+  abort: AbortInfo,
+  now: Date,
+): RunState {
+  const prev = state[storyId] ?? INITIAL_STORY_STATE;
+  if (prev.blocked) return state;
+  const arbitrationLines = prev.notes.split('\n').filter(isArbitrationLine);
+  const desc = abort.timedOut ? '执行超时被终止' : `退出码 ${abort.exitCode}`;
+  const lines = [
+    ...arbitrationLines,
+    `${ABORT_LINE_PREFIX} ${formatStamp(now)} ${abort.side} ${desc}：本轮 passes 置位未经完整验收，已回写；请确认实现后重新走完门禁与验收`,
+  ];
+  return {
+    ...state,
+    [storyId]: { passes: false, notes: lines.join('\n'), retryCount: prev.retryCount, blocked: prev.blocked },
   };
 }

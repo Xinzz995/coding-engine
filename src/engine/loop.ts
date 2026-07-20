@@ -6,7 +6,7 @@ import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
 import type { PrdReadResult } from './prd-guard.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
-import { runQualityChecks, readQualityChecks, applyGateFailure, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
+import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
@@ -30,6 +30,8 @@ export interface LoopConfig {
   keepOpen?: boolean;
   /** keepOpen 的放行信号，默认等待 SIGINT；测试注入用 */
   interrupt?: Promise<void>;
+  /** 连续无进展轮（no-op/超时/异常退出）熔断上限；缺省 3 */
+  stallLimit?: number;
 }
 
 function waitForSigint(): Promise<void> {
@@ -63,6 +65,19 @@ function readRunState(statePath: string, prd: Prd): RunState {
   console.warn('⚠️  state.json 缺失或不可读，本轮按全部 story 未开始处理；若文件损坏请运行 npx coding-x repair');
   return blankStateFor(prd);
 }
+
+// 收敛出口单源：两个 allStoriesResolved 出口（no-op 快路径/轮末完成判定）共用，
+// blocked>0 时 exit 3——「收敛但待人工」对所有出口成立（ADR-009/发现 D）
+const convergedExit = (prd: Prd, state: RunState): number => {
+  const blockedIds = prd.userStories.filter((s) => state[s.id]?.blocked).map((s) => s.id);
+  if (blockedIds.length > 0) {
+    const passedCount = prd.userStories.length - blockedIds.length;
+    console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
+    return 3;
+  }
+  console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
+  return 0;
+};
 
 export async function runLoop(cfg: LoopConfig): Promise<number> {
   // 单写者互斥（ADR-008）：活锁 fail-fast、stale 自动接管；冲突时未启动任何资源，直接退出码 2
@@ -106,6 +121,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
     const agentCwd = process.cwd();
+    const progressPath = join(cfg.workspace, 'progress.md');
+    const rawOf = (p: string): string | null => {
+      try { return readFileSync(p, 'utf-8'); } catch { return null; }
+    };
+    const outcomeOf = (r: { timedOut: boolean; exitCode: number | null }): 'completed' | 'timeout' | 'error' =>
+      r.timedOut ? 'timeout' : r.exitCode === 0 ? 'completed' : 'error';
     // evidence 是增强不是关键路径：写入失败只 warn（去重一次），绝不影响循环
     let warnedEvidence = false;
     const recordEvidence = (record: EvidenceRecord) => {
@@ -127,6 +148,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         });
       }
     };
+    // 四处提前退出（builder 异常轮熔断 / no-op 全部 resolved 快路径 / no-op 非 resolved 熔断 / validator 异常轮熔断）
+    // break 前统一补一次 guard.read()+recordTamper()——它们都复用轮首快照提前结束本轮，
+    // 若 builder 在本轮篡改了 prd.json，不补这一读就不会被检测/恢复/存档（与标准完成判定
+    // 路径:344-345 的读点同形态）。guard.read() 幂等：磁盘未变时是真无操作。
+    const tamperCheckBeforeExit = (iteration: number) => {
+      const r = guard.read();
+      recordTamper(r, iteration);
+    };
     // 模型路由警告去重：非法 models 配置的警告每轮都会重新产生，同一条只打一次
     const warnedModels = new Set<string>();
     const warnModelsOnce = (msgs: string[]) => {
@@ -134,9 +163,20 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (!warnedModels.has(m)) { warnedModels.add(m); console.warn(m); }
       }
     };
+    const stallLimit = cfg.stallLimit ?? 3;
+    let stallCount = 0;
+    // stall 熔断判定：stall 轮调用；达限打横幅并返回 true（调用方 break）
+    const stalled = (): boolean => {
+      stallCount += 1;
+      if (stallCount < stallLimit) return false;
+      console.error(`\n🛑 连续 ${stallLimit} 轮无进展（no-op/超时/异常退出），提前终止。排查 agent CLI 可用性、模型名与网络后重跑（引擎幂等续跑）。`);
+      return true;
+    };
     let exitCode = 1;
     for (let i = 1; i <= cfg.maxIterations; i++) {
       lock.verify(); // 轮首自愈：agent 误删/改写锁时告警重建（同 prd-guard 的机械防护哲学）
+      const stateRawBefore = rawOf(statePath);
+      const progressRawBefore = rawOf(progressPath);
       const beforeRead = guard.read();
       recordTamper(beforeRead, i);
       const before = beforeRead.prd;
@@ -148,6 +188,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       warnModelsOnce(modelsRead.warnings);
       const currentStoryObj = before?.userStories.find((s) => s.id === currentStory) ?? null;
       const retryCount = currentStory && beforeState ? (beforeState[currentStory]?.retryCount ?? 0) : 0;
+      // 异常轮回写：本轮把当前 story 的 passes 从 false 翻到 true 且未 blocked → 回写待复核。
+      // state 读取失败（缺失/损坏）不回写不覆盖（同门禁打回的保守语义）。返回是否发生回写。
+      const rollbackIfUnvalidatedPass = (side: 'builder' | 'validator', r: { timedOut: boolean; exitCode: number | null }): boolean => {
+        if (!currentStory) return false;
+        const passedBefore = beforeState?.[currentStory]?.passes ?? false;
+        const st = tryReadState(statePath);
+        const cur = st?.[currentStory];
+        if (!st || !cur || !cur.passes || cur.blocked || passedBefore) return false;
+        const next = applyAbortRollback(st, currentStory, { side, timedOut: r.timedOut, exitCode: r.exitCode }, new Date());
+        writeFileAtomicSync(statePath, JSON.stringify(next, null, 2));
+        console.warn(`⚠️  ${currentStory} 在中断轮被置为通过，未经完整验收——已回写待复核（${side} ${r.timedOut ? '超时' : `退出码 ${r.exitCode}`}）`);
+        return true;
+      };
       const builderChoice = resolveBuilderModel({
         cliOverride: cfg.builderModel, config: modelsRead.config, story: currentStoryObj, retryCount,
       });
@@ -156,6 +209,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       dashboard.setState({ iteration: i, phase: 'developing', currentStory, model: builderChoice.model ?? null });
 
       // Developer
+      let builderOutcome: 'completed' | 'timeout' | 'error' | undefined;
+      let builderRollback = false;
       if (!builder) {
         console.error('❌ builder.md 不存在，跳过开发');
       } else {
@@ -166,10 +221,56 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           kind: cfg.kind, prompt: builder, cwd: agentCwd, timeoutMs: cfg.devTimeoutMs,
           model: builderChoice.model,
         });
-        if (dev.timedOut) {
+        builderOutcome = outcomeOf(dev);
+        if (builderOutcome !== 'completed') {
+          builderRollback = rollbackIfUnvalidatedPass('builder', dev);
+          // evidence=引擎机械事实：agentBlocked 不能硬编码 false——agent 可能同轮已置 blocked:true
+          // 又以非零码退出（如仲裁上报后环境异常收尾），此处需实时读一次 state 反映真实情况。
+          const blockedNow = !!(currentStory && tryReadState(statePath)?.[currentStory]?.blocked);
+          recordEvidence({
+            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+            storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
+            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: blockedNow,
+            builderOutcome, ...(builderRollback ? { abortRollback: { storyId: currentStory! } } : {}),
+          });
           dashboard.setState({ phase: 'idle', model: null });
-          continue; // skip validator, retry next iteration
+          if (stalled()) { tamperCheckBeforeExit(i); break; }
+          continue; // 异常轮：跳过门禁与验收，下轮重试（回写已保证不带走未验收的 true）
         }
+      }
+
+      // no-op 空转检测：builder 正常结束但 state 与 progress 双无变化（机械信号）——
+      // 跳过门禁与验收（省一次强模型调用），计入 stall。
+      if (builder && builderOutcome === 'completed'
+          && rawOf(statePath) === stateRawBefore && rawOf(progressPath) === progressRawBefore) {
+        // 双无变化不等于「无事发生」：本轮开始时可能已经全部 resolved（如 legacy 迁移在
+        // bootstrap 就把 passes 写进 state.json，或断点续跑接手一个已完成的工作区）——
+        // before/beforeState 就是这轮唯一会有的磁盘状态（没变化），完成判定照样要跑，
+        // 否则已完工的工作区会被当成空转一路吃到熔断。
+        if (before && beforeState && allStoriesResolved(before, beforeState)) {
+          // 每轮一条 iteration 不变式：这条快路径 break 前也要留痕，否则已完工工作区
+          // 重跑的终轮在 evidence 时间线上是空洞（其余所有退出路径都恰写一条）。
+          recordEvidence({
+            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+            storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
+            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+            builderOutcome: 'completed', noop: true,
+          });
+          tamperCheckBeforeExit(i);
+          dashboard.setState({ phase: 'done' });
+          exitCode = convergedExit(before, beforeState);
+          break;
+        }
+        console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
+        recordEvidence({
+          type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+          storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
+          validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+          builderOutcome: 'completed', noop: true,
+        });
+        dashboard.setState({ phase: 'idle', model: null });
+        if (stalled()) { tamperCheckBeforeExit(i); break; }
+        continue;
       }
 
       // 机械门禁：builder 之后、validator 之前确定性执行质量检查（fail-fast）。
@@ -209,6 +310,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             // 缺失/损坏都不落盘打回：绝不覆盖可能损坏的文件（同 ensureStateFile 语义）
             console.warn('⚠️  state.json 缺失或不可读，门禁打回未落盘；若文件损坏请运行 npx coding-x repair');
           }
+          recordEvidence({
+            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+            storyId: currentStory, builderRan: !!builder, builderModel: builderChoice.model ?? null,
+            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+            ...(builderOutcome ? { builderOutcome } : {}), validatorOutcome: 'skipped', gateRejected: true,
+          });
+          stallCount = 0; // 有 state 写入=有活动；打回预算由 MAX_RETRIES 独立约束
           // 已知不对称：门禁把最后一个 story 打到 blocked 时，本轮 continue 跳过完成判定，
           // 完成要到下一轮才被发现；发生在末轮迭代时退出码为 1（validator 打回则当轮判定）。低频且 blocked→1 语义诚实，接受。
           dashboard.setState({ phase: 'idle', model: null });
@@ -219,18 +327,28 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Validator
       const validatorModel = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: modelsRead.config });
       dashboard.setState({ phase: 'validating', model: validatorModel ?? null });
+      let validatorOutcome: 'completed' | 'timeout' | 'error' | 'skipped' | undefined;
+      let validatorRollback = false;
       if (validator && skipValidator) {
         console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
+        validatorOutcome = 'skipped';
       } else if (validator && !agentBlocked) {
         if (validatorModel) console.log(`🧠 validator 模型: ${validatorModel}`);
-        await runAgent({
+        const val = await runAgent({
           kind: cfg.kind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
           model: validatorModel,
         });
+        validatorOutcome = outcomeOf(val);
+        if (validatorOutcome !== 'completed') {
+          // validator 异常结局：本轮 builder 置的 true 未经复核 → 回写待复核
+          validatorRollback = rollbackIfUnvalidatedPass('validator', val);
+        }
+      } else if (validator && agentBlocked) {
+        validatorOutcome = 'skipped';
       }
 
-      // 轮末机械记录：只覆盖走到这里的轮（builder 超时/门禁打回轮已 continue，
-      // 时间线轮号跳跃+gate-run 记录即可还原，不为补齐时间线改动 continue 路径）
+      // 每轮一条 iteration 不变式：continue 路径（builder 异常/no-op/门禁打回）各自留痕后跳出，
+      // 走到这里的轮在此记录——evidence 时间线零空洞（v0.22.0，dogfood 发现 B）。
       recordEvidence({
         type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
         storyId: currentStory,
@@ -239,7 +357,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         validatorRan: !!validator && !skipValidator && !agentBlocked,
         validatorModel: validatorModel ?? null,
         skippedValidator: skipValidator, agentBlocked,
+        ...(builderOutcome ? { builderOutcome } : {}),
+        ...(validatorOutcome ? { validatorOutcome } : {}),
+        ...(validatorRollback ? { abortRollback: { storyId: currentStory! } } : {}),
       });
+
+      if (validatorOutcome === 'timeout' || validatorOutcome === 'error') {
+        if (stalled()) { tamperCheckBeforeExit(i); break; }
+      } else {
+        stallCount = 0; // 正常走完的轮（含 agentBlocked/skipValidator 跳过轮）清零
+      }
 
       // Completion check
       dashboard.setState({ phase: 'idle', model: null });
@@ -249,11 +376,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done' });
-        console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
-        exitCode = 0;
+        exitCode = convergedExit(after, afterState);
         break;
       }
     }
+    // 循环终轮收口（第五处，ADR-007 交互残洞）：builder 异常/no-op 的 continue 路径
+    // （:238/:273）在 i === maxIterations 且未触发 stall 熔断时自然耗尽本次运行，
+    // 中间不会再有下一轮轮首读——本轮若被篡改，只有这里补一次 guard.read() 才能恢复/存档。
+    // 对四个既有 break 出口而言是安全的幂等重复调用：它们各自最后一步已是同轮读，
+    // break 前后都未再写 prd.json，磁盘已等于快照，这里的 read() 真无操作（prd-guard.ts:115）。
+    const closeRead = guard.read();
+    recordTamper(closeRead, cfg.maxIterations);
     const tamper = guard.summary();
     if (tamper.count > 0) {
       console.warn(

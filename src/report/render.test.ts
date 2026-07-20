@@ -422,3 +422,45 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('&lt;script&gt;');
   });
 });
+
+describe('时间线区异常轮标注', () => {
+  it('timeout/error/noop/gateRejected 轮在时间线行上可辨', () => {
+    const base = {
+      type: 'iteration' as const, source: 'engine' as const, at: '2026-07-08T06:00:00.000Z',
+      storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+    };
+    const html = renderReportHtml(data(ev([
+      { ...base, iteration: 1, builderOutcome: 'timeout', abortRollback: { storyId: 'US-001' } },
+      { ...base, iteration: 2, noop: true, builderOutcome: 'completed' },
+      { ...base, iteration: 3, gateRejected: true, validatorOutcome: 'skipped' },
+      { ...base, iteration: 4, builderOutcome: 'completed', validatorOutcome: 'completed' },
+    ])));
+    expect(html).toContain('builder 超时');
+    expect(html).toContain('空转');
+    expect(html).toContain('门禁打回');
+    expect(html).toContain('已回写');
+  });
+
+  it('旧 evidence（无新字段）时间线渲染与 0.21.0 一致（零破坏）', () => {
+    const html = renderReportHtml(data(ev([
+      { type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', builderRan: true, builderModel: 'fast-m', validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false },
+    ])));
+    expect(html).toContain('轮次时间线');
+    expect(html).not.toContain('空转（无产出）');
+    expect(html).toContain('<td>—</td>');
+  });
+
+  it('notes 中断标记行按引擎行样式高亮', () => {
+    const s = data().stories[0];
+    const html = renderReportHtml(data({
+      stories: [{
+        ...s, passes: false,
+        notes: '[中断轮待复核] 2026-07-17 10:00 builder 执行超时被终止：本轮 passes 置位未经完整验收，已回写；请确认实现后重新走完门禁与验收',
+      }],
+    }));
+    expect(html).toContain('[中断轮待复核]');
+    // 语义即「按引擎行样式高亮」——同 gate-fail 行复用同一 CSS 类，非纯文本可见性
+    expect(html).toContain('class="note-line gate-fail"');
+  });
+});

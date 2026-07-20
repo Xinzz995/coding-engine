@@ -24,6 +24,7 @@ export interface CliConfig {
   port: number;
   staleDays: number;
   json: boolean;
+  stallLimit: number;
 }
 
 export function parseCliArgs(argv: string[]): CliConfig {
@@ -42,6 +43,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       port: { type: 'string' },
       'stale-days': { type: 'string' },
       json: { type: 'boolean' },
+      'stall-limit': { type: 'string' },
     },
   });
 
@@ -66,6 +68,15 @@ export function parseCliArgs(argv: string[]): CliConfig {
     staleDays = Number(raw);
   }
 
+  let stallLimit = 3;
+  if (values['stall-limit'] !== undefined) {
+    const raw = values['stall-limit'];
+    if (command === 'run' && !/^[1-9]\d*$/.test(raw)) {
+      throw new Error(`❌ --stall-limit 必须是正整数，收到「${raw}」`);
+    }
+    stallLimit = Number(raw);
+  }
+
   return {
     command,
     kind,
@@ -80,6 +91,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     port: values.port ? Number(values.port) : 7331,
     staleDays,
     json: values.json ?? false,
+    stallLimit,
   };
 }
 
@@ -205,6 +217,7 @@ export async function main(argv: string[]): Promise<number> {
     port: cfg.port,
     openBrowser: cfg.openBrowser,
     keepOpen: cfg.keepOpen,
+    stallLimit: cfg.stallLimit,
   });
 }
 
