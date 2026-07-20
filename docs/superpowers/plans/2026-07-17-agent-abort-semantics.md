@@ -1,3 +1,10 @@
+---
+title: "异常轮语义实施计划（findings A-D 吸收轮）"
+status: done
+updated: 2026-07-20
+scope: root
+---
+
 # 异常轮语义实施计划（findings A-D 吸收轮，v0.22.0）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

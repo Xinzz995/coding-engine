@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-16
+updated: 2026-07-20
 scope: root
 ---
 
@@ -77,6 +77,26 @@ notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验�
 一次运行的验证证据静态存档（`<workspace>/report.html`）：story 状态与验收标准、门禁配置、截图工件、人审包渲染、篡改红旗区汇总为零依赖单页；循环结束自动生成，`coding-x report` 子命令随时重生成。是存档不是门禁——生成成功即退出 0，循环成败的 CI 语义归 status。
 禁用：HTML 报告、静态报告（统一用「验证报告」）
 
+**异常轮**
+builder 或 validator 进程以异常结局结束的轮次。结局判定机械三分（completed / timeout / error），只看引擎自己观测的超时信号与退出码，不解析 agent 输出内容（ADR-009）。
+禁用：失败轮、作废轮（异常轮不作废产物——提交与文件保留，走回写待复核）
+
+**空转轮（no-op）**
+builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳过机械门禁与 validator（省一次强模型调用），计入 stall 熔断。
+禁用：空跑轮、无效轮
+
+**回写待复核**
+异常轮的兜底机制：本轮被翻为 true 且未经验收的 passes 回写为 false，notes 追加 `[中断轮待复核]` 机械标记行（自带下轮重验指令）；不涨 retryCount（中断不是能力不足，不消耗打回预算）。
+禁用：回滚（只回写验收状态，不回滚已落盘的提交与产物）
+
+**stall 熔断**
+空转轮与两侧异常轮连续累计达 `--stall-limit`（缺省 3）即提前终止循环（退出码 1）；有真实 state 写入的轮次（含门禁打回轮）清零计数。
+禁用：空转保护、无进展终止
+
+**收敛出口**
+全部 story 达到 passes 或 blocked 时的统一结束路径（单源函数，快路径与轮末两处行为一致）：全通过退出码 0；存在 blocked 时列出 story 号、退出码 3 交人工处理。
+禁用：完成出口、全绿出口
+
 **证据索引**
 一次运行的结构化证据记录文件（`<workspace>/evidence.jsonl`，append-only 每行一条）：引擎写机械记录（门禁执行含通过轮、轮次事件、篡改事件），builder/validator 按指令登记截图元数据（story/验收标准关联）。记录的 `source` 字段是信任级别标记——engine=机械事实、builder/validator=agent 声明；整个文件都在 agent 可写区，消费端按来源诚实标注、不假装防伪。
 禁用：evidence 结构化索引、结构化证据索引（统一用「证据索引」；指文件本身时用 `evidence.jsonl`）
@@ -84,7 +104,8 @@ notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验�
 ## 关系
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
-- 打回递增 retryCount，达到上限转 blocked；全部 story passes 或 blocked 即循环结束
+- 打回递增 retryCount，达到上限转 blocked；全部 story passes 或 blocked 即走收敛出口结束循环
+- 异常轮触发回写待复核并计入 stall 熔断；空转轮跳过门禁与 validator、同样计入熔断
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含人审（/review-loop 产出人审包）与沉淀（/compound-docs，含取舍账本收账）
 - 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
