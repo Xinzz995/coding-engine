@@ -211,7 +211,7 @@ function renderTimeline(records: EvidenceRecord[]): string {
   return `<section class="card"><details><summary><h2>轮次时间线（engine 记录）</h2></summary>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>builder</th><th>validator</th><th>状态</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>` +
-    `<p class="placeholder">仅记录走到轮末的轮；轮号跳跃=该轮被打回或超时（对照门禁执行历史）。</p></details></section>`;
+    `<p class="placeholder">每轮一条记录；异常轮（超时/异常退出/空转/门禁打回）见状态列标注。</p></details></section>`;
 }
 
 function claimLink(c: ScreenshotClaim): string {

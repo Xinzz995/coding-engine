@@ -447,7 +447,7 @@ describe('时间线区异常轮标注', () => {
       { type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', builderRan: true, builderModel: 'fast-m', validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false },
     ])));
     expect(html).toContain('轮次时间线');
-    expect(html).not.toContain('空转');
+    expect(html).not.toContain('空转（无产出）');
     expect(html).toContain('<td>—</td>');
   });
 
