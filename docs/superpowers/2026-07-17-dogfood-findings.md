@@ -1,7 +1,7 @@
 ---
 title: 引擎真实跑 dogfood 发现清单（2026-07-17 轮）
-status: active
-updated: 2026-07-17
+status: done
+updated: 2026-07-20
 scope: root
 ---
 

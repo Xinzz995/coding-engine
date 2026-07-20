@@ -1,7 +1,7 @@
 ---
 title: 异常轮语义——回写待复核、每轮留痕不变式、no-op 熔断与 blocked 收敛出口
-status: active
-updated: 2026-07-17
+status: done
+updated: 2026-07-20
 scope: root
 ---
 
