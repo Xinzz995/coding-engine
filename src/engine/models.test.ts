@@ -20,7 +20,7 @@ describe('readModelsConfig', () => {
 
   it('normalizes a full valid config and keeps escalateAfter', () => {
     const r = readModelsConfig(prdWith({ builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 2 }), 'claude');
-    expect(r.config).toEqual({ builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 2 });
+    expect(r.config).toEqual({ builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 2, profiles: {} });
     expect(r.warnings).toEqual([]);
   });
 
@@ -58,54 +58,57 @@ describe('readModelsConfig', () => {
     expect(r.warnings.some((w) => w.includes('永不生效'))).toBe(true);
   });
 
-  // ——按 agent 工具分段（每个 agent 工具定位自己的模型名，模型名对工具不可移植）——
+  // ——具名模型档案 profiles（配置一次，任何 agent 工具各自定位模型名，ADR-010）——
 
-  const perKind = {
-    claude: { builder: 'sonnet', validator: 'fable', escalation: 'fable', escalateAfter: 2 },
-    codex: { builder: 'x-builder' },
-    cursor: { builder: 'composer', validator: 'composer' },
+  const profiles = {
+    fast: { claude: 'sonnet', codex: 'x-mini', cursor: 'composer' },
+    strong: { claude: 'opus', codex: 'x-big' },
   };
 
-  it('per-kind: picks the section matching the running agent kind', () => {
-    const c = readModelsConfig(prdWith(perKind), 'claude');
-    expect(c.config).toEqual({ builder: 'sonnet', validator: 'fable', escalation: 'fable', escalateAfter: 2 });
+  it('profiles: stage refs resolve to the running kind entry', () => {
+    const models = { profiles, builder: 'fast', validator: 'strong', escalation: 'strong', escalateAfter: 2 };
+    const c = readModelsConfig(prdWith(models), 'claude');
+    expect(c.config).toEqual({ builder: 'sonnet', validator: 'opus', escalation: 'opus', escalateAfter: 2, profiles });
     expect(c.warnings).toEqual([]);
-    const x = readModelsConfig(prdWith(perKind), 'codex');
-    expect(x.config).toEqual({ builder: 'x-builder', validator: undefined, escalation: undefined, escalateAfter: 1 });
+    const x = readModelsConfig(prdWith(models), 'codex');
+    expect(x.config).toMatchObject({ builder: 'x-mini', validator: 'x-big', escalation: 'x-big' });
+    const cur = readModelsConfig(prdWith(models), 'cursor');
+    expect(cur.config?.builder).toBe('composer');
   });
 
-  it('per-kind: unknown-to-engine kind keys are legal sections for other tools', () => {
-    const r = readModelsConfig(prdWith(perKind), 'cursor');
-    expect(r.config?.builder).toBe('composer');
+  it('profiles: a ref not matching any profile passes through as a literal model name', () => {
+    const r = readModelsConfig(prdWith({ profiles, builder: 'my-exact-model' }), 'claude');
+    expect(r.config?.builder).toBe('my-exact-model');
+    expect(r.warnings).toEqual([]);
   });
 
-  it('per-kind: warns and disables routing when the running kind has no section', () => {
-    const r = readModelsConfig(prdWith({ claude: { builder: 'sonnet' } }), 'codex');
-    expect(r.config).toBeNull();
-    expect(r.warnings.some((w) => w.includes('codex') && w.includes('未配置'))).toBe(true);
+  it('profiles: missing kind entry warns and leaves the stage without a model', () => {
+    const r = readModelsConfig(prdWith({ profiles, validator: 'strong' }), 'cursor');
+    expect(r.config?.validator).toBeUndefined();
+    expect(r.warnings.some((w) => w.includes('strong') && w.includes('cursor'))).toBe(true);
   });
 
-  it('per-kind: a bad stage field inside a section is invalid and names the section', () => {
-    const r = readModelsConfig(prdWith({ claude: { builder: 42 } }), 'claude');
-    expect(r.config).toBeNull();
-    expect(r.warnings.some((w) => w.includes('models.claude'))).toBe(true);
+  it('profiles: invalid shapes disable the whole models config with a located warning', () => {
+    for (const [bad, locator] of [
+      ['not-an-object', 'profiles'],
+      [{ fast: 'sonnet' }, 'profiles.fast'],
+      [{ fast: { claude: 42 } }, 'profiles.fast.claude'],
+    ] as const) {
+      const r = readModelsConfig(prdWith({ profiles: bad, builder: 'fast' }), 'claude');
+      expect(r.config).toBeNull();
+      expect(r.warnings.some((w) => w.includes(locator))).toBe(true);
+    }
   });
 
-  it('per-kind: escalateAfter degrades per section with a warning', () => {
-    const r = readModelsConfig(prdWith({ claude: { builder: 'b-m', escalateAfter: 0 } }), 'claude');
-    expect(r.config?.escalateAfter).toBe(1);
-    expect(r.warnings.some((w) => w.includes('escalateAfter'))).toBe(true);
-  });
-
-  it('mixed flat fields and kind sections are invalid as a whole', () => {
-    const r = readModelsConfig(prdWith({ builder: 'b-m', claude: { builder: 'sonnet' } }), 'claude');
-    expect(r.config).toBeNull();
-    expect(r.warnings.some((w) => w.includes('models 形状非法'))).toBe(true);
+  it('profiles: an empty profile is legal but every ref to it warns per kind', () => {
+    const r = readModelsConfig(prdWith({ profiles: { fast: {} }, builder: 'fast' }), 'claude');
+    expect(r.config?.builder).toBeUndefined();
+    expect(r.warnings.some((w) => w.includes('fast') && w.includes('claude'))).toBe(true);
   });
 });
 
 describe('resolveBuilderModel', () => {
-  const cfg = { builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 1 };
+  const cfg = { builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 1, profiles: {} };
 
   it('returns undefined when nothing is configured', () => {
     const r = resolveBuilderModel({ config: null, story: null, retryCount: 0, kind: 'claude' });
@@ -140,7 +143,7 @@ describe('resolveBuilderModel', () => {
 
   it('does not escalate when escalation is not configured', () => {
     const r = resolveBuilderModel({
-      config: { builder: 'b-m', escalateAfter: 1 }, story: story(), retryCount: 4, kind: 'claude',
+      config: { builder: 'b-m', escalateAfter: 1, profiles: {} }, story: story(), retryCount: 4, kind: 'claude',
     });
     expect(r).toMatchObject({ model: 'b-m', escalated: false });
   });
@@ -156,29 +159,38 @@ describe('resolveBuilderModel', () => {
     expect(r.warnings.some((w) => w.includes('US-001') && w.includes('model'))).toBe(true);
   });
 
-  // ——story.model 按 agent 工具分段——
+  // ——story.model 写模型引用：档案名按当前工具解析，非档案名当字面模型名——
 
-  it('per-kind story.model: picks the entry for the running kind', () => {
-    const m = { claude: 'opus', codex: 'x-big' };
-    expect(resolveBuilderModel({ config: cfg, story: story({ model: m }), retryCount: 0, kind: 'claude' }).model).toBe('opus');
-    expect(resolveBuilderModel({ config: null, story: story({ model: m }), retryCount: 0, kind: 'codex' }).model).toBe('x-big');
+  const cfgWithProfiles = {
+    ...cfg,
+    profiles: { strong: { claude: 'opus', codex: 'x-big' } },
+  };
+
+  it('story ref: resolves a profile name via the running kind', () => {
+    expect(resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'strong' }), retryCount: 0, kind: 'claude' }).model).toBe('opus');
+    expect(resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'strong' }), retryCount: 0, kind: 'codex' }).model).toBe('x-big');
   });
 
-  it('per-kind story.model: missing kind entry falls through to the stage chain silently', () => {
-    const r = resolveBuilderModel({ config: cfg, story: story({ model: { codex: 'x-big' } }), retryCount: 0, kind: 'claude' });
-    expect(r.model).toBe('b-m');
+  it('story ref: a non-profile name passes through as a literal model name', () => {
+    const r = resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'my-exact-model' }), retryCount: 0, kind: 'claude' });
+    expect(r.model).toBe('my-exact-model');
     expect(r.warnings).toEqual([]);
   });
 
-  it('per-kind story.model: non-string entry is ignored with a warning', () => {
-    const r = resolveBuilderModel({ config: cfg, story: story({ model: { claude: 42 } }), retryCount: 0, kind: 'claude' });
+  it('story ref: profile hit but missing kind entry warns and falls through to the stage chain', () => {
+    const r = resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'strong' }), retryCount: 0, kind: 'cursor' });
     expect(r.model).toBe('b-m');
-    expect(r.warnings.some((w) => w.includes('US-001'))).toBe(true);
+    expect(r.warnings.some((w) => w.includes('strong') && w.includes('cursor'))).toBe(true);
+  });
+
+  it('story ref: without a models config the value is a literal (old behavior)', () => {
+    const r = resolveBuilderModel({ config: null, story: story({ model: 'strong' }), retryCount: 0, kind: 'claude' });
+    expect(r.model).toBe('strong');
   });
 });
 
 describe('resolveValidatorModel', () => {
-  const cfg = { builder: 'b-m', validator: 'v-m', escalateAfter: 1 };
+  const cfg = { builder: 'b-m', validator: 'v-m', escalateAfter: 1, profiles: {} };
 
   it('returns undefined when nothing is configured', () => {
     expect(resolveValidatorModel({ config: null })).toBeUndefined();

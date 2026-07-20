@@ -252,15 +252,16 @@ describe('renderReportHtml', () => {
     expect(html).toContain('escalateAfter');
   });
 
-  it('模型路由：按 agent 工具分段时每个工具一行、带工具名标注', () => {
-    const withKinds = data();
-    withKinds.prd.models = {
-      claude: { builder: 'sonnet', validator: 'fable' },
-      codex: { builder: 'x-m' },
+  it('模型路由：profiles 档案表与阶段引用一并显示（各工具模型名如实列出）', () => {
+    const withProfiles = data();
+    withProfiles.prd.models = {
+      profiles: { fast: { claude: 'sonnet', codex: 'x-m' } },
+      builder: 'fast',
+      validator: 'opus',
     };
-    const html = renderReportHtml(withKinds);
-    expect(html).toContain('模型路由（claude）');
-    expect(html).toContain('模型路由（codex）');
+    const html = renderReportHtml(withProfiles);
+    expect(html).toContain('模型路由');
+    expect(html).toContain('模型档案「fast」');
     expect(html).toContain('sonnet');
     expect(html).toContain('x-m');
   });

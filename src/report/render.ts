@@ -1,7 +1,7 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import type { StoryView } from '../engine/state.js';
 import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX } from '../engine/gate.js';
-import { readModelsSections } from '../engine/models.js';
+import { readModelsSpec } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
 
 export function escapeHtml(s: string): string {
@@ -219,18 +219,21 @@ function claimLink(c: ScreenshotClaim): string {
 }
 
 function renderModels(data: ReportData): string {
-  // 报告不知道本次运行用的是哪个 agent 工具，按工具分段时如实列出全部段
-  const { sections, warnings } = readModelsSections(data.prd);
+  // 报告不知道本次运行用的是哪个 agent 工具：阶段显示原始引用（档案名或字面模型名），
+  // 档案表如实列出每个工具的模型名
+  const { spec, warnings } = readModelsSpec(data.prd);
   const warnLines = warnings.map((w) => `<div class="meta-line warn">${escapeHtml(w)}</div>`).join('');
-  const lines = sections.map(({ kind, config }) => {
-    const items: string[] = [];
-    if (config.builder) items.push(`builder=<code>${escapeHtml(config.builder)}</code>`);
-    if (config.validator) items.push(`validator=<code>${escapeHtml(config.validator)}</code>`);
-    if (config.escalation) items.push(`escalation=<code>${escapeHtml(config.escalation)}</code>（第 ${config.escalateAfter} 次重试起）`);
-    if (items.length === 0) return '';
-    return `<div class="meta-line">模型路由${kind ? `（${escapeHtml(kind)}）` : ''}：${items.join(' · ')}</div>`;
+  if (!spec) return warnLines;
+  const items: string[] = [];
+  if (spec.stages.builder) items.push(`builder=<code>${escapeHtml(spec.stages.builder)}</code>`);
+  if (spec.stages.validator) items.push(`validator=<code>${escapeHtml(spec.stages.validator)}</code>`);
+  if (spec.stages.escalation) items.push(`escalation=<code>${escapeHtml(spec.stages.escalation)}</code>（第 ${spec.escalateAfter} 次重试起）`);
+  const stageLine = items.length > 0 ? `<div class="meta-line">模型路由：${items.join(' · ')}</div>` : '';
+  const profileLines = Object.entries(spec.profiles).map(([name, entry]) => {
+    const cells = Object.entries(entry).map(([kind, model]) => `${escapeHtml(kind)}=<code>${escapeHtml(model)}</code>`);
+    return `<div class="meta-line">模型档案「${escapeHtml(name)}」：${cells.length > 0 ? cells.join(' · ') : '（空）'}</div>`;
   }).join('');
-  return `${lines}${warnLines}`;
+  return `${stageLine}${profileLines}${warnLines}`;
 }
 
 function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
