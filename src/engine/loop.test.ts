@@ -97,7 +97,11 @@ describe('runLoop', () => {
 
   it('returns 1 when stories never resolve within maxIterations', async () => {
     const { workspace, instructionsDir } = setup([story()]); // never flips to passes
-    process.env.CODING_X_CLAUDE_BIN = `node -e process.exit(0)`;
+    // 真实 stub 文件而非 `node -e` 一行式（见 :187 注释：`-e` 后的脚本会被引擎追加的
+    // --dangerously-skip-permissions 当成 node 自己的 CLI 选项、以退出码 9 假崩溃）。
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, 'process.exit(0);');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
       workspace, instructionsDir, port: 0, openBrowser: false,
@@ -211,7 +215,15 @@ describe('runLoop', () => {
     // 运行期回退必须按全部未开始处理（而非复活 legacy passes），循环跑满返回 1，且不覆盖损坏文件。
     const { workspace, instructionsDir } = setup([story({ passes: true, notes: '', retryCount: 0, blocked: false })]);
     writeFileSync(join(workspace, 'state.json'), '{ broken');
-    process.env.CODING_X_CLAUDE_BIN = 'node -e process.exit(0)';
+    // 用真实 stub 文件而非 `node -e` 一行式：见 :187 注释，`-e` 后面的脚本字符串会被
+    // buildAgentArgs 拼的 --print --dangerously-skip-permissions 参数干扰，node 把它们
+    // 当自己的 CLI 选项重新解析、以退出码 9 崩溃——脚本从未真正跑到 process.exit(0)。
+    // 这个假崩溃会让每轮都走 builder-error continue，完成判定永远到不了，
+    // 而完成判定（allStoriesResolved）正是本用例要守的位置：legacy passes 若被复活，
+    // 只有走到这里才会被判定误判全绿吃掉。stub 必须真的干净退出 0。
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, 'process.exit(0);');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
@@ -252,7 +264,11 @@ describe('runLoop', () => {
 
   it('writes report.html even when the loop hits maxIterations unfinished', async () => {
     const { workspace, instructionsDir } = setup([story()]); // never flips
-    process.env.CODING_X_CLAUDE_BIN = `node -e process.exit(0)`;
+    // 真实 stub 文件而非 `node -e` 一行式（见 :187 注释：`-e` 后的脚本会被引擎追加的
+    // --dangerously-skip-permissions 当成 node 自己的 CLI 选项、以退出码 9 假崩溃）。
+    const fake = join(workspace, 'fake.mjs');
+    writeFileSync(fake, 'process.exit(0);');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
@@ -367,7 +383,7 @@ describe('runLoop quality gate', () => {
       const { records } = readEvidence(workspace);
       const iters = records.filter((r) => r.type === 'iteration');
       expect(iters).toHaveLength(1);
-      expect(iters[0]).toMatchObject({ agentBlocked: true, validatorRan: false });
+      expect(iters[0]).toMatchObject({ agentBlocked: true, validatorRan: false, validatorOutcome: 'skipped' });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
       rmSync(gateMark, { force: true });
