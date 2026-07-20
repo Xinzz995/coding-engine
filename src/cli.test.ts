@@ -1,8 +1,36 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseCliArgs, permissionWarning, runDashboard, main } from './cli.js';
+import { pathToFileURL } from 'node:url';
+import { parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
+
+describe('isDirectInvocation', () => {
+  it('symlink/路径别名形态的 argv[1] 解析到真实模块（npm bin shim 与 macOS /tmp 别名）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-entry-'));
+    const real = join(dir, 'real-cli.mjs');
+    writeFileSync(real, '// stub');
+    const link = join(dir, 'shim-link.mjs');
+    symlinkSync(real, link);
+    // ESM loader 的 import.meta.url 是 realpath URL；argv[1] 则可能是 shim/别名路径
+    const moduleUrl = pathToFileURL(realpathSync(real)).href;
+    expect(isDirectInvocation(link, moduleUrl)).toBe(true);
+    expect(isDirectInvocation(real, moduleUrl)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  it('非本模块、不存在的路径、缺失 argv[1] 一律判非直接执行', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-entry-'));
+    const real = join(dir, 'real-cli.mjs');
+    writeFileSync(real, '// stub');
+    const moduleUrl = pathToFileURL(realpathSync(real)).href;
+    const other = join(dir, 'other.mjs');
+    writeFileSync(other, '// other');
+    expect(isDirectInvocation(other, moduleUrl)).toBe(false);
+    expect(isDirectInvocation(join(dir, 'missing.mjs'), moduleUrl)).toBe(false);
+    expect(isDirectInvocation(undefined, moduleUrl)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
 
 describe('parseCliArgs', () => {
   it('defaults to claude run with standard timeouts', () => {

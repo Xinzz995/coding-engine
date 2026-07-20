@@ -1,5 +1,6 @@
 import { parseArgs } from 'node:util';
 import { join, dirname } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
@@ -222,11 +223,22 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 // Entry: run when executed directly (not when imported by tests).
-// Compares URLs (not paths) so symlinked bin shims (npm/npx/pnpm create
-// `node_modules/.bin/coding-x` as a symlink to the real module) still match:
-// `process.argv[1]` may be the shim path, which `pathToFileURL` resolves to
-// the same URL as `import.meta.url`. Under vitest, argv[1] is the runner, so
-// the guard never fires and the suite does not hang.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// argv[1] must go through realpathSync before comparing: npm/npx bin shims are
+// symlinks (`node_modules/.bin/coding-x` → dist/cli.js) and macOS `/tmp` is an
+// alias of `/private/tmp`, while the ESM loader resolves `import.meta.url` to
+// the realpath — a plain pathToFileURL(argv[1]) comparison never matches in
+// those cases and the CLI silently exits 0 (the long-standing "npx coding-x
+// 静默不执行" trap, root-caused 2026-07-20). Under vitest, argv[1] is the
+// runner, so the guard never fires and the suite does not hang.
+export function isDirectInvocation(argv1: string | undefined, moduleUrl: string): boolean {
+  if (!argv1) return false;
+  try {
+    return moduleUrl === pathToFileURL(realpathSync(argv1)).href;
+  } catch {
+    return false; // argv[1] 不存在/不可解析：按非直接执行处理
+  }
+}
+
+if (isDirectInvocation(process.argv[1], import.meta.url)) {
   main(process.argv.slice(2)).then((code) => process.exit(code));
 }
