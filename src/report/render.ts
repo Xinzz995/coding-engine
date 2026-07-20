@@ -1,7 +1,7 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import type { StoryView } from '../engine/state.js';
 import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX } from '../engine/gate.js';
-import { readModelsConfig } from '../engine/models.js';
+import { readModelsSections } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
 
 export function escapeHtml(s: string): string {
@@ -219,15 +219,18 @@ function claimLink(c: ScreenshotClaim): string {
 }
 
 function renderModels(data: ReportData): string {
-  const { config, warnings } = readModelsConfig(data.prd);
+  // 报告不知道本次运行用的是哪个 agent 工具，按工具分段时如实列出全部段
+  const { sections, warnings } = readModelsSections(data.prd);
   const warnLines = warnings.map((w) => `<div class="meta-line warn">${escapeHtml(w)}</div>`).join('');
-  if (!config) return warnLines;
-  const items: string[] = [];
-  if (config.builder) items.push(`builder=<code>${escapeHtml(config.builder)}</code>`);
-  if (config.validator) items.push(`validator=<code>${escapeHtml(config.validator)}</code>`);
-  if (config.escalation) items.push(`escalation=<code>${escapeHtml(config.escalation)}</code>（第 ${config.escalateAfter} 次重试起）`);
-  if (items.length === 0) return warnLines;
-  return `<div class="meta-line">模型路由：${items.join(' · ')}</div>${warnLines}`;
+  const lines = sections.map(({ kind, config }) => {
+    const items: string[] = [];
+    if (config.builder) items.push(`builder=<code>${escapeHtml(config.builder)}</code>`);
+    if (config.validator) items.push(`validator=<code>${escapeHtml(config.validator)}</code>`);
+    if (config.escalation) items.push(`escalation=<code>${escapeHtml(config.escalation)}</code>（第 ${config.escalateAfter} 次重试起）`);
+    if (items.length === 0) return '';
+    return `<div class="meta-line">模型路由${kind ? `（${escapeHtml(kind)}）` : ''}：${items.join(' · ')}</div>`;
+  }).join('');
+  return `${lines}${warnLines}`;
 }
 
 function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {

@@ -184,7 +184,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       let skipValidator = beforeRead.restoreFailed;
       const beforeState = before ? readRunState(statePath, before) : null;
       const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
-      const modelsRead = readModelsConfig(before);
+      const modelsRead = readModelsConfig(before, cfg.kind);
       warnModelsOnce(modelsRead.warnings);
       const currentStoryObj = before?.userStories.find((s) => s.id === currentStory) ?? null;
       const retryCount = currentStory && beforeState ? (beforeState[currentStory]?.retryCount ?? 0) : 0;
@@ -202,7 +202,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         return true;
       };
       const builderChoice = resolveBuilderModel({
-        cliOverride: cfg.builderModel, config: modelsRead.config, story: currentStoryObj, retryCount,
+        cliOverride: cfg.builderModel, config: modelsRead.config, story: currentStoryObj, retryCount, kind: cfg.kind,
       });
       warnModelsOnce(builderChoice.warnings);
       // 「每轮一条 iteration」五个写入点的公共底座单源：各点只传差异字段——

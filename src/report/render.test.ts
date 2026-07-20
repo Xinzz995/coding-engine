@@ -252,6 +252,19 @@ describe('renderReportHtml', () => {
     expect(html).toContain('escalateAfter');
   });
 
+  it('模型路由：按 agent 工具分段时每个工具一行、带工具名标注', () => {
+    const withKinds = data();
+    withKinds.prd.models = {
+      claude: { builder: 'sonnet', validator: 'fable' },
+      codex: { builder: 'x-m' },
+    };
+    const html = renderReportHtml(withKinds);
+    expect(html).toContain('模型路由（claude）');
+    expect(html).toContain('模型路由（codex）');
+    expect(html).toContain('sonnet');
+    expect(html).toContain('x-m');
+  });
+
   it('state 损坏警示条件渲染，文案对齐真实回退语义（读 prd 内嵌旧格式字段，非"未开始"）', () => {
     expect(renderReportHtml(data())).not.toContain('state.json 已损坏');
     const html = renderReportHtml(data({ stateCorrupted: true }));

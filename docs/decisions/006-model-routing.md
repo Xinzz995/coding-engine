@@ -1,11 +1,13 @@
 ---
 title: 006-model-routing
 status: active
-updated: 2026-07-07
+updated: 2026-07-20
 scope: root
 ---
 
 # 006. 模型路由：透传不映射、validator 恒定、升级复用 retryCount
+
+> 2026-07-20 起由 ADR-010 扩展：`models` 支持按 agent 工具分段（模型名对工具不可移植）；本文三取舍与其余内容继续有效。
 
 ## 背景
 

@@ -172,7 +172,10 @@ npx coding-x codex           # 改用 codex
   "branchName": "ralph/my-feature",
   "sourcePrd": "docs/prds/prd-my-feature.md",  // 意图真相源（源 PRD）路径，冲突时以它为准重新派生
   "qualityChecks": ["npm run typecheck", "npm test"],  // 机械门禁（可选）：每轮 builder 后引擎逐条执行，失败确定性打回
-  "models": { "builder": "sonnet", "validator": "opus", "escalation": "opus" },  // 模型路由（可选）：阶段默认模型与打回升级模型；story 级可再加 "model" 覆盖 builder
+  "models": {                                  // 模型路由（可选）：按 agent 工具分段，每个工具定位自己的模型名
+    "claude": { "builder": "sonnet", "validator": "opus", "escalation": "opus" },
+    "codex":  { "builder": "gpt-5-codex" }     // 键=工具名；运行时取所用工具的段，缺段则该次运行不启用路由（警告）
+  },                                           // 兼容旧扁平形状 { "builder": …, "validator": … }（对所运行工具原样透传）；story 级可再加 "model" 覆盖 builder（字符串或 { "claude": …, "codex": … }）
   "description": "...",
   "userStories": [
     {
@@ -286,7 +289,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
-- **模型路由（models）**：`prd.json` 顶层 `models` 段按阶段分配模型（builder/validator 各自默认），story 级 `model` 字段覆盖 builder，story 被打回后自动升级到 `escalation` 模型重试（阈值 `escalateAfter` 可配，缺省打回 1 次即升级）；模型名不透明透传给 agent CLI（claude/codex 均加 `--model`），未配置时行为与旧版完全一致。
+- **模型路由（models）**：`prd.json` 顶层 `models` 段按阶段分配模型（builder/validator 各自默认），story 级 `model` 字段覆盖 builder，story 被打回后自动升级到 `escalation` 模型重试（阈值 `escalateAfter` 可配，缺省打回 1 次即升级）；模型名不透明透传给 agent CLI（claude/codex 均加 `--model`），未配置时行为与旧版完全一致。模型名对 agent 工具不可移植（claude 的 `sonnet`/codex 的 `gpt-*`），支持按工具分段（键=工具名，运行时取所用工具的段；story 级 `model` 同样可分段），缺当前工具的段时该次运行不启用路由并警告——不传比传错名诚实。
 - **完成判定**：全部 story `passes` 或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
 - **两种 agent 后端**：`claude`（默认）与 `codex`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。

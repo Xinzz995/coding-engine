@@ -6,17 +6,28 @@ export interface Story {
   description: string;
   acceptanceCriteria: string[];
   priority: number;
-  /** builder 阶段模型覆盖（可选，只作用于 builder；validator 恒定不受影响） */
-  model?: string;
+  /**
+   * builder 阶段模型覆盖（可选，只作用于 builder；validator 恒定不受影响）。
+   * 字符串=对所运行 agent 工具原样透传；按工具分段（{ claude: "opus", codex: "…" }）
+   * =取当前工具的条目，缺条目回落阶段链——模型名对工具不可移植。
+   */
+  model?: string | Record<string, string>;
 }
 
-/** 模型路由配置（可选）；缺失=不传 --model，行为与历史版本一致 */
-export interface ModelsConfig {
+/** 一个阶段配置段：builder/validator 默认模型与打回升级模型 */
+export interface ModelsStageConfig {
   builder?: string;
   validator?: string;
   escalation?: string;
   escalateAfter?: number;
 }
+
+/**
+ * 模型路由配置（可选）；缺失=不传 --model，行为与历史版本一致。
+ * 扁平段=对所运行工具原样生效（兼容旧 PRD）；按 agent 工具分段
+ * （键=工具名 claude/codex/…）=每个工具定位自己的模型名，运行时取所用工具的段。
+ */
+export type ModelsConfig = ModelsStageConfig | Record<string, ModelsStageConfig>;
 
 export interface Prd {
   project: string;
