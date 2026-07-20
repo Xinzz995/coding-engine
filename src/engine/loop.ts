@@ -380,6 +380,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         break;
       }
     }
+    // 循环终轮收口（第五处，ADR-007 交互残洞）：builder 异常/no-op 的 continue 路径
+    // （:238/:273）在 i === maxIterations 且未触发 stall 熔断时自然耗尽本次运行，
+    // 中间不会再有下一轮轮首读——本轮若被篡改，只有这里补一次 guard.read() 才能恢复/存档。
+    // 对四个既有 break 出口而言是安全的幂等重复调用：它们各自最后一步已是同轮读，
+    // break 前后都未再写 prd.json，磁盘已等于快照，这里的 read() 真无操作（prd-guard.ts:115）。
+    const closeRead = guard.read();
+    recordTamper(closeRead, cfg.maxIterations);
     const tamper = guard.summary();
     if (tamper.count > 0) {
       console.warn(

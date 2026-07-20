@@ -252,13 +252,13 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
-| `--stall-limit <n>` | `3` | 仅 `run`：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
+| `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期 |
 | `--json` | 关闭 | 仅 `status`：向 stdout 输出单个 JSON 对象（project/branchName/sourcePrd/stories/summary），退出码语义与人类可读模式一致；state.json 损坏警告走 stderr 不污染 stdout |
 
 ### 退出码
 
-默认命令（`run`，即无 `codex`/`repair`/`dashboard`/`doctor`/`status`/`report` 位置参数时）循环结束的进程退出码：
+默认命令（`run`，即无 `repair`/`dashboard`/`doctor`/`status`/`report` 位置参数时；位置参数 `codex` 只切换 agent 后端，仍属 `run`，退出码规则相同）循环结束的进程退出码：
 
 | 退出码 | 含义 |
 | --- | --- |

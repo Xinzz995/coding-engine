@@ -907,6 +907,78 @@ describe('runLoop prd freeze', () => {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
+
+  it('终轮 builder 异常且篡改 prd：循环自然耗尽后磁盘已恢复、篡改被存档并计入 evidence', async () => {
+    // 回归用例（I-2）：i === maxIterations 且本轮走 builder 异常 continue 路径（未触发 stall
+    // 熔断）时，此前循环结束直接 guard.summary()，中间不再有任何 guard.read()——本轮对
+    // prd.json 的篡改留在磁盘上，成为下次启动 createPrdGuard 的新基线，跨运行架空 ADR-007。
+    const { workspace, instructionsDir } = setup([story()]);
+    const prdPath = join(workspace, 'prd.json');
+    const original = readFileSync(prdPath, 'utf-8');
+    const fake = join(workspace, 'fake-final-tamper.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync, readFileSync } from 'node:fs';
+      const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
+      prd.project = 'evil-final-round';
+      writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+      process.exit(1); // builder 异常结局：走 continue，不会经过门禁前的 gateRead
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1); // 唯一一轮异常、未 resolved，跑满 maxIterations
+      expect(readFileSync(prdPath, 'utf-8')).toBe(original); // 磁盘已恢复为启动快照
+      const archived = readdirSync(workspace).filter((f) => f.startsWith('prd.tampered-'));
+      expect(archived).toHaveLength(1); // 篡改版已存档
+      expect(warns.some((w) => w.includes('运行期间检测到 prd.json 被修改'))).toBe(true);
+      const { records } = readEvidence(workspace);
+      const tampers = records.filter((r) => r.type === 'tamper');
+      expect(tampers).toHaveLength(1);
+    } finally {
+      console.warn = origWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('终轮 no-op 且篡改 prd：循环自然耗尽后磁盘已恢复、篡改被存档', async () => {
+    // 同一收口点的第二个入口：no-op continue 路径（builder 正常退出但 state/progress
+    // 双无变化）同样绕开所有既有 guard.read()——只要本轮 builder 在退出前篡改了 prd.json。
+    const { workspace, instructionsDir } = setup([story()]);
+    const prdPath = join(workspace, 'prd.json');
+    const original = readFileSync(prdPath, 'utf-8');
+    const fake = join(workspace, 'fake-final-tamper-noop.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync, readFileSync } from 'node:fs';
+      const prd = JSON.parse(readFileSync(${JSON.stringify(prdPath)}, 'utf-8'));
+      prd.project = 'evil-final-noop';
+      writeFileSync(${JSON.stringify(prdPath)}, JSON.stringify(prd));
+      process.exit(0); // 干净退出，但 state/progress 双无变化 = no-op
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1); // 唯一一轮 no-op、未 resolved，跑满 maxIterations
+      expect(readFileSync(prdPath, 'utf-8')).toBe(original); // 磁盘已恢复为启动快照
+      const archived = readdirSync(workspace).filter((f) => f.startsWith('prd.tampered-'));
+      expect(archived).toHaveLength(1);
+      expect(warns.some((w) => w.includes('运行期间检测到 prd.json 被修改'))).toBe(true);
+    } finally {
+      console.warn = origWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
 });
 
 describe('workspace 并发锁', () => {
