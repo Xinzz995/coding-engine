@@ -448,6 +448,7 @@ describe('时间线区异常轮标注', () => {
     ])));
     expect(html).toContain('轮次时间线');
     expect(html).not.toContain('空转');
+    expect(html).toContain('<td>—</td>');
   });
 
   it('notes 中断标记行按引擎行样式高亮', () => {
