@@ -6,7 +6,7 @@ import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
 import type { PrdReadResult } from './prd-guard.js';
 import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
-import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
+import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
@@ -198,13 +198,23 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (!st || !cur || !cur.passes || cur.blocked || passedBefore) return false;
         const next = applyAbortRollback(st, currentStory, { side, timedOut: r.timedOut, exitCode: r.exitCode }, new Date());
         writeFileAtomicSync(statePath, JSON.stringify(next, null, 2));
-        console.warn(`⚠️  ${currentStory} 在中断轮被置为通过，未经完整验收——已回写待复核（${side} ${r.timedOut ? '超时' : `退出码 ${r.exitCode}`}）`);
+        console.warn(`⚠️  ${currentStory} 在中断轮被置为通过，未经完整验收——已回写待复核（${side} ${abortDesc(r)}）`);
         return true;
       };
       const builderChoice = resolveBuilderModel({
         cliOverride: cfg.builderModel, config: modelsRead.config, story: currentStoryObj, retryCount,
       });
       warnModelsOnce(builderChoice.warnings);
+      // 「每轮一条 iteration」五个写入点的公共底座单源：各点只传差异字段——
+      // 0.22.0 轮五点位分四批才靠审查抓齐，字段漂移风险有实证，底座必须只有一份。
+      const recordIteration = (over: Partial<Extract<EvidenceRecord, { type: 'iteration' }>>) => {
+        recordEvidence({
+          type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
+          storyId: currentStory, builderRan: !!builder, builderModel: builderChoice.model ?? null,
+          validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+          ...over,
+        });
+      };
 
       dashboard.setState({ iteration: i, phase: 'developing', currentStory, model: builderChoice.model ?? null });
 
@@ -227,10 +237,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           // evidence=引擎机械事实：agentBlocked 不能硬编码 false——agent 可能同轮已置 blocked:true
           // 又以非零码退出（如仲裁上报后环境异常收尾），此处需实时读一次 state 反映真实情况。
           const blockedNow = !!(currentStory && tryReadState(statePath)?.[currentStory]?.blocked);
-          recordEvidence({
-            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
-            storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
-            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: blockedNow,
+          recordIteration({
+            agentBlocked: blockedNow,
             builderOutcome, ...(builderRollback ? { abortRollback: { storyId: currentStory! } } : {}),
           });
           dashboard.setState({ phase: 'idle', model: null });
@@ -250,24 +258,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (before && beforeState && allStoriesResolved(before, beforeState)) {
           // 每轮一条 iteration 不变式：这条快路径 break 前也要留痕，否则已完工工作区
           // 重跑的终轮在 evidence 时间线上是空洞（其余所有退出路径都恰写一条）。
-          recordEvidence({
-            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
-            storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
-            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
-            builderOutcome: 'completed', noop: true,
-          });
+          recordIteration({ builderOutcome: 'completed', noop: true });
           tamperCheckBeforeExit(i);
           dashboard.setState({ phase: 'done' });
           exitCode = convergedExit(before, beforeState);
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
-        recordEvidence({
-          type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
-          storyId: currentStory, builderRan: true, builderModel: builderChoice.model ?? null,
-          validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
-          builderOutcome: 'completed', noop: true,
-        });
+        recordIteration({ builderOutcome: 'completed', noop: true });
         dashboard.setState({ phase: 'idle', model: null });
         if (stalled()) { tamperCheckBeforeExit(i); break; }
         continue;
@@ -310,10 +308,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             // 缺失/损坏都不落盘打回：绝不覆盖可能损坏的文件（同 ensureStateFile 语义）
             console.warn('⚠️  state.json 缺失或不可读，门禁打回未落盘；若文件损坏请运行 npx coding-x repair');
           }
-          recordEvidence({
-            type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
-            storyId: currentStory, builderRan: !!builder, builderModel: builderChoice.model ?? null,
-            validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+          recordIteration({
             ...(builderOutcome ? { builderOutcome } : {}), validatorOutcome: 'skipped', gateRejected: true,
           });
           stallCount = 0; // 有 state 写入=有活动；打回预算由 MAX_RETRIES 独立约束
@@ -349,11 +344,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
 
       // 每轮一条 iteration 不变式：continue 路径（builder 异常/no-op/门禁打回）各自留痕后跳出，
       // 走到这里的轮在此记录——evidence 时间线零空洞（v0.22.0，dogfood 发现 B）。
-      recordEvidence({
-        type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
-        storyId: currentStory,
-        builderRan: !!builder,
-        builderModel: builderChoice.model ?? null,
+      recordIteration({
         validatorRan: !!validator && !skipValidator && !agentBlocked,
         validatorModel: validatorModel ?? null,
         skippedValidator: skipValidator, agentBlocked,

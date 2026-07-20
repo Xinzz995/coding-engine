@@ -184,6 +184,16 @@ export interface AbortInfo {
 }
 
 /**
+ * agent 异常结局的人读描述单源（notes 标记行与引擎回写警告共用）。
+ * 非超时且 exitCode 为 null 只有一种来源：进程被外部信号终止（runAgent 的
+ * exit 事件 code=null）——渲染「被信号终止」而非字面「退出码 null」。
+ */
+export function abortDesc(abort: Pick<AbortInfo, 'timedOut' | 'exitCode'>): string {
+  if (abort.timedOut) return '执行超时被终止';
+  return abort.exitCode === null ? '被信号终止' : `退出码 ${abort.exitCode}`;
+}
+
+/**
  * 异常轮回写（纯函数，不落盘）：agent 进程异常结局（超时/非零退出）的轮里
  * passes 被置 true 但未经完整验收——回写 false + 机械标记行，仲裁标签行保全在前。
  * 与 applyGateFailure 的关键差异：不涨 retryCount（中断≠能力不足，不触发 escalation）、
@@ -198,10 +208,9 @@ export function applyAbortRollback(
   const prev = state[storyId] ?? INITIAL_STORY_STATE;
   if (prev.blocked) return state;
   const arbitrationLines = prev.notes.split('\n').filter(isArbitrationLine);
-  const desc = abort.timedOut ? '执行超时被终止' : `退出码 ${abort.exitCode}`;
   const lines = [
     ...arbitrationLines,
-    `${ABORT_LINE_PREFIX} ${formatStamp(now)} ${abort.side} ${desc}：本轮 passes 置位未经完整验收，已回写；请确认实现后重新走完门禁与验收`,
+    `${ABORT_LINE_PREFIX} ${formatStamp(now)} ${abort.side} ${abortDesc(abort)}：本轮 passes 置位未经完整验收，已回写；请确认实现后重新走完门禁与验收`,
   ];
   return {
     ...state,

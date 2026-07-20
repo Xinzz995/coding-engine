@@ -268,6 +268,14 @@ describe('applyAbortRollback', () => {
     expect(next['US-001'].notes).toContain('退出码 143');
   });
 
+  it('外部信号终止（timedOut=false 且 exitCode=null）渲染「被信号终止」而非「退出码 null」', () => {
+    // runAgent 的 exit 事件 code 为 null 仅发生在进程被信号终止且非引擎超时路径
+    const state = { 'US-001': { passes: true, notes: '', retryCount: 0, blocked: false } };
+    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: false, exitCode: null }, at);
+    expect(next['US-001'].notes).toContain('被信号终止');
+    expect(next['US-001'].notes).not.toContain('退出码 null');
+  });
+
   it('保全既有仲裁标签行在标记行之前', () => {
     const state = { 'US-001': { passes: true, notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录', retryCount: 0, blocked: false } };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
