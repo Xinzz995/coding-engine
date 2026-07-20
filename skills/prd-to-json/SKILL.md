@@ -23,7 +23,12 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
   "branchName": "ralph/[feature-name-kebab-case]",
   "sourcePrd": "docs/prds/prd-[feature-name].md",
   "qualityChecks": ["npm run typecheck", "npm test"],
-  "models": { "profiles": { "fast": { "claude": "sonnet" }, "strong": { "claude": "opus" } }, "builder": "fast", "validator": "strong", "escalation": "strong" },
+  "models": {
+    "runner": "codex",
+    "builder": { "low": "model-low", "medium": "model-medium", "high": "model-high" },
+    "validator": "model-validator",
+    "escalation": "model-escalation"
+  },
   "description": "[Feature description from PRD title/intro]\n\n【溯源】本文件由 docs/prds/prd-[feature-name].md 派生：需求背景不明时先查阅该文档理解意图，但验收只以本文件中各 story 的 acceptanceCriteria 为准。若发现源文档与 acceptanceCriteria 冲突、或某条标准无法成立，不要自行取舍：按 acceptanceCriteria 实现，并把冲突写入同目录 state.json 中该 story 的 notes（以 [需求冲突] 开头），留给人工裁决。",
   "userStories": [
     {
@@ -35,7 +40,9 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
         "Criterion 2",
         "Typecheck passes"
       ],
-      "priority": 1
+      "priority": 1,
+      "difficulty": "medium",
+      "difficultyReason": "命中 medium-1：需沿用 src/api/client.ts 的既有接线模式连接页面与接口。"
     }
   ]
 }
@@ -60,33 +67,80 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 ## models：模型路由（可选配置）
 
-顶层可选字段。引擎按它给 builder/validator 拉起命令追加 `--model <名字>`；缺失时不传（沿用用户 CLI 默认模型，行为与历史版本一致）。模型名是不透明字符串直接透传，引擎不校验、不维护模型名单。**模型名对 agent 工具不可移植**（claude 用别名如 opus/sonnet/haiku，codex 用其 CLI 接受的 gpt-* 名字）——用 `profiles` 具名档案配置一次，之后无论用哪个工具跑引擎都能定位到正确的模型名：
+顶层可选字段。它必须在 stories 增强、拆分、排序和源 PRD 回写全部定稿之后处理；源 PRD 只保存业务意图，不写模型策略、难度或模型名。
+
+不启用时，**同时省略**顶层 `models` 和每个 story 的 `difficulty` / `difficultyReason`，引擎只使用 CLI 临时覆盖或 runner 默认模型。
+
+启用时，配置绑定单一 runner，不跨 Claude Code、Codex、Cursor 复用：
 
 ```json
 "models": {
-  "profiles": {
-    "fast":   { "claude": "sonnet", "codex": "gpt-5-codex" },
-    "strong": { "claude": "opus",   "codex": "gpt-5.2" }
+  "runner": "codex",
+  "builder": {
+    "low": "model-low",
+    "medium": "model-medium",
+    "high": "model-high"
   },
-  "builder": "fast",
-  "validator": "strong",
-  "escalation": "strong",
-  "escalateAfter": 1
+  "validator": "model-validator",
+  "escalation": "model-escalation"
 }
 ```
 
-- `profiles`：档案名 → { 工具名 → 模型名 }。工具名与 `npx coding-x [tool]` 对应（`claude`/`codex`/…）；档案缺当前运行工具的条目时该引用不生效（引擎警告并不传 `--model`，不会把别的工具的模型名传错）
-- `builder` / `validator` / `escalation` 写**模型引用**：命中档案名按运行工具解析；非档案名当字面模型名原样透传（不用多工具时可以不写 profiles，直接写模型名，旧配置零迁移）
-- `escalation`：story 被打回 `retryCount ≥ escalateAfter`（缺省 1）后 builder 的升级模型——失败才花大钱；`escalateAfter` 须 < 5（打回上限，达 5 该 story 已 blocked），否则升级永不生效（引擎启动时会警告）
-- story 级可选 `"model"` 字段覆盖 builder（只对该 story 生效；validator 恒定不受影响）：同样写模型引用（推荐档案名——跨工具零改动）
+五个模型值都必须是 runner 当前接受的实际模型标识，不使用 coding-x 自造的 `default` 哨兵；如果 runner 本身把 `auto` / `default` 暴露为真实可选 ID，它只按普通 ID 处理。多个位置可以选择同一模型。
 
-生成规则：
+### 生成顺序
 
-- 先问用户是否需要模型分层；不需要或拿不准时**整段省略**（缺省即现状，不要编造）
-- 问清用户实际会用哪些 agent 工具跑引擎，**档案里只写用户确认过的工具条目**——不要替未确认的工具编造模型名
-- 配置时默认姿势：**validator 能力 ≥ builder**——validator 是把关方，降它的级会重开「共谋假绿」的门
-- 逐 story 评估复杂度再标 `model`：跨模块/数据迁移/状态机类留给强模型，纯样板/文案/单文件小改可标快模型；拿不准不标（回落顶层 builder）
-- 模型名必须与用户确认后写入：用户可用哪些模型只有用户知道，引擎不校验，名字写错会在循环里快速失败白烧迭代数
+1. stories 定稿后，询问是否启用模型路由；不启用就省略整套字段。
+2. 确认 runner：`claude`、`codex` 或 `cursor`。无法从当前宿主可靠判断时直接询问，不偷偷猜。
+3. 调用 `npx coding-x models <runner> --json`：
+   - `available`：使用返回的当前机器、当前账号、当前 provider/中转站配置下模型列表；
+   - `unsupported`：明确说明无法机器复核，请用户提供当前可用模型 ID 列表；
+   - `error`：停止路由配置，解释安装/认证/查询问题。用户仍可选择不启用路由，继续普通转换。
+4. 模型列表只展示一次，然后**批量提出五道选择题**：`builder.low`、`builder.medium`、`builder.high`、`validator`、`escalation`。每项由用户选择，不能替用户拍板。
+5. 只有发现结果返回的可靠元数据或官方明确资料才能用于推荐/能力倒挂警告；未知别名、中转站名称和自定义 ID 不按名字猜强弱。用户确认后允许任意组合。
+6. 按下方固定规则自动评估每个 story，直接写入 `difficulty` 与 `difficultyReason`；不在写入前逐 story 设置审批门槛。
+7. 写入后展示完整对照表：story、档位、理由、对应初始 builder 模型。用户提出异议时修正派生结果，不把策略写回源 PRD。
+
+### difficulty：所需模型推理能力
+
+`difficulty` 只衡量可靠完成 story 所需的模型推理能力，不是工期、代码行数或故事点。story 大到一次迭代无法完成时先拆分，不能用 `high` 掩盖范围问题。
+
+判定顺序固定：先 high，再 medium，剩余同时满足 low 全部条件的才是 low；拿不准向上归档。必须结合 AC 与仓库证据，不得只做关键词匹配。
+
+**high：任一命中**
+
+1. `high-1`：身份认证、权限边界、安全、隐私、密钥或支付正确性。
+2. `high-2`：schema 迁移、存量数据回填、不可逆写入或数据兼容。
+3. `high-3`：并发、事务一致性、幂等、重试语义、复杂状态机或分布式协调。
+4. `high-4`：对外 API、协议、持久化格式或兼容性合同变化。
+5. `high-5`：核心架构/基础设施变化，或跨多个模块/服务且有隐含耦合。
+6. `high-6`：故障可能造成数据丢失、越权、重复扣费或服务不可用等高影响后果。
+7. `high-7`：仓库没有既有实现模式，需要新技术路径或解决明显未知问题。
+
+常规前后端接线不会仅因跨两层自动成为 high。
+
+**medium：未命中 high，且任一命中**
+
+1. `medium-1`：沿仓库既有模式完成常规前后端接线或跨一至两个技术层。
+2. `medium-2`：多分支业务规则、输入校验、异步状态或错误恢复，边界已明确。
+3. `medium-3`：普通接口、页面流程、持久化操作或合同明确的第三方集成。
+4. `medium-4`：修改多个相关文件/模块，需要保持既有行为并补回归测试。
+5. `medium-5`：bug 根因需跨组件追踪，但不涉及 high 风险边界。
+6. `medium-6`：多步骤 UI、加载/失败/刷新保持等闭环验收。
+
+**low：未命中 high/medium，且以下全部满足**
+
+1. `low-1`：修改范围局部，集中在单个组件、模块或一组紧密相关文件。
+2. `low-2`：仓库已有明确复用模式，不需要新技术决策。
+3. `low-3`：逻辑线性、边界明确，几乎没有复杂状态或多分支推理。
+4. `low-4`：不改变权限、schema、外部合同、并发语义或核心基础设施。
+5. `low-5`：验收结果直接可观察，回归影响有限。
+
+`difficultyReason` 必须是一至两句，写明命中的规则编号与仓库具体证据，路径使用仓库相对路径。例如：`命中 medium-1：需沿用 src/api/client.ts 的既有接线模式连接页面与接口。` 绿地项目无现成文件时，如实写已检查目录与“无既有模式”，不要编造路径。
+
+### 运行时升级语义（生成时必须让用户知道）
+
+第一次有效失败——机械门禁失败、validator 正常打回或 builder completed no-op——会让下一轮及以后持续使用 `escalation`。超时、非零退出、认证、网络或环境错误不升级。升级状态保存在 `state.json.escalated`，与 `retryCount` 分离且只由引擎修改。
 
 ---
 
@@ -233,13 +287,13 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 1. **每个 user story 成为一个 JSON 条目**
 2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延历史最大编号（含源 PRD 中已删除 story 曾占用的编号，不回收），不插号、不重排
 3. **Priority**：基于依赖顺序，然后是文档顺序
-4. **不写状态字段**：passes/notes/retryCount/blocked 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
+4. **不写状态字段**：passes/notes/retryCount/blocked/escalated 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
 8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
 9. **qualityChecks 提取**：按上方「qualityChecks」节从目标项目提取候选并请用户确认；提取不到可靠命令时省略该字段
-10. **models 路由（可选）**：按上方「models」节与用户确认模型分层；用户不需要时省略整段
+10. **models 路由（可选）**：只在 stories 定稿后按上方「models」节处理；用户不启用时省略整段及所有 story 难度字段
 
 ### 转换时的增强规则
 
@@ -417,15 +471,22 @@ Add ability to mark tasks with different statuses.
 源 PRD 修改后重新执行本 skill，若 `.workspace/prd.json` 已存在且 `branchName` 与新转换结果**相同**（同一功能），进入再派生模式（branchName 不同则走上方「归档之前的运行」流程）：
 
 1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件、`evidence.jsonl`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）；**同时删除工作区中的旧 `evidence.jsonl`**——需求变更后旧登记按 acIndex 位置匹配，会错挂到改写后的验收标准上，一律作废重验
-2. 用新转换结果**整体重写** `prd.json`（沿用源 id，纯需求字段——prd.json 不含状态）
-3. 若 `state.json` 存在，按 story id 对齐调整它（不存在则跳过，引擎会自动初始化）：
+2. 先处理模型再派生，再用新结果**整体重写** `prd.json`：
+   - runner 相同，且原五个模型在本次 `coding-x models <runner> --json` 的 available 清单中仍有效 → 保留原选择，不重复提问
+   - runner 变化、任一模型失效、发现状态不是 available，或用户明确要求重配 → 重新走模型发现/人工列表与五道选择题
+   - story 内容无实质变化 → 保留原 `difficulty` 与 `difficultyReason`，包括用户事后修正
+   - story 内容有实质变化 → 按固定规则重新评估；用户可明确要求全量重新评估
+3. 若 `state.json` 存在，先把旧 state 缺失的 `escalated` 按 `false` 理解，再按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
    - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
-   - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 置 `false`、retryCount 置 `0`、blocked 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）
+   - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 置 `false`、retryCount 置 `0`、blocked 置 `false`、escalated 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）
+   - acceptanceCriteria 未变，但 difficulty、models.runner 或该 story 对应的初始 `models.builder[difficulty]` 变化 → 只把 escalated 重置为 `false`，其他执行状态保留
+   - 只改 difficultyReason、validator 或 escalation 模型 → escalated 保留；它们不改变该 story 的初始路由
+   - 上述路由变化影响已 blocked story 时，必须让用户选择“保持 blocked”或“用新路由重试”；选择重试时同时设置 blocked=false、retryCount=0、escalated=false，并在 notes 追加模型路由重试说明
    - 新增 id → 不写入 state.json（引擎按初始状态处理）
    - 源 md 已删除的 id → 从 state.json 移除该键，在对照表标注「已移除」
-4. 输出对照表时增加「状态处理」列（保留/重置/新增/移除）
+4. 输出对照表时增加「难度处理」「模型路由」「状态处理」列（保留/重评/重置/新增/移除）
 
-实质变化的判定：AC 条目的增删、断言内容的改变算；纯错别字/措辞润色不算。拿不准时按「有实质变化」处理（宁可重验，不可漏验）。
+验收实质变化的判定：AC 条目的增删、断言内容的改变算；纯错别字/措辞润色不算。story 难度输入的实质变化还包括 title/description/AC 的语义改变。拿不准时按「有实质变化」处理（宁可重验，不可漏验）。
 
 ---
 
@@ -443,12 +504,13 @@ Add ability to mark tasks with different statuses.
 - [ ] 复杂功能最后有一个闭环集成验证 story
 - [ ] Acceptance criteria 是可验证的（不模糊）
 - [ ] 没有 story 依赖于后面的 story
-- [ ] story 不含任何状态字段（passes/notes/retryCount/blocked 均不出现，状态归 state.json）
+- [ ] story 不含任何状态字段（passes/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] qualityChecks 已配置时：写入前逐条真实跑一遍、确认当前基线全绿——命令不存在、命令写错、基线本来就红，都必须在这里（有人在场的派生环节）拦截，否则 builder 会在循环里白烧 5 轮到 blocked；基线绿同时保证循环中门禁失败必然是 builder 引入的
-- [ ] models 已配置时：profiles 档案只含用户确认过的工具条目，模型名已逐个与用户确认（引擎不校验名字），validator 能力 ≥ builder，不需要分层的 story 未强行标注
+- [ ] models 已配置时：runner 已确认；五个实际模型 ID 全部由用户从当前有效列表选择；每个 story 都有 low/medium/high 与含规则编号、仓库路径的非空理由
+- [ ] models 未配置时：所有 story 都没有 difficulty/difficultyReason，避免半套配置
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
-- [ ] 同功能再派生时已先归档副本（含 state.json、evidence.jsonl），已删除工作区中的旧 evidence.jsonl，并按 id 对齐调整 state.json（保留/重置/移除）
+- [ ] 同功能再派生时已先归档副本（含 state.json、evidence.jsonl），已删除工作区中的旧 evidence.jsonl，并按 id、难度与初始路由精确调整 state.json；blocked 路由重试已由用户选择
 
 写入后运行：`npx coding-x repair`（用 jsonrepair 修复并二次校验 prd.json 与 state.json，后者不存在则跳过）。

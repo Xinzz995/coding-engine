@@ -8,17 +8,23 @@ import { acquireLock, LockConflictError } from './engine/lock.js';
 import { runDoctor, renderDoctorReport } from './doctor/doctor.js';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status/status.js';
 import { writeReport } from './report/report.js';
-import type { AgentKind } from './engine/agent.js';
+import { permissionWarning as agentPermissionWarning, type AgentKind } from './engine/agent.js';
+import { tryReadPrd } from './engine/prd.js';
+import { readModelRouting } from './engine/models.js';
+import { discoverModels, renderModelDiscoveryJson, renderModelDiscoveryText } from './engine/model-discovery.js';
 import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models';
   kind: AgentKind;
+  /** 用户是否通过位置参数显式选择 runner；models.runner 自动选择依赖此信息。 */
+  kindExplicit: boolean;
   maxIterations: number;
   devTimeoutMs: number;
   valTimeoutMs: number;
   builderModel: string | undefined;
   validatorModel: string | undefined;
+  escalationModel: string | undefined;
   workspace: string;
   openBrowser: boolean;
   keepOpen: boolean;
@@ -38,6 +44,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'val-timeout': { type: 'string' },
       'builder-model': { type: 'string' },
       'validator-model': { type: 'string' },
+      'escalation-model': { type: 'string' },
       workspace: { type: 'string' },
       'no-open': { type: 'boolean' },
       'keep-open': { type: 'boolean' },
@@ -55,8 +62,15 @@ export function parseCliArgs(argv: string[]): CliConfig {
     : first === 'doctor' ? 'doctor'
     : first === 'status' ? 'status'
     : first === 'report' ? 'report'
+    : first === 'models' ? 'models'
     : 'run';
-  const kind: AgentKind = first === 'codex' ? 'codex' : 'claude';
+  const runnerPositional = command === 'models' ? positionals[1] : first;
+  if (command === 'models' && runnerPositional !== undefined
+    && runnerPositional !== 'claude' && runnerPositional !== 'codex' && runnerPositional !== 'cursor') {
+    throw new Error(`❌ models runner 必须是 claude、codex 或 cursor，收到「${runnerPositional}」`);
+  }
+  const kind: AgentKind = runnerPositional === 'codex' ? 'codex' : runnerPositional === 'cursor' ? 'cursor' : 'claude';
+  const kindExplicit = runnerPositional === 'claude' || runnerPositional === 'codex' || runnerPositional === 'cursor';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
 
   let staleDays = 30;
@@ -81,11 +95,13 @@ export function parseCliArgs(argv: string[]): CliConfig {
   return {
     command,
     kind,
+    kindExplicit,
     maxIterations: values['max-iter'] ? Number(values['max-iter']) : 50,
     devTimeoutMs: min(values['dev-timeout'], 30),
     valTimeoutMs: min(values['val-timeout'], 60),
     builderModel: values['builder-model'],
     validatorModel: values['validator-model'],
+    escalationModel: values['escalation-model'],
     workspace: values.workspace ?? '.workspace',
     openBrowser: !values['no-open'],
     keepOpen: values['keep-open'] ?? false,
@@ -97,17 +113,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
 }
 
 export function permissionWarning(kind: AgentKind): string {
-  const flag = kind === 'codex'
-    ? '--dangerously-bypass-approvals-and-sandbox'
-    : '--dangerously-skip-permissions';
-  return [
-    '',
-    '⚠️  coding-x 将以【跳过权限】模式自动运行 AI agent：',
-    `   使用 ${kind} ${flag}`,
-    '   它会在无人确认的情况下读写文件、执行命令、提交代码。',
-    '   请确认当前目录是你信任的项目工作区。',
-    '',
-  ].join('\n');
+  return agentPermissionWarning(kind);
 }
 
 /**
@@ -199,20 +205,39 @@ export async function main(argv: string[]): Promise<number> {
     }
   }
 
+  if (cfg.command === 'models') {
+    let runner = cfg.kind;
+    if (!cfg.kindExplicit) {
+      const routing = readModelRouting(tryReadPrd(join(cfg.workspace, 'prd.json')));
+      if (routing.status === 'invalid') {
+        const message = `❌ 无法从现有 prd.json 推断 runner：${routing.errors.join('；')}`;
+        if (cfg.json) console.log(JSON.stringify({ status: 'error', runner, error: message }, null, 2));
+        else console.error(message);
+        return 1;
+      }
+      if (routing.status === 'enabled') runner = routing.config.runner;
+    }
+    const result = await discoverModels(runner);
+    if (cfg.json) console.log(renderModelDiscoveryJson(result));
+    else if (result.status === 'error') console.error(renderModelDiscoveryText(result));
+    else console.log(renderModelDiscoveryText(result));
+    return result.status === 'error' ? 1 : 0;
+  }
+
   if (cfg.command === 'dashboard') {
     return runDashboard({ workspace: cfg.workspace, port: cfg.port, openBrowser: cfg.openBrowser });
   }
 
-  console.warn(permissionWarning(cfg.kind));
-
   const instructionsDir = join(dirname(fileURLToPath(import.meta.url)), 'instructions');
   return runLoop({
     kind: cfg.kind,
+    kindExplicit: cfg.kindExplicit,
     maxIterations: cfg.maxIterations,
     devTimeoutMs: cfg.devTimeoutMs,
     valTimeoutMs: cfg.valTimeoutMs,
     builderModel: cfg.builderModel,
     validatorModel: cfg.validatorModel,
+    escalationModel: cfg.escalationModel,
     workspace: cfg.workspace,
     instructionsDir,
     port: cfg.port,

@@ -20,7 +20,7 @@
    - 对于 "Typecheck passes" 类：运行 `npm run typecheck` 或 `tsc --noEmit`
    - 对于 "Verify in browser using agent-browser" 类：按下方【浏览器测试流程】优先复用已有服务；若服务不存在，再按规则启动 dev server 后，用浏览器工具实际操作验证
    - 对于其他描述性标准：结合代码检查和浏览器测试来判断
-6. 根据验证结果，更新 `{{WORKSPACE}}/state.json` 中该 story 的字段（见下方规则；不要修改 prd.json）
+6. 根据验证结果，更新 `{{WORKSPACE}}/state.json` 中该 story 的字段（见下方规则；不要修改 prd.json）；`escalated` 是引擎独占字段，必须原样保留
 
 ## 验证结果写入规则
 
@@ -69,7 +69,6 @@
 - 验收判定**只**以 prd.json 中该 story 的 acceptanceCriteria 为准；不得因 AGENTS.md、golden-principles 或代码风格/品味问题追加失败项
 - 即使 prd.json 顶层的 `sourcePrd` 或 description 指向源 PRD 文档，也**不得**去源文档中寻找验收依据或增删验收项；源文档只属于开发 Agent 的背景材料
 - 验证要严格，不要因为"大部分通过"就放宽标准，每一条 acceptanceCriteria 都必须真实验证
-- **不得修改 prd.json**（只读需求文件）；只允许修改 state.json 中该 story 的 passes、notes、retryCount、blocked 四个字段。prd.json 受引擎运行期快照保护，你读到的内容就是本轮权威验收标准，无需自行审计其来源；`{{WORKSPACE}}/prd.tampered-*.json` 是引擎已处置的篡改存档，供人工审查，不影响你的验证。
+- **不得修改 prd.json**（只读需求文件）；只允许修改 state.json 中该 story 的 passes、notes、retryCount、blocked 四个字段。`escalated` 只能由引擎修改，无论当前值是 true 还是 false，都必须原样保留，不得新增、删除、翻转或重置。prd.json 受引擎运行期快照保护，你读到的内容就是本轮权威验收标准，无需自行审计其来源；`{{WORKSPACE}}/prd.tampered-*.json` 是引擎已处置的篡改存档，供人工审查，不影响你的验证。
 - 验证完成后正常结束，不需要输出任何特殊标记
 - 不要依赖任何由外部追加到 prompt 末尾的开发输出，验证目标只以 `progress.md` 最后一条 story 记录为准
-

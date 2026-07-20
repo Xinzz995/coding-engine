@@ -3,9 +3,11 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { tryReadPrd } from '../engine/prd.js';
+import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
 import { tryReadState, mergedStories, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
+import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
+import type { AgentKind } from '../engine/agent.js';
 
 export type Phase = 'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'error';
 
@@ -16,38 +18,57 @@ interface State {
   currentStory: string | null;
   /** 当前阶段所用模型（未配置路由时为 null） */
   model: string | null;
+  routeSource: ModelRouteSource | null;
+  storyDifficulty: StoryDifficulty | null;
+  runner: AgentKind | null;
   startedAt: number | null;
 }
 
 const state: State = {
-  iteration: 0, maxIterations: 50, phase: 'idle', currentStory: null, model: null, startedAt: null,
+  iteration: 0, maxIterations: 50, phase: 'idle', currentStory: null, model: null,
+  routeSource: null, storyDifficulty: null, runner: null, startedAt: null,
 };
 let workspaceDir = '.workspace';
 
 export function configureWorkspace(workspace: string, maxIterations: number): void {
   workspaceDir = workspace;
   state.maxIterations = maxIterations;
+  state.iteration = 0;
+  state.phase = 'idle';
+  state.currentStory = null;
+  state.model = null;
+  state.routeSource = null;
+  state.storyDifficulty = null;
+  state.runner = null;
   state.startedAt = Date.now();
 }
 
 export function setState(patch: {
   iteration?: number; phase?: Phase; currentStory?: string | null; model?: string | null;
+  routeSource?: ModelRouteSource | null; storyDifficulty?: StoryDifficulty | null;
+  runner?: AgentKind | null;
 }): void {
   if (patch.iteration !== undefined) state.iteration = patch.iteration;
   if (patch.phase !== undefined) state.phase = patch.phase;
   if (patch.currentStory !== undefined) state.currentStory = patch.currentStory;
   if (patch.model !== undefined) state.model = patch.model;
+  if (patch.routeSource !== undefined) state.routeSource = patch.routeSource;
+  if (patch.storyDifficulty !== undefined) state.storyDifficulty = patch.storyDifficulty;
+  if (patch.runner !== undefined) state.runner = patch.runner;
 }
 
 export interface ApiResponse {
   runtime: {
     iteration: number; max_iterations: number; phase: Phase;
     current_story: string | null; elapsed: number; model: string | null;
+    route_source: ModelRouteSource | null; story_difficulty: StoryDifficulty | null;
+    runner: AgentKind | null;
   };
   project: string;
   branchName: string;
   sourcePrd: string;
   stories: StoryView[];
+  modelRouting: ModelRoutingReadResult;
   logs: string;
 }
 
@@ -64,11 +85,15 @@ export function buildApiResponse(): ApiResponse {
       current_story: state.currentStory,
       elapsed,
       model: state.model,
+      route_source: state.routeSource,
+      story_difficulty: state.storyDifficulty,
+      runner: state.runner,
     },
     project: prd?.project ?? '',
     branchName: prd?.branchName ?? '',
     sourcePrd: prd?.sourcePrd ?? '',
     stories: prd ? mergedStories(prd, runState) : [],
+    modelRouting: readModelRouting(prd),
     logs,
   };
 }

@@ -1,13 +1,15 @@
 ---
 title: 006-model-routing
-status: active
-updated: 2026-07-20
+status: superseded
+updated: 2026-07-21
 scope: root
 ---
 
 # 006. 模型路由：透传不映射、validator 恒定、升级复用 retryCount
 
-> 2026-07-20 起由 ADR-010 扩展：`models` 支持 `profiles` 具名档案（模型名对工具不可移植，档案配置一次、任何工具各自定位）；本文三取舍与其余内容继续有效。
+> 2026-07-21 起由 ADR-011 取代。本文保留首次模型路由的历史取舍，不再作为当前实现目标。
+
+> 2026-07-20 曾由 ADR-010 扩展 `profiles` 具名档案；该扩展同样已被 ADR-011 取代。
 
 ## 背景
 

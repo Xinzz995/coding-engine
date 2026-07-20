@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setState, buildApiResponse, start, configureWorkspace, browserOpenCommand } from './server.js';
@@ -52,11 +52,34 @@ describe('buildApiResponse', () => {
     expect(r.stories[0].passes).toBe(true);
   });
 
-  it('exposes the current model in runtime and defaults it to null', () => {
-    setState({ phase: 'developing', model: 'opus' });
+  it('exposes the current actual route in runtime and defaults it to null', () => {
+    setState({
+      phase: 'developing', model: 'opus', routeSource: 'difficulty',
+      storyDifficulty: 'high', runner: 'claude',
+    });
     expect(buildApiResponse().runtime.model).toBe('opus');
-    setState({ model: null });
+    expect(buildApiResponse().runtime.route_source).toBe('difficulty');
+    expect(buildApiResponse().runtime.story_difficulty).toBe('high');
+    expect(buildApiResponse().runtime.runner).toBe('claude');
+    setState({ model: null, routeSource: null, storyDifficulty: null });
     expect(buildApiResponse().runtime.model).toBe(null);
+  });
+
+  it('exposes the complete configured routing separately from the actual route', () => {
+    const ws = tempWorkspace();
+    const path = join(ws, 'prd.json');
+    const prd = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    prd.models = {
+      runner: 'codex', builder: { low: 'lo', medium: 'mid', high: 'hi' },
+      validator: 'val', escalation: 'esc',
+    };
+    (prd.userStories as Array<Record<string, unknown>>)[0].difficulty = 'medium';
+    (prd.userStories as Array<Record<string, unknown>>)[0].difficultyReason = '命中 medium-1';
+    writeFileSync(path, JSON.stringify(prd));
+    configureWorkspace(ws, 50);
+    expect(buildApiResponse().modelRouting).toMatchObject({
+      status: 'enabled', config: { runner: 'codex', validator: 'val', escalation: 'esc' },
+    });
   });
 });
 

@@ -1,11 +1,13 @@
 ---
 title: "设计：模型路由——不同任务使用不同能力的模型"
-status: done
-updated: 2026-07-07
+status: superseded
+updated: 2026-07-21
 scope: root
 ---
 
 # 模型路由：不同任务使用不同能力的模型
+
+> 2026-07-21 起由 `docs/superpowers/specs/2026-07-21-model-routing-redesign.md` 取代；本文保留当时已交付设计与实现依据，仅作历史记录。
 
 - 日期：2026-07-06
 - 作者：Xinzz + Claude

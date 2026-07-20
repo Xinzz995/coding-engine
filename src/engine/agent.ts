@@ -1,9 +1,24 @@
 import { spawn } from 'node:child_process';
 
-export type AgentKind = 'claude' | 'codex';
+export type AgentKind = 'claude' | 'codex' | 'cursor';
+
+export function permissionWarning(kind: AgentKind): string {
+  const flag = kind === 'codex' ? '--dangerously-bypass-approvals-and-sandbox'
+    : kind === 'cursor' ? '--force'
+    : '--dangerously-skip-permissions';
+  return [
+    '',
+    '⚠️  coding-x 将以【跳过权限】模式自动运行 AI agent：',
+    `   使用 ${kind} ${flag}`,
+    '   它会在无人确认的情况下读写文件、执行命令、提交代码。',
+    '   请确认当前目录是你信任的项目工作区。',
+    '',
+  ].join('\n');
+}
 
 export function resolveBinary(kind: AgentKind): string {
   if (kind === 'codex') return process.env.CODING_X_CODEX_BIN ?? 'codex';
+  if (kind === 'cursor') return process.env.CODING_X_CURSOR_BIN ?? 'cursor-agent';
   return process.env.CODING_X_CLAUDE_BIN ?? 'claude';
 }
 
@@ -13,6 +28,7 @@ export function buildAgentArgs(kind: AgentKind, prompt: string, model?: string):
   if (kind === 'codex') {
     return [bin, 'exec', '--dangerously-bypass-approvals-and-sandbox', ...modelArgs, prompt];
   }
+  if (kind === 'cursor') return [bin, '-p', '--force', ...modelArgs, prompt];
   return [bin, '--print', '--dangerously-skip-permissions', ...modelArgs, prompt];
 }
 

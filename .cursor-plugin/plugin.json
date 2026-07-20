@@ -2,7 +2,7 @@
   "name": "coding-x",
   "displayName": "coding-x",
   "description": "Ralph auto-coding workflow: PRD-driven deterministic Developer→Validator loop — skills, commands and the coding-x engine (`npx coding-x`).",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "author": { "name": "Xinzz" },
   "homepage": "https://github.com/Xinzz995/coding-engine",
   "repository": "https://github.com/Xinzz995/coding-engine",

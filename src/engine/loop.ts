@@ -1,13 +1,18 @@
 import { join, basename } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
-import { runAgent, type AgentKind } from './agent.js';
+import { permissionWarning, runAgent, type AgentKind } from './agent.js';
 import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
 import type { PrdReadResult } from './prd-guard.js';
-import { ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved, type RunState } from './state.js';
+import {
+  ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved,
+  enableEscalation, restoreEscalated, type RunState, type StoryState,
+} from './state.js';
 import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
-import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
+import { resolveBuilderModel, resolveValidatorModel } from './models.js';
+import { ModelPreflightError, preflightModelRouting, renderPreflightSummary } from './model-preflight.js';
+import type { ModelDiscoveryResult } from './model-discovery.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
 import { appendEvidence, type EvidenceRecord } from './evidence.js';
@@ -15,6 +20,8 @@ import { acquireLock, LockConflictError, type LockHandle } from './lock.js';
 
 export interface LoopConfig {
   kind: AgentKind;
+  /** CLI 位置参数是否显式指定 kind；直接 API 调用缺省视为显式。 */
+  kindExplicit?: boolean;
   maxIterations: number;
   devTimeoutMs: number;
   valTimeoutMs: number;
@@ -22,6 +29,10 @@ export interface LoopConfig {
   builderModel?: string;
   /** 临时覆盖 validator 阶段模型（压过 prd.json models.validator） */
   validatorModel?: string;
+  /** 临时覆盖升级 builder 模型；只在 state.escalated=true 时生效。 */
+  escalationModel?: string;
+  /** 测试注入；生产缺省调用公开 runner 探测。 */
+  modelDiscovery?: (runner: AgentKind) => Promise<ModelDiscoveryResult>;
   workspace: string;
   instructionsDir: string;
   port?: number;
@@ -99,18 +110,50 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   const builder = builderRaw === null ? null : renderInstruction(builderRaw, cfg.workspace);
   const validator = validatorRaw === null ? null : renderInstruction(validatorRaw, cfg.workspace);
 
-  const server = dashboard.start({
-    workspace: cfg.workspace,
-    maxIterations: cfg.maxIterations,
-    port: cfg.port,
-    openBrowser: cfg.openBrowser ?? true,
-  });
-
+  let server: ReturnType<typeof dashboard.start> | null = null;
   try {
     // 启动时保证 state.json 存在：v0.4 及更早的 prd.json 把状态写在 story 上，
     // ensureStateFile 会把它们抽取成 state.json（一次性迁移）。
     const bootPrd = guard.read().prd;
     if (bootPrd) ensureStateFile(cfg.workspace, bootPrd);
+    // ensureStateFile 为了 legacy 迁移会在损坏 state 时返回内嵌旧状态，但运行期
+    // 绝不能因此“复活”旧 passes。重读磁盘：新迁移文件可读则正常使用，
+    // 仍损坏则与轮内 readRunState 一样按全未开始处理，且不覆盖原文件。
+    const bootState = bootPrd
+      ? (tryReadState(statePath) ?? blankStateFor(bootPrd))
+      : null;
+    let preflight;
+    try {
+      preflight = await preflightModelRouting({
+        prd: bootPrd,
+        state: bootState,
+        requestedRunner: cfg.kind,
+        runnerExplicit: cfg.kindExplicit ?? true,
+        builderOverride: cfg.builderModel,
+        validatorOverride: cfg.validatorModel,
+        escalationOverride: cfg.escalationModel,
+        ...(cfg.modelDiscovery ? { discover: cfg.modelDiscovery } : {}),
+      });
+    } catch (err) {
+      if (err instanceof ModelPreflightError) {
+        console.error(`❌ 模型路由预检失败：${err.message}`);
+        return 2;
+      }
+      throw err;
+    }
+    const runKind = preflight.runner;
+    const bootResolved = !!(bootPrd && bootState && allStoriesResolved(bootPrd, bootState));
+    for (const warning of preflight.warnings) console.warn(`⚠️  ${warning}`);
+    console.log(renderPreflightSummary(preflight));
+    if (!bootResolved) console.warn(permissionWarning(runKind));
+
+    server = dashboard.start({
+      workspace: cfg.workspace,
+      maxIterations: cfg.maxIterations,
+      port: cfg.port,
+      openBrowser: cfg.openBrowser ?? true,
+    });
+    dashboard.setState({ runner: runKind });
     // Agents must run at the project root (the engine process's cwd), NOT at
     // cfg.workspace. The engine reads prd.json at join(cfg.workspace,
     // 'prd.json'), which for the default relative '.workspace' resolves against
@@ -156,13 +199,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const r = guard.read();
       recordTamper(r, iteration);
     };
-    // 模型路由警告去重：非法 models 配置的警告每轮都会重新产生，同一条只打一次
-    const warnedModels = new Set<string>();
-    const warnModelsOnce = (msgs: string[]) => {
-      for (const m of msgs) {
-        if (!warnedModels.has(m)) { warnedModels.add(m); console.warn(m); }
-      }
-    };
     const stallLimit = cfg.stallLimit ?? 3;
     let stallCount = 0;
     // stall 熔断判定：stall 轮调用；达限打横幅并返回 true（调用方 break）
@@ -173,7 +209,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       return true;
     };
     let exitCode = 1;
-    for (let i = 1; i <= cfg.maxIterations; i++) {
+    if (bootResolved) {
+      dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
+      exitCode = convergedExit(bootPrd!, bootState!);
+    }
+    for (let i = 1; !bootResolved && i <= cfg.maxIterations; i++) {
       lock.verify(); // 轮首自愈：agent 误删/改写锁时告警重建（同 prd-guard 的机械防护哲学）
       const stateRawBefore = rawOf(statePath);
       const progressRawBefore = rawOf(progressPath);
@@ -184,10 +224,37 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       let skipValidator = beforeRead.restoreFailed;
       const beforeState = before ? readRunState(statePath, before) : null;
       const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
-      const modelsRead = readModelsConfig(before, cfg.kind);
-      warnModelsOnce(modelsRead.warnings);
       const currentStoryObj = before?.userStories.find((s) => s.id === currentStory) ?? null;
-      const retryCount = currentStory && beforeState ? (beforeState[currentStory]?.retryCount ?? 0) : 0;
+      const routeTampers: Array<{
+        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
+      }> = [];
+      const restoreRouteOwnership = (
+        side: 'builder' | 'validator', expectedState: StoryState | undefined,
+      ): void => {
+        if (!currentStory) return;
+        const state = tryReadState(statePath);
+        if (!state) return;
+        const expected = expectedState?.escalated ?? false;
+        const restored = restoreEscalated(state, currentStory, expected, expectedState);
+        if (!restored.tamper) return;
+        routeTampers.push({ ...restored.tamper, side });
+        writeFileAtomicSync(statePath, JSON.stringify(restored.state, null, 2));
+        console.warn(
+          `⚠️  ${side} 修改了引擎独占的 ${currentStory}.escalated ` +
+          `(${restored.tamper.expected} → ${restored.tamper.received})，已恢复`,
+        );
+      };
+      const hasDedicatedEscalation = Boolean(cfg.escalationModel || preflight.config?.escalation);
+      const triggerEscalation = (reason: 'gate' | 'validator' | 'noop'): boolean => {
+        if (!currentStory) return false;
+        const state = tryReadState(statePath);
+        if (!state) return false;
+        const enabled = enableEscalation(state, currentStory, hasDedicatedEscalation);
+        if (!enabled.changed) return false;
+        writeFileAtomicSync(statePath, JSON.stringify(enabled.state, null, 2));
+        console.log(`⬆️  ${currentStory} 首次有效失败（${reason}），下轮起使用 escalation 模型`);
+        return true;
+      };
       // 异常轮回写：本轮把当前 story 的 passes 从 false 翻到 true 且未 blocked → 回写待复核。
       // state 读取失败（缺失/损坏）不回写不覆盖（同门禁打回的保守语义）。返回是否发生回写。
       const rollbackIfUnvalidatedPass = (side: 'builder' | 'validator', r: { timedOut: boolean; exitCode: number | null }): boolean => {
@@ -202,9 +269,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         return true;
       };
       const builderChoice = resolveBuilderModel({
-        cliOverride: cfg.builderModel, config: modelsRead.config, story: currentStoryObj, retryCount, kind: cfg.kind,
+        builderOverride: cfg.builderModel, escalationOverride: cfg.escalationModel,
+        config: preflight.config, story: currentStoryObj,
+        escalated: currentStory && beforeState ? (beforeState[currentStory]?.escalated ?? false) : false,
       });
-      warnModelsOnce(builderChoice.warnings);
       // 「每轮一条 iteration」五个写入点的公共底座单源：各点只传差异字段——
       // 0.22.0 轮五点位分四批才靠审查抓齐，字段漂移风险有实证，底座必须只有一份。
       const recordIteration = (over: Partial<Extract<EvidenceRecord, { type: 'iteration' }>>) => {
@@ -212,11 +280,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           type: 'iteration', source: 'engine', at: new Date().toISOString(), iteration: i,
           storyId: currentStory, builderRan: !!builder, builderModel: builderChoice.model ?? null,
           validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+          builderRouteSource: builderChoice.source,
+          ...(currentStoryObj?.difficulty ? { storyDifficulty: currentStoryObj.difficulty } : {}),
+          ...(routeTampers.length > 0 ? { stateRouteTamper: [...routeTampers] } : {}),
           ...over,
         });
       };
 
-      dashboard.setState({ iteration: i, phase: 'developing', currentStory, model: builderChoice.model ?? null });
+      dashboard.setState({
+        iteration: i, phase: 'developing', currentStory,
+        model: builder ? (builderChoice.model ?? null) : null,
+        routeSource: builder ? builderChoice.source : null,
+        storyDifficulty: currentStoryObj?.difficulty ?? null,
+      });
 
       // Developer
       let builderOutcome: 'completed' | 'timeout' | 'error' | undefined;
@@ -224,14 +300,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       if (!builder) {
         console.error('❌ builder.md 不存在，跳过开发');
       } else {
-        if (builderChoice.model) {
-          console.log(`🧠 builder 模型: ${builderChoice.model}${builderChoice.escalated ? `（${currentStory} 第 ${retryCount} 次重试，升级）` : ''}`);
-        }
+        console.log(
+          `🧠 builder 实际模型: ${builderChoice.model ?? 'runner 默认'} [${builderChoice.source}]` +
+          `${currentStoryObj?.difficulty ? ` · 难度 ${currentStoryObj.difficulty}` : ''}` +
+          `${builderChoice.escalated ? ` · ${currentStory} 升级路由` : ''}`,
+        );
         const dev = await runAgent({
-          kind: cfg.kind, prompt: builder, cwd: agentCwd, timeoutMs: cfg.devTimeoutMs,
+          kind: runKind, prompt: builder, cwd: agentCwd, timeoutMs: cfg.devTimeoutMs,
           model: builderChoice.model,
         });
         builderOutcome = outcomeOf(dev);
+        restoreRouteOwnership('builder', beforeState?.[currentStory ?? '']);
         if (builderOutcome !== 'completed') {
           builderRollback = rollbackIfUnvalidatedPass('builder', dev);
           // evidence=引擎机械事实：agentBlocked 不能硬编码 false——agent 可能同轮已置 blocked:true
@@ -241,7 +320,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             agentBlocked: blockedNow,
             builderOutcome, ...(builderRollback ? { abortRollback: { storyId: currentStory! } } : {}),
           });
-          dashboard.setState({ phase: 'idle', model: null });
+          dashboard.setState({ phase: 'idle', model: null, routeSource: null, storyDifficulty: null });
           if (stalled()) { tamperCheckBeforeExit(i); break; }
           continue; // 异常轮：跳过门禁与验收，下轮重试（回写已保证不带走未验收的 true）
         }
@@ -260,13 +339,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           // 重跑的终轮在 evidence 时间线上是空洞（其余所有退出路径都恰写一条）。
           recordIteration({ builderOutcome: 'completed', noop: true });
           tamperCheckBeforeExit(i);
-          dashboard.setState({ phase: 'done' });
+          dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
           exitCode = convergedExit(before, beforeState);
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
-        recordIteration({ builderOutcome: 'completed', noop: true });
-        dashboard.setState({ phase: 'idle', model: null });
+        const escalationTriggered = triggerEscalation('noop');
+        recordIteration({
+          builderOutcome: 'completed', noop: true,
+          ...(escalationTriggered ? { escalationTriggeredBy: 'noop' as const } : {}),
+        });
+        dashboard.setState({ phase: 'idle', model: null, routeSource: null, storyDifficulty: null });
         if (stalled()) { tamperCheckBeforeExit(i); break; }
         continue;
       }
@@ -289,7 +372,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       if (checks === 'invalid') {
         console.warn('⚠️  prd.json 的 qualityChecks 形状非法（应为字符串数组），机械门禁未启用');
       } else if (!agentBlocked && checks && currentStory) {
-        dashboard.setState({ phase: 'gating', model: null });
+        dashboard.setState({
+          phase: 'gating', model: null, routeSource: null,
+          storyDifficulty: currentStoryObj?.difficulty ?? null,
+        });
         const gate = await runQualityChecks(checks, agentCwd);
         recordEvidence({
           type: 'gate-run', source: 'engine', at: new Date().toISOString(), iteration: i,
@@ -302,41 +388,62 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           console.error(`\n❌ 机械门禁未通过（${gate.failure!.command}），打回 ${currentStory} 待下轮重试`);
           const st = tryReadState(statePath);
           if (st) {
-            const next = applyGateFailure(st, currentStory, gate.failure!, new Date());
-            writeFileAtomicSync(statePath, JSON.stringify(next, null, 2));
+            const failed = applyGateFailure(st, currentStory, gate.failure!, new Date());
+            const enabled = enableEscalation(failed, currentStory, hasDedicatedEscalation);
+            writeFileAtomicSync(statePath, JSON.stringify(enabled.state, null, 2));
+            if (enabled.changed) console.log(`⬆️  ${currentStory} 首次有效失败（gate），下轮起使用 escalation 模型`);
+            recordIteration({
+              ...(builderOutcome ? { builderOutcome } : {}), validatorOutcome: 'skipped', gateRejected: true,
+              ...(enabled.changed ? { escalationTriggeredBy: 'gate' as const } : {}),
+            });
           } else {
             // 缺失/损坏都不落盘打回：绝不覆盖可能损坏的文件（同 ensureStateFile 语义）
             console.warn('⚠️  state.json 缺失或不可读，门禁打回未落盘；若文件损坏请运行 npx coding-x repair');
           }
-          recordIteration({
+          if (!st) recordIteration({
             ...(builderOutcome ? { builderOutcome } : {}), validatorOutcome: 'skipped', gateRejected: true,
           });
           stallCount = 0; // 有 state 写入=有活动；打回预算由 MAX_RETRIES 独立约束
           // 已知不对称：门禁把最后一个 story 打到 blocked 时，本轮 continue 跳过完成判定，
           // 完成要到下一轮才被发现；发生在末轮迭代时退出码为 1（validator 打回则当轮判定）。低频且 blocked→1 语义诚实，接受。
-          dashboard.setState({ phase: 'idle', model: null });
+          dashboard.setState({ phase: 'idle', model: null, routeSource: null, storyDifficulty: null });
           continue;
         }
       }
 
       // Validator
-      const validatorModel = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: modelsRead.config });
-      dashboard.setState({ phase: 'validating', model: validatorModel ?? null });
+      const validatorChoice = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: preflight.config });
+      const validatorModel = validatorChoice.model;
+      const validatorWillRun = !!validator && !skipValidator && !agentBlocked;
+      dashboard.setState({
+        phase: 'validating', model: validatorWillRun ? (validatorModel ?? null) : null,
+        routeSource: validatorWillRun ? validatorChoice.source : null,
+        storyDifficulty: currentStoryObj?.difficulty ?? null,
+      });
       let validatorOutcome: 'completed' | 'timeout' | 'error' | 'skipped' | undefined;
       let validatorRollback = false;
+      let validatorEscalationTriggered = false;
       if (validator && skipValidator) {
         console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
         validatorOutcome = 'skipped';
       } else if (validator && !agentBlocked) {
-        if (validatorModel) console.log(`🧠 validator 模型: ${validatorModel}`);
+        console.log(`🧠 validator 实际模型: ${validatorModel ?? 'runner 默认'} [${validatorChoice.source}]`);
+        const validatorStateBefore = currentStory ? tryReadState(statePath)?.[currentStory] : undefined;
         const val = await runAgent({
-          kind: cfg.kind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
+          kind: runKind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
           model: validatorModel,
         });
         validatorOutcome = outcomeOf(val);
+        restoreRouteOwnership('validator', validatorStateBefore);
         if (validatorOutcome !== 'completed') {
           // validator 异常结局：本轮 builder 置的 true 未经复核 → 回写待复核
           validatorRollback = rollbackIfUnvalidatedPass('validator', val);
+        } else if (currentStory && validatorStateBefore) {
+          const validatorStateAfter = tryReadState(statePath)?.[currentStory];
+          const rejected = !!validatorStateAfter
+            && !validatorStateAfter.passes
+            && validatorStateAfter.retryCount > validatorStateBefore.retryCount;
+          if (rejected) validatorEscalationTriggered = triggerEscalation('validator');
         }
       } else if (validator && agentBlocked) {
         validatorOutcome = 'skipped';
@@ -347,10 +454,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       recordIteration({
         validatorRan: !!validator && !skipValidator && !agentBlocked,
         validatorModel: validatorModel ?? null,
+        validatorRouteSource: validatorChoice.source,
         skippedValidator: skipValidator, agentBlocked,
         ...(builderOutcome ? { builderOutcome } : {}),
         ...(validatorOutcome ? { validatorOutcome } : {}),
         ...(validatorRollback ? { abortRollback: { storyId: currentStory! } } : {}),
+        ...(validatorEscalationTriggered ? { escalationTriggeredBy: 'validator' as const } : {}),
       });
 
       if (validatorOutcome === 'timeout' || validatorOutcome === 'error') {
@@ -360,13 +469,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
 
       // Completion check
-      dashboard.setState({ phase: 'idle', model: null });
+      dashboard.setState({ phase: 'idle', model: null, routeSource: null, storyDifficulty: null });
       const afterRead = guard.read();
       recordTamper(afterRead, i);
       const after = afterRead.prd;
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
-        dashboard.setState({ phase: 'done' });
+        dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
         exitCode = convergedExit(after, afterState);
         break;
       }
@@ -401,13 +510,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // 等待期 Ctrl+C 完全走既有 waitForSigint 语义（真实退出码保留）
     lock.release();
     if (cfg.keepOpen) {
-      const url = `http://localhost:${server.address().port}`;
+      const url = `http://localhost:${server!.address().port}`;
       console.log(`\n✅ 运行结束（退出码 ${exitCode}）。仪表盘仍在 ${url} ，按 Ctrl+C 退出。`);
       await (cfg.interrupt ?? waitForSigint());
     }
     return exitCode;
   } finally {
     lock.release(); // 幂等：正常路径已释放则短路；异常路径在此兜底
-    server.close();
+    server?.close();
   }
 }

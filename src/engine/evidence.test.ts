@@ -165,4 +165,27 @@ describe('iteration 新可选字段（异常轮语义）', () => {
     expect(recs).toHaveLength(1);
     expect((recs[0] as { noop?: true }).noop).toBeUndefined();
   });
+
+  it('模型路由来源、升级触发与所有权篡改往返保真', () => {
+    const dir = ws();
+    appendEvidence(dir, {
+      type: 'iteration', source: 'engine', at: '2026-07-21T10:00:00.000Z', iteration: 7,
+      storyId: 'US-007', builderRan: true, builderModel: 'esc-m',
+      validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false,
+      builderRouteSource: 'escalation', validatorRouteSource: 'validator', storyDifficulty: 'high',
+      escalationTriggeredBy: 'validator',
+      stateRouteTamper: [
+        { expected: false, received: true, side: 'builder' },
+        { expected: true, received: 'missing', side: 'validator' },
+      ],
+    });
+    expect(readEvidence(dir).records[0]).toMatchObject({
+      builderRouteSource: 'escalation', validatorRouteSource: 'validator', storyDifficulty: 'high',
+      escalationTriggeredBy: 'validator',
+      stateRouteTamper: [
+        { expected: false, received: true, side: 'builder' },
+        { expected: true, received: 'missing', side: 'validator' },
+      ],
+    });
+  });
 });

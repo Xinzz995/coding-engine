@@ -1,7 +1,7 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import type { StoryView } from '../engine/state.js';
 import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX } from '../engine/gate.js';
-import { readModelsSpec } from '../engine/models.js';
+import { readModelRouting } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
 
 export function escapeHtml(s: string): string {
@@ -128,6 +128,10 @@ function storyBadge(s: StoryView): string {
 
 function renderStoryCard(s: StoryView, shots: ScreenshotEntry[], claims: ScreenshotClaim[], anyClaims: boolean): string {
   const retry = s.retryCount > 0 ? ` <span class="retry">重试 ${s.retryCount} 次</span>` : '';
+  const routeMeta = s.difficulty
+    ? `<div class="meta-line">难度：<code>${text(s.difficulty)}</code>${s.escalated ? ' · ⬆️ 已升级' : ''}` +
+      `${s.difficultyReason ? ` · 依据：${text(s.difficultyReason)}` : ''}</div>`
+    : (s.escalated ? '<div class="meta-line">⬆️ 已升级</div>' : '');
   // tryReadPrd 无逐字段守卫，acceptanceCriteria 可能形状非法——渲染层兜底为空列表
   const acList = Array.isArray(s.acceptanceCriteria) ? s.acceptanceCriteria : [];
   // acIndex 从 1 数起；越界（<1 或 >AC 数）、非整数（如 1.5）与缺省一律归 story 级登记，不静默丢弃
@@ -144,6 +148,7 @@ function renderStoryCard(s: StoryView, shots: ScreenshotEntry[], claims: Screens
     : '';
   return `<section class="card story">
 <h3>${text(s.id)} ${text(s.title)} ${storyBadge(s)}${retry}</h3>
+${routeMeta}
 <ul class="acs">${acs}</ul>
 ${storyClaimsHtml}
 ${renderNotes(s.notes)}
@@ -205,11 +210,21 @@ function renderTimeline(records: EvidenceRecord[]): string {
     if (r.validatorOutcome === 'timeout') flags.push('validator 超时');
     if (r.validatorOutcome === 'error') flags.push('validator 异常退出');
     if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
+    if (r.escalationTriggeredBy) flags.push(`已触发升级（${text(r.escalationTriggeredBy)}）`);
+    for (const tamper of r.stateRouteTamper ?? []) {
+      flags.push(`${tamper.side} 改写 escalated（${tamper.expected} → ${tamper.received}）已恢复`);
+    }
     const flagCell = flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—';
-    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.builderRan ? text(r.builderModel ?? '默认') : '未跑'}</td><td>${r.validatorRan ? text(r.validatorModel ?? '默认') : (r.agentBlocked ? '跳过（agent blocked）' : r.skippedValidator ? '跳过（快照写回失败）' : '未跑')}</td><td>${flagCell}</td><td>${stampOf(r.at)}</td></tr>`;
+    const builder = r.builderRan
+      ? `${text(r.builderModel ?? '默认')} [${text(r.builderRouteSource ?? '来源未知')}]`
+      : '未跑';
+    const validator = r.validatorRan
+      ? `${text(r.validatorModel ?? '默认')} [${text(r.validatorRouteSource ?? '来源未知')}]`
+      : (r.agentBlocked ? '跳过（agent blocked）' : r.skippedValidator ? '跳过（快照写回失败）' : '未跑');
+    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${text(r.storyDifficulty ?? '—')}</td><td>${builder}</td><td>${validator}</td><td>${flagCell}</td><td>${stampOf(r.at)}</td></tr>`;
   }).join('');
   return `<section class="card"><details><summary><h2>轮次时间线（engine 记录）</h2></summary>` +
-    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>builder</th><th>validator</th><th>状态</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>难度</th><th>builder 实际路由</th><th>validator 实际路由</th><th>状态</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>` +
     `<p class="placeholder">每轮一条记录；异常轮（超时/异常退出/空转/门禁打回）见状态列标注。</p></details></section>`;
 }
@@ -219,26 +234,28 @@ function claimLink(c: ScreenshotClaim): string {
 }
 
 function renderModels(data: ReportData): string {
-  // 报告不知道本次运行用的是哪个 agent 工具：阶段显示原始引用（档案名或字面模型名），
-  // 档案表如实列出每个工具的模型名
-  const { spec, warnings } = readModelsSpec(data.prd);
-  const warnLines = warnings.map((w) => `<div class="meta-line warn">${escapeHtml(w)}</div>`).join('');
-  if (!spec) return warnLines;
-  const items: string[] = [];
-  if (spec.stages.builder) items.push(`builder=<code>${escapeHtml(spec.stages.builder)}</code>`);
-  if (spec.stages.validator) items.push(`validator=<code>${escapeHtml(spec.stages.validator)}</code>`);
-  if (spec.stages.escalation) items.push(`escalation=<code>${escapeHtml(spec.stages.escalation)}</code>（第 ${spec.escalateAfter} 次重试起）`);
-  const stageLine = items.length > 0 ? `<div class="meta-line">模型路由：${items.join(' · ')}</div>` : '';
-  const profileLines = Object.entries(spec.profiles).map(([name, entry]) => {
-    const cells = Object.entries(entry).map(([kind, model]) => `${escapeHtml(kind)}=<code>${escapeHtml(model)}</code>`);
-    return `<div class="meta-line">模型档案「${escapeHtml(name)}」：${cells.length > 0 ? cells.join(' · ') : '（空）'}</div>`;
-  }).join('');
-  return `${stageLine}${profileLines}${warnLines}`;
+  const routing = readModelRouting(data.prd);
+  if (routing.status === 'disabled') return '';
+  if (routing.status === 'invalid') {
+    return routing.errors.map((e) => `<div class="meta-line warn">${escapeHtml(e)}</div>`).join('');
+  }
+  const { config } = routing;
+  return `<div class="meta-line">模型路由（${escapeHtml(config.runner)}）：` +
+    `builder low=<code>${escapeHtml(config.builder.low)}</code> · ` +
+    `medium=<code>${escapeHtml(config.builder.medium)}</code> · ` +
+    `high=<code>${escapeHtml(config.builder.high)}</code> · ` +
+    `validator=<code>${escapeHtml(config.validator)}</code> · ` +
+    `escalation=<code>${escapeHtml(config.escalation)}</code></div>`;
 }
 
 function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
   const tamperEvents = records.filter((r): r is Extract<EvidenceRecord, { type: 'tamper' }> => r.type === 'tamper');
-  if (tampered.length === 0 && tamperEvents.length === 0) return '';
+  const stateRouteTampers = records
+    .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration')
+    .flatMap((r) => (r.stateRouteTamper ?? []).map((t) => ({
+      ...t, iteration: r.iteration, at: r.at, storyId: r.storyId,
+    })));
+  if (tampered.length === 0 && tamperEvents.length === 0 && stateRouteTampers.length === 0) return '';
   const eventOf = new Map(tamperEvents.filter((t) => t.archive !== null).map((t) => [t.archive as string, t]));
   const files = tampered.map((f) => {
     const ev = eventOf.get(f);
@@ -252,11 +269,14 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
   const missing = tamperEvents.filter((t) => t.archive !== null && !tampered.includes(t.archive as string)).map((t) =>
     `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出，存档 <code>${text(t.archive)}</code> 已不在工作区</li>`,
   ).join('');
+  const routeItems = stateRouteTampers.map((t) =>
+    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>escalated</code>（${t.expected} → ${t.received}），已恢复</li>`,
+  ).join('');
   return `<section class="card red-flag">
-<h2>🚩 红旗区：运行期篡改存档</h2>
-<p>运行期间 prd.json 被修改过，引擎已按启动快照恢复并存档（ADR-007）。合并裁决前请逐个核对：</p>
-<ul>${files}${deletions}${missing}</ul>
-<p>指引：<code>diff</code> 存档与 <code>prd.json</code>，核对运行期被改了什么；与预期不符须停止合并。</p>
+<h2>🚩 红旗区：运行期路由 / PRD 篡改</h2>
+<p>引擎检出并恢复了不应由 agent 修改的数据（PRD 防护见 ADR-007）。合并裁决前请逐个核对：</p>
+<ul>${files}${deletions}${missing}${routeItems}</ul>
+<p>指引：核对上述记录及对应存档；与预期不符须停止合并。</p>
 </section>`;
 }
 

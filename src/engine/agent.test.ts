@@ -17,6 +17,11 @@ describe('buildAgentArgs', () => {
       'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', 'P',
     ]);
   });
+  it('builds cursor headless force command', () => {
+    expect(buildAgentArgs('cursor', 'P')).toEqual([
+      'cursor-agent', '-p', '--force', 'P',
+    ]);
+  });
   it('appends --model before the prompt for claude when a model is given', () => {
     expect(buildAgentArgs('claude', 'P', 'opus')).toEqual([
       'claude', '--print', '--dangerously-skip-permissions', '--model', 'opus', 'P',
@@ -27,13 +32,24 @@ describe('buildAgentArgs', () => {
       'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5', 'P',
     ]);
   });
+  it('appends --model before the prompt for cursor when a model is given', () => {
+    expect(buildAgentArgs('cursor', 'P', 'composer-1')).toEqual([
+      'cursor-agent', '-p', '--force', '--model', 'composer-1', 'P',
+    ]);
+  });
 });
 
 describe('resolveBinary', () => {
-  it('honors env override', () => {
+  it('honors all runner env overrides', () => {
     process.env.CODING_X_CLAUDE_BIN = '/tmp/x';
+    process.env.CODING_X_CODEX_BIN = '/tmp/y';
+    process.env.CODING_X_CURSOR_BIN = '/tmp/z';
     expect(resolveBinary('claude')).toBe('/tmp/x');
+    expect(resolveBinary('codex')).toBe('/tmp/y');
+    expect(resolveBinary('cursor')).toBe('/tmp/z');
     delete process.env.CODING_X_CLAUDE_BIN;
+    delete process.env.CODING_X_CODEX_BIN;
+    delete process.env.CODING_X_CURSOR_BIN;
   });
 });
 

@@ -436,6 +436,49 @@ describe('renderStatusReport', () => {
       rmSync(ws, { recursive: true, force: true });
     }
   });
+
+  it('同时展示配置路由、story 难度/升级态与最近实际命中', () => {
+    const ws = makeWorkspace();
+    try {
+      const routed = {
+        ...PRD,
+        models: {
+          runner: 'codex', builder: { low: 'lo', medium: 'mid', high: 'hi' },
+          validator: 'val', escalation: 'esc',
+        },
+        userStories: PRD.userStories.map((s) => ({
+          ...s, difficulty: 'medium', difficultyReason: `命中 medium-1：${s.id} 涉及多文件。`,
+        })),
+      };
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(routed));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({
+        'US-001': { passes: false, notes: '', retryCount: 1, blocked: false, escalated: true },
+      }));
+      writeFileSync(join(ws, 'evidence.jsonl'), JSON.stringify({
+        type: 'iteration', source: 'engine', at: '2026-07-21T00:00:00.000Z',
+        iteration: 4, storyId: 'US-001', builderRan: true, builderModel: 'esc',
+        validatorRan: true, validatorModel: 'val', skippedValidator: false, agentBlocked: false,
+        builderRouteSource: 'escalation', validatorRouteSource: 'validator', storyDifficulty: 'medium',
+      }) + '\n');
+
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report).text;
+      expect(human).toContain('模型路由（codex）');
+      expect(human).toContain('low=lo');
+      expect(human).toContain('[medium]');
+      expect(human).toContain('⬆️ 已升级');
+      expect(human).toContain('难度依据');
+      expect(human).toContain('builder=esc [escalation]@第4轮');
+      expect(human).toContain('validator=val [validator]@第4轮');
+
+      const json = JSON.parse(renderStatusJson(report).text);
+      expect(json.modelRouting.status).toBe('enabled');
+      expect(json.stories[0]).toMatchObject({ difficulty: 'medium', escalated: true });
+      expect(json.recentActual['US-001'].builder).toMatchObject({ model: 'esc', source: 'escalation' });
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('renderStatusJson', () => {
@@ -456,7 +499,7 @@ describe('renderStatusJson', () => {
       expect(obj.stories).toHaveLength(3);
       expect(obj.stories[1]).toEqual({
         id: 'US-002', title: '第二个故事', priority: 2,
-        passes: false, notes: '一条失败记录', retryCount: 2, blocked: false,
+        passes: false, notes: '一条失败记录', retryCount: 2, blocked: false, escalated: false,
       });
       expect(obj.summary).toEqual({ total: 3, passed: 1, blocked: 1 });
       expect(exitCode).toBe(1);
@@ -508,7 +551,7 @@ describe('renderStatusJson', () => {
       const obj = JSON.parse(text);
       expect(obj.stories[0]).toEqual({
         id: 'US-001', title: '旧一', priority: 1,
-        passes: true, notes: '旧备注', retryCount: 2, blocked: false,
+        passes: true, notes: '旧备注', retryCount: 2, blocked: false, escalated: false,
       });
       expect(obj.stories[1].blocked).toBe(true);
       expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });

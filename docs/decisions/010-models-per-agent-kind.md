@@ -1,11 +1,13 @@
 ---
 title: 010-models-per-agent-kind
-status: active
-updated: 2026-07-20
+status: superseded
+updated: 2026-07-21
 scope: root
 ---
 
 # 010. models 具名档案：配置一次，任何 agent 工具定位自己的模型名
+
+> 2026-07-21 起由 ADR-011 取代。用户明确不需要跨 runner 复用同一配置，`profiles` 不再是当前目标。
 
 ## 背景
 

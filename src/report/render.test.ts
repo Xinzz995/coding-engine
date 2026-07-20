@@ -2,6 +2,14 @@ import { describe, it, expect } from 'vitest';
 import { renderReportHtml, escapeHtml, renderMarkdownLite } from './render.js';
 import type { ReportData } from './report.js';
 import type { EvidenceRecord } from '../engine/evidence.js';
+import type { ModelsConfig } from '../engine/prd.js';
+
+function withModelsConfig(): ModelsConfig {
+  return {
+    runner: 'claude', builder: { low: 'fast-m', medium: 'mid-m', high: 'high-m' },
+    validator: 'val-m', escalation: 'esc-m',
+  };
+}
 
 function data(over: Partial<ReportData> = {}): ReportData {
   return {
@@ -16,7 +24,7 @@ function data(over: Partial<ReportData> = {}): ReportData {
     stories: [
       {
         id: 'US-001', title: '第一个', description: 'd', acceptanceCriteria: ['能打开页面'],
-        priority: 1, passes: true, notes: '', retryCount: 0, blocked: false,
+        priority: 1, passes: true, notes: '', retryCount: 0, blocked: false, escalated: false,
       },
     ],
     stateCorrupted: false,
@@ -229,7 +237,11 @@ describe('renderReportHtml', () => {
   it('模型路由：未配置整行省略；配置则显示', () => {
     expect(renderReportHtml(data())).not.toContain('模型路由');
     const withModels = data();
-    withModels.prd.models = { builder: 'fast-m', validator: 'val-m', escalation: 'esc-m' };
+    withModels.prd.models = withModelsConfig();
+    for (const story of withModels.prd.userStories) {
+      story.difficulty = 'medium';
+      story.difficultyReason = '命中 medium-1：沿用 src/api.ts 的既有接线模式。';
+    }
     const html = renderReportHtml(withModels);
     expect(html).toContain('模型路由');
     expect(html).toContain('fast-m');
@@ -244,26 +256,20 @@ describe('renderReportHtml', () => {
     expect(html).not.toContain('模型路由：');
   });
 
-  it('模型路由：escalateAfter 非法时模型路由行照常显示，并追加警示', () => {
+  it('模型路由：旧 escalateAfter 格式显示重新派生警示', () => {
     const withInvalidEscalate = data();
-    withInvalidEscalate.prd.models = { builder: 'fast-m', escalateAfter: 0 };
+    (withInvalidEscalate.prd as { models?: unknown }).models = { ...withModelsConfig(), escalateAfter: 0 };
     const html = renderReportHtml(withInvalidEscalate);
-    expect(html).toContain('模型路由');
     expect(html).toContain('escalateAfter');
+    expect(html).toContain('prd-to-json');
   });
 
-  it('模型路由：profiles 档案表与阶段引用一并显示（各工具模型名如实列出）', () => {
+  it('模型路由：旧 profiles 格式显示重新派生警示', () => {
     const withProfiles = data();
-    withProfiles.prd.models = {
-      profiles: { fast: { claude: 'sonnet', codex: 'x-m' } },
-      builder: 'fast',
-      validator: 'opus',
-    };
+    (withProfiles.prd as { models?: unknown }).models = { ...withModelsConfig(), profiles: { fast: { claude: 'sonnet' } } };
     const html = renderReportHtml(withProfiles);
-    expect(html).toContain('模型路由');
-    expect(html).toContain('模型档案「fast」');
-    expect(html).toContain('sonnet');
-    expect(html).toContain('x-m');
+    expect(html).toContain('models.profiles');
+    expect(html).toContain('prd-to-json');
   });
 
   it('state 损坏警示条件渲染，文案对齐真实回退语义（读 prd 内嵌旧格式字段，非"未开始"）', () => {
@@ -375,6 +381,30 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('fast-m');
     expect(html).toContain('val-m');
     expect(html).toContain('防伪加固属后续评估'); // engine 记录区免责标注（A3，发现 5 裁决）
+  });
+
+  it('路由证据展示难度、实际模型来源、升级触发与状态篡改', () => {
+    const base = data();
+    const html = renderReportHtml(data({
+      stories: [{
+        ...base.stories[0], difficulty: 'high', difficultyReason: '命中 high-2：跨模块修改。', escalated: true,
+      }],
+      ...ev([{
+        type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z',
+        iteration: 2, storyId: 'US-001', builderRan: true, builderModel: 'esc-m',
+        validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false,
+        storyDifficulty: 'high', builderRouteSource: 'escalation', validatorRouteSource: 'validator',
+        escalationTriggeredBy: 'validator',
+        stateRouteTamper: [{ expected: true, received: false, side: 'builder' }],
+      }]),
+    }));
+    expect(html).toContain('命中 high-2');
+    expect(html).toContain('⬆️ 已升级');
+    expect(html).toContain('esc-m [escalation]');
+    expect(html).toContain('val-m [validator]');
+    expect(html).toContain('已触发升级（validator）');
+    expect(html).toContain('改写 escalated（true → false）已恢复');
+    expect(html).toContain('引擎独占字段');
   });
 
   it('renderTimeline validator 列三种跳过归因：agent blocked / 快照写回失败 / 未跑（triage 13）', () => {

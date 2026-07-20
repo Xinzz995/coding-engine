@@ -6,6 +6,19 @@ import {
 } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
+import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
+import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
+
+export interface RecentModelRoute {
+  model: string | null;
+  source: ModelRouteSource | null;
+  iteration: number;
+}
+
+export interface StoryRecentActual {
+  builder?: RecentModelRoute;
+  validator?: RecentModelRoute;
+}
 
 export type StatusReport =
   | { status: 'missing'; workspace: string }
@@ -16,6 +29,10 @@ export type StatusReport =
       stories: StoryView[];
       currentStoryId: string | null;
       latestProgress: string | null;
+      modelRouting: ModelRoutingReadResult;
+      recentActual: Record<string, StoryRecentActual>;
+      evidenceSkippedLines: number;
+      evidenceUnavailable: boolean;
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
       stateCorrupted: boolean;
     };
@@ -26,6 +43,30 @@ function latestProgressTitle(progress: string): string | null {
   const records = progress.split('\n').filter((l) => /^## \d{4}-\d{2}-\d{2}/.test(l));
   const last = records.at(-1);
   return last ? last.slice(3).trim() : null;
+}
+
+function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentActual> {
+  const recent: Record<string, StoryRecentActual> = {};
+  for (const record of records) {
+    if (record.type !== 'iteration' || record.storyId === null) continue;
+    const current = recent[record.storyId] ?? {};
+    if (record.builderRan) {
+      current.builder = {
+        model: record.builderModel,
+        source: record.builderRouteSource ?? null,
+        iteration: record.iteration,
+      };
+    }
+    if (record.validatorRan) {
+      current.validator = {
+        model: record.validatorModel,
+        source: record.validatorRouteSource ?? null,
+        iteration: record.iteration,
+      };
+    }
+    recent[record.storyId] = current;
+  }
+  return recent;
 }
 
 /** 只读收集 workspace 执行状态；state.json 缺失或损坏时回退读 story 上的旧格式内嵌字段。 */
@@ -40,12 +81,23 @@ export function collectStatus(workspace: string): StatusReport {
   // 缺失与损坏都回退读 story 上的旧格式内嵌字段（与 dashboard 离线回看语义一致）；损坏需另行标记供 cli 层警告
   const rawState = stateExists ? tryReadState(statePath) : null;
   const state = rawState ?? initialStateFor(prd);
+  let evidence: ReturnType<typeof readEvidence> = { records: [], skippedLines: 0 };
+  let evidenceUnavailable = false;
+  try {
+    evidence = readEvidence(workspace);
+  } catch {
+    evidenceUnavailable = true;
+  }
   return {
     status: 'ok',
     prd,
     stories: mergedStories(prd, state),
     currentStoryId: getCurrentStoryId(prd, state),
     latestProgress: latestProgressTitle(readProgress(join(workspace, 'progress.md'))),
+    modelRouting: readModelRouting(prd),
+    recentActual: recentActualOf(evidence.records),
+    evidenceSkippedLines: evidence.skippedLines,
+    evidenceUnavailable,
     stateCorrupted: stateExists && rawState === null,
   };
 }
@@ -82,9 +134,32 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     `   story 通过 ${passed}/${total}${blocked > 0 ? `，阻塞 ${blocked}` : ''}`,
     '',
   ];
+  if (report.modelRouting.status === 'enabled') {
+    const m = report.modelRouting.config;
+    lines.push(
+      `🧭 模型路由（${m.runner}）`,
+      `   builder low=${m.builder.low} · medium=${m.builder.medium} · high=${m.builder.high}`,
+      `   validator=${m.validator} · escalation=${m.escalation}`,
+      '',
+    );
+  } else if (report.modelRouting.status === 'invalid') {
+    lines.push('⚠️  模型路由配置无效：', ...report.modelRouting.errors.map((e) => `   · ${e}`), '');
+  } else {
+    lines.push('🧭 PRD 模型路由：未启用', '');
+  }
   for (const s of stories) {
     const retry = s.retryCount > 0 ? `（已重试 ${s.retryCount} 次）` : '';
-    lines.push(`  ${markOf(s)} ${s.id} ${s.title}${retry}`);
+    const difficulty = s.difficulty ? ` [${s.difficulty}]` : '';
+    const escalated = s.escalated ? ' ⬆️ 已升级' : '';
+    lines.push(`  ${markOf(s)} ${s.id} ${s.title}${difficulty}${escalated}${retry}`);
+    if (s.difficultyReason) lines.push(`      · 难度依据：${s.difficultyReason}`);
+    const actual = report.recentActual[s.id];
+    if (actual?.builder || actual?.validator) {
+      const route = (side: RecentModelRoute | undefined) => side
+        ? `${side.model ?? '默认'} [${side.source ?? '来源未知'}]@第${side.iteration}轮`
+        : '无';
+      lines.push(`      · 最近实际：builder=${route(actual.builder)} · validator=${route(actual.validator)}`);
+    }
     for (const raw of s.notes.split('\n')) {
       const note = raw.trim();
       if (note === '') continue;
@@ -96,6 +171,10 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   if (current) extras.push(`👉 当前 story：${current.id} ${current.title}`);
   if (report.latestProgress !== null) extras.push(`🕐 最近进展：${report.latestProgress}`);
   if (extras.length > 0) lines.push('', ...extras);
+  if (report.evidenceSkippedLines > 0) {
+    lines.push(`⚠️ evidence.jsonl 有 ${report.evidenceSkippedLines} 行无法解析已跳过`);
+  }
+  if (report.evidenceUnavailable) lines.push('⚠️ evidence.jsonl 当前不可读，最近实际路由可能不完整');
   // 空 story 列表不算全绿：status 的退出码用作 CI 门禁，对退化的 prd.json 必须保守
   if (total === 0) {
     lines.push('', '⚠️ prd.json 中没有任何 story');
@@ -132,7 +211,15 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
       notes: s.notes,
       retryCount: s.retryCount,
       blocked: s.blocked,
+      escalated: s.escalated,
+      ...(s.difficulty ? { difficulty: s.difficulty, difficultyReason: s.difficultyReason } : {}),
     })),
+    modelRouting: report.modelRouting,
+    recentActual: report.recentActual,
+    evidence: {
+      skippedLines: report.evidenceSkippedLines,
+      unavailable: report.evidenceUnavailable,
+    },
     summary,
   };
   // 与人类可读模式同一保守语义：空 story 列表不算全绿

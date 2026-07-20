@@ -27,6 +27,26 @@ const story = (over: Record<string, unknown> = {}) => ({
   priority: 1, ...over,
 });
 
+const routedStory = (over: Record<string, unknown> = {}) => story({
+  difficulty: 'medium',
+  difficultyReason: '命中 medium-1：沿用 src/api.ts 的既有接线模式。',
+  ...over,
+});
+
+const modelConfig = () => ({
+  runner: 'claude',
+  builder: { low: 'low-m', medium: 'fast-m', high: 'high-m' },
+  validator: 'val-m',
+  escalation: 'esc-m',
+});
+
+const discovered = (...ids: string[]) => async () => ({
+  status: 'available' as const,
+  runner: 'claude' as const,
+  source: 'fixture',
+  models: ids.map((id) => ({ id })),
+});
+
 // instruction assets 契约测试共享的文件读取 helper（两个 describe 曾各自重复定义，见 triage#9）。
 const read = (f: string) =>
   readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
@@ -509,13 +529,13 @@ describe('runLoop model routing', () => {
     return { fake, argvLog };
   }
 
-  it('routes stage models and escalates the builder after a rollback', async () => {
-    const { workspace, instructionsDir } = setup([story()], {
-      models: { builder: 'fast-m', validator: 'val-m', escalation: 'esc-m' },
+  it('routes stage models and uses sticky escalation state', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], {
+      models: modelConfig(),
     });
-    // 预置：US-001 已被打回一次（retryCount=1 ≥ escalateAfter 缺省 1）→ builder 应升级
+    // 升级与 retryCount 分离：只有 engine-owned escalated 决定本轮路由。
     writeFileSync(join(workspace, 'state.json'), JSON.stringify({
-      'US-001': { passes: false, notes: '', retryCount: 1, blocked: false },
+      'US-001': { passes: false, notes: '', retryCount: 1, blocked: false, escalated: true },
     }));
     const { fake, argvLog } = fakeArgvRecorder(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -523,20 +543,32 @@ describe('runLoop model routing', () => {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: discovered('esc-m', 'val-m'),
       });
       expect(code).toBe(0);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
       expect(lines).toHaveLength(2);
       expect(lines[0]).toContain('--model esc-m'); // builder 升级
       expect(lines[1]).toContain('--model val-m'); // validator 恒定
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated).toBe(true);
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        builderRouteSource: 'escalation', validatorRouteSource: 'validator',
+        stateRouteTamper: [
+          { expected: true, received: false, side: 'builder' },
+          { expected: true, received: false, side: 'validator' },
+        ],
+      });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
 
-  it('uses story.model for the builder before any rollback', async () => {
-    const { workspace, instructionsDir } = setup([story({ model: 'story-m' })], {
-      models: { builder: 'fast-m', validator: 'val-m', escalation: 'esc-m' },
+  it.each([
+    ['low', 'low-m'], ['medium', 'fast-m'], ['high', 'high-m'],
+  ] as const)('uses the %s story difficulty mapping for the initial builder', async (difficulty, expectedModel) => {
+    const { workspace, instructionsDir } = setup([routedStory({ difficulty })], {
+      models: modelConfig(),
     });
     const { fake, argvLog } = fakeArgvRecorder(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -544,19 +576,52 @@ describe('runLoop model routing', () => {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: discovered(expectedModel, 'esc-m', 'val-m'),
       });
       expect(code).toBe(0);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
-      expect(lines[0]).toContain('--model story-m'); // retryCount=0，story 覆盖生效
+      expect(lines[0]).toContain(`--model ${expectedModel}`);
       expect(lines[1]).toContain('--model val-m');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
 
+  it.each([
+    ['claude', 'CODING_X_CLAUDE_BIN', '--print --dangerously-skip-permissions'],
+    ['codex', 'CODING_X_CODEX_BIN', 'exec --dangerously-bypass-approvals-and-sandbox'],
+    ['cursor', 'CODING_X_CURSOR_BIN', '-p --force'],
+  ] as const)('models.runner auto-selects %s and reaches the fake agent with its public argv', async (
+    runner, envName, argvPrefix,
+  ) => {
+    const { workspace, instructionsDir } = setup([routedStory()], {
+      models: { ...modelConfig(), runner },
+    });
+    const { fake, argvLog } = fakeArgvRecorder(workspace);
+    process.env[envName] = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', kindExplicit: false, maxIterations: 2,
+        devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: async () => ({
+          status: 'available', runner, source: 'fixture',
+          models: ['fast-m', 'esc-m', 'val-m'].map((id) => ({ id })),
+        }),
+      });
+      expect(code).toBe(0);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines[0]).toContain(argvPrefix);
+      expect(lines[0]).toContain('--model fast-m');
+      expect(lines[1]).toContain('--model val-m');
+    } finally {
+      delete process.env[envName];
+    }
+  });
+
   it('lets CLI overrides beat prd.json models', async () => {
-    const { workspace, instructionsDir } = setup([story()], {
-      models: { builder: 'fast-m', validator: 'val-m', escalation: 'esc-m' },
+    const { workspace, instructionsDir } = setup([routedStory()], {
+      models: modelConfig(),
     });
     const { fake, argvLog } = fakeArgvRecorder(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -565,6 +630,7 @@ describe('runLoop model routing', () => {
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
         builderModel: 'cli-b', validatorModel: 'cli-v',
+        modelDiscovery: discovered('cli-b', 'cli-v', 'esc-m'),
       });
       expect(code).toBe(0);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
@@ -593,9 +659,9 @@ describe('runLoop model routing', () => {
     }
   });
 
-  it('warns only once across rounds and disables routing on malformed models', async () => {
+  it('fails before starting an agent on malformed models', async () => {
     const { workspace, instructionsDir } = setup([story()], { models: 'opus' });
-    // 只记录 argv、不翻绿：跑满 2 轮，真正验证跨轮警告去重（每轮都重读非法 models）
+    // 非法配置必须在循环前失败，不能回退到 runner 默认模型。
     const fake = join(workspace, 'fake-argv-only.mjs');
     const argvLog = join(workspace, 'argv.log');
     writeFileSync(fake, `
@@ -607,21 +673,216 @@ describe('runLoop model routing', () => {
       process.exit(0);
     `);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    const warns: string[] = [];
-    const orig = console.warn;
-    console.warn = (...args: unknown[]) => { warns.push(args.join(' ')); };
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
     try {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
       });
-      expect(code).toBe(1); // story 从未翻绿，跑满 maxIterations
-      expect(warns.filter((w) => w.includes('models 形状非法'))).toHaveLength(1); // 2 轮只警告一次
-      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
-      expect(lines).toHaveLength(4); // 2 轮 × (builder + validator)
-      for (const line of lines) expect(line).not.toContain('--model');
+      expect(code).toBe(2);
+      expect(existsSync(argvLog)).toBe(false);
+      expect(errors.some((w) => w.includes('models 形状非法'))).toBe(true);
     } finally {
-      console.warn = orig;
+      console.error = orig;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+});
+
+describe('模型升级触发与状态所有权', () => {
+  it('completed no-op 首次触发，下轮改走 escalation 且不增加 retryCount', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    const fake = join(workspace, 'fake-noop-route.mjs');
+    const argvLog = join(workspace, 'argv.log');
+    writeFileSync(fake, `
+      import { appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 3,
+        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+      })).toBe(1);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines[0]).toContain('--model fast-m');
+      expect(lines[1]).toContain('--model esc-m');
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'];
+      expect(state).toMatchObject({ escalated: true, retryCount: 0 });
+      const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+      expect(iterations[0]).toMatchObject({ noop: true, escalationTriggeredBy: 'noop' });
+      expect(iterations[1]).not.toHaveProperty('escalationTriggeredBy');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('机械门禁首次打回后，下轮改走 escalation', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], {
+      models: modelConfig(), qualityChecks: ['node -e "process.exit(1)"'],
+    });
+    const fake = join(workspace, 'fake-gate-route.mjs');
+    const argvLog = join(workspace, 'argv.log');
+    writeFileSync(fake, `
+      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      const path = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(path, 'utf-8'));
+      state['US-001'].passes = true;
+      writeFileSync(path, JSON.stringify(state));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+      })).toBe(1);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines[0]).toContain('--model fast-m');
+      expect(lines[1]).toContain('--model esc-m');
+      const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+      expect(iterations[0]).toMatchObject({ gateRejected: true, escalationTriggeredBy: 'gate' });
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated).toBe(true);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('validator 正常打回后，下轮 builder 改走 escalation', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    const fake = join(workspace, 'fake-validator-route.mjs');
+    const calls = join(workspace, 'calls.txt');
+    const argvLog = join(workspace, 'argv.log');
+    writeFileSync(fake, `
+      import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      const callsPath = ${JSON.stringify(calls)};
+      const count = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf-8')) + 1 : 1;
+      writeFileSync(callsPath, String(count));
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+      if (count % 2 === 1) {
+        state['US-001'].passes = true;
+        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder progress\\n');
+      } else {
+        state['US-001'].passes = false;
+        state['US-001'].retryCount += 1;
+      }
+      writeFileSync(statePath, JSON.stringify(state));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+      })).toBe(1);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines).toHaveLength(4);
+      expect(lines[0]).toContain('--model fast-m');
+      expect(lines[1]).toContain('--model val-m');
+      expect(lines[2]).toContain('--model esc-m');
+      const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+      expect(iterations[0]).toMatchObject({ escalationTriggeredBy: 'validator' });
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated).toBe(true);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('异常退出不触发升级', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    const fake = join(workspace, 'fake-error-route.mjs');
+    writeFileSync(fake, 'process.exit(9);');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated).toBe(false);
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).not.toHaveProperty('escalationTriggeredBy');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('agent 擅自置位 escalated 会被恢复并留痕', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    const fake = join(workspace, 'fake-tamper-route.mjs');
+    writeFileSync(fake, `
+      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      const path = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(path, 'utf-8'));
+      state['US-001'].passes = true;
+      state['US-001'].escalated = true;
+      writeFileSync(path, JSON.stringify(state));
+      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'progress\\n');
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+      })).toBe(0);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated).toBe(false);
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        stateRouteTamper: [
+          { expected: false, received: true, side: 'builder' },
+          { expected: false, received: true, side: 'validator' },
+        ],
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('agent 删除整条 story 状态时恢复路由所有权与其余状态', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    const statePath = join(workspace, 'state.json');
+    writeFileSync(statePath, JSON.stringify({
+      'US-001': { passes: false, notes: 'keep', retryCount: 2, blocked: false, escalated: true },
+    }));
+    const fake = join(workspace, 'fake-delete-story-route.mjs');
+    writeFileSync(fake, `
+      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      const path = ${JSON.stringify(statePath)};
+      const state = JSON.parse(readFileSync(path, 'utf-8'));
+      delete state['US-001'];
+      writeFileSync(path, JSON.stringify(state));
+      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'progress\\n');
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+        modelDiscovery: discovered('esc-m', 'val-m'),
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toEqual({
+        passes: false, notes: 'keep', retryCount: 2, blocked: false, escalated: true,
+      });
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        stateRouteTamper: [
+          { expected: true, received: 'missing', side: 'builder' },
+          { expected: true, received: 'missing', side: 'validator' },
+        ],
+      });
+    } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
@@ -1322,11 +1583,8 @@ describe('no-op 检测与 stall 熔断', () => {
     expect(readFileSync(calls, 'utf-8').length).toBe(1);
   });
 
-  it('轮首已全部 resolved 的空转轮：完成判定优先于 stall 计数，当轮 exit 0', async () => {
-    // 回归用例：no-op 分支的“双无变化”不等于“无事发生”——工作区可能在这轮开始前
-    // 就已经全部通过（如断点续跑接手一个已完工的工作区，或 legacy 迁移在 bootstrap
-    // 就把 passes 写进 state.json）。这类轮次的 builder 调用同样是空转（state/progress
-    // 双无变化），但完成判定必须照跑，否则已完工的工作区会被当成卡死一路吃到 stall 熔断。
+  it('启动时已全部 resolved：完成判定优先于 stall 计数，直接 exit 0', async () => {
+    // 断点续跑接手已完工 workspace 时，bootstrap 直接收敛，不需要制造 no-op 轮。
     const { workspace, instructionsDir } = setup([story()]);
     writeFileSync(join(workspace, 'state.json'), JSON.stringify({
       'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
@@ -1342,14 +1600,15 @@ describe('no-op 检测与 stall 熔断', () => {
     expect(code).toBe(0);
   });
 
-  it('已完工工作区的空转终轮也留一条 iteration 记录（每轮一条不变式）', async () => {
+  it('已完工 workspace 启动即收敛：不调 agent，也不伪造 iteration', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     // 预置已完工 state；fake 不写任何文件（空转）
     writeFileSync(join(workspace, 'state.json'), JSON.stringify({
       'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
     }));
     const fake = join(workspace, 'fake.mjs');
-    writeFileSync(fake, `process.exit(0);`);
+    const called = join(workspace, 'called.txt');
+    writeFileSync(fake, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(called)}, 'x');`);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
@@ -1357,9 +1616,9 @@ describe('no-op 检测与 stall 熔断', () => {
     });
     delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(0);
+    expect(existsSync(called)).toBe(false);
     const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
-    expect(iters).toHaveLength(1);
-    expect(iters[0]).toMatchObject({ iteration: 1, noop: true, builderOutcome: 'completed' });
+    expect(iters).toHaveLength(0);
   });
 
   it('已收敛但含 blocked 的工作区重跑：no-op 快路径同样 exit 3 并列出 blocked story', async () => {

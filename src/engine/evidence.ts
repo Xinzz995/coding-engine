@@ -1,5 +1,7 @@
 import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { ModelRouteSource } from './models.js';
+import type { StoryDifficulty } from './prd.js';
 
 /**
  * evidence.jsonl 的记录 schema 单源（判别联合）。append-only、每行一条独立 JSON：
@@ -20,7 +22,17 @@ export type EvidenceRecord =
       /** 本轮门禁打回（细节在同轮 gate-run 记录；此处保「每轮一条 iteration」的轮语义） */
       gateRejected?: true;
       /** 本轮发生异常回写（applyAbortRollback） */
-      abortRollback?: { storyId: string } }
+      abortRollback?: { storyId: string };
+      /** 本轮实际路由来源；旧记录缺失时消费端显示“来源未知”。 */
+      builderRouteSource?: ModelRouteSource;
+      validatorRouteSource?: ModelRouteSource;
+      storyDifficulty?: StoryDifficulty;
+      /** 本轮首次把 state.escalated 从 false 置 true 的机械原因。 */
+      escalationTriggeredBy?: 'gate' | 'validator' | 'noop';
+      /** agent 对引擎独占字段的改动；引擎已恢复。 */
+      stateRouteTamper?: Array<{
+        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
+      }> }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
       ok: boolean; total: number; ran: number; ms: number;
       failedCommand?: string; exitCode?: number | null; timedOut?: boolean }
@@ -47,6 +59,18 @@ function isRec(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+function isRouteSource(v: unknown): v is ModelRouteSource {
+  return v === 'cli-builder' || v === 'cli-escalation' || v === 'cli-validator'
+    || v === 'difficulty' || v === 'escalation' || v === 'validator' || v === 'runner-default';
+}
+
+function isStateRouteTamper(v: unknown): boolean {
+  return Array.isArray(v) && v.every((item) => isRec(item)
+    && typeof item.expected === 'boolean'
+    && (typeof item.received === 'boolean' || item.received === 'missing')
+    && (item.side === 'builder' || item.side === 'validator'));
+}
+
 // 落盘数据不直接类型断言（patterns 约定）：按 type 分支逐字段校验，未知 type 一律不认——
 // 前向兼容（新版本引擎写的记录类型，旧版本消费方跳过不炸）。
 function isEvidenceRecord(v: unknown): v is EvidenceRecord {
@@ -65,7 +89,13 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (v.validatorOutcome === undefined || v.validatorOutcome === 'completed' || v.validatorOutcome === 'timeout' || v.validatorOutcome === 'error' || v.validatorOutcome === 'skipped')
         && (v.noop === undefined || v.noop === true)
         && (v.gateRejected === undefined || v.gateRejected === true)
-        && (v.abortRollback === undefined || (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string'));
+        && (v.abortRollback === undefined || (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string'))
+        && (v.builderRouteSource === undefined || isRouteSource(v.builderRouteSource))
+        && (v.validatorRouteSource === undefined || isRouteSource(v.validatorRouteSource))
+        && (v.storyDifficulty === undefined || v.storyDifficulty === 'low' || v.storyDifficulty === 'medium' || v.storyDifficulty === 'high')
+        && (v.escalationTriggeredBy === undefined || v.escalationTriggeredBy === 'gate'
+          || v.escalationTriggeredBy === 'validator' || v.escalationTriggeredBy === 'noop')
+        && (v.stateRouteTamper === undefined || isStateRouteTamper(v.stateRouteTamper));
     case 'gate-run':
       return v.source === 'engine' && typeof v.iteration === 'number'
         && (typeof v.storyId === 'string' || v.storyId === null)

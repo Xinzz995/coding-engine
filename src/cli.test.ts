@@ -1,9 +1,16 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
+
+afterEach(() => {
+  delete process.env.CODING_X_CODEX_BIN;
+  delete process.env.CODING_X_CLAUDE_BIN;
+  delete process.env.CODING_X_CURSOR_BIN;
+  delete process.env.CODING_X_FAKE_DISCOVERY_MODE;
+});
 
 describe('isDirectInvocation', () => {
   it('symlink/路径别名形态的 argv[1] 解析到真实模块（npm bin shim 与 macOS /tmp 别名）', () => {
@@ -37,6 +44,7 @@ describe('parseCliArgs', () => {
     const c = parseCliArgs([]);
     expect(c.command).toBe('run');
     expect(c.kind).toBe('claude');
+    expect(c.kindExplicit).toBe(false);
     expect(c.maxIterations).toBe(50);
     expect(c.devTimeoutMs).toBe(30 * 60 * 1000);
     expect(c.valTimeoutMs).toBe(60 * 60 * 1000);
@@ -45,9 +53,15 @@ describe('parseCliArgs', () => {
   it('parses codex positional and flag overrides', () => {
     const c = parseCliArgs(['codex', '--max-iter', '3', '--dev-timeout', '10', '--no-open']);
     expect(c.kind).toBe('codex');
+    expect(c.kindExplicit).toBe(true);
     expect(c.maxIterations).toBe(3);
     expect(c.devTimeoutMs).toBe(10 * 60 * 1000);
     expect(c.openBrowser).toBe(false);
+  });
+  it('parses cursor positional as an explicit runner', () => {
+    const c = parseCliArgs(['cursor']);
+    expect(c.kind).toBe('cursor');
+    expect(c.kindExplicit).toBe(true);
   });
   it('recognizes the repair subcommand', () => {
     expect(parseCliArgs(['repair']).command).toBe('repair');
@@ -70,6 +84,14 @@ describe('parseCliArgs', () => {
     const c = parseCliArgs(['report']);
     expect(c.command).toBe('report');
     expect(c.workspace).toBe('.workspace');
+  });
+  it('recognizes models with an optional explicit runner', () => {
+    const auto = parseCliArgs(['models', '--json']);
+    expect(auto.command).toBe('models');
+    expect(auto.kindExplicit).toBe(false);
+    expect(parseCliArgs(['models', 'cursor']).kind).toBe('cursor');
+    expect(parseCliArgs(['models', 'cursor']).kindExplicit).toBe(true);
+    expect(() => parseCliArgs(['models', 'unknown'])).toThrow('models runner');
   });
   it('passes --workspace through to the report subcommand', () => {
     expect(parseCliArgs(['report', '--workspace', 'ws-x']).workspace).toBe('ws-x');
@@ -105,15 +127,17 @@ describe('parseCliArgs', () => {
     expect(() => parseCliArgs(['doctor', '--stale-days', '0x10'])).toThrow('--stale-days'); // === 16
     expect(() => parseCliArgs(['doctor', '--stale-days', '1e2'])).toThrow('--stale-days'); // === 100
   });
-  it('parses --builder-model and --validator-model', () => {
-    const c = parseCliArgs(['--builder-model', 'haiku', '--validator-model', 'opus']);
+  it('parses all three model overrides', () => {
+    const c = parseCliArgs(['--builder-model', 'haiku', '--validator-model', 'opus', '--escalation-model', 'max']);
     expect(c.builderModel).toBe('haiku');
     expect(c.validatorModel).toBe('opus');
+    expect(c.escalationModel).toBe('max');
   });
-  it('defaults builder/validator model overrides to undefined', () => {
+  it('defaults all model overrides to undefined', () => {
     const c = parseCliArgs([]);
     expect(c.builderModel).toBeUndefined();
     expect(c.validatorModel).toBeUndefined();
+    expect(c.escalationModel).toBeUndefined();
   });
   it('defaults stallLimit to 3', () => {
     expect(parseCliArgs([]).stallLimit).toBe(3);
@@ -302,6 +326,79 @@ describe('permissionWarning', () => {
   });
   it('mentions bypass-approvals for codex', () => {
     expect(permissionWarning('codex')).toMatch(/--dangerously-bypass-approvals-and-sandbox/);
+  });
+  it('mentions force for cursor', () => {
+    expect(permissionWarning('cursor')).toMatch(/--force/);
+  });
+});
+
+describe('main — models subcommand', () => {
+  const fixture = join(process.cwd(), 'src/engine/__fixtures__/fake-codex-app-server.mjs');
+  const fakeCommand = `${process.execPath} ${fixture}`;
+
+  it('available：Codex --json 输出单个可解析对象与完整分页模型', async () => {
+    process.env.CODING_X_CODEX_BIN = fakeCommand;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['models', 'codex', '--json'])).toBe(0);
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      const result = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(result).toMatchObject({ status: 'available', runner: 'codex' });
+      expect(result.models.map((m: { id: string }) => m.id)).toEqual(['model-a', 'model-b']);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('unsupported：已认证 Claude 诚实降级且退出 0', async () => {
+    process.env.CODING_X_CLAUDE_BIN = fakeCommand;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['models', 'claude', '--json'])).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls[0][0] as string)).toMatchObject({
+        status: 'unsupported', runner: 'claude',
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('error：认证失败输出机器可读错误并退出 1', async () => {
+    process.env.CODING_X_CURSOR_BIN = fakeCommand;
+    process.env.CODING_X_FAKE_DISCOVERY_MODE = 'auth-error';
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['models', 'cursor', '--json'])).toBe(1);
+      const result = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(result).toMatchObject({ status: 'error', runner: 'cursor' });
+      expect(result.error).toContain('未认证');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('未显式指定 runner 时从现有 models.runner 推断', async () => {
+    process.env.CODING_X_CODEX_BIN = fakeCommand;
+    const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd',
+        models: {
+          runner: 'codex', builder: { low: 'model-a', medium: 'model-a', high: 'model-b' },
+          validator: 'model-b', escalation: 'model-b',
+        },
+        userStories: [{
+          id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
+          difficulty: 'low', difficultyReason: '命中 low-1',
+        }],
+      }));
+      expect(await main(['models', '--workspace', workspace, '--json'])).toBe(0);
+      expect(JSON.parse(logSpy.mock.calls[0][0] as string).runner).toBe('codex');
+    } finally {
+      logSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 });
 

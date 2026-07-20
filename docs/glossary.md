@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-20
+updated: 2026-07-21
 scope: root
 ---
 
@@ -101,6 +101,22 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 一次运行的结构化证据记录文件（`<workspace>/evidence.jsonl`，append-only 每行一条）：引擎写机械记录（门禁执行含通过轮、轮次事件、篡改事件），builder/validator 按指令登记截图元数据（story/验收标准关联）。记录的 `source` 字段是信任级别标记——engine=机械事实、builder/validator=agent 声明；整个文件都在 agent 可写区，消费端按来源诚实标注、不假装防伪。
 禁用：evidence 结构化索引、结构化证据索引（统一用「证据索引」；指文件本身时用 `evidence.jsonl`）
 
+**难度档位（difficulty）**
+story 可靠完成所需的模型推理能力档位（low / medium / high）；不是代码行数、工期或故事点。
+禁用：难度分、复杂度（复杂度只是判定证据之一）
+
+**初始路由**
+story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则按难度档位取 PRD 映射，再否则使用 runner 默认。
+禁用：默认路由（runner default 只是其中一种回落）
+
+**有效失败**
+可归因于当前实现/推理结果的首次机械事件：门禁打回、validator 正常打回或 builder completed no-op。超时、非零退出、认证、网络和环境故障不是有效失败。
+禁用：失败轮（会与异常轮混淆）
+
+**升级状态（escalated）**
+引擎在 story 首次有效失败后置位的 sticky 执行状态；表示后续 builder 使用专用 escalation 路由。该字段由引擎独占，agent 不得改写。
+禁用：升级次数、重试状态（它与 retryCount 独立）
+
 ## 关系
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
@@ -110,6 +126,7 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 - 收口包含人审（/review-loop 产出人审包）与沉淀（/compound-docs，含取舍账本收账）
 - 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
 - 验证报告消费证据索引（门禁执行历史、轮次时间线、验收标准↔截图对账均由它派生）；证据索引缺失时报告退回文件名猜测归属
+- 难度档位决定初始路由；首次有效失败置升级状态，后续 builder 走 escalation，与 retryCount 独立
 
 ## 已解决的歧义
 

@@ -271,7 +271,8 @@ const FALLBACK = {
 - **未来迭代的学习：**
   - page.tsx 需要 "use client" 指令才能使用 React hooks
   - 类型定义放在 app/types.ts，示例数据放在 app/sample-data.ts`,
-  runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus" }
+  runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus", route_source: "difficulty", story_difficulty: "medium", runner: "claude" },
+  modelRouting: { status: "disabled", config: null, errors: [] }
 };
 
 const POLL_MS = 2000;
@@ -484,6 +485,11 @@ function render() {
   const passedCount = stories.filter(s => s.passes === true).length;
   const pct = stories.length ? Math.round((passedCount / stories.length) * 100) : 0;
   const isActive = runtime.phase === 'developing' || runtime.phase === 'validating';
+  const routing = dashboardData.modelRouting;
+  const routeConfig = routing && routing.status === 'enabled'
+    ? `${routing.config.runner} · L:${routing.config.builder.low} M:${routing.config.builder.medium} H:${routing.config.builder.high} · V:${routing.config.validator} · E:${routing.config.escalation}`
+    : `${runtime.runner || '默认 runner'} · ${routing && routing.status === 'invalid' ? '模型路由无效' : '未启用 PRD 模型路由'}`;
+  const actualRoute = `${runtime.current_story ? ' · '+runtime.current_story : ''}${runtime.story_difficulty ? ' · '+runtime.story_difficulty : ''}${runtime.model ? ' · '+runtime.model+(runtime.route_source ? ' ['+runtime.route_source+']' : '') : ''}`;
 
   let html = '';
 
@@ -498,8 +504,8 @@ function render() {
       </div>
     </div>
     <div class="hud-right">
-      <span class="hud-phase">${phaseEmoji[runtime.phase]||'⏸'} ${phaseText[runtime.phase]||'等待启动'}${runtime.current_story ? ' · '+runtime.current_story : ''}${runtime.model ? ' · '+runtime.model : ''}${isActive ? '<span class="loading-dots"></span>' : ''}</span>
-      <span class="hud-meta">Round ${runtime.iteration}/${runtime.max_iterations} · ${formatElapsed(runtime.elapsed)}</span>
+      <span class="hud-phase">${phaseEmoji[runtime.phase]||'⏸'} ${phaseText[runtime.phase]||'等待启动'}${actualRoute}${isActive ? '<span class="loading-dots"></span>' : ''}</span>
+      <span class="hud-meta">${routeConfig} · Round ${runtime.iteration}/${runtime.max_iterations} · ${formatElapsed(runtime.elapsed)}</span>
     </div>
   </div>`;
 
@@ -535,6 +541,8 @@ function render() {
       detail = `<div class="ws-detail" onclick="event.stopPropagation()">
         <div class="ws-detail-title">${story.title}</div>
         <div class="ws-detail-desc">${story.description}</div>
+        ${story.difficulty ? '<div class="ws-detail-retry">难度 '+story.difficulty+(story.escalated?' · ⬆ 已升级':'')+'</div>' : ''}
+        ${story.difficultyReason ? '<div class="ws-detail-desc">'+story.difficultyReason+'</div>' : ''}
         ${story.notes ? '<div class="ws-detail-notes">⚠ '+story.notes+'</div>' : ''}
         ${story.retryCount > 0 ? '<div class="ws-detail-retry">重试 ×'+story.retryCount+'</div>' : ''}
         <div class="ws-detail-criteria">${story.acceptanceCriteria.map(c=>'<div class="ws-detail-criterion">• '+c+'</div>').join('')}</div>

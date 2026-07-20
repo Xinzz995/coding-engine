@@ -178,6 +178,7 @@
       <div class="phase-dot" id="phaseDot" style="background:var(--mac-gray)"></div>
       <div class="phase-text" id="phaseText">等待启动</div>
     </div>
+    <div class="clock" id="routingText"></div>
     <div class="clock" id="clock"></div>
   </div>
 </div>
@@ -231,9 +232,12 @@ function renderStories(stories, cur) {
           <div class="header">
             <span class="id">${s.id}</span>
             <span class="badge" style="background:${cfg.badgeBg};color:${cfg.badgeColor}">${cfg.label}</span>
+            ${s.difficulty ? `<span class="badge" style="background:hsla(211,100%,50%,0.1);color:var(--mac-blue)">${esc(s.difficulty)}</span>` : ''}
+            ${s.escalated ? `<span class="retry">⬆ 已升级</span>` : ''}
             ${s.retryCount > 0 ? `<span class="retry">×${s.retryCount}</span>` : ''}
           </div>
           <div class="card-title">${esc(s.title)}</div>
+          ${s.difficultyReason ? `<div class="notes" style="color:var(--muted)">${esc(s.difficultyReason)}</div>` : ''}
           ${s.notes ? `<div class="notes">${esc(s.notes)}</div>` : ''}
         </div>
       </div>
@@ -265,7 +269,7 @@ function renderProgress(stories) {
   document.getElementById('progressLabel').textContent = passed + '/' + total;
 }
 
-function renderPhase(rt) {
+function renderPhase(rt, routing) {
   const cfg = PHASE_MAP[rt.phase] || PHASE_MAP.idle;
   const dot = document.getElementById('phaseDot');
   const text = document.getElementById('phaseText');
@@ -274,13 +278,23 @@ function renderPhase(rt) {
   let label = cfg.label;
   if (cfg.animate) {
     const storyPart = rt.current_story ? ` · ${rt.current_story}` : '';
-    const modelPart = rt.model ? ` · ${rt.model}` : '';
-    label += storyPart + modelPart + ` · Round ${rt.iteration}`;
+    const difficultyPart = rt.story_difficulty ? ` · ${rt.story_difficulty}` : '';
+    const modelPart = rt.model ? ` · ${rt.model}${rt.route_source ? ` [${rt.route_source}]` : ''}` : '';
+    label += storyPart + difficultyPart + modelPart + ` · Round ${rt.iteration}`;
     label += '<span class="loading-dots"></span>';
   }
   text.innerHTML = label;
   document.getElementById('iterInfo').textContent = `Round ${rt.iteration}/${rt.max_iterations}`;
   document.getElementById('elapsedInfo').textContent = fmtElapsed(rt.elapsed);
+  const routingText = document.getElementById('routingText');
+  if (routing && routing.status === 'enabled') {
+    const m = routing.config;
+    routingText.textContent = `${m.runner} · L:${m.builder.low} M:${m.builder.medium} H:${m.builder.high} · V:${m.validator} · E:${m.escalation}`;
+  } else if (routing && routing.status === 'invalid') {
+    routingText.textContent = '⚠ 模型路由配置无效';
+  } else {
+    routingText.textContent = `${rt.runner || '默认 runner'} · 未启用 PRD 模型路由`;
+  }
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN');
 }
 
@@ -296,7 +310,8 @@ function setEndedBanner(visible) {
 }
 
 const FALLBACK = {
-  runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340, model: 'opus' },
+  runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340, model: 'opus', route_source: 'difficulty', story_difficulty: 'medium', runner: 'claude' },
+  modelRouting: { status: 'disabled', config: null, errors: [] },
   project: '简易笔记系统',
   stories: [
     { id:'US-001', title:'初始化项目结构与静态导出配置', passes:true, notes:'', retryCount:0, blocked:false },
@@ -337,7 +352,7 @@ async function poll() {
   renderStories(data.stories, data.runtime.current_story);
   renderProgress(data.stories);
   renderLogs(data.logs);
-  renderPhase(data.runtime);
+  renderPhase(data.runtime, data.modelRouting);
 }
 
 setInterval(poll, POLL_MS);

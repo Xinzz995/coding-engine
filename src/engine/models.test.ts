@@ -1,206 +1,137 @@
-import { describe, it, expect } from 'vitest';
-import { readModelsConfig, resolveBuilderModel, resolveValidatorModel } from './models.js';
-import type { Prd, Story } from './prd.js';
-
-// models 参数保持 unknown：非法形状用例要传数组/字符串/错误字段类型
-const prdWith = (models?: unknown): Prd => ({
-  project: 'p', branchName: 'b', description: 'd', userStories: [],
-  ...(models !== undefined ? { models } : {}),
-} as Prd);
+import { describe, expect, it } from 'vitest';
+import { readModelRouting, resolveBuilderModel, resolveValidatorModel } from './models.js';
+import type { ModelsConfig, Prd, Story } from './prd.js';
 
 const story = (over: Record<string, unknown> = {}): Story => ({
-  id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1, ...over,
+  id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
+  difficulty: 'medium', difficultyReason: '命中 medium-1：沿用 src/api.ts 的既有接线模式。',
+  ...over,
 } as Story);
 
-describe('readModelsConfig', () => {
-  it('returns null config without warnings when prd is null or models is missing', () => {
-    expect(readModelsConfig(null, 'claude')).toEqual({ config: null, warnings: [] });
-    expect(readModelsConfig(prdWith(), 'claude')).toEqual({ config: null, warnings: [] });
+const storyWithoutRouting = (): Story => ({
+  id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
+});
+
+const config: ModelsConfig = {
+  runner: 'codex',
+  builder: { low: 'low-m', medium: 'mid-m', high: 'high-m' },
+  validator: 'val-m',
+  escalation: 'esc-m',
+};
+
+const prd = (models: unknown = config, stories: Story[] = [story()]): Prd => ({
+  project: 'p', branchName: 'b', description: 'd', userStories: stories,
+  ...(models === null ? {} : { models }),
+} as Prd);
+
+describe('readModelRouting', () => {
+  it('distinguishes disabled from a complete enabled config', () => {
+    expect(readModelRouting(prd(null, [storyWithoutRouting()]))).toEqual({
+      status: 'disabled', config: null, errors: [],
+    });
+    expect(readModelRouting(prd())).toEqual({ status: 'enabled', config, errors: [] });
   });
 
-  it('normalizes a full valid config and keeps escalateAfter', () => {
-    const r = readModelsConfig(prdWith({ builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 2 }), 'claude');
-    expect(r.config).toEqual({ builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 2, profiles: {} });
-    expect(r.warnings).toEqual([]);
+  it('requires all five non-empty model identifiers and a known runner', () => {
+    const result = readModelRouting(prd({
+      runner: 'other', builder: { low: '', medium: 'm' }, validator: ' ', escalation: 42,
+    }));
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') return;
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.stringContaining('models.runner'),
+      expect.stringContaining('models.builder.low'),
+      expect.stringContaining('models.builder.high'),
+      expect.stringContaining('models.validator'),
+      expect.stringContaining('models.escalation'),
+    ]));
   });
 
-  it('defaults escalateAfter to 1 when missing', () => {
-    const r = readModelsConfig(prdWith({ builder: 'b-m' }), 'claude');
-    expect(r.config?.escalateAfter).toBe(1);
-    expect(r.warnings).toEqual([]);
+  it('rejects unknown keys inside models and builder', () => {
+    const result = readModelRouting(prd({
+      ...config, typo: true, builder: { ...config.builder, ultra: 'u' },
+    }));
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') return;
+    expect(result.errors.some((e) => e.includes('models.typo'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('models.builder.ultra'))).toBe(true);
   });
 
-  it('treats a non-object models value as invalid (array, string)', () => {
-    for (const bad of [['opus'], 'opus']) {
-      const r = readModelsConfig(prdWith(bad), 'claude');
-      expect(r.config).toBeNull();
-      expect(r.warnings.some((w) => w.includes('models 形状非法'))).toBe(true);
-    }
+  it.each([
+    [{ builder: 'fast', validator: 'v', escalation: 'e' }, 'models.builder'],
+    [{ ...config, profiles: { fast: { codex: 'm' } } }, 'models.profiles'],
+    [{ ...config, escalateAfter: 1 }, 'models.escalateAfter'],
+    [{ codex: config }, 'models.<runner>'],
+  ])('rejects unpublished old schemas and points to re-derivation', (models, locator) => {
+    const result = readModelRouting(prd(models));
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') return;
+    expect(result.errors.some((e) => e.includes(locator) && e.includes('prd-to-json'))).toBe(true);
   });
 
-  it('treats non-string stage fields as invalid as a whole', () => {
-    const r = readModelsConfig(prdWith({ builder: 42 }), 'claude');
-    expect(r.config).toBeNull();
-    expect(r.warnings.some((w) => w.includes('models 形状非法'))).toBe(true);
+  it('rejects story.model even without a models block', () => {
+    const result = readModelRouting(prd(null, [story({
+      difficulty: undefined, difficultyReason: undefined, model: 'old-m',
+    })]));
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') return;
+    expect(result.errors[0]).toContain('userStories[US-001].model');
+    expect(result.errors[0]).toContain('prd-to-json');
   });
 
-  it('degrades an invalid escalateAfter to 1 with a warning (0, negative, float, non-number)', () => {
-    for (const bad of [0, -1, 2.5, '2']) {
-      const r = readModelsConfig(prdWith({ builder: 'b-m', escalateAfter: bad }), 'claude');
-      expect(r.config?.escalateAfter).toBe(1);
-      expect(r.warnings.some((w) => w.includes('escalateAfter'))).toBe(true);
-    }
+  it('requires difficulty and a non-empty reason for every story when enabled', () => {
+    const result = readModelRouting(prd(config, [story({ difficulty: 'unknown', difficultyReason: ' ' })]));
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') return;
+    expect(result.errors.some((e) => e.includes('.difficulty '))).toBe(true);
+    expect(result.errors.some((e) => e.includes('.difficultyReason'))).toBe(true);
   });
 
-  it('warns that escalation never fires when escalateAfter >= MAX_RETRIES', () => {
-    const r = readModelsConfig(prdWith({ escalation: 'e-m', escalateAfter: 5 }), 'claude');
-    expect(r.config?.escalateAfter).toBe(5); // 值保留，行为上永不触发（达 5 已 blocked）
-    expect(r.warnings.some((w) => w.includes('永不生效'))).toBe(true);
-  });
-
-  // ——具名模型档案 profiles（配置一次，任何 agent 工具各自定位模型名，ADR-010）——
-
-  const profiles = {
-    fast: { claude: 'sonnet', codex: 'x-mini', cursor: 'composer' },
-    strong: { claude: 'opus', codex: 'x-big' },
-  };
-
-  it('profiles: stage refs resolve to the running kind entry', () => {
-    const models = { profiles, builder: 'fast', validator: 'strong', escalation: 'strong', escalateAfter: 2 };
-    const c = readModelsConfig(prdWith(models), 'claude');
-    expect(c.config).toEqual({ builder: 'sonnet', validator: 'opus', escalation: 'opus', escalateAfter: 2, profiles });
-    expect(c.warnings).toEqual([]);
-    const x = readModelsConfig(prdWith(models), 'codex');
-    expect(x.config).toMatchObject({ builder: 'x-mini', validator: 'x-big', escalation: 'x-big' });
-    const cur = readModelsConfig(prdWith(models), 'cursor');
-    expect(cur.config?.builder).toBe('composer');
-  });
-
-  it('profiles: a ref not matching any profile passes through as a literal model name', () => {
-    const r = readModelsConfig(prdWith({ profiles, builder: 'my-exact-model' }), 'claude');
-    expect(r.config?.builder).toBe('my-exact-model');
-    expect(r.warnings).toEqual([]);
-  });
-
-  it('profiles: missing kind entry warns and leaves the stage without a model', () => {
-    const r = readModelsConfig(prdWith({ profiles, validator: 'strong' }), 'cursor');
-    expect(r.config?.validator).toBeUndefined();
-    expect(r.warnings.some((w) => w.includes('strong') && w.includes('cursor'))).toBe(true);
-  });
-
-  it('profiles: invalid shapes disable the whole models config with a located warning', () => {
-    for (const [bad, locator] of [
-      ['not-an-object', 'profiles'],
-      [{ fast: 'sonnet' }, 'profiles.fast'],
-      [{ fast: { claude: 42 } }, 'profiles.fast.claude'],
-    ] as const) {
-      const r = readModelsConfig(prdWith({ profiles: bad, builder: 'fast' }), 'claude');
-      expect(r.config).toBeNull();
-      expect(r.warnings.some((w) => w.includes(locator))).toBe(true);
-    }
-  });
-
-  it('profiles: an empty profile is legal but every ref to it warns per kind', () => {
-    const r = readModelsConfig(prdWith({ profiles: { fast: {} }, builder: 'fast' }), 'claude');
-    expect(r.config?.builder).toBeUndefined();
-    expect(r.warnings.some((w) => w.includes('fast') && w.includes('claude'))).toBe(true);
+  it('rejects difficulty metadata without models as a half-configured route', () => {
+    const result = readModelRouting(prd(null));
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') return;
+    expect(result.errors[0]).toContain('半套配置');
   });
 });
 
 describe('resolveBuilderModel', () => {
-  const cfg = { builder: 'b-m', validator: 'v-m', escalation: 'e-m', escalateAfter: 1, profiles: {} };
-
-  it('returns undefined when nothing is configured', () => {
-    const r = resolveBuilderModel({ config: null, story: null, retryCount: 0, kind: 'claude' });
-    expect(r).toEqual({ model: undefined, escalated: false, warnings: [] });
-  });
-
-  it('falls back to the top-level builder model', () => {
-    const r = resolveBuilderModel({ config: cfg, story: story(), retryCount: 0, kind: 'claude' });
-    expect(r.model).toBe('b-m');
-    expect(r.escalated).toBe(false);
-  });
-
-  it('lets story.model override the top-level builder model', () => {
-    const r = resolveBuilderModel({ config: cfg, story: story({ model: 's-m' }), retryCount: 0, kind: 'claude' });
-    expect(r.model).toBe('s-m');
-  });
-
-  it('applies story.model even without a top-level models config', () => {
-    const r = resolveBuilderModel({ config: null, story: story({ model: 's-m' }), retryCount: 0, kind: 'claude' });
-    expect(r.model).toBe('s-m');
-  });
-
-  it('escalates past story.model once retryCount reaches escalateAfter', () => {
-    const r = resolveBuilderModel({ config: cfg, story: story({ model: 's-m' }), retryCount: 1, kind: 'claude' });
-    expect(r).toMatchObject({ model: 'e-m', escalated: true });
-  });
-
-  it('does not escalate below the threshold', () => {
-    const r = resolveBuilderModel({ config: { ...cfg, escalateAfter: 3 }, story: story(), retryCount: 2, kind: 'claude' });
-    expect(r).toMatchObject({ model: 'b-m', escalated: false });
-  });
-
-  it('does not escalate when escalation is not configured', () => {
-    const r = resolveBuilderModel({
-      config: { builder: 'b-m', escalateAfter: 1, profiles: {} }, story: story(), retryCount: 4, kind: 'claude',
+  it('selects the story difficulty for an initial builder', () => {
+    expect(resolveBuilderModel({ config, story: story({ difficulty: 'low' }), escalated: false })).toMatchObject({
+      model: 'low-m', source: 'difficulty', escalated: false,
     });
-    expect(r).toMatchObject({ model: 'b-m', escalated: false });
+    expect(resolveBuilderModel({ config, story: story({ difficulty: 'high' }), escalated: false }).model).toBe('high-m');
   });
 
-  it('lets the CLI override beat everything, including escalation', () => {
-    const r = resolveBuilderModel({ cliOverride: 'cli-m', config: cfg, story: story({ model: 's-m' }), retryCount: 3, kind: 'claude' });
-    expect(r).toMatchObject({ model: 'cli-m', escalated: false });
+  it('lets the builder CLI override only the initial route', () => {
+    expect(resolveBuilderModel({
+      builderOverride: 'cli-b', config, story: story(), escalated: false,
+    })).toMatchObject({ model: 'cli-b', source: 'cli-builder', escalated: false });
+    expect(resolveBuilderModel({
+      builderOverride: 'cli-b', config, story: story(), escalated: true,
+    })).toMatchObject({ model: 'esc-m', source: 'escalation', escalated: true });
   });
 
-  it('ignores a non-string story.model with a warning and falls back', () => {
-    const r = resolveBuilderModel({ config: cfg, story: story({ model: 123 }), retryCount: 0, kind: 'claude' });
-    expect(r.model).toBe('b-m');
-    expect(r.warnings.some((w) => w.includes('US-001') && w.includes('model'))).toBe(true);
+  it('uses the dedicated CLI escalation before configured escalation', () => {
+    expect(resolveBuilderModel({
+      builderOverride: 'cli-b', escalationOverride: 'cli-e', config, story: story(), escalated: true,
+    })).toMatchObject({ model: 'cli-e', source: 'cli-escalation', escalated: true });
   });
 
-  // ——story.model 写模型引用：档案名按当前工具解析，非档案名当字面模型名——
-
-  const cfgWithProfiles = {
-    ...cfg,
-    profiles: { strong: { claude: 'opus', codex: 'x-big' } },
-  };
-
-  it('story ref: resolves a profile name via the running kind', () => {
-    expect(resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'strong' }), retryCount: 0, kind: 'claude' }).model).toBe('opus');
-    expect(resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'strong' }), retryCount: 0, kind: 'codex' }).model).toBe('x-big');
-  });
-
-  it('story ref: a non-profile name passes through as a literal model name', () => {
-    const r = resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'my-exact-model' }), retryCount: 0, kind: 'claude' });
-    expect(r.model).toBe('my-exact-model');
-    expect(r.warnings).toEqual([]);
-  });
-
-  it('story ref: profile hit but missing kind entry warns and falls through to the stage chain', () => {
-    const r = resolveBuilderModel({ config: cfgWithProfiles, story: story({ model: 'strong' }), retryCount: 0, kind: 'cursor' });
-    expect(r.model).toBe('b-m');
-    expect(r.warnings.some((w) => w.includes('strong') && w.includes('cursor'))).toBe(true);
-  });
-
-  it('story ref: without a models config the value is a literal (old behavior)', () => {
-    const r = resolveBuilderModel({ config: null, story: story({ model: 'strong' }), retryCount: 0, kind: 'claude' });
-    expect(r.model).toBe('strong');
+  it('falls back through builder override and runner default without a dedicated escalation', () => {
+    expect(resolveBuilderModel({
+      builderOverride: 'cli-b', config: null, story: story(), escalated: true,
+    })).toMatchObject({ model: 'cli-b', source: 'cli-builder', escalated: false });
+    expect(resolveBuilderModel({ config: null, story: story(), escalated: false })).toMatchObject({
+      model: undefined, source: 'runner-default', escalated: false,
+    });
   });
 });
 
 describe('resolveValidatorModel', () => {
-  const cfg = { builder: 'b-m', validator: 'v-m', escalateAfter: 1, profiles: {} };
-
-  it('returns undefined when nothing is configured', () => {
-    expect(resolveValidatorModel({ config: null })).toBeUndefined();
-  });
-
-  it('uses the top-level validator model', () => {
-    expect(resolveValidatorModel({ config: cfg })).toBe('v-m');
-  });
-
-  it('lets the CLI override win', () => {
-    expect(resolveValidatorModel({ cliOverride: 'cli-m', config: cfg })).toBe('cli-m');
+  it('uses CLI, configured validator, then runner default', () => {
+    expect(resolveValidatorModel({ cliOverride: 'cli-v', config })).toEqual({ model: 'cli-v', source: 'cli-validator' });
+    expect(resolveValidatorModel({ config })).toEqual({ model: 'val-m', source: 'validator' });
+    expect(resolveValidatorModel({ config: null })).toEqual({ model: undefined, source: 'runner-default' });
   });
 });

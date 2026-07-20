@@ -1,4 +1,7 @@
 import { readFileSync } from 'node:fs';
+import type { AgentKind } from './agent.js';
+
+export type StoryDifficulty = 'low' | 'medium' | 'high';
 
 export interface Story {
   id: string;
@@ -6,25 +9,18 @@ export interface Story {
   description: string;
   acceptanceCriteria: string[];
   priority: number;
-  /**
-   * builder 阶段模型覆盖（可选，只作用于 builder；validator 恒定不受影响）。
-   * 写模型引用：命中 models.profiles 的档案名按当前工具解析，否则当字面模型名透传。
-   */
-  model?: string;
+  /** 启用 models 时由 prd-to-json 派生；衡量可靠完成 story 所需的模型推理能力。 */
+  difficulty?: StoryDifficulty;
+  /** 一至两句可审计理由：包含规则编号与仓库具体证据。 */
+  difficultyReason?: string;
 }
 
-/**
- * 模型路由配置（可选）；缺失=不传 --model，行为与历史版本一致。
- * profiles=具名模型档案（档案名 → { 工具名 → 模型名 }），配置一次、任何 agent 工具可用；
- * 各阶段字段写模型引用（档案名或字面模型名）。模型名对工具不可移植（claude 的
- * sonnet/codex 的 gpt-*），档案让同一份配置在不同工具下各自定位到正确名字（ADR-010）。
- */
+/** runner 绑定的模型路由；五个模型值都必须是当前有效环境接受的实际标识。 */
 export interface ModelsConfig {
-  profiles?: Record<string, Record<string, string>>;
-  builder?: string;
-  validator?: string;
-  escalation?: string;
-  escalateAfter?: number;
+  runner: AgentKind;
+  builder: Record<StoryDifficulty, string>;
+  validator: string;
+  escalation: string;
 }
 
 export interface Prd {
@@ -35,7 +31,7 @@ export interface Prd {
   sourcePrd?: string;
   /** 机械门禁命令（完整 shell 命令行，引擎逐条执行）；缺失或空数组=门禁不启用 */
   qualityChecks?: string[];
-  /** 模型路由（阶段默认/story 覆盖/重试升级）；缺失=模型路由不启用 */
+  /** 模型路由；缺失时只使用 CLI 临时覆盖或 runner 默认模型。 */
   models?: ModelsConfig;
   userStories: Story[];
 }

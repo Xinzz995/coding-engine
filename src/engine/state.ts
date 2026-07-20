@@ -8,6 +8,8 @@ export interface StoryState {
   notes: string;
   retryCount: number;
   blocked: boolean;
+  /** 首次有效失败已触发专用升级路由；仅引擎可修改。 */
+  escalated: boolean;
 }
 
 /** key = story id */
@@ -17,22 +19,36 @@ export type RunState = Record<string, StoryState>;
 export type StoryView = Story & StoryState;
 
 export const INITIAL_STORY_STATE: Readonly<StoryState> = Object.freeze({
-  passes: false, notes: '', retryCount: 0, blocked: false,
+  passes: false, notes: '', retryCount: 0, blocked: false, escalated: false,
 });
 
-function isStoryState(v: unknown): v is StoryState {
-  if (typeof v !== 'object' || v === null) return false;
+function normalizeStoryState(v: unknown): StoryState | null {
+  if (typeof v !== 'object' || v === null) return null;
   const s = v as Record<string, unknown>;
-  return typeof s.passes === 'boolean' && typeof s.notes === 'string'
-    && typeof s.retryCount === 'number' && typeof s.blocked === 'boolean';
+  if (typeof s.passes !== 'boolean' || typeof s.notes !== 'string'
+    || typeof s.retryCount !== 'number' || typeof s.blocked !== 'boolean'
+    || (s.escalated !== undefined && typeof s.escalated !== 'boolean')) return null;
+  return {
+    passes: s.passes,
+    notes: s.notes,
+    retryCount: s.retryCount,
+    blocked: s.blocked,
+    // v0.22.0 及更早 state 没有该字段：内存归一但不因读取立刻重写文件。
+    escalated: s.escalated ?? false,
+  };
 }
 
 export function tryReadState(path: string): RunState | null {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
-    if (!Object.values(parsed as Record<string, unknown>).every(isStoryState)) return null;
-    return parsed as RunState;
+    const state: RunState = {};
+    for (const [id, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      const normalized = normalizeStoryState(raw);
+      if (!normalized) return null;
+      state[id] = normalized;
+    }
+    return state;
   } catch {
     return null;
   }
@@ -46,6 +62,7 @@ function legacyStateOf(story: Story): StoryState {
     notes: s.notes ?? '',
     retryCount: s.retryCount ?? 0,
     blocked: s.blocked ?? false,
+    escalated: false,
   };
 }
 
@@ -76,6 +93,47 @@ export function ensureStateFile(workspace: string, prd: Prd): RunState {
 
 function storyStateOf(state: RunState, id: string): StoryState {
   return state[id] ?? INITIAL_STORY_STATE;
+}
+
+export interface EscalatedTamper {
+  expected: boolean;
+  received: boolean | 'missing';
+}
+
+/** 恢复 agent 写回前的引擎独占值；无篡改时保持同一 state 引用。 */
+export function restoreEscalated(
+  state: RunState,
+  storyId: string,
+  expected: boolean,
+  fallback?: StoryState,
+): { state: RunState; tamper: EscalatedTamper | null } {
+  const current = state[storyId];
+  if (!current) {
+    if (!fallback) return { state, tamper: null };
+    return {
+      state: { ...state, [storyId]: { ...fallback, escalated: expected } },
+      tamper: { expected, received: 'missing' },
+    };
+  }
+  if (current.escalated === expected) return { state, tamper: null };
+  return {
+    state: { ...state, [storyId]: { ...current, escalated: expected } },
+    tamper: { expected, received: current.escalated },
+  };
+}
+
+/** 首次有效失败后置位；没有专用升级目标时保持不变，且从不修改 retryCount。 */
+export function enableEscalation(
+  state: RunState,
+  storyId: string,
+  hasDedicatedTarget: boolean,
+): { state: RunState; changed: boolean } {
+  const current = state[storyId];
+  if (!hasDedicatedTarget || !current || current.escalated) return { state, changed: false };
+  return {
+    state: { ...state, [storyId]: { ...current, escalated: true } },
+    changed: true,
+  };
 }
 
 export function getCurrentStoryId(prd: Prd, state: RunState): string | null {
