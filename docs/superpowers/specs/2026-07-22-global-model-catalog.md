@@ -1,6 +1,6 @@
 ---
 title: "全局模型目录：以用户配置取代 runner 自主发现"
-status: active
+status: done
 updated: 2026-07-22
 scope: root
 ---

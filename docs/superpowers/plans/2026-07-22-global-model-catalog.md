@@ -1,6 +1,6 @@
 ---
 title: "全局模型目录实施计划"
-status: active
+status: done
 updated: 2026-07-22
 scope: root
 ---
@@ -23,7 +23,7 @@ scope: root
 - [x] Task 7 隔离部分：审查修复后 471 条全量测试、typecheck、build、发布入口 config/models/doctor smoke 与 fake-agent 生产配置链路已通过。
 - [x] Task 7 真实 provider 最小链路：在隔离 clone 中完成一轮 Codex low Terra builder → Sol validator，门禁、evidence、report 与最终状态均通过；覆盖边界见下方“持久审计证据”。
 - [x] Task 7 工程收口：预提交 `/review-loop` 已完成，10 项发现均有裁决（9 项已纳入本分支提交且留痕已回填哈希）；`/compound-docs` 已按无 workspace/无分支提交的降级模式完成取证，现有 architecture/glossary 已覆盖稳定知识，无额外 patterns 候选。
-- [ ] 合并/发布收尾：实现尚未合并或发布，因此本 plan/spec 保持 `active`，不发布、不打 tag。
+- [x] 状态收尾：实现已通过 PR #2 合并到 `main`（merge `44cfb589`）；依 `/compound-docs` 的任务型文档规则，本 plan/spec 置 `done`。tag、npm 与 GitHub Release 由独立发布工作流审计，不作为本计划内实现证据回写。
 
 ## 全局约束
 
@@ -346,7 +346,7 @@ node dist/cli.js doctor
 - 真实 provider 只验证一条经用户明确授权的最小边界：从 study-report fixture 派生单个 low 难度 US-009，在无 Git remote 的隔离 clone 中，以临时全局目录运行一轮 Terra builder → Sol validator，并核对目录预检、真实 runner 参数、机械门禁、evidence、state 与 report。
 - 该真实调用不声称覆盖 medium/high builder 或 escalation；这些组合的证据来自上一条所列自动化链路。成本边界固定为一次成功尝试最多一个 builder 与一个 validator；首次安全中止另行留痕，不重复扩张 provider 调用范围。
 - 预提交 `/review-loop` 人审包落在 `.workspace/review-2026-07-22.md`；所有发现已有四态裁决，机械修复后相关目标测试与全量门禁均通过，留痕已回填本分支修复提交哈希。
-- `/compound-docs` 已基于当前代码、工作树 diff 与现有文档降级取证：结构/边界已在 architecture、glossary、ADR/spec/plan 单源表达，一次性 dogfood 事故不沉淀为通用模式，仓库无真实 `// 取舍:` 债务。plan/spec 只在实现合并或发布后置 `done`，本轮不自动发布。
+- `/compound-docs` 已基于当前代码、工作树 diff 与现有文档降级取证：结构/边界已在 architecture、glossary、ADR/spec/plan 单源表达，一次性 dogfood 事故不沉淀为通用模式，仓库无真实 `// 取舍:` 债务。PR #2 合并后，plan/spec 已按证据置 `done`；发布继续由 tag 工作流独立执行。
 
 ### 持久审计证据（脱敏）
 
