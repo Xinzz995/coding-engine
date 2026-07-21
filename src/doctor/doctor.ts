@@ -1,6 +1,12 @@
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, relative, resolve } from 'node:path';
+import type { AgentKind } from '../engine/agent.js';
+import {
+  readGlobalModelConfig,
+  resolveGlobalConfigPath,
+} from '../engine/model-catalog.js';
+import { readModelRouting } from '../engine/models.js';
 import { tryReadPrd } from '../engine/prd.js';
 import { readQualityChecks } from '../engine/gate.js';
 import { isPidAlive, readLockInfo, LOCK_FILE } from '../engine/lock.js';
@@ -40,6 +46,8 @@ export interface DoctorOptions {
   staleDays?: number;
   /** 引擎工作区目录（相对项目根），门禁配置检查用。缺省 .workspace。 */
   workspace?: string;
+  /** 全局模型目录路径；测试/隔离环境可显式注入，缺省遵循 CODING_X_CONFIG 或固定用户目录。 */
+  modelConfigPath?: string;
 }
 
 export interface GateConfigCheckResult {
@@ -59,6 +67,27 @@ export interface LockCheckResult {
   pid: number | null;
 }
 
+export interface ModelCatalogCheckResult {
+  /** 展示用的 workspace/prd.json 路径。 */
+  prdPath: string;
+  /** prd.json 是否存在；不存在时仅跳过项目映射复核，已有全局配置仍校验。 */
+  prdFound: boolean;
+  /** prd.json 是否启用了完整有效的 models 路由。 */
+  routingEnabled: boolean;
+  /** 启用路由时绑定的 runner。 */
+  runner: AgentKind | null;
+  /** 实际读取（或本应读取）的全局模型目录路径。 */
+  configPath: string;
+  /** 配置文件的静态读取状态；missing 在当前项目无需路由时不计失败。 */
+  configStatus: 'missing' | 'available' | 'error';
+  /** schema 合法时，各个已声明 runner 的目录条目数。 */
+  configuredRunners: Array<{ runner: AgentKind; count: number }>;
+  /** 成功读取目录后核对的项目模型位置数；完整路由固定为五项。 */
+  checked: number;
+  /** 配置缺失/非法、runner 空目录、项目模型未声明等机械失败。 */
+  issues: DoctorIssue[];
+}
+
 export interface DoctorReport {
   docsFound: boolean;
   frontmatter: FrontmatterCheckResult | null;
@@ -66,6 +95,7 @@ export interface DoctorReport {
   agentsIndex: AgentsIndexCheckResult | null;
   links: LinksCheckResult | null;
   gate: GateConfigCheckResult;
+  modelCatalog: ModelCatalogCheckResult;
   lock: LockCheckResult;
 }
 
@@ -199,17 +229,115 @@ function gitLastCommitDate(root: string, relFile: string): string | null {
   }
 }
 
+/**
+ * 全局目录是用户声明的允许集合，不是 provider 在线探测。存在配置文件时始终
+ * 校验 schema；项目启用 models 路由时，再机械核对五个项目模型。普通零配置
+ * 项目允许目录缺失，继续使用 runner 默认模型。
+ */
+function checkModelCatalog(
+  prdPath: string,
+  prdDisplayPath: string,
+  configPath: string,
+): ModelCatalogCheckResult {
+  const base: ModelCatalogCheckResult = {
+    prdPath: prdDisplayPath,
+    prdFound: existsSync(prdPath),
+    routingEnabled: false,
+    runner: null,
+    configPath,
+    configStatus: 'missing',
+    configuredRunners: [],
+    checked: 0,
+    issues: [],
+  };
+  let routing: ReturnType<typeof readModelRouting> | null = null;
+  const prdIssues: DoctorIssue[] = [];
+  if (base.prdFound) {
+    const prd = tryReadPrd(prdPath);
+    if (prd === null) {
+      prdIssues.push({ file: prdDisplayPath, message: 'prd.json 无法解析，不能检查全局模型目录' });
+    } else {
+      routing = readModelRouting(prd);
+      if (routing.status === 'invalid') {
+        prdIssues.push(...routing.errors.map((message) => ({ file: prdDisplayPath, message })));
+      }
+    }
+  }
+
+  const enabledRouting = routing?.status === 'enabled' ? routing.config : null;
+  const withRouting = enabledRouting === null
+    ? base
+    : { ...base, routingEnabled: true, runner: enabledRouting.runner };
+  const config = readGlobalModelConfig(configPath);
+  if (config.status === 'error') {
+    const missing = !existsSync(configPath);
+    const configIssues = missing && enabledRouting === null
+      ? []
+      : config.errors.map((message) => ({ file: configPath, message }));
+    return {
+      ...withRouting,
+      configStatus: missing ? 'missing' : 'error',
+      issues: [...prdIssues, ...configIssues],
+    };
+  }
+
+  const configuredRunners = (Object.entries(config.config.models) as Array<[
+    AgentKind,
+    NonNullable<(typeof config.config.models)[AgentKind]>,
+  ]>).map(([runner, models]) => ({ runner, count: models.length }));
+  const available = {
+    ...withRouting,
+    configStatus: 'available' as const,
+    configuredRunners,
+    issues: prdIssues,
+  };
+  if (enabledRouting === null) return available;
+
+  const runnerModels = config.config.models[enabledRouting.runner] ?? [];
+  if (runnerModels.length === 0) {
+    return {
+      ...available,
+      issues: [
+        ...prdIssues,
+        {
+          file: configPath,
+          message: `全局模型目录未配置任何模型（runner: ${enabledRouting.runner}）：${configPath}`,
+        },
+      ],
+    };
+  }
+
+  const configuredIds = new Set(runnerModels.map((model) => model.id));
+  const projectModels: Array<[path: string, model: string]> = [
+    ['models.builder.low', enabledRouting.builder.low],
+    ['models.builder.medium', enabledRouting.builder.medium],
+    ['models.builder.high', enabledRouting.builder.high],
+    ['models.validator', enabledRouting.validator],
+    ['models.escalation', enabledRouting.escalation],
+  ];
+  const routingIssues = projectModels
+    .filter(([, model]) => !configuredIds.has(model))
+    .map(([path, model]) => ({
+      file: prdDisplayPath,
+      message: `${path} 的模型 ${model} 未在 ${enabledRouting.runner} 全局模型目录中声明`,
+    }));
+  return { ...available, checked: projectModels.length, issues: [...prdIssues, ...routingIssues] };
+}
+
 /** 对项目根 root 只读执行各项健康检查（无 docs/ 时温和降级）。 */
 export function runDoctor(root: string, options: DoctorOptions = {}): DoctorReport {
   const staleDays = options.staleDays ?? DEFAULT_STALE_DAYS;
   const workspace = options.workspace ?? '.workspace';
   const prdRel = join(workspace, 'prd.json');
+  const prdPath = resolve(root, prdRel);
+  const modelConfigPath = options.modelConfigPath ?? resolveGlobalConfigPath();
+  const modelCatalog = checkModelCatalog(prdPath, prdRel, modelConfigPath);
   let gate: GateConfigCheckResult = { prdPath: prdRel, prdFound: false, configured: false };
   // resolve（非 join）：workspace 可能是绝对路径（如 --workspace 巡检异地目录）；join 会把
   // 已是绝对路径的第二段原样拼在 root 之下产生不存在的路径，resolve 则在遇到绝对路径段时
   // 正确丢弃 root，相对 workspace 的既有行为不变（终审 2026-07-16 发现 1）。
-  if (existsSync(resolve(root, prdRel))) {
-    const checks = readQualityChecks(tryReadPrd(resolve(root, prdRel)));
+  if (existsSync(prdPath)) {
+    const checks = readQualityChecks(tryReadPrd(prdPath));
     gate = { prdPath: prdRel, prdFound: true, configured: Array.isArray(checks) };
   }
   const lockPath = resolve(root, workspace, LOCK_FILE);
@@ -220,7 +348,10 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   }
   const docsDir = join(root, 'docs');
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
-    return { docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null, gate, lock };
+    return {
+      docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null,
+      gate, modelCatalog, lock,
+    };
   }
   const files = walkMarkdownFiles(docsDir);
   const gitAvailable = isGitWorkTree(root);
@@ -289,6 +420,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     agentsIndex,
     links: { checked: linksChecked, issues: linkIssues },
     gate,
+    modelCatalog,
     lock,
   };
 }
@@ -301,6 +433,30 @@ function renderGateLines(gate: GateConfigCheckResult): string[] {
     lines.push('  ✅ 已配置 qualityChecks（引擎每轮 builder 后确定性执行）');
   } else {
     lines.push('  💡 建议在 prd.json 顶层配置 qualityChecks（如 ["npm run typecheck", "npm test"]）：引擎将在每轮 builder 之后机械执行、失败确定性打回（建议项，不计失败）');
+  }
+  return lines;
+}
+
+function renderModelCatalogLines(result: ModelCatalogCheckResult): string[] {
+  const lines = ['🧭 全局模型目录'];
+  if (result.issues.length > 0) {
+    for (const issue of result.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
+  } else if (result.configStatus === 'missing') {
+    lines.push(`  ℹ️  未配置（${result.configPath}）：runner-default 不受影响`);
+    if (!result.prdFound) lines.push(`  ℹ️  未找到 ${result.prdPath}：无需项目模型映射复核`);
+    else lines.push('  ℹ️  prd.json 未启用 models：无需项目模型映射复核');
+  } else if (!result.routingEnabled) {
+    const summary = result.configuredRunners.length === 0
+      ? '尚未声明 runner'
+      : result.configuredRunners.map(({ runner, count }) => `${runner} ${count} 项`).join('、');
+    lines.push(`  ✅ 配置 schema 合法（${summary}）`);
+    if (!result.prdFound) lines.push(`  ℹ️  未找到 ${result.prdPath}：无需项目模型映射复核`);
+    else lines.push('  ℹ️  prd.json 未启用 models：无需项目模型映射复核');
+  } else {
+    lines.push(
+      `  ✅ ${result.runner} 的 ${result.checked}/5 个项目模型均已在全局目录声明`,
+      '  ℹ️  这里只检查静态允许目录，不检查 provider 在线可用性',
+    );
   }
   return lines;
 }
@@ -319,9 +475,15 @@ function renderLockLines(lock: LockCheckResult): string[] {
 
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
+    const total = report.modelCatalog.issues.length;
     return {
-      text: ['ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。', '', ...renderGateLines(report.gate), '', ...renderLockLines(report.lock)].join('\n'),
-      exitCode: 0,
+      text: [
+        'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
+        '', ...renderGateLines(report.gate),
+        '', ...renderModelCatalogLines(report.modelCatalog),
+        '', ...renderLockLines(report.lock),
+      ].join('\n'),
+      exitCode: total === 0 ? 0 : 1,
     };
   }
   const fm = report.frontmatter!;
@@ -356,8 +518,10 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
     for (const issue of links.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
   lines.push('', ...renderGateLines(report.gate));
+  lines.push('', ...renderModelCatalogLines(report.modelCatalog));
   lines.push('', ...renderLockLines(report.lock));
-  const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length;
+  const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
+    + report.modelCatalog.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
 }

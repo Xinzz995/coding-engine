@@ -15,7 +15,7 @@ export interface Story {
   difficultyReason?: string;
 }
 
-/** runner 绑定的模型路由；五个模型值都必须是当前有效环境接受的实际标识。 */
+/** runner 绑定的模型路由；五个模型值都必须是对应 runner 全局模型目录声明的实际标识。 */
 export interface ModelsConfig {
   runner: AgentKind;
   builder: Record<StoryDifficulty, string>;

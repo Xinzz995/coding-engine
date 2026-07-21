@@ -1,13 +1,18 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runLoop, renderInstruction } from './loop.js';
 import { readEvidence } from './evidence.js';
 import { readLockInfo, LOCK_FILE } from './lock.js';
+import * as dashboard from '../dashboard/server.js';
 
 let cleanup: Array<() => void> = [];
-afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
+afterEach(() => {
+  cleanup.forEach((f) => f());
+  cleanup = [];
+  delete process.env.CODING_X_CONFIG;
+});
 
 function setup(prdStories: unknown[], prdExtra: Record<string, unknown> = {}): { workspace: string; instructionsDir: string } {
   const workspace = mkdtempSync(join(tmpdir(), 'loop-ws-'));
@@ -40,10 +45,11 @@ const modelConfig = () => ({
   escalation: 'esc-m',
 });
 
-const discovered = (...ids: string[]) => async () => ({
+const catalogWith = (...ids: string[]) => async () => ({
   status: 'available' as const,
   runner: 'claude' as const,
-  source: 'fixture',
+  source: 'global-config' as const,
+  configPath: '/fixture/config.json',
   models: ids.map((id) => ({ id })),
 });
 
@@ -543,7 +549,7 @@ describe('runLoop model routing', () => {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: discovered('esc-m', 'val-m'),
+        modelCatalog: catalogWith('esc-m', 'val-m'),
       });
       expect(code).toBe(0);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
@@ -576,7 +582,7 @@ describe('runLoop model routing', () => {
       const code = await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: discovered(expectedModel, 'esc-m', 'val-m'),
+        modelCatalog: catalogWith(expectedModel, 'esc-m', 'val-m'),
       });
       expect(code).toBe(0);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
@@ -604,8 +610,8 @@ describe('runLoop model routing', () => {
         kind: 'claude', kindExplicit: false, maxIterations: 2,
         devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: async () => ({
-          status: 'available', runner, source: 'fixture',
+        modelCatalog: async () => ({
+          status: 'available', runner, source: 'global-config', configPath: '/fixture/config.json',
           models: ['fast-m', 'esc-m', 'val-m'].map((id) => ({ id })),
         }),
       });
@@ -630,7 +636,7 @@ describe('runLoop model routing', () => {
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
         builderModel: 'cli-b', validatorModel: 'cli-v',
-        modelDiscovery: discovered('cli-b', 'cli-v', 'esc-m'),
+        modelCatalog: catalogWith('cli-b', 'cli-v', 'esc-m'),
       });
       expect(code).toBe(0);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
@@ -641,8 +647,32 @@ describe('runLoop model routing', () => {
     }
   });
 
+  it('reads a valid CODING_X_CONFIG through the production preflight path', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    const configPath = join(workspace, 'global-models.json');
+    writeFileSync(configPath, JSON.stringify({
+      version: 1,
+      models: { claude: ['fast-m', 'esc-m', 'val-m'].map((id) => ({ id })) },
+    }));
+    process.env.CODING_X_CONFIG = configPath;
+    const { fake, argvLog } = fakeArgvRecorder(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(0);
+      const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
+      expect(lines[0]).toContain('--model fast-m');
+      expect(lines[1]).toContain('--model val-m');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('passes no --model at all when nothing is configured', async () => {
     const { workspace, instructionsDir } = setup([story()]);
+    process.env.CODING_X_CONFIG = join(workspace, 'missing-global-config.json');
     const { fake, argvLog } = fakeArgvRecorder(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
@@ -689,6 +719,83 @@ describe('runLoop model routing', () => {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
+
+  it('fails before dashboard/agent when routed models have no global catalog', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    process.env.CODING_X_CONFIG = join(workspace, 'missing-global-config.json');
+    const fake = join(workspace, 'must-not-run.mjs');
+    const argvLog = join(workspace, 'argv.log');
+    writeFileSync(fake, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(argvLog)}, 'ran');`);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const dashboardStart = vi.spyOn(dashboard, 'start');
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(2);
+      expect(dashboardStart).not.toHaveBeenCalled();
+      expect(existsSync(argvLog)).toBe(false);
+      expect(errors.join('\n')).toContain('未找到全局模型配置');
+    } finally {
+      dashboardStart.mockRestore();
+      console.error = orig;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('does not let a CLI model override bypass the catalog when prd.json is missing', async () => {
+    const { workspace, instructionsDir } = setup([]);
+    rmSync(join(workspace, 'prd.json'));
+    const configPath = join(workspace, 'global-models.json');
+    writeFileSync(configPath, JSON.stringify({
+      version: 1, models: { claude: [{ id: 'some-other-model' }] },
+    }));
+    process.env.CODING_X_CONFIG = configPath;
+    const fake = join(workspace, 'must-not-run.mjs');
+    const argvLog = join(workspace, 'argv.log');
+    writeFileSync(fake, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(argvLog)}, 'ran');`);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const errors: string[] = [];
+    const orig = console.error;
+    console.error = (...args: unknown[]) => { errors.push(args.join(' ')); };
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        builderModel: 'cli-b', workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(2);
+      expect(existsSync(argvLog)).toBe(false);
+      expect(errors.join('\n')).toContain('cli-b');
+      expect(errors.join('\n')).toContain('claude 全局模型目录');
+    } finally {
+      console.error = orig;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('skips a missing catalog for a routed workspace that is already settled', async () => {
+    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+    }));
+    process.env.CODING_X_CONFIG = join(workspace, 'missing-global-models.json');
+    const argvLog = join(workspace, 'argv.log');
+    const fake = join(workspace, 'must-not-run.mjs');
+    writeFileSync(fake, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(argvLog)}, 'ran');`);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', kindExplicit: false, maxIterations: 1,
+        devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(0);
+      expect(existsSync(argvLog)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
 });
 
 describe('模型升级触发与状态所有权', () => {
@@ -706,7 +813,7 @@ describe('模型升级触发与状态所有权', () => {
       expect(await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 3,
-        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+        modelCatalog: catalogWith('fast-m', 'esc-m', 'val-m'),
       })).toBe(1);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
       expect(lines[0]).toContain('--model fast-m');
@@ -741,7 +848,7 @@ describe('模型升级触发与状态所有权', () => {
       expect(await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+        modelCatalog: catalogWith('fast-m', 'esc-m', 'val-m'),
       })).toBe(1);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
       expect(lines[0]).toContain('--model fast-m');
@@ -782,7 +889,7 @@ describe('模型升级触发与状态所有权', () => {
       expect(await runLoop({
         kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+        modelCatalog: catalogWith('fast-m', 'esc-m', 'val-m'),
       })).toBe(1);
       const lines = readFileSync(argvLog, 'utf-8').trim().split('\n');
       expect(lines).toHaveLength(4);
@@ -806,7 +913,7 @@ describe('模型升级触发与状态所有权', () => {
       expect(await runLoop({
         kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+        modelCatalog: catalogWith('fast-m', 'esc-m', 'val-m'),
       })).toBe(1);
       expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated).toBe(false);
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
@@ -834,7 +941,7 @@ describe('模型升级触发与状态所有权', () => {
       expect(await runLoop({
         kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: discovered('fast-m', 'esc-m', 'val-m'),
+        modelCatalog: catalogWith('fast-m', 'esc-m', 'val-m'),
       })).toBe(0);
       expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated).toBe(false);
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
@@ -870,7 +977,7 @@ describe('模型升级触发与状态所有权', () => {
       expect(await runLoop({
         kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-        modelDiscovery: discovered('esc-m', 'val-m'),
+        modelCatalog: catalogWith('esc-m', 'val-m'),
       })).toBe(1);
       expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toEqual({
         passes: false, notes: 'keep', retryCount: 2, blocked: false, escalated: true,

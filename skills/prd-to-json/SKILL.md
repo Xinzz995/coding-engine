@@ -69,7 +69,7 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 顶层可选字段。它必须在 stories 增强、拆分、排序和源 PRD 回写全部定稿之后处理；源 PRD 只保存业务意图，不写模型策略、难度或模型名。
 
-不启用时，**同时省略**顶层 `models` 和每个 story 的 `difficulty` / `difficultyReason`，引擎只使用 CLI 临时覆盖或 runner 默认模型。
+不启用时，**同时省略**顶层 `models` 和每个 story 的 `difficulty` / `difficultyReason`。不再额外传模型 CLI 覆盖时，这是 runner-default 零配置路径，不要求存在全局模型目录；若运行时另行传入任一模型 CLI 覆盖，该 ID 仍必须在目录中声明。
 
 启用时，配置绑定单一 runner，不跨 Claude Code、Codex、Cursor 复用：
 
@@ -86,20 +86,37 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 }
 ```
 
-五个模型值都必须是 runner 当前接受的实际模型标识，不使用 coding-x 自造的 `default` 哨兵；如果 runner 本身把 `auto` / `default` 暴露为真实可选 ID，它只按普通 ID 处理。多个位置可以选择同一模型。
+五个模型值都必须从对应 runner 的全局模型目录中选择，不使用 coding-x 自造的 `default` 哨兵；如果用户把 runner 接受的 `auto` / `default` 作为真实 ID 写入目录，它只按普通 ID 处理。多个位置可以选择同一模型。目录中的声明表示用户允许 coding-x 使用该 ID，不证明账号、provider、配额或网络下实时可用；真实拒绝只会在 agent 实际调用时体现。
+
+### 全局模型目录合同
+
+默认配置文件是 `~/.config/coding-x/config.json`；`CODING_X_CONFIG` 可覆盖为另一个完整文件路径。只接受 version 1：
+
+```json
+{
+  "version": 1,
+  "models": {
+    "claude": [{ "id": "sonnet", "label": "Sonnet" }],
+    "codex": [{ "id": "gpt-5.6-codex", "label": "GPT-5.6 Codex" }],
+    "cursor": [{ "id": "composer-2.5", "label": "Composer 2.5" }]
+  }
+}
+```
+
+每项 `id` 必填、`label` 可选；数组顺序就是展示顺序。配置可以只含部分 runner，但为所选 runner 配置路由时，其数组必须非空。需要定位、创建或校验文件时分别运行 `npx coding-x config path`、`npx coding-x config init`、`npx coding-x config validate`。这些命令与 `models` 都不拉起 Claude Code、Codex 或 Cursor CLI。
 
 ### 生成顺序
 
 1. stories 定稿后，询问是否启用模型路由；不启用就省略整套字段。
 2. 确认 runner：`claude`、`codex` 或 `cursor`。无法从当前宿主可靠判断时直接询问，不偷偷猜。
 3. 调用 `npx coding-x models <runner> --json`：
-   - `available`：使用返回的当前机器、当前账号、当前 provider/中转站配置下模型列表；
-   - `unsupported`：明确说明无法机器复核，请用户提供当前可用模型 ID 列表；
-   - `error`：停止路由配置，解释安装/认证/查询问题。用户仍可选择不启用路由，继续普通转换。
-4. 模型列表只展示一次，然后**批量提出五道选择题**：`builder.low`、`builder.medium`、`builder.high`、`validator`、`escalation`。每项由用户选择，不能替用户拍板。
-5. 只有发现结果返回的可靠元数据或官方明确资料才能用于推荐/能力倒挂警告；未知别名、中转站名称和自定义 ID 不按名字猜强弱。用户确认后允许任意组合。
-6. 按下方固定规则自动评估每个 story，直接写入 `difficulty` 与 `difficultyReason`；不在写入前逐 story 设置审批门槛。
-7. 写入后展示完整对照表：story、档位、理由、对应初始 builder 模型。用户提出异议时修正派生结果，不把策略写回源 PRD。
+   - `available`：使用返回的全局模型目录，保持原数组顺序；
+   - `error`：停止路由配置，说明配置路径与校验错误，引导用户先运行 `config init` 或编辑后执行 `config validate`。用户仍可选择不启用路由，继续普通转换。
+4. 目录错误时不得请用户在当前会话临时粘贴 ID 绕过；只能修好全局配置后重试，或明确选择不启用路由。
+5. 模型列表只展示一次，然后**批量提出五道选择题**：`builder.low`、`builder.medium`、`builder.high`、`validator`、`escalation`。每项由用户从目录选择，不能替用户拍板，也不能选择目录外 ID。
+6. `label` 只用于帮助识别，不构成能力或实时可用性证据。没有其他可靠资料时，不按名称、别名或自定义 ID 猜强弱，不自动推荐或判断倒挂；用户确认后允许任意组合。
+7. 按下方固定规则自动评估每个 story，直接写入 `difficulty` 与 `difficultyReason`；不在写入前逐 story 设置审批门槛。
+8. 写入后展示完整对照表：story、档位、理由、对应初始 builder 模型。用户提出异议时修正派生结果，不把策略写回源 PRD。
 
 ### difficulty：所需模型推理能力
 
@@ -472,8 +489,8 @@ Add ability to mark tasks with different statuses.
 
 1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件、`evidence.jsonl`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）；**同时删除工作区中的旧 `evidence.jsonl`**——需求变更后旧登记按 acIndex 位置匹配，会错挂到改写后的验收标准上，一律作废重验
 2. 先处理模型再派生，再用新结果**整体重写** `prd.json`：
-   - runner 相同，且原五个模型在本次 `coding-x models <runner> --json` 的 available 清单中仍有效 → 保留原选择，不重复提问
-   - runner 变化、任一模型失效、发现状态不是 available，或用户明确要求重配 → 重新走模型发现/人工列表与五道选择题
+   - runner 相同，且原五个模型在本次 `coding-x models <runner> --json` 返回的全局目录中仍有声明 → 保留原选择，不重复提问
+   - runner 变化、任一模型被移出目录、目录读取失败，或用户明确要求重配 → 停止保留，重新走目录选择与五道选择题；目录失败时不得退回历史列表或会话内临时列表
    - story 内容无实质变化 → 保留原 `difficulty` 与 `difficultyReason`，包括用户事后修正
    - story 内容有实质变化 → 按固定规则重新评估；用户可明确要求全量重新评估
 3. 若 `state.json` 存在，先把旧 state 缺失的 `escalated` 按 `false` 理解，再按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
@@ -507,7 +524,7 @@ Add ability to mark tasks with different statuses.
 - [ ] story 不含任何状态字段（passes/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] qualityChecks 已配置时：写入前逐条真实跑一遍、确认当前基线全绿——命令不存在、命令写错、基线本来就红，都必须在这里（有人在场的派生环节）拦截，否则 builder 会在循环里白烧 5 轮到 blocked；基线绿同时保证循环中门禁失败必然是 builder 引入的
-- [ ] models 已配置时：runner 已确认；五个实际模型 ID 全部由用户从当前有效列表选择；每个 story 都有 low/medium/high 与含规则编号、仓库路径的非空理由
+- [ ] models 已配置时：runner 已确认；五个模型 ID 全部由用户从该 runner 的全局模型目录选择；每个 story 都有 low/medium/high 与含规则编号、仓库路径的非空理由
 - [ ] models 未配置时：所有 story 都没有 difficulty/difficultyReason，避免半套配置
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表

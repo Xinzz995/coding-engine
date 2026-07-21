@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ModelPreflightError, preflightModelRouting, renderPreflightSummary, resolveRunKind } from './model-preflight.js';
-import type { ModelDiscoveryResult } from './model-discovery.js';
+import type { ModelCatalogResult } from './model-catalog.js';
 import type { Prd } from './prd.js';
 import type { RunState } from './state.js';
 
@@ -22,8 +22,9 @@ const state = (over: Partial<RunState[string]> = {}): RunState => ({
   'US-001': { passes: false, notes: '', retryCount: 0, blocked: false, escalated: false, ...over },
 });
 
-const available = (...ids: string[]): ModelDiscoveryResult => ({
-  status: 'available', runner: 'codex', source: 'fixture', models: ids.map((id) => ({ id })),
+const available = (...ids: string[]): ModelCatalogResult => ({
+  status: 'available', runner: 'codex', source: 'global-config', configPath: '/fixture/config.json',
+  models: ids.map((id) => ({ id })),
 });
 
 describe('resolveRunKind', () => {
@@ -39,16 +40,16 @@ describe('resolveRunKind', () => {
 });
 
 describe('preflightModelRouting', () => {
-  it('在调用探测前拒绝空白 CLI 模型标识', async () => {
+  it('在读取目录前拒绝空白 CLI 模型标识', async () => {
     let called = false;
     await expect(preflightModelRouting({
       prd: prd(), state: state(), requestedRunner: 'codex', runnerExplicit: true,
-      builderOverride: '   ', discover: async () => { called = true; return available(); },
+      builderOverride: '   ', catalog: async () => { called = true; return available(); },
     })).rejects.toThrow('--builder-model');
     expect(called).toBe(false);
   });
 
-  it('skips discovery for zero-config historical runs', async () => {
+  it('skips the global catalog for zero-config historical runs', async () => {
     const plain = { ...prd(), models: undefined };
     for (const story of plain.userStories) {
       delete story.difficulty;
@@ -57,16 +58,16 @@ describe('preflightModelRouting', () => {
     let called = false;
     const result = await preflightModelRouting({
       prd: plain, state: state(), requestedRunner: 'claude', runnerExplicit: false,
-      discover: async () => { called = true; return available(); },
+      catalog: async () => { called = true; return available(); },
     });
     expect(called).toBe(false);
-    expect(result.discovery.status).toBe('skipped');
+    expect(result.catalog.status).toBe('skipped');
   });
 
   it('validates all effective initial, escalation and validator routes', async () => {
     const result = await preflightModelRouting({
       prd: prd('low'), state: state(), requestedRunner: 'claude', runnerExplicit: false,
-      discover: async () => available('low-m', 'esc-m', 'val-m'),
+      catalog: async () => available('low-m', 'esc-m', 'val-m'),
     });
     expect(result.runner).toBe('codex');
     expect(result.storyRoutes[0]).toMatchObject({
@@ -74,10 +75,45 @@ describe('preflightModelRouting', () => {
     });
   });
 
+  it.each([
+    ['current builder', ['esc-m', 'val-m'], 'low-m'],
+    ['escalation', ['low-m', 'val-m'], 'esc-m'],
+    ['validator', ['low-m', 'esc-m'], 'val-m'],
+  ] as const)('rejects a missing effective %s model', async (_route, configured, missing) => {
+    await expect(preflightModelRouting({
+      prd: prd('low'), state: state(), requestedRunner: 'codex', runnerExplicit: true,
+      catalog: async () => available(...configured),
+    })).rejects.toThrow(missing);
+  });
+
   it('rejects a missing effective model including a CLI model', async () => {
     await expect(preflightModelRouting({
       prd: prd(), state: state(), requestedRunner: 'codex', runnerExplicit: true,
-      builderOverride: 'cli-b', discover: async () => available('esc-m', 'val-m'),
+      builderOverride: 'cli-b', catalog: async () => available('esc-m', 'val-m'),
+    })).rejects.toThrow('cli-b');
+  });
+
+  it('requires the global catalog for a CLI-only model override', async () => {
+    const plain = { ...prd(), models: undefined };
+    for (const story of plain.userStories) {
+      delete story.difficulty;
+      delete story.difficultyReason;
+    }
+    await expect(preflightModelRouting({
+      prd: plain, state: state(), requestedRunner: 'claude', runnerExplicit: false,
+      builderOverride: 'cli-b',
+      catalog: async () => ({
+        status: 'error', runner: 'claude', configPath: '/missing/config.json',
+        error: '未找到全局模型配置',
+      }),
+    })).rejects.toThrow('未找到全局模型配置');
+  });
+
+  it('does not let CLI overrides bypass the catalog when prd.json is unavailable', async () => {
+    await expect(preflightModelRouting({
+      prd: null, state: null, requestedRunner: 'codex', runnerExplicit: true,
+      builderOverride: 'cli-b', validatorOverride: 'cli-v', escalationOverride: 'cli-e',
+      catalog: async () => available('some-other-model'),
     })).rejects.toThrow('cli-b');
   });
 
@@ -85,7 +121,7 @@ describe('preflightModelRouting', () => {
     const result = await preflightModelRouting({
       prd: prd(), state: state(), requestedRunner: 'codex', runnerExplicit: true,
       builderOverride: 'cli-b', validatorOverride: 'cli-v', escalationOverride: 'cli-e',
-      discover: async () => available('cli-b', 'cli-v', 'cli-e'),
+      catalog: async () => available('cli-b', 'cli-v', 'cli-e'),
     });
     expect(result.warnings).toHaveLength(3);
     expect(result.warnings.join('\n')).toContain('重新运行 prd-to-json');
@@ -94,23 +130,20 @@ describe('preflightModelRouting', () => {
     expect(renderPreflightSummary(result)).toContain('escalation=cli-e');
   });
 
-  it('continues with an explicit warning when discovery is unsupported', async () => {
-    const result = await preflightModelRouting({
-      prd: prd(), state: state(), requestedRunner: 'codex', runnerExplicit: true,
-      discover: async () => ({ status: 'unsupported', runner: 'codex', reason: 'no public API' }),
-    });
-    expect(result.warnings[0]).toContain('人工确认');
-  });
-
-  it('fails on discovery errors and invalid schemas before routing', async () => {
+  it('fails on catalog errors, runner mismatch and invalid schemas before routing', async () => {
     await expect(preflightModelRouting({
       prd: prd(), state: state(), requestedRunner: 'codex', runnerExplicit: true,
-      discover: async () => ({ status: 'error', runner: 'codex', error: 'auth failed' }),
-    })).rejects.toThrow('auth failed');
+      catalog: async () => ({
+        status: 'error', runner: 'codex', error: '全局配置缺失', configPath: '/missing/config.json',
+      }),
+    })).rejects.toThrow('全局配置缺失');
     await expect(preflightModelRouting({
       prd: prd(), state: state(), requestedRunner: 'codex', runnerExplicit: true,
-      discover: async () => ({ status: 'unsupported', runner: 'claude', reason: 'wrong runner' }),
-    })).rejects.toThrow('模型发现 runner 错配：期望 codex，收到 claude');
+      catalog: async () => ({
+        status: 'available', runner: 'claude', source: 'global-config', configPath: '/fixture/config.json',
+        models: [],
+      }),
+    })).rejects.toThrow('全局模型目录 runner 错配：期望 codex，收到 claude');
     await expect(preflightModelRouting({
       prd: { ...prd(), models: 'old' } as unknown as Prd,
       state: state(), requestedRunner: 'codex', runnerExplicit: true,
@@ -120,19 +153,39 @@ describe('preflightModelRouting', () => {
   it('validates only escalation for an already escalated story, plus validator', async () => {
     const result = await preflightModelRouting({
       prd: prd(), state: state({ escalated: true }), requestedRunner: 'codex', runnerExplicit: true,
-      discover: async () => available('esc-m', 'val-m'),
+      catalog: async () => available('esc-m', 'val-m'),
     });
     expect(result.storyRoutes[0].currentBuilder.model).toBe('esc-m');
   });
 
-  it('已收敛 workspace 仍校验 schema/runner，但不做无实际调用的模型发现', async () => {
+  it('does not report the initial config builder as CLI-shadowed for an already escalated story', async () => {
+    const result = await preflightModelRouting({
+      prd: prd(), state: state({ escalated: true }), requestedRunner: 'codex', runnerExplicit: true,
+      builderOverride: 'cli-b', catalog: async () => available('esc-m', 'val-m'),
+    });
+    expect(result.storyRoutes[0].currentBuilder).toMatchObject({ model: 'esc-m', source: 'escalation' });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('excludes blocked stories and does not read the global catalog when no story can run', async () => {
+    let called = false;
+    const result = await preflightModelRouting({
+      prd: prd(), state: state({ blocked: true }), requestedRunner: 'codex', runnerExplicit: true,
+      catalog: async () => { called = true; return available(); },
+    });
+    expect(result.storyRoutes).toEqual([]);
+    expect(result.catalog.status).toBe('skipped');
+    expect(called).toBe(false);
+  });
+
+  it('已收敛 workspace 仍校验 schema/runner，但不读无实际调用的模型目录', async () => {
     let called = false;
     const result = await preflightModelRouting({
       prd: prd(), state: state({ passes: true }), requestedRunner: 'claude', runnerExplicit: false,
-      discover: async () => { called = true; return available(); },
+      catalog: async () => { called = true; return available(); },
     });
     expect(result.runner).toBe('codex');
-    expect(result.discovery.status).toBe('skipped');
+    expect(result.catalog.status).toBe('skipped');
     expect(called).toBe(false);
   });
 });
