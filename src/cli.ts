@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { join, dirname } from 'node:path';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
@@ -11,11 +11,19 @@ import { writeReport } from './report/report.js';
 import { permissionWarning as agentPermissionWarning, type AgentKind } from './engine/agent.js';
 import { tryReadPrd } from './engine/prd.js';
 import { readModelRouting } from './engine/models.js';
-import { discoverModels, renderModelDiscoveryJson, renderModelDiscoveryText } from './engine/model-discovery.js';
+import {
+  initializeGlobalModelConfig,
+  listConfiguredModels,
+  readGlobalModelConfig,
+  renderModelCatalogJson,
+  renderModelCatalogText,
+  resolveGlobalConfigPath,
+} from './engine/model-catalog.js';
 import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config';
+  configAction: 'path' | 'init' | 'validate' | null;
   kind: AgentKind;
   /** 用户是否通过位置参数显式选择 runner；models.runner 自动选择依赖此信息。 */
   kindExplicit: boolean;
@@ -63,11 +71,26 @@ export function parseCliArgs(argv: string[]): CliConfig {
     : first === 'status' ? 'status'
     : first === 'report' ? 'report'
     : first === 'models' ? 'models'
+    : first === 'config' ? 'config'
     : 'run';
+  let configAction: CliConfig['configAction'] = null;
+  if (command === 'config') {
+    const rawAction = positionals[1];
+    if (rawAction !== 'path' && rawAction !== 'init' && rawAction !== 'validate') {
+      throw new Error('❌ config 子命令必须是 path、init 或 validate');
+    }
+    configAction = rawAction;
+  }
+  if (command === 'config' && positionals.length > 2) {
+    throw new Error(`❌ config ${configAction} 不接受额外位置参数`);
+  }
   const runnerPositional = command === 'models' ? positionals[1] : first;
   if (command === 'models' && runnerPositional !== undefined
     && runnerPositional !== 'claude' && runnerPositional !== 'codex' && runnerPositional !== 'cursor') {
     throw new Error(`❌ models runner 必须是 claude、codex 或 cursor，收到「${runnerPositional}」`);
+  }
+  if (command === 'models' && positionals.length > 2) {
+    throw new Error('❌ models 不接受 runner 以外的额外位置参数');
   }
   const kind: AgentKind = runnerPositional === 'codex' ? 'codex' : runnerPositional === 'cursor' ? 'cursor' : 'claude';
   const kindExplicit = runnerPositional === 'claude' || runnerPositional === 'codex' || runnerPositional === 'cursor';
@@ -94,6 +117,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
 
   return {
     command,
+    configAction,
     kind,
     kindExplicit,
     maxIterations: values['max-iter'] ? Number(values['max-iter']) : 50,
@@ -205,22 +229,63 @@ export async function main(argv: string[]): Promise<number> {
     }
   }
 
+  if (cfg.command === 'config') {
+    const path = resolveGlobalConfigPath();
+    if (cfg.configAction === 'path') {
+      console.log(path);
+      return 0;
+    }
+    if (cfg.configAction === 'init') {
+      const result = initializeGlobalModelConfig(path);
+      if (result.status === 'created') {
+        console.log(`✅ 已创建全局模型配置：${result.path}`);
+        return 0;
+      }
+      if (result.status === 'exists') {
+        console.error(`❌ 全局模型配置已存在，不会覆盖：${result.path}`);
+        return 1;
+      }
+      console.error(`❌ ${result.error}`);
+      return 1;
+    }
+    const result = readGlobalModelConfig(path);
+    if (result.status === 'error') {
+      console.error(`❌ 全局模型配置无效：${result.errors.join('；')}`);
+      return 1;
+    }
+    const counts = (['claude', 'codex', 'cursor'] as const)
+      .map((runner) => `${runner}=${result.config.models[runner]?.length ?? 0}`)
+      .join(' · ');
+    console.log(`✅ 全局模型配置有效：${result.path}\n   ${counts}`);
+    return 0;
+  }
+
   if (cfg.command === 'models') {
+    const configPath = resolveGlobalConfigPath();
     let runner = cfg.kind;
     if (!cfg.kindExplicit) {
-      const routing = readModelRouting(tryReadPrd(join(cfg.workspace, 'prd.json')));
+      const prdPath = join(cfg.workspace, 'prd.json');
+      const prd = tryReadPrd(prdPath);
+      const invalidRoot = prd !== null && (typeof prd !== 'object' || Array.isArray(prd));
+      if ((prd === null || invalidRoot) && existsSync(prdPath)) {
+        const message = `❌ 无法从现有 prd.json 推断 runner：${prdPath} 无法解析`;
+        if (cfg.json) console.log(JSON.stringify({ status: 'error', runner, configPath, error: message }, null, 2));
+        else console.error(message);
+        return 1;
+      }
+      const routing = readModelRouting(prd);
       if (routing.status === 'invalid') {
         const message = `❌ 无法从现有 prd.json 推断 runner：${routing.errors.join('；')}`;
-        if (cfg.json) console.log(JSON.stringify({ status: 'error', runner, error: message }, null, 2));
+        if (cfg.json) console.log(JSON.stringify({ status: 'error', runner, configPath, error: message }, null, 2));
         else console.error(message);
         return 1;
       }
       if (routing.status === 'enabled') runner = routing.config.runner;
     }
-    const result = await discoverModels(runner);
-    if (cfg.json) console.log(renderModelDiscoveryJson(result));
-    else if (result.status === 'error') console.error(renderModelDiscoveryText(result));
-    else console.log(renderModelDiscoveryText(result));
+    const result = listConfiguredModels(runner, configPath);
+    if (cfg.json) console.log(renderModelCatalogJson(result));
+    else if (result.status === 'error') console.error(renderModelCatalogText(result));
+    else console.log(renderModelCatalogText(result));
     return result.status === 'error' ? 1 : 0;
   }
 

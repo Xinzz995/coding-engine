@@ -12,7 +12,7 @@ import {
 import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { resolveBuilderModel, resolveValidatorModel } from './models.js';
 import { ModelPreflightError, preflightModelRouting, renderPreflightSummary } from './model-preflight.js';
-import type { ModelDiscoveryResult } from './model-discovery.js';
+import type { ModelCatalogResult } from './model-catalog.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
 import { appendEvidence, type EvidenceRecord } from './evidence.js';
@@ -31,8 +31,8 @@ export interface LoopConfig {
   validatorModel?: string;
   /** 临时覆盖升级 builder 模型；只在 state.escalated=true 时生效。 */
   escalationModel?: string;
-  /** 测试注入；生产缺省调用公开 runner 探测。 */
-  modelDiscovery?: (runner: AgentKind) => Promise<ModelDiscoveryResult>;
+  /** 测试注入；生产缺省只读全局模型目录。 */
+  modelCatalog?: (runner: AgentKind) => ModelCatalogResult | Promise<ModelCatalogResult>;
   workspace: string;
   instructionsDir: string;
   port?: number;
@@ -132,7 +132,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         builderOverride: cfg.builderModel,
         validatorOverride: cfg.validatorModel,
         escalationOverride: cfg.escalationModel,
-        ...(cfg.modelDiscovery ? { discover: cfg.modelDiscovery } : {}),
+        ...(cfg.modelCatalog ? { catalog: cfg.modelCatalog } : {}),
       });
     } catch (err) {
       if (err instanceof ModelPreflightError) {

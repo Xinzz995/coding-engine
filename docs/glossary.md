@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-21
+updated: 2026-07-22
 scope: root
 ---
 
@@ -105,8 +105,16 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 story 可靠完成所需的模型推理能力档位（low / medium / high）；不是代码行数、工期或故事点。
 禁用：难度分、复杂度（复杂度只是判定证据之一）
 
+**全局模型目录**
+当前 OS 用户为 Claude Code、Codex、Cursor 声明的允许模型 ID 清单，默认位于 `~/.config/coding-x/config.json`，可由 `CODING_X_CONFIG` 覆盖；它是跨项目的选择边界，不是账号、provider、配额或网络下的实时可用性证明。
+禁用：当前可用模型列表、runner 实时枚举、模型发现（历史决策语境除外；现行实现不向 runner 查询或证明实时可用性）
+
+**显式模型策略**
+项目启用了 `prd.json.models`，或本次运行传入任一模型 CLI 覆盖；本次可能实际调用的全部模型 ID 都必须在对应 runner 的全局模型目录中声明。
+禁用：自定义模型模式
+
 **初始路由**
-story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则按难度档位取 PRD 映射，再否则使用 runner 默认。
+story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则按难度档位取 PRD 映射；两者都属于显式模型策略。只有两者都不存在时才使用 runner 默认。
 禁用：默认路由（runner default 只是其中一种回落）
 
 **有效失败**
@@ -127,6 +135,8 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 - 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
 - 验证报告消费证据索引（门禁执行历史、轮次时间线、验收标准↔截图对账均由它派生）；证据索引缺失时报告退回文件名猜测归属
 - 难度档位决定初始路由；首次有效失败置升级状态，后续 builder 走 escalation，与 retryCount 独立
+- 全局模型目录限定显式模型策略可引用的 ID；项目 PRD 保存五项具体映射；某轮实际传给 runner 的模型只记录进证据索引
+- runner-default 不构成显式模型策略，因此无需全局模型目录；目录声明与 provider 是否接受模型是两个独立事实
 
 ## 已解决的歧义
 

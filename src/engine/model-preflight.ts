@@ -1,4 +1,4 @@
-import { discoverModels, type ModelDiscoveryResult } from './model-discovery.js';
+import { listConfiguredModels, type ModelCatalogResult } from './model-catalog.js';
 import { readModelRouting, resolveBuilderModel, resolveValidatorModel, type ModelChoice } from './models.js';
 import type { AgentKind } from './agent.js';
 import type { ModelsConfig, Prd, StoryDifficulty } from './prd.js';
@@ -23,7 +23,7 @@ export interface StoryRoutePreview {
 export interface ModelPreflightResult {
   runner: AgentKind;
   config: ModelsConfig | null;
-  discovery: ModelDiscoveryResult | { status: 'skipped'; runner: AgentKind };
+  catalog: ModelCatalogResult | { status: 'skipped'; runner: AgentKind };
   warnings: string[];
   storyRoutes: StoryRoutePreview[];
   validator: ModelChoice;
@@ -38,7 +38,7 @@ export interface ModelPreflightOptions {
   builderOverride?: string;
   validatorOverride?: string;
   escalationOverride?: string;
-  discover?: (runner: AgentKind) => Promise<ModelDiscoveryResult>;
+  catalog?: (runner: AgentKind) => ModelCatalogResult | Promise<ModelCatalogResult>;
 }
 
 export function resolveRunKind(
@@ -108,7 +108,7 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
     addModel(required, currentBuilder.model, `story ${story.id} 当前 builder`);
     if (!escalated) addModel(required, escalationBuilder?.model, `story ${story.id} escalation`);
 
-    if (config && opts.builderOverride && story.difficulty) {
+    if (config && opts.builderOverride && story.difficulty && !escalated) {
       addModel(shadowed, config.builder[story.difficulty], `models.builder.${story.difficulty}`);
     }
   }
@@ -119,15 +119,26 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
   if (hasPending && config && opts.validatorOverride) addModel(shadowed, config.validator, 'models.validator');
   if (hasPending && config && opts.escalationOverride) addModel(shadowed, config.escalation, 'models.escalation');
 
+  // prd.json 缺失/无法解析时 loop 的历史行为仍会进入 agent 修复轮。此时若用户给了
+  // CLI 模型覆盖，它们不能因为没有可枚举 story 而绕过全局允许目录。
+  const prdUnavailable = opts.prd === null;
+  if (prdUnavailable) {
+    addModel(required, opts.builderOverride, '--builder-model');
+    addModel(required, opts.validatorOverride, '--validator-model');
+    addModel(required, opts.escalationOverride, '--escalation-model');
+  }
+
   // 没有待执行 story 就不会发生模型调用：schema/runner 仍严格校验，
-  // 但不为一个已收敛 workspace 做无意义的认证/模型发现。
-  const hasPolicy = hasPending && (config !== null
-    || opts.builderOverride !== undefined
+  // 但不为一个已收敛 workspace 做无意义的全局模型目录读取。prd 不可用且显式
+  // 传入覆盖是例外：loop 仍可能启动修复 agent，必须先复核这些 ID。
+  const hasOverrides = opts.builderOverride !== undefined
     || opts.validatorOverride !== undefined
-    || opts.escalationOverride !== undefined);
+    || opts.escalationOverride !== undefined;
+  const hasPolicy = (hasPending && (config !== null || hasOverrides))
+    || (prdUnavailable && hasOverrides);
   if (!hasPolicy) {
     return {
-      runner, config, discovery: { status: 'skipped', runner }, warnings: [], storyRoutes, validator,
+      runner, config, catalog: { status: 'skipped', runner }, warnings: [], storyRoutes, validator,
       overrides: {
         ...(opts.builderOverride !== undefined ? { builder: opts.builderOverride } : {}),
         ...(opts.validatorOverride !== undefined ? { validator: opts.validatorOverride } : {}),
@@ -136,29 +147,25 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
     };
   }
 
-  const discovery = await (opts.discover ?? discoverModels)(runner);
-  if (discovery.runner !== runner) {
-    throw new ModelPreflightError(`模型发现 runner 错配：期望 ${runner}，收到 ${discovery.runner}`);
+  const catalog = await (opts.catalog ?? listConfiguredModels)(runner);
+  if (catalog.runner !== runner) {
+    throw new ModelPreflightError(`全局模型目录 runner 错配：期望 ${runner}，收到 ${catalog.runner}`);
   }
-  if (discovery.status === 'error') throw new ModelPreflightError(discovery.error);
+  if (catalog.status === 'error') throw new ModelPreflightError(catalog.error);
   const warnings: string[] = [];
-  if (discovery.status === 'unsupported') {
-    warnings.push(`无法自动复核 ${runner} 当前模型清单：${discovery.reason}；本次信任 prd-to-json 中的人工确认`);
-  } else {
-    const available = new Set(discovery.models.map((model) => model.id));
-    const missingRequired = [...required.entries()].filter(([model]) => !available.has(model));
-    if (missingRequired.length > 0) {
-      const detail = missingRequired.map(([model, paths]) => `${model}（${paths.join('、')}）`).join('；');
-      throw new ModelPreflightError(`本次实际路由包含当前不可用模型：${detail}`);
-    }
-    for (const [model, paths] of shadowed) {
-      if (!available.has(model)) {
-        warnings.push(`配置模型 ${model}（${paths.join('、')}）当前不可用，但已被 CLI 完全覆盖；本次继续，建议重新运行 prd-to-json`);
-      }
+  const configured = new Set(catalog.models.map((model) => model.id));
+  const missingRequired = [...required.entries()].filter(([model]) => !configured.has(model));
+  if (missingRequired.length > 0) {
+    const detail = missingRequired.map(([model, paths]) => `${model}（${paths.join('、')}）`).join('；');
+    throw new ModelPreflightError(`本次实际路由包含未在 ${runner} 全局模型目录声明的模型：${detail}`);
+  }
+  for (const [model, paths] of shadowed) {
+    if (!configured.has(model)) {
+      warnings.push(`配置模型 ${model}（${paths.join('、')}）未在全局模型目录声明，但已被 CLI 完全覆盖；本次继续，建议重新运行 prd-to-json`);
     }
   }
   return {
-    runner, config, discovery, warnings, storyRoutes, validator,
+    runner, config, catalog, warnings, storyRoutes, validator,
     overrides: {
       ...(opts.builderOverride !== undefined ? { builder: opts.builderOverride } : {}),
       ...(opts.validatorOverride !== undefined ? { validator: opts.validatorOverride } : {}),
@@ -181,6 +188,6 @@ export function renderPreflightSummary(result: ModelPreflightResult): string {
   if (overrides.length > 0) {
     lines.push(`   CLI 临时覆盖：${overrides.map(([key, value]) => `${key}=${value}`).join(' · ')}`);
   }
-  lines.push(`   模型复核：${result.discovery.status}`);
+  lines.push(`   全局模型目录：${result.catalog.status}${result.catalog.status === 'available' ? `（${result.catalog.configPath}）` : ''}`);
   return lines.join('\n');
 }

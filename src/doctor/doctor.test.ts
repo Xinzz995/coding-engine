@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -12,6 +12,17 @@ import {
 } from './doctor.js';
 
 const FULL_FM = ['---', 'title: 示例', 'status: active', 'updated: 2026-07-03', 'scope: root', '---', '', '# 正文'].join('\n');
+const ORIGINAL_CODING_X_CONFIG = process.env.CODING_X_CONFIG;
+const ISOLATED_MISSING_CONFIG = join(tmpdir(), `coding-x-doctor-${process.pid}-missing-config.json`);
+
+beforeEach(() => {
+  process.env.CODING_X_CONFIG = ISOLATED_MISSING_CONFIG;
+});
+
+afterEach(() => {
+  if (ORIGINAL_CODING_X_CONFIG === undefined) delete process.env.CODING_X_CONFIG;
+  else process.env.CODING_X_CONFIG = ORIGINAL_CODING_X_CONFIG;
+});
 
 /** 四字段齐全、updated 为指定值的 frontmatter 文档。 */
 function fmDoc(updated: string): string {
@@ -490,9 +501,183 @@ describe('runDoctor quality gate config check', () => {
       const report = runDoctor(root, { workspace: workspaceAbs });
       expect(report.gate.prdFound).toBe(true);
       expect(report.gate.configured).toBe(true);
+      expect(report.modelCatalog.configPath).toBe(ISOLATED_MISSING_CONFIG);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(workspaceAbs, { recursive: true, force: true });
+    }
+  });
+});
+
+const ROUTED_PRD = {
+  project: 'p', branchName: 'b', description: 'd',
+  models: {
+    runner: 'codex',
+    builder: { low: 'low-m', medium: 'mid-m', high: 'high-m' },
+    validator: 'val-m',
+    escalation: 'esc-m',
+  },
+  userStories: [{
+    id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
+    difficulty: 'medium', difficultyReason: '命中 medium-1：见 src/api.ts。',
+  }],
+};
+
+describe('runDoctor global model catalog check', () => {
+  it('skips a missing catalog when prd.json does not enable models', () => {
+    withProject({
+      '.workspace/prd.json': JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+      }),
+    }, (root) => {
+      const missingConfig = join(root, 'missing-config.json');
+      const report = runDoctor(root, { modelConfigPath: missingConfig });
+      expect(report.modelCatalog).toMatchObject({
+        prdFound: true, routingEnabled: false, checked: 0, issues: [],
+        configPath: missingConfig, configStatus: 'missing', configuredRunners: [],
+      });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('未启用 models');
+      expect(text).toContain('runner-default 不受影响');
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  it('validates and summarizes an existing catalog when prd.json does not enable models', () => {
+    withProject({
+      '.workspace/prd.json': JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+      }),
+      'global-models.json': JSON.stringify({
+        version: 1,
+        models: { claude: [{ id: 'sonnet' }], codex: [{ id: 'model-a' }, { id: 'model-b' }] },
+      }),
+    }, (root) => {
+      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+      expect(report.modelCatalog).toMatchObject({
+        routingEnabled: false,
+        configStatus: 'available',
+        configuredRunners: [{ runner: 'claude', count: 1 }, { runner: 'codex', count: 2 }],
+        issues: [],
+      });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('配置 schema 合法（claude 1 项、codex 2 项）');
+      expect(text).toContain('无需项目模型映射复核');
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  it('fails for an existing invalid catalog even when prd.json does not enable models', () => {
+    withProject({
+      '.workspace/prd.json': JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+      }),
+      'global-models.json': '{ broken',
+    }, (root) => {
+      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+      expect(report.modelCatalog).toMatchObject({
+        routingEnabled: false, configStatus: 'error', checked: 0,
+      });
+      expect(report.modelCatalog.issues[0]?.message).toContain('不是合法 JSON');
+      expect(renderDoctorReport(report).exitCode).toBe(1);
+    });
+  });
+
+  it('fails when an enabled project has no global model config, even without docs/', () => {
+    withProject({ '.workspace/prd.json': JSON.stringify(ROUTED_PRD) }, (root) => {
+      const missingConfig = join(root, 'missing-config.json');
+      const report = runDoctor(root, { modelConfigPath: missingConfig });
+      expect(report.docsFound).toBe(false);
+      expect(report.modelCatalog).toMatchObject({
+        routingEnabled: true, runner: 'codex', checked: 0,
+      });
+      expect(report.modelCatalog.issues).toHaveLength(1);
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('未找到全局模型配置');
+      expect(exitCode).toBe(1);
+    });
+  });
+
+  it.each([
+    ['broken JSON', '{ broken'],
+    ['invalid schema', JSON.stringify({ version: 2, models: { codex: [] } })],
+  ])('fails for an invalid global model config: %s', (_label, config) => {
+    withProject({
+      '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+      'global-models.json': config,
+    }, (root) => {
+      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+      expect(report.modelCatalog.issues).toHaveLength(1);
+      expect(renderDoctorReport(report).exitCode).toBe(1);
+    });
+  });
+
+  it('fails when the selected runner catalog is empty', () => {
+    withProject({
+      '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+      'global-models.json': JSON.stringify({ version: 1, models: { codex: [] } }),
+    }, (root) => {
+      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+      expect(report.modelCatalog.issues[0].message).toContain('未配置任何模型');
+      expect(renderDoctorReport(report).exitCode).toBe(1);
+    });
+  });
+
+  it.each([
+    ['models.builder.low', 'low-m'],
+    ['models.builder.medium', 'mid-m'],
+    ['models.builder.high', 'high-m'],
+    ['models.validator', 'val-m'],
+    ['models.escalation', 'esc-m'],
+  ] as const)('fails when routed project model %s (%s) is not declared', (fieldPath, missingId) => {
+    withProject({
+      '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+      'global-models.json': JSON.stringify({
+        version: 1,
+        models: {
+          codex: ['low-m', 'mid-m', 'high-m', 'val-m', 'esc-m']
+            .filter((id) => id !== missingId)
+            .map((id) => ({ id })),
+        },
+      }),
+    }, (root) => {
+      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+      expect(report.modelCatalog.checked).toBe(5);
+      expect(report.modelCatalog.issues).toHaveLength(1);
+      expect(report.modelCatalog.issues[0].message).toContain(fieldPath);
+      expect(report.modelCatalog.issues[0].message).toContain(missingId);
+      expect(renderDoctorReport(report).exitCode).toBe(1);
+    });
+  });
+
+  it('passes all five declarations without probing provider availability or runner binaries', () => {
+    const binVars = ['CODING_X_CLAUDE_BIN', 'CODING_X_CODEX_BIN', 'CODING_X_CURSOR_BIN'] as const;
+    const originals = binVars.map((name) => [name, process.env[name]] as const);
+    for (const name of binVars) process.env[name] = `/definitely/missing/${name}`;
+    try {
+      withProject({
+        '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+        'global-models.json': JSON.stringify({
+          version: 1,
+          models: {
+            codex: ['low-m', 'mid-m', 'high-m', 'val-m', 'esc-m'].map((id) => ({ id })),
+          },
+        }),
+      }, (root) => {
+        const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+        expect(report.modelCatalog).toMatchObject({
+          routingEnabled: true, runner: 'codex', checked: 5, issues: [],
+        });
+        const { text, exitCode } = renderDoctorReport(report);
+        expect(text).toContain('5/5');
+        expect(text).toContain('不检查 provider 在线可用性');
+        expect(exitCode).toBe(0);
+      });
+    } finally {
+      for (const [name, value] of originals) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
     }
   });
 });

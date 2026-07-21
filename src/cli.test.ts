@@ -9,7 +9,7 @@ afterEach(() => {
   delete process.env.CODING_X_CODEX_BIN;
   delete process.env.CODING_X_CLAUDE_BIN;
   delete process.env.CODING_X_CURSOR_BIN;
-  delete process.env.CODING_X_FAKE_DISCOVERY_MODE;
+  delete process.env.CODING_X_CONFIG;
 });
 
 describe('isDirectInvocation', () => {
@@ -92,6 +92,15 @@ describe('parseCliArgs', () => {
     expect(parseCliArgs(['models', 'cursor']).kind).toBe('cursor');
     expect(parseCliArgs(['models', 'cursor']).kindExplicit).toBe(true);
     expect(() => parseCliArgs(['models', 'unknown'])).toThrow('models runner');
+    expect(() => parseCliArgs(['models', 'codex', 'extra'])).toThrow('额外位置参数');
+  });
+  it('recognizes global config subcommands and rejects invalid actions', () => {
+    expect(parseCliArgs(['config', 'path']).configAction).toBe('path');
+    expect(parseCliArgs(['config', 'init']).configAction).toBe('init');
+    expect(parseCliArgs(['config', 'validate']).configAction).toBe('validate');
+    expect(() => parseCliArgs(['config'])).toThrow('config 子命令');
+    expect(() => parseCliArgs(['config', 'unknown'])).toThrow('config 子命令');
+    expect(() => parseCliArgs(['config', 'path', 'extra'])).toThrow('额外位置参数');
   });
   it('passes --workspace through to the report subcommand', () => {
     expect(parseCliArgs(['report', '--workspace', 'ws-x']).workspace).toBe('ws-x');
@@ -333,53 +342,70 @@ describe('permissionWarning', () => {
 });
 
 describe('main — models subcommand', () => {
-  const fixture = join(process.cwd(), 'src/engine/__fixtures__/fake-codex-app-server.mjs');
-  const fakeCommand = `${process.execPath} ${fixture}`;
-
-  it('available：Codex --json 输出单个可解析对象与完整分页模型', async () => {
-    process.env.CODING_X_CODEX_BIN = fakeCommand;
+  it.each(['claude', 'codex', 'cursor'] as const)(
+    '%s 只读全局目录输出单个可解析对象，不拉起任何 runner CLI', async (runner) => {
+    const dir = mkdtempSync(join(tmpdir(), 'models-cli-'));
+    const configPath = join(dir, 'config.json');
+    process.env.CODING_X_CONFIG = configPath;
+    process.env.CODING_X_CLAUDE_BIN = join(dir, 'definitely-missing-claude');
+    process.env.CODING_X_CODEX_BIN = join(dir, 'definitely-missing-codex');
+    process.env.CODING_X_CURSOR_BIN = join(dir, 'definitely-missing-cursor');
+    writeFileSync(configPath, JSON.stringify({
+      version: 1,
+      models: { [runner]: [{ id: 'model-a', label: 'Model A' }, { id: 'model-b' }] },
+    }));
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      expect(await main(['models', 'codex', '--json'])).toBe(0);
+      expect(await main(['models', runner, '--json'])).toBe(0);
       expect(logSpy).toHaveBeenCalledTimes(1);
       const result = JSON.parse(logSpy.mock.calls[0][0] as string);
-      expect(result).toMatchObject({ status: 'available', runner: 'codex' });
+      expect(result).toMatchObject({ status: 'available', runner, source: 'global-config' });
       expect(result.models.map((m: { id: string }) => m.id)).toEqual(['model-a', 'model-b']);
     } finally {
       logSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('unsupported：已认证 Claude 诚实降级且退出 0', async () => {
-    process.env.CODING_X_CLAUDE_BIN = fakeCommand;
+  it('配置缺失输出机器可读 error 并退出 1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'models-cli-'));
+    process.env.CODING_X_CONFIG = join(dir, 'missing.json');
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      expect(await main(['models', 'claude', '--json'])).toBe(0);
-      expect(JSON.parse(logSpy.mock.calls[0][0] as string)).toMatchObject({
-        status: 'unsupported', runner: 'claude',
-      });
+      expect(await main(['models', 'claude', '--json'])).toBe(1);
+      const result = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(result).toMatchObject({ status: 'error', runner: 'claude' });
+      expect(result.error).toContain('未找到全局模型配置');
     } finally {
       logSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('error：认证失败输出机器可读错误并退出 1', async () => {
-    process.env.CODING_X_CURSOR_BIN = fakeCommand;
-    process.env.CODING_X_FAKE_DISCOVERY_MODE = 'auth-error';
+  it('runner 未配置模型时输出 error，不接受人工临时绕过目录', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'models-cli-'));
+    const configPath = join(dir, 'config.json');
+    process.env.CODING_X_CONFIG = configPath;
+    writeFileSync(configPath, JSON.stringify({ version: 1, models: { codex: [{ id: 'm' }] } }));
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       expect(await main(['models', 'cursor', '--json'])).toBe(1);
       const result = JSON.parse(logSpy.mock.calls[0][0] as string);
       expect(result).toMatchObject({ status: 'error', runner: 'cursor' });
-      expect(result.error).toContain('未认证');
+      expect(result.error).toContain('未配置任何模型');
     } finally {
       logSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it('未显式指定 runner 时从现有 models.runner 推断', async () => {
-    process.env.CODING_X_CODEX_BIN = fakeCommand;
     const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
+    const configPath = join(workspace, 'global-config.json');
+    process.env.CODING_X_CONFIG = configPath;
+    writeFileSync(configPath, JSON.stringify({
+      version: 1, models: { codex: [{ id: 'model-a' }, { id: 'model-b' }] },
+    }));
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
@@ -398,6 +424,143 @@ describe('main — models subcommand', () => {
     } finally {
       logSpy.mockRestore();
       rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('未显式指定 runner 时不绕过非法 prd.json 猜测目录', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
+    const configPath = join(workspace, 'global-config.json');
+    process.env.CODING_X_CONFIG = configPath;
+    writeFileSync(configPath, JSON.stringify({
+      version: 1, models: { claude: [{ id: 'model-a' }] },
+    }));
+    writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
+      project: 'p', branchName: 'b', description: 'd',
+      models: { runner: 'unknown' }, userStories: [],
+    }));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['models', '--workspace', workspace, '--json'])).toBe(1);
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      const result = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(result.configPath).toBe(configPath);
+      expect(result.error).toContain('无法从现有 prd.json 推断 runner');
+    } finally {
+      logSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('未显式指定 runner 时不把损坏的 prd.json 当作文件缺失', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
+    const configPath = join(workspace, 'missing-global-config.json');
+    process.env.CODING_X_CONFIG = configPath;
+    writeFileSync(join(workspace, 'prd.json'), '{ broken');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['models', '--workspace', workspace, '--json'])).toBe(1);
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      const result = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(result.configPath).toBe(configPath);
+      expect(result.error).toContain('prd.json');
+      expect(result.error).toContain('无法解析');
+      expect(result.error).not.toContain('未找到全局模型配置');
+    } finally {
+      logSpy.mockRestore();
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['1', 'false', '"text"', '[]'])(
+    '未显式指定 runner 时拒绝合法 JSON 的错误根形状：%s', async (rawPrd) => {
+      const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
+      const configPath = join(workspace, 'global-config.json');
+      process.env.CODING_X_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify({
+        version: 1, models: { claude: [{ id: 'model-a' }] },
+      }));
+      writeFileSync(join(workspace, 'prd.json'), rawPrd);
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        expect(await main(['models', '--workspace', workspace, '--json'])).toBe(1);
+        expect(logSpy).toHaveBeenCalledTimes(1);
+        const result = JSON.parse(logSpy.mock.calls[0][0] as string);
+        expect(result.configPath).toBe(configPath);
+        expect(result.error).toContain('无法从现有 prd.json 推断 runner');
+        expect(result.error).toContain('无法解析');
+      } finally {
+        logSpy.mockRestore();
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe('main — config subcommand', () => {
+  it('path 输出解析后的全局配置路径', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'config-cli-'));
+    const path = join(dir, 'config.json');
+    process.env.CODING_X_CONFIG = path;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['config', 'path'])).toBe(0);
+      expect(logSpy).toHaveBeenCalledWith(path);
+    } finally {
+      logSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('init 创建空模板且第二次拒绝覆盖', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'config-cli-'));
+    const path = join(dir, 'nested', 'config.json');
+    process.env.CODING_X_CONFIG = path;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await main(['config', 'init'])).toBe(0);
+      expect(JSON.parse(readFileSync(path, 'utf-8'))).toEqual({ version: 1, models: {} });
+      const initialBytes = readFileSync(path, 'utf-8');
+      expect(await main(['config', 'init'])).toBe(1);
+      expect(readFileSync(path, 'utf-8')).toBe(initialBytes);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('不会覆盖'));
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validate 区分有效配置与非法 JSON', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'config-cli-'));
+    const path = join(dir, 'config.json');
+    process.env.CODING_X_CONFIG = path;
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      writeFileSync(path, JSON.stringify({ version: 1, models: { claude: [{ id: 'sonnet' }] } }));
+      expect(await main(['config', 'validate'])).toBe(0);
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('claude=1'));
+      writeFileSync(path, '{ invalid');
+      expect(await main(['config', 'validate'])).toBe(1);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('不是合法 JSON'));
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('validate 对缺失配置返回明确错误', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'config-cli-'));
+    process.env.CODING_X_CONFIG = join(dir, 'missing.json');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await main(['config', 'validate'])).toBe(1);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('未找到全局模型配置'));
+    } finally {
+      errSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

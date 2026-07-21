@@ -174,7 +174,7 @@ npx coding-x cursor          # 改用 Cursor Agent
   "sourcePrd": "docs/prds/prd-my-feature.md",  // 意图真相源（源 PRD）路径，冲突时以它为准重新派生
   "qualityChecks": ["npm run typecheck", "npm test"],  // 机械门禁（可选）：每轮 builder 后引擎逐条执行，失败确定性打回
   "models": {                                  // 模型路由整段可选；一旦启用必须完整
-    "runner": "codex",                       // claude | codex | cursor，与当前账号/机器/中转环境绑定
+    "runner": "codex",                       // claude | codex | cursor，绑定单一 runner
     "builder": {
       "low": "model-a",                     // 低难度 story 初始模型
       "medium": "model-b",                  // 中难度 story 初始模型
@@ -214,9 +214,30 @@ npx coding-x cursor          # 改用 Cursor Agent
 
 引擎每轮选择 `priority` 最高、`passes: false` 且 `blocked: false` 的 story（状态读自 `state.json`）。
 
-> **0.23.0 模型路由迁移：** 正式发布的 0.22.0 尚未包含模型 schema。开发期曾出现的扁平 `models.builder`、`profiles`、`escalateAfter`、按 runner 分段以及 story `model` 均已废弃；0.23.0 会拒绝它们并提示重新运行 `prd-to-json`。`models` 缺失且 story 不含难度字段时仍是合法零配置，保持 runner 默认模型行为。
+> **0.24.0 模型目录迁移：** coding-x 不再调用 Claude Code、Codex 或 Cursor 查询模型。模型候选统一来自用户维护的全局模型目录；`models` 缺失、没有任何模型 CLI 覆盖时仍是合法零配置，直接使用 runner 默认模型。存在待执行 story，并且（PRD 启用模型路由或本次传入任一模型 CLI 覆盖）时，所需 ID 必须已在目录中声明；已收敛 workspace 跳过目录读取。`prd.json.models` schema 不变，v0.23 已有项目只需先登记原五项 ID，无需迁移项目文件。
 
-`prd-to-json` 在用户选择 runner 后，按当前账号、当前机器、provider/中转站配置调用 `coding-x models <runner> --json`，将模型列表展示一次，再让用户分别选择 low/medium/high builder、validator 和 escalation。Codex 有官方机器可读列举接口；Claude Code 与 Cursor 无稳定公开接口时会诚实返回 `unsupported`，由用户提供当前可用 ID，不抓取交互式 TUI。模型列表、账号、密钥、base URL 和中转站地址都不写入 `prd.json`。
+全局配置默认位于 `~/.config/coding-x/config.json`，可用 `CODING_X_CONFIG` 覆盖为另一个完整文件路径。version 1 的示例结构如下；`config init` 创建的真实空模板是 `{ "version": 1, "models": {} }`。runner 可以只配置一部分，`label` 可省略，数组顺序就是展示顺序：
+
+```json
+{
+  "version": 1,
+  "models": {
+    "claude": [
+      { "id": "sonnet", "label": "Sonnet" }
+    ],
+    "codex": [
+      { "id": "gpt-5.6-codex", "label": "GPT-5.6 Codex" }
+    ],
+    "cursor": [
+      { "id": "composer-2.5", "label": "Composer 2.5" }
+    ]
+  }
+}
+```
+
+目录表达的是“用户允许 coding-x 选择或传给该 runner 的模型 ID”，**不是模型在当前账号、provider、配额和网络下实时可用的证明**。coding-x 不把账号、密钥、base URL、中转站或 runner 配置写入该文件；真实可用性只会在实际 agent 调用时体现。
+
+`prd-to-json` 在用户选择 runner 后调用 `coding-x models <runner> --json` **只读该目录**，将候选展示一次，再让用户分别选择 low/medium/high builder、validator 和 escalation。目录缺失或非法时可先维护配置后重试，也可明确不启用模型路由并继续普通转换；不能用会话内临时 ID 绕过。
 
 ### 第 2 步：运行引擎
 
@@ -225,7 +246,10 @@ npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x cursor             # 改用 Cursor Agent 后端
 npx coding-x --max-iter 20      # 最多 20 轮迭代
-npx coding-x models codex --json  # 列出当前 Codex 账号/机器/provider 可用模型
+npx coding-x config path        # 输出实际使用的全局配置绝对路径
+npx coding-x config init        # 排他创建 version 1 空模板（已存在时不覆盖）
+npx coding-x config validate    # 只读校验全局配置
+npx coding-x models codex --json  # 从全局配置列出声明给 Codex 的模型
 npx coding-x --builder-model model-a --validator-model model-d  # 临时覆盖初始 builder / validator
 npx coding-x --escalation-model model-e  # 临时覆盖升级 builder 模型
 npx coding-x --no-open          # 不自动打开浏览器
@@ -258,10 +282,11 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | 位置参数 `claude` / `codex` / `cursor` | — | 显式选择 runner；若 PRD 启用了模型路由，必须与 `models.runner` 一致。未显式指定时优先用 `models.runner`，否则默认 claude |
-| 位置参数 `models [claude\|codex\|cursor]` | — | 检查 runner 认证并获取当前环境的模型集合；Codex 通过官方 `model/list` 列举，Claude/Cursor 无公开机器接口时返回 `unsupported`；可配 `--json` |
+| 位置参数 `config path\|init\|validate` | — | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁 |
+| 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
-| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter 完整性、`updated` 新鲜度、AGENTS.md 索引、文档相对链接、机械门禁配置建议（建议级，不计失败）），发现问题以退出码 1 结束，可作 CI 门禁 |
+| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接）、机械门禁建议与全局模型目录/PRD 映射核对；发现错误以退出码 1 结束，可作 CI 门禁 |
 | 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
 | 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会自动生成；退出码 0=已生成 / 1=写入失败 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
@@ -270,17 +295,17 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | `--builder-model <id>` | — | 本次运行的初始 builder 覆盖；优先于 `models.builder[story.difficulty]`，但不压过已触发的专用 escalation 路由 |
 | `--validator-model <id>` | — | 本次运行的 validator 覆盖；优先于 `models.validator` |
 | `--escalation-model <id>` | — | 本次运行的升级 builder 覆盖；仅在 `state.escalated=true` 时生效，优先于 `models.escalation` |
-| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录；`doctor` 用它定位 prd.json 做门禁配置检查 |
+| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录；`doctor` 用它定位 prd.json 做门禁与项目模型映射检查 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
 | `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期 |
-| `--json` | 关闭 | `status`：输出 story 状态、配置路由与 evidence 中最近实际命中；`models`：输出 `available` / `unsupported` / `error` 三态单个 JSON 对象 |
+| `--json` | 关闭 | `status`：输出 story 状态、配置路由与 evidence 中最近实际命中；`models`：输出 `available` 或 `error` 的单个 JSON 对象 |
 
 ### 退出码
 
-默认命令（`run`，即无 `repair`/`dashboard`/`doctor`/`status`/`report`/`models` 位置参数时；位置参数 `claude`/`codex`/`cursor` 只切换 runner，仍属 `run`，退出码规则相同）循环结束的进程退出码：
+默认命令（`run`，即无 `repair`/`dashboard`/`doctor`/`status`/`report`/`models`/`config` 位置参数时；位置参数 `claude`/`codex`/`cursor` 只切换 runner，仍属 `run`，退出码规则相同）循环结束的进程退出码：
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -289,12 +314,13 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | `2` | workspace 锁（`engine.lock`）被占用，本次 `run`/`repair` 直接拒绝（ADR-008） |
 | `3` | 全部 story 已收敛（`passes` 或 `blocked`），但存在 `blocked` story 待人工处理 |
 
-`repair`/`doctor`/`status`/`report` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
+`repair`/`doctor`/`status`/`report`/`models`/`config` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
 
 ### 环境变量
 
 | 变量 | 说明 |
 | --- | --- |
+| `CODING_X_CONFIG` | 覆盖全局模型配置的完整文件路径；相对路径按当前目录解析，空白值按未设置处理 |
 | `CODING_X_CLAUDE_BIN` | 覆盖 `claude` 可执行文件路径 |
 | `CODING_X_CODEX_BIN` | 覆盖 `codex` 可执行文件路径 |
 | `CODING_X_CURSOR_BIN` | 覆盖 `cursor-agent` 可执行文件路径 |
@@ -309,7 +335,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
-- **按难度的模型路由**：`models.runner` 绑定一个 runner 环境，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、validator 正常打回或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner 和本次实际模型；CLI 覆盖只影响单次运行，不改写 PRD。
+- **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、validator 正常打回或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
 - **完成判定**：全部 story `passes` 或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
@@ -387,16 +413,26 @@ coding-engine/
 │   ├── cli.ts                    #   命令行入口、参数解析
 │   ├── engine/
 │   │   ├── loop.ts               #   主循环：Developer ⇄ Validator
-│   │   ├── agent.ts              #   拉起 claude / codex 子进程、超时控制
+│   │   ├── agent.ts              #   拉起 claude / codex / cursor 子进程、模型参数与超时控制
+│   │   ├── evidence.ts           #   evidence.jsonl schema、追加与读取
+│   │   ├── fs-atomic.ts          #   关键 JSON 原子写（tmp+rename）
+│   │   ├── gate.ts               #   机械门禁、打回与异常轮回写
+│   │   ├── lock.ts               #   engine.lock 单写者互斥（pid 活性/stale 接管/轮首自愈）
+│   │   ├── model-catalog.ts      #   全局模型目录路径、严格 schema、查询与初始化
+│   │   ├── model-preflight.ts    #   runner/路由/CLI 覆盖与目录成员启动预检
+│   │   ├── models.ts             #   PRD 模型路由 schema 与实际路由解析
+│   │   ├── prd-guard.ts          #   运行期 PRD 快照、篡改存档与恢复
 │   │   ├── prd.ts                #   读取 prd.json（需求内容）
 │   │   ├── state.ts              #   state.json 读写、选 story、完成判定、合并视图
 │   │   ├── progress.ts           #   读取 progress.md
-│   │   ├── repair.ts             #   jsonrepair 修复 prd.json / state.json
-│   │   ├── lock.ts               #   engine.lock 单写者互斥（pid 活性/stale 接管/轮首自愈）
-│   │   └── fs-atomic.ts          #   关键 JSON 原子写（tmp+rename）
+│   │   └── repair.ts             #   jsonrepair 修复 prd.json / state.json
+│   ├── doctor/
+│   │   └── doctor.ts             #   docs、门禁与全局模型目录健康检查
 │   ├── report/
 │   │   ├── report.ts             #   验证报告数据收集与写盘（collectReport/writeReport）
 │   │   └── render.ts             #   验证报告 HTML 渲染（零浏览器 JS、全文本转义）
+│   ├── status/
+│   │   └── status.ts             #   workspace 状态与实际路由终端速览
 │   └── dashboard/
 │       └── server.ts             #   仪表盘 HTTP 服务 + 自动开浏览器
 │

@@ -1,11 +1,13 @@
 ---
 title: "模型路由重设计：难度档位、失败升级与 runner 绑定"
 status: done
-updated: 2026-07-21
+updated: 2026-07-22
 scope: root
 ---
 
 # 模型路由重设计：难度档位、失败升级与 runner 绑定
+
+> **继任说明（2026-07-22）：** 本规格是 v0.23.0 的已交付合同，保留为历史记录；其中“模型发现与启动时在线复核”从 v0.24.0 起由 [全局模型目录规格](2026-07-22-global-model-catalog.md) 与 [ADR-012](../../decisions/012-global-model-catalog.md) 局部取代，其余路由语义继续有效。
 
 > 本规格取代 `docs/superpowers/specs/2026-07-06-model-routing-design.md`。旧规格已经按当时设计交付，保留作历史记录；本轮从用户目标重新推导，不继承其 schema 与路由优先级。
 

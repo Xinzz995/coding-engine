@@ -1,11 +1,13 @@
 ---
 title: 011-model-routing-by-difficulty
 status: active
-updated: 2026-07-21
+updated: 2026-07-22
 scope: root
 ---
 
 # 011. 模型路由按 story 难度分档，并绑定单一 runner
+
+> **2026-07-22 局部修订：** 本 ADR 的“公开接口发现 + unsupported/人工降级 + 启动时在线模型可用性复核”已由 [ADR-012](012-global-model-catalog.md) 取代；runner 绑定、难度分档、首次有效失败升级、CLI 优先级与可观测性继续生效。
 
 ## 背景
 
