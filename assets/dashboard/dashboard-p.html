@@ -272,6 +272,7 @@ const FALLBACK = {
   - page.tsx 需要 "use client" 指令才能使用 React hooks
   - 类型定义放在 app/types.ts，示例数据放在 app/sample-data.ts`,
   runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus", route_source: "difficulty", story_difficulty: "medium", runner: "claude" },
+  stateCorrupted: false,
   modelRouting: { status: "disabled", config: null, errors: [] }
 };
 
@@ -487,9 +488,11 @@ function render() {
   const pct = stories.length ? Math.round((passedCount / stories.length) * 100) : 0;
   const isActive = runtime.phase === 'developing' || runtime.phase === 'validating';
   const routing = dashboardData.modelRouting;
-  const routeConfig = routing && routing.status === 'enabled'
-    ? `${routing.config.runner} · L:${routing.config.builder.low} M:${routing.config.builder.medium} H:${routing.config.builder.high} · V:${routing.config.validator} · E:${routing.config.escalation}`
-    : `${runtime.runner || '默认 runner'} · ${routing && routing.status === 'invalid' ? '模型路由无效' : '未启用 PRD 模型路由'}`;
+  const routeConfig = dashboardData.stateCorrupted
+    ? '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair'
+    : routing && routing.status === 'enabled'
+      ? `${routing.config.runner} · L:${routing.config.builder.low} M:${routing.config.builder.medium} H:${routing.config.builder.high} · V:${routing.config.validator} · E:${routing.config.escalation}`
+      : `${runtime.runner || '默认 runner'} · ${routing && routing.status === 'invalid' ? '模型路由无效' : '未启用 PRD 模型路由'}`;
   const actualRoute = `${runtime.current_story ? ' · '+runtime.current_story : ''}${runtime.story_difficulty ? ' · '+runtime.story_difficulty : ''}${runtime.model ? ' · '+runtime.model+(runtime.route_source ? ' ['+runtime.route_source+']' : '') : ''}`;
 
   let html = '';

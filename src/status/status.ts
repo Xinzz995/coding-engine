@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
 import {
-  tryReadState, mergedStories, getCurrentStoryId, initialStateFor, type StoryView,
+  readDisplayState, mergedStories, getCurrentStoryId, type StoryView,
   isStoryPassed,
 } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
@@ -70,7 +70,7 @@ function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentAc
   return recent;
 }
 
-/** 只读收集 workspace 执行状态；state.json 缺失或损坏时回退读 story 上的旧格式内嵌字段。 */
+/** 只读收集 workspace 执行状态；state.json 缺失兼容 legacy，存在但损坏则 fail-closed。 */
 export function collectStatus(workspace: string): StatusReport {
   const prdPath = join(workspace, 'prd.json');
   if (!existsSync(prdPath)) return { status: 'missing', workspace };
@@ -78,10 +78,7 @@ export function collectStatus(workspace: string): StatusReport {
   // userStories 非数组的 prd.json 对 status 同样不可用，与 JSON 解析失败同等对待
   if (prd === null || !Array.isArray(prd.userStories)) return { status: 'unparsable', workspace };
   const statePath = join(workspace, 'state.json');
-  const stateExists = existsSync(statePath);
-  // 缺失与损坏都回退读 story 上的旧格式内嵌字段（与 dashboard 离线回看语义一致）；损坏需另行标记供 cli 层警告
-  const rawState = stateExists ? tryReadState(statePath) : null;
-  const state = rawState ?? initialStateFor(prd);
+  const { state, stateCorrupted } = readDisplayState(statePath, prd);
   let evidence: ReturnType<typeof readEvidence> = { records: [], skippedLines: 0 };
   let evidenceUnavailable = false;
   try {
@@ -99,7 +96,7 @@ export function collectStatus(workspace: string): StatusReport {
     recentActual: recentActualOf(evidence.records),
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
-    stateCorrupted: stateExists && rawState === null,
+    stateCorrupted,
   };
 }
 
@@ -182,7 +179,7 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     lines.push('', '⚠️ prd.json 中没有任何 story');
     return { text: lines.join('\n'), exitCode: 1 };
   }
-  const allPassed = passed === total;
+  const allPassed = !report.stateCorrupted && passed === total;
   lines.push('', allPassed ? '✅ 全部 story 已通过' : `⏳ 还有 ${total - passed} 个 story 未完成`);
   return { text: lines.join('\n'), exitCode: allPassed ? 0 : 1 };
 }
@@ -205,6 +202,7 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
     project: prd.project,
     branchName: prd.branchName,
     sourcePrd: prd.sourcePrd, // undefined 时 JSON.stringify 自动省略该键
+    stateCorrupted: report.stateCorrupted,
     stories: stories.map((s) => ({
       id: s.id,
       title: s.title,
@@ -226,6 +224,6 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
     summary,
   };
   // 与人类可读模式同一保守语义：空 story 列表不算全绿
-  const allPassed = summary.total > 0 && summary.passed === summary.total;
+  const allPassed = !report.stateCorrupted && summary.total > 0 && summary.passed === summary.total;
   return { text: JSON.stringify(view, null, 2), exitCode: allPassed ? 0 : 1 };
 }

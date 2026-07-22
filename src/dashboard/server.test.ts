@@ -84,6 +84,12 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
       /stories\.filter\(s\s*=>\s*!s\.blocked\s*&&\s*s\.passes\s*===\s*true\s*&&\s*s\.validated\s*===\s*true\)\.length/,
     );
   });
+
+  it('state 损坏时展示 fail-closed 警告', () => {
+    const html = readDashboardAsset(asset.file);
+    expect(html).toContain('state.json 已损坏');
+    expect(html).toContain('stateCorrupted');
+  });
 });
 
 describe('buildApiResponse', () => {
@@ -114,8 +120,27 @@ describe('buildApiResponse', () => {
     writeFileSync(join(dir, 'progress.md'), '');
     configureWorkspace(dir, 50);
     const r = buildApiResponse();
+    expect(r.stateCorrupted).toBe(false);
     expect(r.stories[0].passes).toBe(true);
     expect(r.stories[0].validated).toBe(true);
+  });
+
+  it('fails closed and exposes a warning flag when state.json exists but is corrupt', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ws-corrupt-'));
+    cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+    writeFileSync(join(dir, 'prd.json'), JSON.stringify({
+      project: 'p', branchName: 'ralph/x', description: 'd',
+      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
+        priority: 1, passes: true, notes: '旧备注', retryCount: 2, blocked: false }],
+    }));
+    writeFileSync(join(dir, 'state.json'), '{ broken');
+    writeFileSync(join(dir, 'progress.md'), '');
+    configureWorkspace(dir, 50);
+    const r = buildApiResponse();
+    expect(r.stateCorrupted).toBe(true);
+    expect(r.stories[0]).toMatchObject({
+      passes: false, validated: false, notes: '', retryCount: 0, blocked: false,
+    });
   });
 
   it('exposes the current actual route in runtime and defaults it to null', () => {

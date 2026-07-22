@@ -117,6 +117,26 @@ export function blankStateFor(prd: Prd): RunState {
   return state;
 }
 
+export interface DisplayStateRead {
+  state: RunState;
+  /** state.json 存在但解析失败/形状非法；文件缺失是合法的 legacy 回退。 */
+  stateCorrupted: boolean;
+}
+
+/**
+ * status/dashboard/report 的展示状态单源：文件缺失才迁移旧版内嵌字段；
+ * 文件存在但损坏时全部按未验证显示，绝不复活 legacy 通过态。
+ */
+export function readDisplayState(path: string, prd: Prd): DisplayStateRead {
+  const stateExists = existsSync(path);
+  const rawState = stateExists ? tryReadState(path) : null;
+  const stateCorrupted = stateExists && rawState === null;
+  return {
+    state: stateCorrupted ? blankStateFor(prd) : rawState ?? initialStateFor(prd),
+    stateCorrupted,
+  };
+}
+
 // 启动时保证 state.json 存在：缺失则从 prd 初始化（含旧格式抽取迁移）并落盘。
 // 文件存在但解析失败时不覆盖（留给 npx coding-x repair），内存中按初始值继续。
 export function ensureStateFile(workspace: string, prd: Prd): RunState {
@@ -270,8 +290,8 @@ export function allStoriesResolved(prd: Prd, state: RunState): boolean {
   });
 }
 
-// 只读合并（不落盘）：state 为 null 时回退读 story 上的旧格式字段，
-// 让仪表盘对 v0.4 workspace 与历史归档的离线回看零迁移可用。
+// 只读合并（不落盘）：state 为 null 时回退读 story 上的旧格式字段。
+// 消费方区分缺失/损坏时应先走 readDisplayState，避免损坏态复活 legacy 字段。
 export function mergedStories(prd: Prd, state: RunState | null): StoryView[] {
   return prd.userStories.map((s) => ({
     ...s,

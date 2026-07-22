@@ -205,7 +205,7 @@ describe('runQualityChecks', () => {
     expect(r.failure!.exitCode).toBeNull();
   });
 
-  it.runIf(process.platform !== 'win32')('kills the whole process tree on timeout (no orphaned grandchildren)', async () => {
+  it.runIf(process.platform !== 'win32')('does not resolve a timeout until the whole gate process tree has exited', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-'));
     const marker = join(dir, 'orphan-pid.txt');
     try {
@@ -214,15 +214,15 @@ describe('runQualityChecks', () => {
       const r = await runQualityChecks([`${hang} && echo done`], process.cwd(), 500);
       expect(r.ok).toBe(false);
       expect(r.failure!.timedOut).toBe(true);
-      await new Promise((res) => setTimeout(res, 300)); // 给信号传播留时间
       const pid = Number(readFileSync(marker, 'utf-8'));
+      // timeout Promise 返回即代表进程树已经退出，引擎此后才可继续读写 workspace。
       expect(() => process.kill(pid, 0)).toThrow(); // signal 0 探活：已死则 ESRCH
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it.runIf(process.platform !== 'win32')('escalates to SIGKILL for grandchildren that trap SIGTERM', async () => {
+  it.runIf(process.platform !== 'win32')('escalates to SIGKILL before resolving when a gate descendant traps SIGTERM', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-'));
     const marker = join(dir, 'trap-pid.txt');
     try {
@@ -231,8 +231,6 @@ describe('runQualityChecks', () => {
       const r = await runQualityChecks([trap], process.cwd(), 500);
       expect(r.ok).toBe(false);
       expect(r.failure!.timedOut).toBe(true);
-      // 等过 5s 升级窗口 + 传播余量：组 SIGKILL 必须已补刀
-      await new Promise((res) => setTimeout(res, 5800));
       const pid = Number(readFileSync(marker, 'utf-8'));
       expect(() => process.kill(pid, 0)).toThrow();
     } finally {

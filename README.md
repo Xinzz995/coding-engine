@@ -27,7 +27,7 @@ coding-x 同时是两样东西：
 
 ## 工作原理
 
-引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控；agent 回写结果字段，引擎独占验收凭证与升级状态）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（结构化证据索引：引擎机械记录+agent 截图登记）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理。
+引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控；agent 回写结果字段，引擎独占验收凭证与升级状态）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（结构化证据索引：引擎机械记录+agent 截图登记）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理；`state.json` 已存在但损坏时不是迁移信号，report/status/dashboard 会统一把所有 story 按未验证状态显示并提示 repair。
 
 ```
                       npx coding-x
@@ -291,9 +291,9 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `config path\|init\|validate` | — | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁 |
 | 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
-| 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
+| 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
-| 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
+| 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；损坏 state 全部按未验证、`--json` 标 `stateCorrupted`；退出码 0=全通过 / 1=未全通过或 state 损坏 / 2=无可读工作区，可作 CI 门禁 |
 | 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会从引擎冻结的 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏（仍写红色诊断报告） / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
@@ -341,7 +341,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **引擎验收凭证**：`passes=true` 只是 builder 的候选声明；仅当 Validator 被引擎观察为正常完成且结果仍通过，才签发 `validated=true`。所有完成判定与展示面统一要求二者同时为 true（ADR-013）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
-- **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
+- **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证；超时会终止并确认整棵门禁进程树退出后才进入下一轮——LLM 验证链之下不可共谋、不可绕过的确定性防线。
 - **workspace 写入避让与 Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 双次检查活跃工作区锁、写前阻止静默污染，`doctor` 只读报告锁与 Git 隔离状态，不替用户删锁或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、validator 正常打回或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
 - **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
@@ -429,6 +429,7 @@ coding-engine/
 │   │   ├── model-catalog.ts      #   全局模型目录路径、严格 schema、查询与初始化
 │   │   ├── model-preflight.ts    #   runner/路由/CLI 覆盖与目录成员启动预检
 │   │   ├── models.ts             #   PRD 模型路由 schema 与实际路由解析
+│   │   ├── process-tree.ts        #   agent/门禁共享的跨平台进程树终止与退出确认
 │   │   ├── prd-guard.ts          #   运行期 PRD 快照、篡改存档与恢复
 │   │   ├── prd.ts                #   读取 prd.json（需求内容）
 │   │   ├── state.ts              #   state.json 读写、验收凭证、选 story、完成判定、合并视图

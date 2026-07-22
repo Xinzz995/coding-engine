@@ -271,7 +271,7 @@ function renderProgress(stories) {
   document.getElementById('progressLabel').textContent = passed + '/' + total;
 }
 
-function renderPhase(rt, routing) {
+function renderPhase(rt, routing, stateCorrupted) {
   const cfg = PHASE_MAP[rt.phase] || PHASE_MAP.idle;
   const dot = document.getElementById('phaseDot');
   const text = document.getElementById('phaseText');
@@ -289,7 +289,9 @@ function renderPhase(rt, routing) {
   document.getElementById('iterInfo').textContent = `Round ${rt.iteration}/${rt.max_iterations}`;
   document.getElementById('elapsedInfo').textContent = fmtElapsed(rt.elapsed);
   const routingText = document.getElementById('routingText');
-  if (routing && routing.status === 'enabled') {
+  if (stateCorrupted) {
+    routingText.textContent = '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair';
+  } else if (routing && routing.status === 'enabled') {
     const m = routing.config;
     routingText.textContent = `${m.runner} · L:${m.builder.low} M:${m.builder.medium} H:${m.builder.high} · V:${m.validator} · E:${m.escalation}`;
   } else if (routing && routing.status === 'invalid') {
@@ -313,6 +315,7 @@ function setEndedBanner(visible) {
 
 const FALLBACK = {
   runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340, model: 'opus', route_source: 'difficulty', story_difficulty: 'medium', runner: 'claude' },
+  stateCorrupted: false,
   modelRouting: { status: 'disabled', config: null, errors: [] },
   project: '简易笔记系统',
   stories: [
@@ -354,7 +357,7 @@ async function poll() {
   renderStories(data.stories, data.runtime.current_story);
   renderProgress(data.stories);
   renderLogs(data.logs);
-  renderPhase(data.runtime, data.modelRouting);
+  renderPhase(data.runtime, data.modelRouting, data.stateCorrupted);
 }
 
 setInterval(poll, POLL_MS);

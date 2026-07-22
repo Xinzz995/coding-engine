@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
-import { tryReadState, mergedStories, type StoryView } from '../engine/state.js';
+import { readDisplayState, mergedStories, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
 import type { AgentKind } from '../engine/agent.js';
@@ -68,6 +68,8 @@ export interface ApiResponse {
   branchName: string;
   sourcePrd: string;
   stories: StoryView[];
+  /** state.json 存在但损坏；stories 已按未验证状态 fail-closed。 */
+  stateCorrupted: boolean;
   modelRouting: ModelRoutingReadResult;
   logs: string;
 }
@@ -75,7 +77,7 @@ export interface ApiResponse {
 export function buildApiResponse(): ApiResponse {
   const elapsed = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0;
   const prd = tryReadPrd(join(workspaceDir, 'prd.json'));
-  const runState = tryReadState(join(workspaceDir, 'state.json'));
+  const displayState = prd ? readDisplayState(join(workspaceDir, 'state.json'), prd) : null;
   const logs = readProgress(join(workspaceDir, 'progress.md'));
   return {
     runtime: {
@@ -92,7 +94,8 @@ export function buildApiResponse(): ApiResponse {
     project: prd?.project ?? '',
     branchName: prd?.branchName ?? '',
     sourcePrd: prd?.sourcePrd ?? '',
-    stories: prd ? mergedStories(prd, runState) : [],
+    stories: prd && displayState ? mergedStories(prd, displayState.state) : [],
+    stateCorrupted: displayState?.stateCorrupted ?? false,
     modelRouting: readModelRouting(prd),
     logs,
   };

@@ -203,7 +203,7 @@ export async function main(argv: string[]): Promise<number> {
     const report = collectStatus(cfg.workspace);
     // 警告走 stderr：--json 模式下不污染 stdout，人类可读模式同样适用
     if (report.status === 'ok' && report.stateCorrupted) {
-      console.error('⚠️  state.json 已损坏，已按 prd.json 内嵌旧格式状态回退显示。建议运行 npx coding-x repair。');
+      console.error('⚠️  state.json 已损坏，所有 story 已按未验证状态保守显示。建议运行 npx coding-x repair。');
     }
     const { text, exitCode } = cfg.json ? renderStatusJson(report) : renderStatusReport(report);
     console.log(text);

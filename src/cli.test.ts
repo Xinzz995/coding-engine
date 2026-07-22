@@ -256,8 +256,11 @@ describe('main — status --json', () => {
       const code = await main(['status', '--workspace', workspace, '--json']);
       expect(code).toBe(1);
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('npx coding-x repair'));
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('按未验证状态'));
       expect(logSpy).toHaveBeenCalledTimes(1);
-      expect(() => JSON.parse(logSpy.mock.calls[0][0] as string)).not.toThrow();
+      const view = JSON.parse(logSpy.mock.calls[0][0] as string);
+      expect(view.stateCorrupted).toBe(true);
+      expect(view.summary).toEqual({ total: 1, passed: 0, blocked: 0 });
     } finally {
       errSpy.mockRestore();
       logSpy.mockRestore();

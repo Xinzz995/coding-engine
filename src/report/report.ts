@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
-import { tryReadState, mergedStories, initialStateFor, blankStateFor, type StoryView } from '../engine/state.js';
+import { readDisplayState, mergedStories, type StoryView } from '../engine/state.js';
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import { readProgress } from '../engine/progress.js';
 import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
@@ -80,12 +80,7 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
   const prd = options.trustedPrd ?? tryReadPrd(prdPath);
   if (prd === null || !Array.isArray(prd.userStories)) return { status: 'unparsable', workspace };
   const statePath = join(workspace, 'state.json');
-  const stateExists = existsSync(statePath);
-  const rawState = stateExists ? tryReadState(statePath) : null;
-  const stateCorrupted = stateExists && rawState === null;
-  // 缺失文件仍兼容从旧版 PRD 迁移；文件已经存在但损坏时，绝不让内嵌 legacy
-  // passes 复活为绿灯，统一按未验证初始态生成诊断报告。
-  const state = stateCorrupted ? blankStateFor(prd) : rawState ?? initialStateFor(prd);
+  const { state, stateCorrupted } = readDisplayState(statePath, prd);
   const rootFiles = listFiles(workspace);
   const reviews: { filename: string; content: string }[] = [];
   for (const filename of rootFiles.filter((n) => /^review-.*\.md$/.test(n)).sort()) {

@@ -2,6 +2,7 @@ import type { Prd } from './prd.js';
 import type { RunState } from './state.js';
 import { INITIAL_STORY_STATE } from './state.js';
 import { spawn } from 'node:child_process';
+import { terminateProcessTree } from './process-tree.js';
 
 /** 打回上限的单一真相源：validator.md 经 {{MAX_RETRIES}} 占位符共享此值 */
 export const MAX_RETRIES = 5;
@@ -71,7 +72,7 @@ const GATE_TIMEOUT_MS = 600_000;
 const OUTPUT_TAIL_CHARS = 2000;
 
 function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<GateFailure | null> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     // shell 语义：qualityChecks 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`）。
     // patterns.md 的「不经 shell」约定针对代码拼接固定命令+变量参数的场景，不适用于此。
     const child = spawn(command, {
@@ -87,32 +88,29 @@ function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<G
     // tee：实时转发保证无人值守时进度可见，同时滚动缓冲尾部供打回 notes 用
     child.stdout.on('data', (c: Buffer) => { process.stdout.write(c); keep(c); });
     child.stderr.on('data', (c: Buffer) => { process.stderr.write(c); keep(c); });
-    // 对整个进程组发信号（POSIX 负 pid）；win32 回退单进程 kill。进程可能已死（ESRCH）——忽略
-    const killTree = (signal: NodeJS.Signals) => {
-      try {
-        if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, signal);
-        else child.kill(signal);
-      } catch { /* 已退出 */ }
-    };
     let settled = false;
+    let terminating = false;
     const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      killTree('SIGTERM');
-      // 组长（shell）先于孙进程退出是常态：不能在 exit 时取消升级，
-      // 否则陷 SIGTERM 的孙进程永远等不到组 SIGKILL。unref 防空转 timer 拖住进程退出；
-      // 组已全死时补刀是空操作（killTree 吞 ESRCH，win32 child.kill 对已退进程返回 false）
-      setTimeout(() => killTree('SIGKILL'), 5000).unref();
-      resolve({ command, exitCode: null, timedOut: true, outputTail: tail });
+      if (settled || terminating) return;
+      terminating = true;
+      void terminateProcessTree(child).then(() => {
+        if (settled) return;
+        settled = true;
+        resolve({ command, exitCode: null, timedOut: true, outputTail: tail });
+      }, (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      });
     }, timeoutMs);
     child.once('exit', (code) => {
-      if (settled) return;
+      if (settled || terminating) return;
       settled = true;
       clearTimeout(timer);
       resolve(code === 0 ? null : { command, exitCode: code, timedOut: false, outputTail: tail });
     });
     child.once('error', (err) => {
-      if (settled) return;
+      if (settled || terminating) return;
       settled = true;
       clearTimeout(timer);
       resolve({ command, exitCode: null, timedOut: false, outputTail: err.message });

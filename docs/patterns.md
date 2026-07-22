@@ -20,7 +20,7 @@ scope: root
 - 2026-07-03 新功能自成 `src/<feature>/` 目录，核心逻辑导出纯函数（签名收 root/数据、返回结构体），console 输出、`process.cwd()`、退出码等副作用全留在 `src/cli.ts` 薄胶水层——纯函数才能用临时目录 fixture 直接单测（见 `src/doctor/`、`src/dashboard/`）。
 - 2026-07-03 调外部命令用 `execFileSync('git', [...args])`（不经 shell、免转义），并 try/catch 失败即降级返回 null/false，让功能在缺该命令的环境温和退化而非抛栈（见 doctor 的 `isGitWorkTree`/`gitLastCommitDate`）。
 - 2026-07-03 CLI 参数非法值在 `parseCliArgs` 内抛错、由 `main()` try/catch 捕获打印并返回退出码 1，不把 `NaN`/越界值静默传给下游（见 `--stale-days` 只接受非负整数，且校验的是字面量 `/^\d+$/` 而非 `Number()` 转换结果——否则空串/`0x10`/`1e2` 会被静默接受）。
-- 2026-07-04 读 workspace 文件需要区分「文件不存在」与「内容损坏」两种降级时，先 `existsSync` 再 `tryReadX`——`tryReadPrd`/`tryReadState` 对两者都返回 `null`，只靠返回值无法分流（见 `collectStatus`：prd.json 缺失提示生成、损坏提示 repair；state.json 缺失静默回退、损坏 stderr 警告）。
+- 2026-07-04 读 workspace 文件需要区分「文件不存在」与「内容损坏」两种降级时，先 `existsSync` 再 `tryReadX`——`tryReadPrd`/`tryReadState` 对两者都返回 `null`，只靠返回值无法分流（见 `readDisplayState`：state.json 缺失才静默回退 legacy；存在但损坏统一归零并标 `stateCorrupted`，status/dashboard/report 三消费方不得各写一套）。
 - 2026-07-04 机器可读输出（`--json` 类）的契约：stdout 恒为单个可 `JSON.parse` 的对象（错误态也输出 `{error, ...}` 对象而非裸文本），警告/提示一律走 stderr 且由 `src/cli.ts` 层发出（render 纯函数只产 stdout 文本与退出码）；测试断言用「`console.log` spy 恰被调用一次 + 对该次参数整体 `JSON.parse`」的不变式，强于正则匹配（见 `renderStatusJson` 与 cli.test.ts 的 status --json 用例）。
 - 2026-07-08 展示/渲染层消费宽松解析产物时（`tryReadPrd` 无逐字段守卫——与 `tryReadState` 的读入守卫模式不同，属历史设计），任何值插进输出标记前必须统一走「空值兜底+转义」helper（见 render.ts `text()`），不逐点裸插——缺字段的合法 JSON 会让裸插值抛 TypeError，造成「status 正常降级而验证报告崩」的消费端分叉；段级配置已有单源守卫的直接复用（`readQualityChecks`/`readModelsConfig`），并且其 warnings 必须透出到呈现面，否则「配置非法」与「未配置」不可区分。
 - 2026-07-08 跨文件消费的 notes 行前缀/标签一律从 gate.ts 导出常量做单源（`ARBITRATION_PREFIXES`、`GATE_FAIL_LINE_PREFIX`、`BLOCKED_LINE_PREFIX` 三例），生产/消费方 import 同一常量；无法 import 的指令模板类第二生产方（如 validator.md 的 BLOCKED 文案）在常量 doc comment 登记「改措辞须同步」；测试对这些前缀保留字面量断言、不 import 实现常量——字面量断言即格式契约守卫，任何一方单独改措辞立刻红。
@@ -30,7 +30,8 @@ scope: root
 - 2026-07-16 workspace 中需要“旧版或新版、绝不半份”的覆盖写一律走 `writeFileAtomicSync`（fs-atomic 的 tmp+rename），不裸用 `writeFileSync`——包括 prd.json/state.json 及其归档，也包括可重生成但会被人直接打开裁决的 report.html。进程中途被杀只损失 tmp、目标文件永远完整；append-only 信道（evidence.jsonl）不适用此模式。
 - 2026-07-22 共享 state 里的 agent 结果与引擎事实必须分字段建模：`passes` 是 builder/validator 可写的候选结果，`validated` 是 validator 正常完成后由引擎签发的验收凭证；所有选 story、收敛、status、dashboard、report 消费端统一复用 `isStoryPassed`（或等价的 `passes && validated`），禁止继续把裸 `passes=true` 渲染成全绿。agent 返回后按阶段前快照恢复引擎独占字段，异常/跳过路径与启动恢复都要清掉未签发凭证的候选 true（ADR-013）。
 - 2026-07-22 workspace 是运行时边界，不是功能提交的一部分：prd-to-json 首次写入前用 `git ls-files` + `git check-ignore --no-index` 检查“已跟踪/未忽略”两种风险，doctor 只读复核；builder 只显式 stage story 文件、检查暂存清单、提交成功后才回写 state/progress。自动化不得替用户修改 `.gitignore`、执行 `git rm --cached` 或重置既有暂存区。
-- 2026-07-22 收口副产物必须沿用主流程已经建立的信任来源：loop 自动报告只消费终轮 PRD guard 返回的冻结快照，并显式标注来源；不能在裁决完成后重新读取 agent 可改写的磁盘 PRD。手动报告没有该信任来源，只能标成磁盘读取。state 文件“缺失”才允许 legacy 迁移；“存在但损坏”在验证报告里必须 fail-closed 为全部未验证、输出红色诊断且 CLI 非零（ADR-014）。
+- 2026-07-22 收口副产物必须沿用主流程已经建立的信任来源：loop 自动报告只消费终轮 PRD guard 返回的冻结快照，并显式标注来源；不能在裁决完成后重新读取 agent 可改写的磁盘 PRD。手动报告没有该信任来源，只能标成磁盘读取。state 文件“缺失”才允许 legacy 迁移；“存在但损坏”在 report/status/dashboard 所有展示面都必须 fail-closed 为全部未验证、显式警示，机器消费端必须给非零退出或损坏标志（ADR-014）。
+- 2026-07-22 会在超时后继续读写 workspace 的子进程调用，Promise 只能在整棵进程树确认退出后结算；POSIX 用独占进程组 SIGTERM→宽限→SIGKILL 并探活确认，Windows 等待 `taskkill /T /F`。agent 与机械门禁必须复用 `process-tree.ts`，禁止一侧等待退出、另一侧只安排延时补杀后立即返回。
 - 2026-07-22 skill 要改写 workspace 前，先通过 doctor 读取工作区锁结论，完成只读准备后在首次真实写入前再次检查；活锁、无法判定或结论变化都保持零写入，陈旧/损坏锁不由 skill 删除。双检查只缩小 TOCTOU 窗口，文案不得把它冒充 O_EXCL 机械互斥。
 - 2026-07-16 把 CLI 传入的 workspace 路径与项目根拼接时用 `resolve` 不用 `join`——`--workspace` 可传绝对路径，`join` 会把已是绝对路径的段原样拼在 root 之下产生不存在的路径，检查类消费方表现为假阴性（doctor 的锁检查「引擎运行中却报无锁」与门禁配置检查同款实翻，0.21.0 终审端到端实测检出）。
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。
@@ -41,7 +42,7 @@ scope: root
 
 <!-- 容易再次踩、与本项目框架/数据边界/路由方式强相关的坑 -->
 
-- 2026-07-03 运行期状态需要回退时用「全部归零」的空初始化，不要复用带历史字段抽取的迁移初始化——迁移路径会把已废弃的旧格式状态重新激活（对比 `blankStateFor` 只写初始常量、`initialStateFor` 读旧字段）。文件**缺失**是旧 workspace 迁移信号，可以读 legacy；文件**存在但损坏**不是迁移信号。dashboard/status 为离线诊断兼容 legacy 时必须醒目告警；验证报告属于裁决证据，损坏态必须全部归零并红色 fail-closed，否则陈旧 passes:true 会形成假绿面（ADR-014）。
+- 2026-07-03 运行期状态需要回退时用「全部归零」的空初始化，不要复用带历史字段抽取的迁移初始化——迁移路径会把已废弃的旧格式状态重新激活（对比 `blankStateFor` 只写初始常量、`initialStateFor` 读旧字段）。文件**缺失**是旧 workspace 迁移信号，可以读 legacy；文件**存在但损坏**不是迁移信号。report/status/dashboard 都属于可能影响裁决或自动化的展示面，损坏态必须经 `readDisplayState` 全部归零并 fail-closed，否则陈旧 passes:true 会形成假绿面（ADR-014）。
 - 2026-07-03 临时目录里跑 git 的单测须先 `git config commit.gpgsign false`（否则全局签名配置会让 commit 失败），并用 `GIT_COMMITTER_DATE`/`GIT_AUTHOR_DATE` 固定日期（`git log %cs` 取的是 committer date），否则依赖提交日期的断言不稳定（见 doctor.test.ts 的 git fixture）。
 - 2026-07-03 单测里的路径断言用 `join('docs', 'sub', 'x.md')` 拼接，不要硬编码 `/` 分隔的字面串，否则 Windows 上会假失败。
 - 2026-07-04 版本号除 package.json 外还有多处落点（package-lock、`.claude-plugin/`/`.cursor-plugin/`/`.codex-plugin/` 三个插件清单），靠人记必漂移——0.6.0–0.7.1 期间插件清单曾停在 0.5.1 三个版本没人发现。机械防线（三道）：`npm version` 生命周期钩子跑 `build/sync-plugin-versions.mjs` 自动同步；`build/version-consistency.test.mjs` 随 npm test 常态校验全部落点一致（本地与 CI test.yml，漂移提交即红）；publish.yml 发版门禁兜底。新增版本号落点时登记进 `PLUGIN_MANIFESTS`（或一致性测试的 entries）即可全线生效。同理，会随版本演进的枚举内容（如清单 description 里列 skills/commands 名单）不要复制到多处，写稳定表述。

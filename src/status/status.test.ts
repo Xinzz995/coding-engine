@@ -103,7 +103,7 @@ describe('collectStatus', () => {
     }
   });
 
-  it('flags stateCorrupted and falls back to legacy fields when state.json is broken JSON', () => {
+  it('flags stateCorrupted and fails closed when state.json is broken JSON', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(LEGACY_PRD));
@@ -111,7 +111,13 @@ describe('collectStatus', () => {
       const report = collectStatus(ws);
       if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
       expect(report.stateCorrupted).toBe(true);
-      expect(report.stories.map((s) => s.passes)).toEqual([true, false]); // 与缺失回退同语义
+      expect(report.stories.map((s) => ({
+        passes: s.passes, validated: s.validated, notes: s.notes,
+        retryCount: s.retryCount, blocked: s.blocked,
+      }))).toEqual([
+        { passes: false, validated: false, notes: '', retryCount: 0, blocked: false },
+        { passes: false, validated: false, notes: '', retryCount: 0, blocked: false },
+      ]);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -561,14 +567,19 @@ describe('renderStatusJson', () => {
     }
   });
 
-  it('renders the same fallback view when state.json is corrupt', () => {
+  it('renders a machine-readable fail-closed view when state.json is corrupt', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(LEGACY_PRD));
       writeFileSync(join(ws, 'state.json'), '{ not json');
-      const obj = JSON.parse(renderStatusJson(collectStatus(ws)).text);
-      expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });
-      expect(obj.stories[0].notes).toBe('旧备注');
+      const rendered = renderStatusJson(collectStatus(ws));
+      const obj = JSON.parse(rendered.text);
+      expect(obj.stateCorrupted).toBe(true);
+      expect(obj.summary).toEqual({ total: 2, passed: 0, blocked: 0 });
+      expect(obj.stories[0]).toMatchObject({
+        passes: false, validated: false, notes: '', retryCount: 0, blocked: false,
+      });
+      expect(rendered.exitCode).toBe(1);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
