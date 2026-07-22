@@ -19,7 +19,7 @@ const prd = (difficulty: 'low' | 'medium' | 'high' = 'medium'): Prd => ({
 });
 
 const state = (over: Partial<RunState[string]> = {}): RunState => ({
-  'US-001': { passes: false, notes: '', retryCount: 0, blocked: false, escalated: false, ...over },
+  'US-001': { passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false, ...over },
 });
 
 const available = (...ids: string[]): ModelCatalogResult => ({
@@ -181,11 +181,22 @@ describe('preflightModelRouting', () => {
   it('已收敛 workspace 仍校验 schema/runner，但不读无实际调用的模型目录', async () => {
     let called = false;
     const result = await preflightModelRouting({
-      prd: prd(), state: state({ passes: true }), requestedRunner: 'claude', runnerExplicit: false,
+      prd: prd(), state: state({ passes: true, validated: true }), requestedRunner: 'claude', runnerExplicit: false,
       catalog: async () => { called = true; return available(); },
     });
     expect(result.runner).toBe('codex');
     expect(result.catalog.status).toBe('skipped');
     expect(called).toBe(false);
+  });
+
+  it('把 passes=true 但无验收凭证的 story 继续视为待执行', async () => {
+    let called = false;
+    const result = await preflightModelRouting({
+      prd: prd(), state: state({ passes: true, validated: false }),
+      requestedRunner: 'codex', runnerExplicit: true,
+      catalog: async () => { called = true; return available('mid-m', 'esc-m', 'val-m'); },
+    });
+    expect(result.storyRoutes).toHaveLength(1);
+    expect(called).toBe(true);
   });
 });

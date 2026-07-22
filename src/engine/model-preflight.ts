@@ -2,7 +2,7 @@ import { listConfiguredModels, type ModelCatalogResult } from './model-catalog.j
 import { readModelRouting, resolveBuilderModel, resolveValidatorModel, type ModelChoice } from './models.js';
 import type { AgentKind } from './agent.js';
 import type { ModelsConfig, Prd, StoryDifficulty } from './prd.js';
-import type { RunState } from './state.js';
+import { isStoryPassed, type RunState } from './state.js';
 
 export class ModelPreflightError extends Error {
   constructor(message: string) {
@@ -56,7 +56,7 @@ export function resolveRunKind(
 
 function storyPending(state: RunState | null, storyId: string): boolean {
   const current = state?.[storyId];
-  return !current?.passes && !current?.blocked;
+  return !current || (!isStoryPassed(current) && !current.blocked);
 }
 
 function addModel(target: Map<string, string[]>, model: string | undefined, path: string): void {

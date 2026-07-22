@@ -80,7 +80,7 @@ describe('runLoop', () => {
     writeFileSync(fake, `
       import { writeFileSync } from 'node:fs';
       writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
       }));
       process.exit(0);
     `);
@@ -90,7 +90,172 @@ describe('runLoop', () => {
       workspace, instructionsDir, port: 0, openBrowser: false,
     });
     expect(code).toBe(0);
+    expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'])
+      .toMatchObject({ passes: true, validated: true });
+    expect(readEvidence(workspace).records.find((r) => r.type === 'iteration'))
+      .toMatchObject({ validatorOutcome: 'completed', validationReceipt: true });
     delete process.env.CODING_X_CLAUDE_BIN;
+  });
+
+  it('does not accept a builder-only passes=true when validator.md is missing', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    rmSync(join(instructionsDir, 'validator.md'));
+    const fake = join(workspace, 'fake-builder-only.mjs');
+    writeFileSync(fake, `
+      import { writeFileSync, appendFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
+      }));
+      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## 2026-07-22 10:00 - US-001\\n');
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 3,
+      });
+      expect(code).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false });
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        validatorRan: false, validatorOutcome: 'skipped', validationRollback: true,
+      });
+      expect(iteration).not.toHaveProperty('validationReceipt');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('does not issue a receipt from a restored candidate when validator deletes the story', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake-validator-delete-story.mjs');
+    const calls = join(workspace, 'calls.txt');
+    const statePath = join(workspace, 'state.json');
+    writeFileSync(fake, `
+      import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      const statePath = ${JSON.stringify(statePath)};
+      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+      if (!existsSync(${JSON.stringify(calls)})) {
+        state['US-001'].passes = true;
+        writeFileSync(${JSON.stringify(calls)}, 'builder');
+        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## builder done\\n');
+      } else {
+        delete state['US-001'];
+      }
+      writeFileSync(statePath, JSON.stringify(state));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false });
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        validatorOutcome: 'completed', validationRollback: true,
+        stateValidationTamper: [
+          { expected: false, received: 'missing', side: 'validator' },
+        ],
+      });
+      expect(iteration).not.toHaveProperty('validationReceipt');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('records field-only validated deletion before issuing a legitimate receipt', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake-validator-delete-field.mjs');
+    const calls = join(workspace, 'calls.txt');
+    const statePath = join(workspace, 'state.json');
+    writeFileSync(fake, `
+      import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      const statePath = ${JSON.stringify(statePath)};
+      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
+      if (!existsSync(${JSON.stringify(calls)})) {
+        state['US-001'].passes = true;
+        writeFileSync(${JSON.stringify(calls)}, 'builder');
+        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## builder done\\n');
+      } else {
+        delete state['US-001'].validated;
+      }
+      writeFileSync(statePath, JSON.stringify(state));
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(0);
+      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001'])
+        .toMatchObject({ passes: true, validated: true });
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        validationReceipt: true,
+        stateValidationTamper: [
+          { expected: false, received: 'missing', side: 'validator' },
+        ],
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rolls a crash-left passes=true validated=false back before selecting work', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': { passes: true, validated: false, notes: 'builder done', retryCount: 0, blocked: false, escalated: false },
+    }));
+    const fake = join(workspace, 'fake-noop.mjs');
+    writeFileSync(fake, 'process.exit(0);');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(' ')); };
+    try {
+      const code = await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      });
+      expect(code).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false, notes: 'builder done' });
+      expect(warnings.some((line) => line.includes('待验收状态') && line.includes('US-001'))).toBe(true);
+    } finally {
+      console.warn = originalWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('materializes legacy engine-owned fields before the agent without faking progress or tamper', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const statePath = join(workspace, 'state.json');
+    writeFileSync(statePath, JSON.stringify({
+      'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
+    }));
+    const fake = join(workspace, 'fake-legacy-noop.mjs');
+    writeFileSync(fake, 'process.exit(0);');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false, escalated: false });
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({ builderOutcome: 'completed', noop: true });
+      expect(iteration).not.toHaveProperty('stateValidationTamper');
+      expect(iteration).not.toHaveProperty('stateRouteTamper');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
   });
 
   it('prints review-loop and compound-docs hints when all stories resolve', async () => {
@@ -561,8 +726,8 @@ describe('runLoop model routing', () => {
       expect(iteration).toMatchObject({
         builderRouteSource: 'escalation', validatorRouteSource: 'validator',
         stateRouteTamper: [
-          { expected: true, received: false, side: 'builder' },
-          { expected: true, received: false, side: 'validator' },
+          { expected: true, received: 'missing', side: 'builder' },
+          { expected: true, received: 'missing', side: 'validator' },
         ],
       });
     } finally {
@@ -980,13 +1145,17 @@ describe('模型升级触发与状态所有权', () => {
         modelCatalog: catalogWith('esc-m', 'val-m'),
       })).toBe(1);
       expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toEqual({
-        passes: false, notes: 'keep', retryCount: 2, blocked: false, escalated: true,
+        passes: false, validated: false, notes: 'keep', retryCount: 2, blocked: false, escalated: true,
       });
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
       expect(iteration).toMatchObject({
         stateRouteTamper: [
           { expected: true, received: 'missing', side: 'builder' },
           { expected: true, received: 'missing', side: 'validator' },
+        ],
+        stateValidationTamper: [
+          { expected: false, received: 'missing', side: 'builder' },
+          { expected: false, received: 'missing', side: 'validator' },
         ],
       });
     } finally {
@@ -1109,6 +1278,20 @@ describe('instruction assets evidence contract', () => {
     }
     expect(read('builder.md')).toContain('"source":"builder"');
     expect(read('validator.md')).toContain('"source":"validator"');
+  });
+});
+
+describe('instruction assets engine-owned state contract', () => {
+  it('builder.md and validator.md reserve validated and escalated for the engine', () => {
+    for (const f of ['builder.md', 'validator.md']) {
+      const content = read(f);
+      expect(content).toContain('`validated`');
+      expect(content).toContain('`escalated`');
+      expect(content).toContain('引擎独占字段');
+      expect(content).toContain('原样保留');
+    }
+    expect(read('builder.md')).toContain('待 Validator 复核的候选结果');
+    expect(read('validator.md')).toContain('引擎在观察到本次验证正常完成后签发');
   });
 });
 

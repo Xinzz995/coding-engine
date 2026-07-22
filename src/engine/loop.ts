@@ -7,7 +7,9 @@ import { createPrdGuard } from './prd-guard.js';
 import type { PrdReadResult } from './prd-guard.js';
 import {
   ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved,
-  enableEscalation, restoreEscalated, type RunState, type StoryState,
+  enableEscalation, restoreEscalated, restoreValidated, issueValidationReceipt,
+  rollbackUnvalidatedPass, rollbackUnvalidatedPasses, tryReadEngineOwnedFields,
+  INITIAL_STORY_STATE, type RunState, type StoryState,
 } from './state.js';
 import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { resolveBuilderModel, resolveValidatorModel } from './models.js';
@@ -119,9 +121,20 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // ensureStateFile 为了 legacy 迁移会在损坏 state 时返回内嵌旧状态，但运行期
     // 绝不能因此“复活”旧 passes。重读磁盘：新迁移文件可读则正常使用，
     // 仍损坏则与轮内 readRunState 一样按全未开始处理，且不覆盖原文件。
-    const bootState = bootPrd
+    let bootState = bootPrd
       ? (tryReadState(statePath) ?? blankStateFor(bootPrd))
       : null;
+    // 进程可能在 builder 写 passes=true 后、validator 签发凭证前被杀。显式
+    // validated=false 是 v0.25 的待验收残态；启动时回写成可被 builder 重新选中的状态。
+    // 旧 state 缺字段时 tryReadState 已按历史 passes 兼容，不会在这里被误重验。
+    if (bootState) {
+      const recovered = rollbackUnvalidatedPasses(bootState);
+      if (recovered.storyIds.length > 0) {
+        bootState = recovered.state;
+        writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
+        console.warn(`⚠️  检测到未完成 validator 的待验收状态，已回写待复核：${recovered.storyIds.join(', ')}`);
+      }
+    }
     let preflight;
     try {
       preflight = await preflightModelRouting({
@@ -215,7 +228,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     }
     for (let i = 1; !bootResolved && i <= cfg.maxIterations; i++) {
       lock.verify(); // 轮首自愈：agent 误删/改写锁时告警重建（同 prd-guard 的机械防护哲学）
-      const stateRawBefore = rawOf(statePath);
+      let stateRawBefore = rawOf(statePath);
       const progressRawBefore = rawOf(progressPath);
       const beforeRead = guard.read();
       recordTamper(beforeRead, i);
@@ -225,24 +238,64 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const beforeState = before ? readRunState(statePath, before) : null;
       const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
       const currentStoryObj = before?.userStories.find((s) => s.id === currentStory) ?? null;
+      const currentStoryState = currentStory && beforeState
+        ? (beforeState[currentStory] ?? INITIAL_STORY_STATE)
+        : undefined;
+      // 旧 state 只读时不迁移；一旦 story 真正进入执行轮，就先把引擎独占字段
+      // 实体化。这样 agent 后续删除字段能与 legacy 缺省明确区分，且把基线更新到
+      // 实体化之后，避免这次引擎写入被 no-op 检测误算成 builder 产出。
+      if (currentStory && beforeState && currentStoryState) {
+        const owned = tryReadEngineOwnedFields(statePath, currentStory);
+        if (owned && (owned.validated !== currentStoryState.validated
+            || owned.escalated !== currentStoryState.escalated)) {
+          writeFileAtomicSync(statePath, JSON.stringify({
+            ...beforeState, [currentStory]: { ...currentStoryState },
+          }, null, 2));
+          stateRawBefore = rawOf(statePath);
+        }
+      }
       const routeTampers: Array<{
         expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
       }> = [];
-      const restoreRouteOwnership = (
+      const validationTampers: Array<{
+        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
+      }> = [];
+      const restoreEngineOwnership = (
         side: 'builder' | 'validator', expectedState: StoryState | undefined,
-      ): void => {
-        if (!currentStory) return;
+      ): { storyMissing: boolean } => {
+        if (!currentStory || !expectedState) return { storyMissing: false };
         const state = tryReadState(statePath);
-        if (!state) return;
-        const expected = expectedState?.escalated ?? false;
-        const restored = restoreEscalated(state, currentStory, expected, expectedState);
-        if (!restored.tamper) return;
-        routeTampers.push({ ...restored.tamper, side });
-        writeFileAtomicSync(statePath, JSON.stringify(restored.state, null, 2));
-        console.warn(
-          `⚠️  ${side} 修改了引擎独占的 ${currentStory}.escalated ` +
-          `(${restored.tamper.expected} → ${restored.tamper.received})，已恢复`,
+        if (!state) return { storyMissing: false };
+        const storyMissing = !state[currentStory];
+        const observed = tryReadEngineOwnedFields(statePath, currentStory);
+        const route = restoreEscalated(
+          state, currentStory, expectedState.escalated, expectedState, observed?.escalated,
         );
+        // 两个 helper 都从同一原始 state 检测，story 整项被删时能分别留下两条所有权证据；
+        // 最终以 route.state 为底，再覆盖 validated 的期望值合并成一次原子写。
+        const validation = restoreValidated(
+          state, currentStory, expectedState.validated, expectedState, observed?.validated,
+        );
+        if (!route.tamper && !validation.tamper) return { storyMissing };
+        if (route.tamper) {
+          routeTampers.push({ ...route.tamper, side });
+          console.warn(
+            `⚠️  ${side} 修改了引擎独占的 ${currentStory}.escalated ` +
+            `(${route.tamper.expected} → ${route.tamper.received})，已恢复`,
+          );
+        }
+        if (validation.tamper) {
+          validationTampers.push({ ...validation.tamper, side });
+          console.warn(
+            `⚠️  ${side} 修改了引擎独占的 ${currentStory}.validated ` +
+            `(${validation.tamper.expected} → ${validation.tamper.received})，已恢复`,
+          );
+        }
+        const restored = route.state[currentStory]
+          ? { ...route.state, [currentStory]: { ...route.state[currentStory], validated: expectedState.validated } }
+          : validation.state;
+        writeFileAtomicSync(statePath, JSON.stringify(restored, null, 2));
+        return { storyMissing };
       };
       const hasDedicatedEscalation = Boolean(cfg.escalationModel || preflight.config?.escalation);
       const triggerEscalation = (reason: 'gate' | 'validator' | 'noop'): boolean => {
@@ -268,6 +321,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         console.warn(`⚠️  ${currentStory} 在中断轮被置为通过，未经完整验收——已回写待复核（${side} ${abortDesc(r)}）`);
         return true;
       };
+      const rollbackPendingValidation = (reason: string): boolean => {
+        if (!currentStory) return false;
+        const state = tryReadState(statePath);
+        if (!state) return false;
+        const rolled = rollbackUnvalidatedPass(state, currentStory);
+        if (!rolled.changed) return false;
+        writeFileAtomicSync(statePath, JSON.stringify(rolled.state, null, 2));
+        console.warn(`⚠️  ${currentStory} 未取得引擎验收凭证（${reason}），已回写待复核`);
+        return true;
+      };
       const builderChoice = resolveBuilderModel({
         builderOverride: cfg.builderModel, escalationOverride: cfg.escalationModel,
         config: preflight.config, story: currentStoryObj,
@@ -283,6 +346,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           builderRouteSource: builderChoice.source,
           ...(currentStoryObj?.difficulty ? { storyDifficulty: currentStoryObj.difficulty } : {}),
           ...(routeTampers.length > 0 ? { stateRouteTamper: [...routeTampers] } : {}),
+          ...(validationTampers.length > 0 ? { stateValidationTamper: [...validationTampers] } : {}),
           ...over,
         });
       };
@@ -310,7 +374,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           model: builderChoice.model,
         });
         builderOutcome = outcomeOf(dev);
-        restoreRouteOwnership('builder', beforeState?.[currentStory ?? '']);
+        restoreEngineOwnership('builder', currentStoryState);
         if (builderOutcome !== 'completed') {
           builderRollback = rollbackIfUnvalidatedPass('builder', dev);
           // evidence=引擎机械事实：agentBlocked 不能硬编码 false——agent 可能同轮已置 blocked:true
@@ -422,11 +486,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       });
       let validatorOutcome: 'completed' | 'timeout' | 'error' | 'skipped' | undefined;
       let validatorRollback = false;
+      let validationRollback = false;
+      let validationReceipt = false;
       let validatorEscalationTriggered = false;
-      if (validator && skipValidator) {
+      if (!validator) {
+        console.error('❌ validator.md 不存在，本轮无法签发验收凭证');
+        validatorOutcome = 'skipped';
+      } else if (skipValidator) {
         console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
         validatorOutcome = 'skipped';
-      } else if (validator && !agentBlocked) {
+      } else if (!agentBlocked) {
         console.log(`🧠 validator 实际模型: ${validatorModel ?? 'runner 默认'} [${validatorChoice.source}]`);
         const validatorStateBefore = currentStory ? tryReadState(statePath)?.[currentStory] : undefined;
         const val = await runAgent({
@@ -434,19 +503,44 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           model: validatorModel,
         });
         validatorOutcome = outcomeOf(val);
-        restoreRouteOwnership('validator', validatorStateBefore);
+        const validatorOwnership = restoreEngineOwnership('validator', validatorStateBefore);
         if (validatorOutcome !== 'completed') {
           // validator 异常结局：本轮 builder 置的 true 未经复核 → 回写待复核
           validatorRollback = rollbackIfUnvalidatedPass('validator', val);
-        } else if (currentStory && validatorStateBefore) {
-          const validatorStateAfter = tryReadState(statePath)?.[currentStory];
+        } else if (currentStory && validatorStateBefore && !validatorOwnership.storyMissing) {
+          let stateAfter = tryReadState(statePath);
+          const validatorStateAfter = stateAfter?.[currentStory];
           const rejected = !!validatorStateAfter
             && !validatorStateAfter.passes
             && validatorStateAfter.retryCount > validatorStateBefore.retryCount;
           if (rejected) validatorEscalationTriggered = triggerEscalation('validator');
+          // passes 是 builder 候选声明；只有 validator 启动前已经为 true、正常结束后
+          // 仍为 true 且未 blocked，engine 才签发最终凭证。validator 自行伪造
+          // validated 会在上方 restoreEngineOwnership 先被恢复。
+          if (stateAfter && validatorStateBefore.passes && !validatorStateBefore.blocked
+              && validatorStateAfter?.passes && !validatorStateAfter.blocked) {
+            // triggerEscalation 可能已原子写过 state，签发前重读，避免用旧快照覆盖升级状态。
+            stateAfter = tryReadState(statePath);
+            if (stateAfter) {
+              const issued = issueValidationReceipt(stateAfter, currentStory);
+              if (issued.changed) {
+                writeFileAtomicSync(statePath, JSON.stringify(issued.state, null, 2));
+                validationReceipt = true;
+                console.log(`✅ ${currentStory} validator 已正常完成，引擎验收凭证已签发`);
+              }
+            }
+          }
         }
-      } else if (validator && agentBlocked) {
+      } else if (agentBlocked) {
         validatorOutcome = 'skipped';
+      }
+
+      // 除 blocked 外，任何没有签发凭证的路径都不能把 builder 的 passes=true 带到
+      // 下一轮；异常结局已由 applyAbortRollback 回写，此处覆盖缺指令/skip 等其余路径。
+      if (!validationReceipt && !validatorRollback) {
+        validationRollback = rollbackPendingValidation(
+          validatorOutcome === 'completed' ? 'validator 未确认候选通过' : 'validator 未完整执行',
+        );
       }
 
       // 每轮一条 iteration 不变式：continue 路径（builder 异常/no-op/门禁打回）各自留痕后跳出，
@@ -459,10 +553,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(builderOutcome ? { builderOutcome } : {}),
         ...(validatorOutcome ? { validatorOutcome } : {}),
         ...(validatorRollback ? { abortRollback: { storyId: currentStory! } } : {}),
+        ...(validationRollback ? { validationRollback: true as const } : {}),
+        ...(validationReceipt ? { validationReceipt: true as const } : {}),
         ...(validatorEscalationTriggered ? { escalationTriggeredBy: 'validator' as const } : {}),
       });
 
-      if (validatorOutcome === 'timeout' || validatorOutcome === 'error') {
+      if (validatorOutcome === 'timeout' || validatorOutcome === 'error' || validationRollback) {
         if (stalled()) { tamperCheckBeforeExit(i); break; }
       } else {
         stallCount = 0; // 正常走完的轮（含 agentBlocked/skipValidator 跳过轮）清零

@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import {
   tryReadState, initialStateFor, blankStateFor, ensureStateFile, mergedStories,
   getCurrentStoryId, allStoriesResolved, INITIAL_STORY_STATE, restoreEscalated,
-  enableEscalation, type RunState,
+  enableEscalation, isStoryPassed, restoreValidated, issueValidationReceipt,
+  rollbackUnvalidatedPasses, tryReadEngineOwnedFields, type RunState,
 } from './state.js';
 import type { Prd } from './prd.js';
 
@@ -42,6 +43,38 @@ describe('tryReadState', () => {
     writeFileSync(file, JSON.stringify({ 'US-001': { passes: true, notes: 'n', retryCount: 2, blocked: false } }));
     expect(tryReadState(file)?.['US-001'].retryCount).toBe(2);
     expect(tryReadState(file)?.['US-001'].escalated).toBe(false);
+    expect(tryReadState(file)?.['US-001'].validated).toBe(true); // 旧 passed state 兼容为已验收
+    rmSync(dir, { recursive: true, force: true });
+  });
+  it('does not let a receipt outlive its passing candidate state', () => {
+    const dir = tempDir();
+    const file = join(dir, 'state.json');
+    writeFileSync(file, JSON.stringify({
+      'US-001': { passes: false, validated: true, notes: '', retryCount: 0, blocked: false },
+    }));
+    expect(tryReadState(file)?.['US-001'].validated).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+  it('reads engine-owned fields without hiding missing legacy values', () => {
+    const dir = tempDir();
+    const file = join(dir, 'state.json');
+    writeFileSync(file, JSON.stringify({
+      'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
+    }));
+    expect(tryReadEngineOwnedFields(file, 'US-001')).toEqual({
+      validated: 'missing', escalated: 'missing',
+    });
+    writeFileSync(file, JSON.stringify({
+      'US-001': {
+        passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: true,
+      },
+    }));
+    expect(tryReadEngineOwnedFields(file, 'US-001')).toEqual({
+      validated: false, escalated: true,
+    });
+    expect(tryReadEngineOwnedFields(file, 'US-404')).toEqual({
+      validated: 'missing', escalated: 'missing',
+    });
     rmSync(dir, { recursive: true, force: true });
   });
   it('rejects structurally invalid state (valid JSON, wrong shape)', () => {
@@ -55,6 +88,8 @@ describe('tryReadState', () => {
     expect(tryReadState(file)).toBeNull();
     writeFileSync(file, JSON.stringify({ 'US-001': { passes: false, notes: '', retryCount: 0, blocked: false, escalated: 'yes' } }));
     expect(tryReadState(file)).toBeNull();
+    writeFileSync(file, JSON.stringify({ 'US-001': { passes: false, validated: 'yes', notes: '', retryCount: 0, blocked: false } }));
+    expect(tryReadState(file)).toBeNull();
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -67,7 +102,7 @@ describe('initialStateFor', () => {
   });
   it('extracts legacy state fields from v0.4-style stories (migration)', () => {
     const s = initialStateFor(contentPrd(['US-001'], { 'US-001': { passes: true, notes: 'x', retryCount: 3, blocked: true } }));
-    expect(s['US-001']).toEqual({ passes: true, notes: 'x', retryCount: 3, blocked: true, escalated: false });
+    expect(s['US-001']).toEqual({ passes: true, validated: false, notes: 'x', retryCount: 3, blocked: true, escalated: false });
   });
 });
 
@@ -92,7 +127,9 @@ describe('ensureStateFile', () => {
     const state = ensureStateFile(dir, contentPrd(['US-001']));
     expect(state['US-001'].passes).toBe(true); // 不被初始值覆盖
     expect(state['US-001'].escalated).toBe(false); // 旧 state 在内存兼容归一
+    expect(state['US-001'].validated).toBe(true); // 旧 passed state 保持已完成
     expect(readFileSync(join(dir, 'state.json'), 'utf-8')).not.toContain('escalated'); // 读取不触发迁移写
+    expect(readFileSync(join(dir, 'state.json'), 'utf-8')).not.toContain('validated');
     rmSync(dir, { recursive: true, force: true });
   });
   it('does not overwrite a corrupted state.json (leave it to repair)', () => {
@@ -116,8 +153,8 @@ describe('getCurrentStoryId / allStoriesResolved', () => {
   const prd = contentPrd(['US-001', 'US-002', 'US-003']);
   it('picks the first story that is neither passing nor blocked', () => {
     const state: RunState = {
-      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false },
-      'US-002': { passes: false, notes: '', retryCount: 5, blocked: true, escalated: false },
+      'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+      'US-002': { passes: false, validated: false, notes: '', retryCount: 5, blocked: true, escalated: false },
     };
     // US-003 不在 state 中 → 按初始状态可选
     expect(getCurrentStoryId(prd, state)).toBe('US-003');
@@ -125,9 +162,9 @@ describe('getCurrentStoryId / allStoriesResolved', () => {
   });
   it('resolves when every story passes or is blocked', () => {
     const state: RunState = {
-      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false },
-      'US-002': { passes: false, notes: '', retryCount: 5, blocked: true, escalated: false },
-      'US-003': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+      'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+      'US-002': { passes: false, validated: false, notes: '', retryCount: 5, blocked: true, escalated: false },
+      'US-003': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
     };
     expect(getCurrentStoryId(prd, state)).toBeNull();
     expect(allStoriesResolved(prd, state)).toBe(true);
@@ -136,7 +173,7 @@ describe('getCurrentStoryId / allStoriesResolved', () => {
 
 describe('mergedStories', () => {
   it('overlays state onto content when state is present', () => {
-    const state: RunState = { 'US-001': { passes: true, notes: 'ok', retryCount: 1, blocked: false, escalated: false } };
+    const state: RunState = { 'US-001': { passes: true, validated: true, notes: 'ok', retryCount: 1, blocked: false, escalated: false } };
     const view = mergedStories(contentPrd(['US-001', 'US-002']), state);
     expect(view[0].passes).toBe(true);
     expect(view[0].notes).toBe('ok');
@@ -150,7 +187,7 @@ describe('mergedStories', () => {
 
 describe('escalated engine ownership', () => {
   const base = (): RunState => ({
-    'US-001': { passes: false, notes: '', retryCount: 2, blocked: false, escalated: false },
+    'US-001': { passes: false, validated: false, notes: '', retryCount: 2, blocked: false, escalated: false },
   });
 
   it('restores both unauthorized enable and downgrade attempts', () => {
@@ -182,5 +219,64 @@ describe('escalated engine ownership', () => {
     expect(withTarget.changed).toBe(true);
     expect(withTarget.state['US-001']).toMatchObject({ escalated: true, retryCount: 2 });
     expect(enableEscalation(withTarget.state, 'US-001', true).changed).toBe(false);
+  });
+});
+
+describe('validated engine ownership', () => {
+  const base = (): RunState => ({
+    'US-001': { passes: true, validated: false, notes: '', retryCount: 1, blocked: false, escalated: false },
+  });
+
+  it('requires both the builder claim and engine receipt for an effective pass', () => {
+    expect(isStoryPassed(base()['US-001'])).toBe(false);
+    expect(isStoryPassed({ ...base()['US-001'], validated: true })).toBe(true);
+    expect(isStoryPassed({ ...base()['US-001'], validated: true, blocked: true })).toBe(false);
+  });
+
+  it('restores agent attempts to forge or remove the receipt', () => {
+    const forged = base();
+    forged['US-001'].validated = true;
+    const restored = restoreValidated(forged, 'US-001', false);
+    expect(restored.state['US-001'].validated).toBe(false);
+    expect(restored.tamper).toEqual({ expected: false, received: true });
+
+    const missing = restoreValidated({}, 'US-001', false, base()['US-001']);
+    expect(missing.state['US-001']).toEqual(base()['US-001']);
+    expect(missing.tamper).toEqual({ expected: false, received: 'missing' });
+
+    const fieldOnly = restoreValidated(base(), 'US-001', false, undefined, 'missing');
+    expect(fieldOnly.state['US-001'].validated).toBe(false);
+    expect(fieldOnly.tamper).toEqual({ expected: false, received: 'missing' });
+  });
+
+  it('issues only for a passing non-blocked story and is idempotent', () => {
+    const issued = issueValidationReceipt(base(), 'US-001');
+    expect(issued.changed).toBe(true);
+    expect(issued.state['US-001'].validated).toBe(true);
+    expect(issueValidationReceipt(issued.state, 'US-001').changed).toBe(false);
+    expect(issueValidationReceipt({
+      'US-001': { ...base()['US-001'], passes: false },
+    }, 'US-001').changed).toBe(false);
+    expect(issueValidationReceipt({
+      'US-001': { ...base()['US-001'], blocked: true },
+    }, 'US-001').changed).toBe(false);
+  });
+
+  it('rolls explicit unvalidated passes back at startup but preserves receipts and blocked', () => {
+    const rolled = rollbackUnvalidatedPasses({
+      'US-001': base()['US-001'],
+      'US-002': { ...base()['US-001'], validated: true },
+      'US-003': { ...base()['US-001'], blocked: true },
+    });
+    expect(rolled.storyIds).toEqual(['US-001']);
+    expect(rolled.state['US-001']).toMatchObject({ passes: false, validated: false, retryCount: 1 });
+    expect(rolled.state['US-002'].passes).toBe(true);
+    expect(rolled.state['US-003'].passes).toBe(true);
+  });
+
+  it('keeps an unvalidated pass current and unresolved', () => {
+    const prd = contentPrd(['US-001']);
+    expect(getCurrentStoryId(prd, base())).toBe('US-001');
+    expect(allStoriesResolved(prd, base())).toBe(false);
   });
 });

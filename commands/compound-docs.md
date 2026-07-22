@@ -39,7 +39,7 @@ progress.md 里写了但当前代码已不再体现的经验，不沉淀。
 ### 1. 建立范围
 
 - 读 `.workspace/prd.json`：branchName、交付范围（顶层 `sourcePrd` 存在时可读源 PRD 补背景）
-- 读 `.workspace/state.json`：哪些 story 已 `passes`（本轮实际完成范围）
+- 读 `.workspace/state.json`：哪些 story 已有效通过（`blocked=false` 且 `passes && validated`；旧 state 缺 `validated` 时按 `passes` 兼容，本轮实际完成范围）
 - git 取证基线：
 
 ```bash

@@ -23,6 +23,10 @@ export type EvidenceRecord =
       gateRejected?: true;
       /** 本轮发生异常回写（applyAbortRollback） */
       abortRollback?: { storyId: string };
+      /** 本轮未获得验收凭证，候选 passes 已回写。 */
+      validationRollback?: true;
+      /** validator completed 且候选结果保持通过，引擎已签发验收凭证。 */
+      validationReceipt?: true;
       /** 本轮实际路由来源；旧记录缺失时消费端显示“来源未知”。 */
       builderRouteSource?: ModelRouteSource;
       validatorRouteSource?: ModelRouteSource;
@@ -31,6 +35,10 @@ export type EvidenceRecord =
       escalationTriggeredBy?: 'gate' | 'validator' | 'noop';
       /** agent 对引擎独占字段的改动；引擎已恢复。 */
       stateRouteTamper?: Array<{
+        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
+      }>;
+      /** agent 对引擎独占 validated 的改动；引擎已恢复。 */
+      stateValidationTamper?: Array<{
         expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
       }> }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
@@ -90,12 +98,16 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (v.noop === undefined || v.noop === true)
         && (v.gateRejected === undefined || v.gateRejected === true)
         && (v.abortRollback === undefined || (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string'))
+        && (v.validationRollback === undefined || v.validationRollback === true)
+        && (v.validationReceipt === undefined || v.validationReceipt === true)
+        && !(v.validationRollback === true && v.validationReceipt === true)
         && (v.builderRouteSource === undefined || isRouteSource(v.builderRouteSource))
         && (v.validatorRouteSource === undefined || isRouteSource(v.validatorRouteSource))
         && (v.storyDifficulty === undefined || v.storyDifficulty === 'low' || v.storyDifficulty === 'medium' || v.storyDifficulty === 'high')
         && (v.escalationTriggeredBy === undefined || v.escalationTriggeredBy === 'gate'
           || v.escalationTriggeredBy === 'validator' || v.escalationTriggeredBy === 'noop')
-        && (v.stateRouteTamper === undefined || isStateRouteTamper(v.stateRouteTamper));
+        && (v.stateRouteTamper === undefined || isStateRouteTamper(v.stateRouteTamper))
+        && (v.stateValidationTamper === undefined || isStateRouteTamper(v.stateValidationTamper));
     case 'gate-run':
       return v.source === 'engine' && typeof v.iteration === 'number'
         && (typeof v.storyId === 'string' || v.storyId === null)

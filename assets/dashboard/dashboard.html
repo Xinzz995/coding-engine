@@ -200,6 +200,7 @@ const STATE_CONFIG = {
   passed:  { label: '已通过', dotColor: 'var(--mac-green)',  badgeBg: 'hsla(142,60%,95%,1)',      badgeColor: 'var(--mac-green)' },
   failed:  { label: '未通过', dotColor: 'var(--mac-red)',    badgeBg: 'hsla(4,80%,96%,1)',        badgeColor: 'var(--mac-red)' },
   blocked: { label: '已阻塞', dotColor: 'var(--mac-orange)', badgeBg: 'hsla(36,80%,95%,1)',      badgeColor: 'var(--mac-orange)' },
+  awaiting:{ label: '待引擎验收', dotColor: 'var(--mac-purple)', badgeBg: 'hsla(280,60%,95%,1)', badgeColor: 'var(--mac-purple)' },
   pending: { label: '待执行', dotColor: 'var(--mac-gray)',   badgeBg: 'transparent',              badgeColor: 'var(--muted)' },
 };
 
@@ -214,7 +215,8 @@ function fmtElapsed(s) {
 function getState(story, cur) {
   if (story.id === cur) return 'active';
   if (story.blocked) return 'blocked';
-  if (story.passes === true) return 'passed';
+  if (story.passes === true && story.validated === true) return 'passed';
+  if (story.passes === true) return 'awaiting';
   if (story.passes === false && (story.retryCount > 0 || story.notes)) return 'failed';
   return 'pending';
 }
@@ -263,7 +265,7 @@ function renderLogs(logs) {
 }
 
 function renderProgress(stories) {
-  const passed = stories.filter(s => s.passes === true).length;
+  const passed = stories.filter(s => !s.blocked && s.passes === true && s.validated === true).length;
   const total = stories.length;
   document.getElementById('progressFill').style.width = (total ? Math.round(passed/total*100) : 0) + '%';
   document.getElementById('progressLabel').textContent = passed + '/' + total;
@@ -314,15 +316,15 @@ const FALLBACK = {
   modelRouting: { status: 'disabled', config: null, errors: [] },
   project: '简易笔记系统',
   stories: [
-    { id:'US-001', title:'初始化项目结构与静态导出配置', passes:true, notes:'', retryCount:0, blocked:false },
-    { id:'US-002', title:'定义 Note 数据类型与示例数据预加载', passes:true, notes:'', retryCount:0, blocked:false },
-    { id:'US-003', title:'笔记列表组件（左侧栏）', passes:false, notes:'列表项点击事件未正确绑定', retryCount:2, blocked:false },
-    { id:'US-004', title:'笔记详情展示（右侧区域）', passes:false, notes:'', retryCount:0, blocked:false },
-    { id:'US-005', title:'新建笔记功能', passes:false, notes:'', retryCount:0, blocked:false },
-    { id:'US-006', title:'编辑笔记（实时保存）', passes:false, notes:'', retryCount:0, blocked:false },
-    { id:'US-007', title:'删除笔记功能', passes:false, notes:'', retryCount:0, blocked:true },
-    { id:'US-008', title:'笔记搜索过滤', passes:false, notes:'', retryCount:0, blocked:false },
-    { id:'US-009', title:'数据重置按钮', passes:false, notes:'', retryCount:0, blocked:false },
+    { id:'US-001', title:'初始化项目结构与静态导出配置', passes:true, validated:true, notes:'', retryCount:0, blocked:false },
+    { id:'US-002', title:'定义 Note 数据类型与示例数据预加载', passes:true, validated:true, notes:'', retryCount:0, blocked:false },
+    { id:'US-003', title:'笔记列表组件（左侧栏）', passes:false, validated:false, notes:'列表项点击事件未正确绑定', retryCount:2, blocked:false },
+    { id:'US-004', title:'笔记详情展示（右侧区域）', passes:false, validated:false, notes:'', retryCount:0, blocked:false },
+    { id:'US-005', title:'新建笔记功能', passes:false, validated:false, notes:'', retryCount:0, blocked:false },
+    { id:'US-006', title:'编辑笔记（实时保存）', passes:false, validated:false, notes:'', retryCount:0, blocked:false },
+    { id:'US-007', title:'删除笔记功能', passes:false, validated:false, notes:'', retryCount:0, blocked:true },
+    { id:'US-008', title:'笔记搜索过滤', passes:false, validated:false, notes:'', retryCount:0, blocked:false },
+    { id:'US-009', title:'数据重置按钮', passes:false, validated:false, notes:'', retryCount:0, blocked:false },
   ],
   logs: `## Codebase Patterns\n- Next.js 16 + App Router + Tailwind CSS v4\n- 静态导出：next.config.mjs 中设置 output: 'export'\n- 页面文件位于 app/ 目录\n\n## 2026-03-29 23:30 - US-001\n- 搭建了 Next.js 16 (App Router) 项目骨架\n- 配置了 Tailwind CSS v4（使用 @tailwindcss/postcss 插件）\n- next.config.mjs 中设置 output: 'export' 启用静态导出\n- 实现了两栏布局：左侧固定宽度 320px 列表区 + 右侧弹性内容区\n- TypeScript 类型检查通过，next build 成功生成 out/ 静态产物\n- **未来迭代的学习：**\n  - Tailwind CSS v4 不使用传统的 tailwind.config.js\n  - PostCSS 配置使用 "@tailwindcss/postcss" 插件名\n\n## 2026-03-29 23:45 - US-002\n- 定义了 Note 接口类型\n- 创建了示例数据文件，包含 2 条示例笔记\n- 将 page.tsx 改为 "use client" 客户端组件\n- 应用初始化后默认选中第一条示例笔记\n- TypeScript 类型检查和 next build 均通过\n- **未来迭代的学习：**\n  - page.tsx 需要 "use client" 指令才能使用 React hooks\n  - 类型定义放在 app/types.ts，示例数据放在 app/sample-data.ts`
 };

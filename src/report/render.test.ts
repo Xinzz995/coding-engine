@@ -24,7 +24,7 @@ function data(over: Partial<ReportData> = {}): ReportData {
     stories: [
       {
         id: 'US-001', title: '第一个', description: 'd', acceptanceCriteria: ['能打开页面'],
-        priority: 1, passes: true, notes: '', retryCount: 0, blocked: false, escalated: false,
+        priority: 1, passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false,
       },
     ],
     stateCorrupted: false,
@@ -381,6 +381,49 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('fast-m');
     expect(html).toContain('val-m');
     expect(html).toContain('防伪加固属后续评估'); // engine 记录区免责标注（A3，发现 5 裁决）
+  });
+
+  it('passes=true 但无引擎验收凭证时不显示全绿', () => {
+    const base = data();
+    const html = renderReportHtml(data({
+      stories: [{ ...base.stories[0], validated: false }],
+    }));
+    expect(html).toContain('待引擎验收');
+    expect(html).toContain('进行中：0/1 通过');
+    expect(html).not.toContain('全部通过 1/1');
+  });
+
+  it('blocked 优先于矛盾的 passes 与 validated 组合', () => {
+    const base = data();
+    const html = renderReportHtml(data({
+      stories: [{ ...base.stories[0], blocked: true }],
+    }));
+    expect(html).toContain('⛔ blocked');
+    expect(html).toContain('0 通过 · 1 blocked');
+    expect(html).not.toContain('全部通过 1/1');
+  });
+
+  it('验收凭证签发、回写与 validated 篡改进入时间线和红旗区', () => {
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'iteration', source: 'engine', at: '2026-07-22T06:00:00.000Z',
+        iteration: 3, storyId: 'US-001', builderRan: true, builderModel: null,
+        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+        validationReceipt: true,
+      },
+      {
+        type: 'iteration', source: 'engine', at: '2026-07-22T06:01:00.000Z',
+        iteration: 4, storyId: 'US-002', builderRan: true, builderModel: null,
+        validatorRan: false, validatorModel: null, skippedValidator: true, agentBlocked: false,
+        validationRollback: true,
+        stateValidationTamper: [{ expected: false, received: true, side: 'builder' }],
+      },
+    ])));
+    expect(html).toContain('验收凭证已签发');
+    expect(html).toContain('未签发验收凭证，已回写待复核');
+    expect(html).toContain('改写 validated（false → true）已恢复');
+    expect(html).toContain('引擎独占字段 <code>validated</code>');
+    expect(html).toContain('红旗区：运行期状态 / PRD 篡改');
   });
 
   it('路由证据展示难度、实际模型来源、升级触发与状态篡改', () => {

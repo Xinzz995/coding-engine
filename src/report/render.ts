@@ -1,5 +1,5 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
-import type { StoryView } from '../engine/state.js';
+import { isStoryPassed, type StoryView } from '../engine/state.js';
 import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX } from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
@@ -121,8 +121,9 @@ function renderGallery(shots: ScreenshotEntry[], claimedFiles: ReadonlySet<strin
 }
 
 function storyBadge(s: StoryView): string {
-  if (s.passes) return '<span class="badge ok">✅ 通过</span>';
+  if (isStoryPassed(s)) return '<span class="badge ok">✅ 通过</span>';
   if (s.blocked) return '<span class="badge blocked">⛔ blocked</span>';
+  if (s.passes) return '<span class="badge pending">🟨 待引擎验收</span>';
   return '<span class="badge pending">⬜ 未完成</span>';
 }
 
@@ -159,7 +160,7 @@ ${renderGallery(shots, anyClaims ? new Set(claims.map((c) => c.file)) : null)}
 function renderBanner(stories: StoryView[]): string {
   const total = stories.length;
   if (total === 0) return '<div class="banner blocked">⚠️ prd.json 中没有任何 story</div>';
-  const passed = stories.filter((x) => x.passes).length;
+  const passed = stories.filter(isStoryPassed).length;
   const blocked = stories.filter((x) => x.blocked).length;
   if (total > 0 && passed === total) return `<div class="banner ok">✅ 全部通过 ${passed}/${total}</div>`;
   if (blocked > 0) return `<div class="banner blocked">⛔ ${passed} 通过 · ${blocked} blocked · 共 ${total}</div>`;
@@ -210,9 +211,14 @@ function renderTimeline(records: EvidenceRecord[]): string {
     if (r.validatorOutcome === 'timeout') flags.push('validator 超时');
     if (r.validatorOutcome === 'error') flags.push('validator 异常退出');
     if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
+    if (r.validationRollback) flags.push('未签发验收凭证，已回写待复核');
+    if (r.validationReceipt) flags.push('验收凭证已签发');
     if (r.escalationTriggeredBy) flags.push(`已触发升级（${text(r.escalationTriggeredBy)}）`);
     for (const tamper of r.stateRouteTamper ?? []) {
       flags.push(`${tamper.side} 改写 escalated（${tamper.expected} → ${tamper.received}）已恢复`);
+    }
+    for (const tamper of r.stateValidationTamper ?? []) {
+      flags.push(`${tamper.side} 改写 validated（${tamper.expected} → ${tamper.received}）已恢复`);
     }
     const flagCell = flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—';
     const builder = r.builderRan
@@ -255,7 +261,13 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
     .flatMap((r) => (r.stateRouteTamper ?? []).map((t) => ({
       ...t, iteration: r.iteration, at: r.at, storyId: r.storyId,
     })));
-  if (tampered.length === 0 && tamperEvents.length === 0 && stateRouteTampers.length === 0) return '';
+  const stateValidationTampers = records
+    .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration')
+    .flatMap((r) => (r.stateValidationTamper ?? []).map((t) => ({
+      ...t, iteration: r.iteration, at: r.at, storyId: r.storyId,
+    })));
+  if (tampered.length === 0 && tamperEvents.length === 0
+      && stateRouteTampers.length === 0 && stateValidationTampers.length === 0) return '';
   const eventOf = new Map(tamperEvents.filter((t) => t.archive !== null).map((t) => [t.archive as string, t]));
   const files = tampered.map((f) => {
     const ev = eventOf.get(f);
@@ -272,10 +284,13 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
   const routeItems = stateRouteTampers.map((t) =>
     `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>escalated</code>（${t.expected} → ${t.received}），已恢复</li>`,
   ).join('');
+  const validationItems = stateValidationTampers.map((t) =>
+    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>validated</code>（${t.expected} → ${t.received}），已恢复</li>`,
+  ).join('');
   return `<section class="card red-flag">
-<h2>🚩 红旗区：运行期路由 / PRD 篡改</h2>
-<p>引擎检出并恢复了不应由 agent 修改的数据（PRD 防护见 ADR-007）。合并裁决前请逐个核对：</p>
-<ul>${files}${deletions}${missing}${routeItems}</ul>
+<h2>🚩 红旗区：运行期状态 / PRD 篡改</h2>
+<p>引擎检出并恢复了不应由 agent 修改的数据（PRD 防护见 ADR-007，状态所有权见 ADR-013）。合并裁决前请逐个核对：</p>
+<ul>${files}${deletions}${missing}${routeItems}${validationItems}</ul>
 <p>指引：核对上述记录及对应存档；与预期不符须停止合并。</p>
 </section>`;
 }

@@ -499,7 +499,7 @@ describe('renderStatusJson', () => {
       expect(obj.stories).toHaveLength(3);
       expect(obj.stories[1]).toEqual({
         id: 'US-002', title: '第二个故事', priority: 2,
-        passes: false, notes: '一条失败记录', retryCount: 2, blocked: false, escalated: false,
+        passes: false, validated: false, notes: '一条失败记录', retryCount: 2, blocked: false, escalated: false,
       });
       expect(obj.summary).toEqual({ total: 3, passed: 1, blocked: 1 });
       expect(exitCode).toBe(1);
@@ -551,7 +551,7 @@ describe('renderStatusJson', () => {
       const obj = JSON.parse(text);
       expect(obj.stories[0]).toEqual({
         id: 'US-001', title: '旧一', priority: 1,
-        passes: true, notes: '旧备注', retryCount: 2, blocked: false, escalated: false,
+        passes: true, validated: true, notes: '旧备注', retryCount: 2, blocked: false, escalated: false,
       });
       expect(obj.stories[1].blocked).toBe(true);
       expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });
@@ -581,6 +581,49 @@ describe('renderStatusJson', () => {
       const { text, exitCode } = renderStatusJson(collectStatus(ws));
       expect(JSON.parse(text).summary).toEqual({ total: 0, passed: 0, blocked: 0 });
       expect(exitCode).toBe(1);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('does not count passes=true without an engine validation receipt as passed', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [PRD.userStories[0]] }));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({
+        'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
+      }));
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report);
+      expect(human.text).toContain('待引擎验收');
+      expect(human.text).not.toContain('✅ 全部 story 已通过');
+      expect(human.exitCode).toBe(1);
+      const json = renderStatusJson(report);
+      expect(JSON.parse(json.text)).toMatchObject({
+        stories: [{ passes: true, validated: false }],
+        summary: { total: 1, passed: 0, blocked: 0 },
+      });
+      expect(json.exitCode).toBe(1);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('gives blocked precedence over contradictory pass and receipt fields', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [PRD.userStories[0]] }));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({
+        'US-001': { passes: true, validated: true, notes: '', retryCount: 5, blocked: true, escalated: false },
+      }));
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report);
+      expect(human.text).toContain('⛔ US-001');
+      expect(human.text).not.toContain('待引擎验收');
+      expect(human.exitCode).toBe(1);
+      const json = renderStatusJson(report);
+      expect(JSON.parse(json.text).summary).toEqual({ total: 1, passed: 0, blocked: 1 });
+      expect(json.exitCode).toBe(1);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }

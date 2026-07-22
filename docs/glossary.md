@@ -26,8 +26,12 @@ validator 判定某条 acceptanceCriteria 未通过：passes 设回 false、note
 禁用：驳回、退回
 
 **blocked**
-story 达到最大重试次数后被跳过的状态，留给人工处理；与 passes 一起构成循环完成判定。
+story 达到最大重试次数后被跳过的状态，留给人工处理；与有效通过态一起构成循环完成判定。
 禁用：卡死、挂起
+
+**验收凭证（validated）**
+引擎观察到 validator 正常完成且 `passes` 仍为 true 后签发的 story 通过凭证；由引擎独占，agent 不得改写。story 只有 `blocked=false` 且 `passes && validated` 才是有效通过。
+禁用：验证标记、通过凭证（统一用「验收凭证」；字段名用 `validated`）
 
 **假绿**
 validator 报告通过但实际未满足验收标准（共谋、敷衍验证或同义反复测试所致）——review-loop 独立复核存在的理由。
@@ -94,7 +98,7 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 禁用：空转保护、无进展终止
 
 **收敛出口**
-全部 story 达到 passes 或 blocked 时的统一结束路径（单源函数，快路径与轮末两处行为一致）：全通过退出码 0；存在 blocked 时列出 story 号、退出码 3 交人工处理。
+全部 story 达到有效通过（`passes && validated`）或 blocked 时的统一结束路径（单源函数，快路径与轮末两处行为一致）：全通过退出码 0；存在 blocked 时列出 story 号、退出码 3 交人工处理。
 禁用：完成出口、全绿出口
 
 **证据索引**
@@ -128,7 +132,8 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 ## 关系
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
-- 打回递增 retryCount，达到上限转 blocked；全部 story passes 或 blocked 即走收敛出口结束循环
+- builder 把 `passes=true` 作为候选结果，validator 正常完成且仍通过后由引擎签发验收凭证；两者同时为 true 才是有效通过
+- 打回递增 retryCount，达到上限转 blocked；全部 story 有效通过或 blocked 即走收敛出口结束循环
 - 异常轮触发回写待复核并计入 stall 熔断；空转轮跳过门禁与 validator、同样计入熔断
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含人审（/review-loop 产出人审包）与沉淀（/compound-docs，含取舍账本收账）

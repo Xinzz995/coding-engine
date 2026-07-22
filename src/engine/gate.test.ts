@@ -40,7 +40,7 @@ describe('readQualityChecks', () => {
 
 describe('applyGateFailure', () => {
   const base: RunState = {
-    'US-001': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+    'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
   };
   const now = new Date(2026, 6, 5, 14, 30); // 本地时间 2026-07-05 14:30
 
@@ -66,6 +66,7 @@ describe('applyGateFailure', () => {
     const state: RunState = {
       'US-001': {
         passes: true,
+        validated: false,
         notes: '[需求冲突] 2026-07-01 10:00 冲突点（源说 X，AC 说 Y，已按 Y 实现）\n[验证失败 - 第1次] 旧失败详情',
         retryCount: 1,
         blocked: false,
@@ -81,7 +82,7 @@ describe('applyGateFailure', () => {
 
   it('marks blocked and appends BLOCKED note when retryCount reaches MAX_RETRIES', () => {
     const state: RunState = {
-      'US-001': { passes: true, notes: '', retryCount: MAX_RETRIES - 1, blocked: false, escalated: false },
+      'US-001': { passes: true, validated: false, notes: '', retryCount: MAX_RETRIES - 1, blocked: false, escalated: false },
     };
     const next = applyGateFailure(state, 'US-001', failure(), now);
     expect(next['US-001'].retryCount).toBe(MAX_RETRIES);
@@ -100,6 +101,7 @@ describe('applyGateFailure', () => {
     const state: RunState = {
       'US-001': {
         passes: false,
+        validated: false,
         notes: '[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已附调查过程\n普通旧失败行',
         retryCount: 0,
         blocked: false,
@@ -117,6 +119,7 @@ describe('applyGateFailure', () => {
     const state: RunState = {
       'US-001': {
         passes: false,
+        validated: false,
         notes: '[需求冲突] 冲突点 A\n[需要人工核实] 疑点 B\n其他旧内容',
         retryCount: 0,
         blocked: false,
@@ -131,6 +134,7 @@ describe('applyGateFailure', () => {
     const state: RunState = {
       'US-001': {
         passes: false,
+        validated: false,
         notes: '[需要人工核实] 已置 blocked 待人工',
         retryCount: 0,
         blocked: true,
@@ -253,7 +257,7 @@ describe('applyAbortRollback', () => {
   const at = new Date('2026-07-17T10:00:00');
 
   it('回写 passes=false 并写入中断标记行；retryCount 与 blocked 不动', () => {
-    const state = { 'US-001': { passes: true, notes: '', retryCount: 2, blocked: false, escalated: false } };
+    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 2, blocked: false, escalated: false } };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].retryCount).toBe(2);
@@ -266,7 +270,7 @@ describe('applyAbortRollback', () => {
   });
 
   it('error 结局的标记行含退出码', () => {
-    const state = { 'US-001': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false } };
+    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false } };
     const next = applyAbortRollback(state, 'US-001', { side: 'validator', timedOut: false, exitCode: 143 }, at);
     expect(next['US-001'].notes).toContain('validator');
     expect(next['US-001'].notes).toContain('退出码 143');
@@ -274,14 +278,14 @@ describe('applyAbortRollback', () => {
 
   it('外部信号终止（timedOut=false 且 exitCode=null）渲染「被信号终止」而非「退出码 null」', () => {
     // runAgent 的 exit 事件 code 为 null 仅发生在进程被信号终止且非引擎超时路径
-    const state = { 'US-001': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false } };
+    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false } };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: false, exitCode: null }, at);
     expect(next['US-001'].notes).toContain('被信号终止');
     expect(next['US-001'].notes).not.toContain('退出码 null');
   });
 
   it('保全既有仲裁标签行在标记行之前', () => {
-    const state = { 'US-001': { passes: true, notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录', retryCount: 0, blocked: false, escalated: false } };
+    const state = { 'US-001': { passes: true, validated: false, notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录', retryCount: 0, blocked: false, escalated: false } };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
     const lines = next['US-001'].notes.split('\n');
     expect(lines[0]).toBe('[需求冲突] AC2 与源 PRD 矛盾');
@@ -290,7 +294,7 @@ describe('applyAbortRollback', () => {
   });
 
   it('prev.blocked 时原样返回不回写（停下等人信号优先）', () => {
-    const state = { 'US-001': { passes: true, notes: '[需要人工核实] x', retryCount: 1, blocked: true, escalated: false } };
+    const state = { 'US-001': { passes: true, validated: false, notes: '[需要人工核实] x', retryCount: 1, blocked: true, escalated: false } };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
     expect(next).toBe(state);
   });

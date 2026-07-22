@@ -1,11 +1,13 @@
 ---
 title: "PRD: coding-x status——工作区执行状态终端速览子命令"
 status: done
-updated: 2026-07-06
+updated: 2026-07-22
 scope: root
 ---
 
 # PRD: coding-x status——工作区执行状态终端速览子命令
+
+> v0.25 起“通过”指 `passes && validated`；`passes=true, validated=false` 作为“待引擎验收”单独呈现。验收凭证语义见 ADR-013。
 
 ## Introduction
 
@@ -18,7 +20,7 @@ scope: root
 - 一条命令一屏看清工作区执行状态（不起服务器、不开浏览器）
 - 留给人的信息（`[需求冲突]` notes、blocked story）必须冒出来，不被淹没
 - `--json` 机器可读输出，agent/脚本/CI 可直接消费
-- 退出码可作门禁：全通过 0、未全通过 1、无可读工作区 2
+- 退出码可作门禁：全部 story 有效通过（`passes && validated`）时为 0、未全通过 1、无可读 workspace 2
 - 复用引擎既有合并视图逻辑，v0.4 旧格式 workspace 与历史归档零迁移可看
 - 只读、零新增运行时依赖
 
@@ -29,8 +31,8 @@ scope: root
 
 **Acceptance Criteria：**
 - [ ] 运行 `coding-x status` 读取 `--workspace`（缺省 `.workspace`）目录下的 `prd.json` 与 `state.json`，输出总览：项目名、分支名、story 通过数/总数
-- [ ] 每个 story 输出一行：状态标记 + id + 标题；通过、未通过、阻塞三种状态的行首标记互不相同；`retryCount` 大于 0 的 story 行内显示重试次数
-- [ ] 全部 story 通过时输出明确的全绿信息，进程退出码为 0
+- [ ] 每个 story 输出一行：状态标记 + id + 标题；通过、待引擎验收、未通过、阻塞四种状态的行首标记互不相同；`retryCount` 大于 0 的 story 行内显示重试次数
+- [ ] 全部 story 有效通过（`passes && validated`）时输出明确的全绿信息，进程退出码为 0
 - [ ] 存在未通过或 blocked 的 story 时退出码为 1
 - [ ] workspace 目录或其中 `prd.json` 不存在时：输出提示（建议先用 prd-to-json 生成工作区）并以退出码 2 结束
 - [ ] `prd.json` 存在但无法解析时：输出错误提示（建议运行 `npx coding-x repair`）并以退出码 2 结束
@@ -53,7 +55,7 @@ scope: root
 **描述：** 作为 agent/脚本作者，我想用 `coding-x status --json` 拿到结构化的执行状态，以便程序化消费而不解析人类可读文本；旧格式工作区也要能看。
 
 **Acceptance Criteria：**
-- [ ] `coding-x status --json` 向 stdout 输出单个 JSON 对象，字段含 `project`、`branchName`、`sourcePrd`（prd.json 中存在时）、`stories`（每项含 id/title/priority/passes/notes/retryCount/blocked）、`summary`（total/passed/blocked 计数）
+- [ ] `coding-x status --json` 向 stdout 输出单个 JSON 对象，字段含 `project`、`branchName`、`sourcePrd`（prd.json 中存在时）、`stories`（每项含 id/title/priority/passes/validated/notes/retryCount/blocked）、`summary`（total/passed/blocked 计数，其中 passed 只计有效通过）
 - [ ] `--json` 模式下 stdout 内容可被 `JSON.parse` 直接解析（无任何装饰性文本混入）
 - [ ] `--json` 模式退出码语义与人类可读模式一致（0/1/2）
 - [ ] `state.json` 缺失时：按 prd.json story 上的旧格式内嵌状态字段回退合并（v0.4 workspace 与历史归档零迁移可看，语义与 dashboard 离线回看一致）
@@ -74,10 +76,10 @@ scope: root
 ## Functional Requirements
 
 - FR-1: CLI 新增子命令 `status`（与既有 `dashboard`、`repair`、`doctor` 同级分发），支持 `--workspace <dir>`（缺省 `.workspace`）与 `--json` 参数
-- FR-2: 人类可读输出包含——总览（项目名、分支名、通过数/总数、blocked 计数（>0 时））、每 story 一行（三态标记/id/标题/重试次数（>0 时））、非空 notes 缩进展示、`[需求冲突]` 行醒目标记、「当前 story」提示行、最近进展标题行（progress.md 有记录时）
+- FR-2: 人类可读输出包含——总览（项目名、分支名、有效通过数/总数、blocked 计数（>0 时））、每 story 一行（四态标记/id/标题/重试次数（>0 时））、非空 notes 缩进展示、`[需求冲突]` 行醒目标记、「当前 story」提示行、最近进展标题行（progress.md 有记录时）
 - FR-3: `--json` 输出合并视图单个 JSON 对象到 stdout，无装饰文本；人类警告一律走 stderr
 - FR-4: 状态合并以 `state.json` 为准；state.json 缺失或损坏时回退读 prd.json story 上的旧格式内嵌状态字段（损坏时 stderr 警告建议 repair）
-- FR-5: 退出码——全部 story passes：0；存在未通过或 blocked：1；workspace 目录/prd.json 不存在或不可解析：2
+- FR-5: 退出码——全部 story `passes && validated`：0；存在待验收、未通过或 blocked：1；workspace 目录/prd.json 不存在或不可解析：2
 - FR-6: status 为只读命令，不创建、不修改、不删除任何文件
 - FR-7: 零新增运行时依赖，复用 `src/engine/` 既有纯函数（`tryReadPrd`、`tryReadState`、`mergedStories`、`getCurrentStoryId`、`readProgress`）
 

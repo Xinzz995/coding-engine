@@ -237,15 +237,15 @@ const FALLBACK = {
   project: "AI 自动化 Coding2.0",
   branchName: "ralph/AI Auto Coding",
   stories: [
-    { id: "US-001", title: "初始化项目结构与静态导出配置", description: "搭建 Next.js 项目骨架，配置 Tailwind CSS 与静态导出", acceptanceCriteria: ["App Router 模式", "output: 'export'", "两栏布局骨架", "next build 成功", "Typecheck passes"], priority: 1, passes: true, notes: "", retryCount: 0, blocked: false },
-    { id: "US-002", title: "定义 Note 数据类型与示例数据预加载", description: "定义笔记数据结构，预加载示例数据", acceptanceCriteria: ["Note 类型定义", "预加载 2 条示例", "默认选中第一条", "Typecheck passes"], priority: 2, passes: true, notes: "", retryCount: 0, blocked: false },
-    { id: "US-003", title: "笔记列表组件（左侧栏）", description: "左侧栏显示笔记列表，含标题、预览和时间", acceptanceCriteria: ["列表渲染", "倒序排列", "高亮选中", "过渡动画", "点击切换"], priority: 3, passes: false, notes: "列表项点击事件未正确绑定", retryCount: 2, blocked: false },
-    { id: "US-004", title: "笔记详情展示（右侧区域）", description: "点击列表笔记后，右侧显示完整内容", acceptanceCriteria: ["显示完整标题与内容", "空状态占位文本", "Typecheck passes"], priority: 4, passes: false, notes: "", retryCount: 0, blocked: false },
-    { id: "US-005", title: "新建笔记功能", description: "通过按钮快速新建空白笔记", acceptanceCriteria: ["新建按钮", "插入列表顶端", "焦点落在标题", "过渡动画"], priority: 5, passes: false, notes: "", retryCount: 0, blocked: false },
-    { id: "US-006", title: "编辑笔记（实时保存）", description: "右侧区域直接修改标题和内容，实时生效", acceptanceCriteria: ["无边框输入框", "实时更新状态", "列表同步更新", "自动置顶"], priority: 6, passes: false, notes: "", retryCount: 0, blocked: false },
-    { id: "US-007", title: "删除笔记功能", description: "删除不需要的笔记，有确认提示", acceptanceCriteria: ["删除按钮", "confirm 对话框", "移除动画", "自动选中下一条"], priority: 7, passes: false, notes: "", retryCount: 0, blocked: true },
-    { id: "US-008", title: "笔记搜索过滤", description: "通过搜索框实时过滤笔记列表", acceptanceCriteria: ["搜索框", "实时过滤", "清空恢复", "无结果提示"], priority: 8, passes: false, notes: "", retryCount: 0, blocked: false },
-    { id: "US-009", title: "数据重置按钮", description: "一键恢复初始示例数据", acceptanceCriteria: ["重置按钮", "恢复示例数据", "默认选中第一条"], priority: 9, passes: false, notes: "", retryCount: 0, blocked: false }
+    { id: "US-001", title: "初始化项目结构与静态导出配置", description: "搭建 Next.js 项目骨架，配置 Tailwind CSS 与静态导出", acceptanceCriteria: ["App Router 模式", "output: 'export'", "两栏布局骨架", "next build 成功", "Typecheck passes"], priority: 1, passes: true, validated: true, notes: "", retryCount: 0, blocked: false },
+    { id: "US-002", title: "定义 Note 数据类型与示例数据预加载", description: "定义笔记数据结构，预加载示例数据", acceptanceCriteria: ["Note 类型定义", "预加载 2 条示例", "默认选中第一条", "Typecheck passes"], priority: 2, passes: true, validated: true, notes: "", retryCount: 0, blocked: false },
+    { id: "US-003", title: "笔记列表组件（左侧栏）", description: "左侧栏显示笔记列表，含标题、预览和时间", acceptanceCriteria: ["列表渲染", "倒序排列", "高亮选中", "过渡动画", "点击切换"], priority: 3, passes: false, validated: false, notes: "列表项点击事件未正确绑定", retryCount: 2, blocked: false },
+    { id: "US-004", title: "笔记详情展示（右侧区域）", description: "点击列表笔记后，右侧显示完整内容", acceptanceCriteria: ["显示完整标题与内容", "空状态占位文本", "Typecheck passes"], priority: 4, passes: false, validated: false, notes: "", retryCount: 0, blocked: false },
+    { id: "US-005", title: "新建笔记功能", description: "通过按钮快速新建空白笔记", acceptanceCriteria: ["新建按钮", "插入列表顶端", "焦点落在标题", "过渡动画"], priority: 5, passes: false, validated: false, notes: "", retryCount: 0, blocked: false },
+    { id: "US-006", title: "编辑笔记（实时保存）", description: "右侧区域直接修改标题和内容，实时生效", acceptanceCriteria: ["无边框输入框", "实时更新状态", "列表同步更新", "自动置顶"], priority: 6, passes: false, validated: false, notes: "", retryCount: 0, blocked: false },
+    { id: "US-007", title: "删除笔记功能", description: "删除不需要的笔记，有确认提示", acceptanceCriteria: ["删除按钮", "confirm 对话框", "移除动画", "自动选中下一条"], priority: 7, passes: false, validated: false, notes: "", retryCount: 0, blocked: true },
+    { id: "US-008", title: "笔记搜索过滤", description: "通过搜索框实时过滤笔记列表", acceptanceCriteria: ["搜索框", "实时过滤", "清空恢复", "无结果提示"], priority: 8, passes: false, validated: false, notes: "", retryCount: 0, blocked: false },
+    { id: "US-009", title: "数据重置按钮", description: "一键恢复初始示例数据", acceptanceCriteria: ["重置按钮", "恢复示例数据", "默认选中第一条"], priority: 9, passes: false, validated: false, notes: "", retryCount: 0, blocked: false }
   ],
   logs: `## Codebase Patterns
 - Next.js 16 + App Router + Tailwind CSS v4
@@ -344,7 +344,8 @@ function getStoryState(story) {
   const runtime = getRuntime();
   if (story.id === runtime.current_story) return 'active';
   if (story.blocked) return 'blocked';
-  if (story.passes === true) return 'passed';
+  if (story.passes === true && story.validated === true) return 'passed';
+  if (story.passes === true) return 'awaiting';
   if (story.passes === false && (story.retryCount > 0 || story.notes)) return 'failed';
   return 'pending';
 }
@@ -355,8 +356,8 @@ function formatElapsed(sec) {
   return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
 }
 
-const stateLabel = { active:'进行中', passed:'已通过', failed:'未通过', blocked:'已阻塞', pending:'待执行' };
-const stateColor = { active:'#4a9eff', passed:'#4ade80', failed:'#f87171', blocked:'#fb923c', pending:'#6b7280' };
+const stateLabel = { active:'进行中', passed:'已通过', failed:'未通过', blocked:'已阻塞', awaiting:'待引擎验收', pending:'待执行' };
+const stateColor = { active:'#4a9eff', passed:'#4ade80', failed:'#f87171', blocked:'#fb923c', awaiting:'#c084fc', pending:'#6b7280' };
 const phaseEmoji = { idle:'⏸', developing:'🤖', validating:'🔍', done:'✅', error:'❌' };
 const phaseText = { idle:'等待启动', developing:'开发中', validating:'验证中', done:'全部完成', error:'出现错误' };
 
@@ -482,7 +483,7 @@ function render() {
   ensureCharStates();
   const stories = getStories();
   const runtime = getRuntime();
-  const passedCount = stories.filter(s => s.passes === true).length;
+  const passedCount = stories.filter(s => !s.blocked && s.passes === true && s.validated === true).length;
   const pct = stories.length ? Math.round((passedCount / stories.length) * 100) : 0;
   const isActive = runtime.phase === 'developing' || runtime.phase === 'validating';
   const routing = dashboardData.modelRouting;

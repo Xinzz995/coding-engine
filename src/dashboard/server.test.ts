@@ -35,6 +35,7 @@ describe('buildApiResponse', () => {
     expect(r.sourcePrd).toBe('docs/prds/prd-x.md');
     expect(r.stories.length).toBe(1);
     expect(r.stories[0].passes).toBe(true); // 状态来自 state.json
+    expect(r.stories[0].validated).toBe(true); // 旧 passed state 兼容为已验收
     expect(r.logs).toContain('US-001');
   });
 
@@ -50,6 +51,7 @@ describe('buildApiResponse', () => {
     configureWorkspace(dir, 50);
     const r = buildApiResponse();
     expect(r.stories[0].passes).toBe(true);
+    expect(r.stories[0].validated).toBe(true);
   });
 
   it('exposes the current actual route in runtime and defaults it to null', () => {

@@ -188,4 +188,50 @@ describe('iteration 新可选字段（异常轮语义）', () => {
       ],
     });
   });
+
+  it('验收凭证、未验收回写与 validated 所有权篡改往返保真', () => {
+    const dir = ws();
+    appendEvidence(dir, {
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:00:00.000Z', iteration: 8,
+      storyId: 'US-008', builderRan: true, builderModel: null,
+      validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      validationReceipt: true,
+    });
+    appendEvidence(dir, {
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:01:00.000Z', iteration: 9,
+      storyId: 'US-009', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: true, agentBlocked: false,
+      validationRollback: true,
+      stateValidationTamper: [
+        { expected: false, received: true, side: 'builder' },
+        { expected: false, received: 'missing', side: 'validator' },
+      ],
+    });
+    expect(readEvidence(dir).records[0]).toMatchObject({
+      validationReceipt: true,
+    });
+    expect(readEvidence(dir).records[1]).toMatchObject({
+      validationRollback: true,
+      stateValidationTamper: [
+        { expected: false, received: true, side: 'builder' },
+        { expected: false, received: 'missing', side: 'validator' },
+      ],
+    });
+  });
+
+  it('rejects non-true receipt flags and malformed validated tamper entries', () => {
+    const dir = ws();
+    const base = {
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:00:00.000Z', iteration: 1,
+      storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+    };
+    writeFileSync(join(dir, EVIDENCE_FILE), [
+      { ...base, validationReceipt: false },
+      { ...base, validationRollback: 'yes' },
+      { ...base, validationReceipt: true, validationRollback: true },
+      { ...base, stateValidationTamper: [{ expected: false, received: 1, side: 'builder' }] },
+    ].map((v) => JSON.stringify(v)).join('\n') + '\n');
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 4 });
+  });
 });

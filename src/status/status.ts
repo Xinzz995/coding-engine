@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
 import {
   tryReadState, mergedStories, getCurrentStoryId, initialStateFor, type StoryView,
+  isStoryPassed,
 } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
@@ -105,13 +106,13 @@ export function collectStatus(workspace: string): StatusReport {
 function summarize(stories: StoryView[]): { total: number; passed: number; blocked: number } {
   return {
     total: stories.length,
-    passed: stories.filter((s) => s.passes).length,
+    passed: stories.filter(isStoryPassed).length,
     blocked: stories.filter((s) => s.blocked).length,
   };
 }
 
 function markOf(s: StoryView): string {
-  return s.passes ? '✅' : s.blocked ? '⛔' : '⬜';
+  return isStoryPassed(s) ? '✅' : s.blocked ? '⛔' : s.passes ? '🟨' : '⬜';
 }
 
 export function renderStatusReport(report: StatusReport): { text: string; exitCode: number } {
@@ -151,7 +152,8 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     const retry = s.retryCount > 0 ? `（已重试 ${s.retryCount} 次）` : '';
     const difficulty = s.difficulty ? ` [${s.difficulty}]` : '';
     const escalated = s.escalated ? ' ⬆️ 已升级' : '';
-    lines.push(`  ${markOf(s)} ${s.id} ${s.title}${difficulty}${escalated}${retry}`);
+    const validation = !s.blocked && s.passes && !s.validated ? ' ⏳ 待引擎验收' : '';
+    lines.push(`  ${markOf(s)} ${s.id} ${s.title}${difficulty}${escalated}${validation}${retry}`);
     if (s.difficultyReason) lines.push(`      · 难度依据：${s.difficultyReason}`);
     const actual = report.recentActual[s.id];
     if (actual?.builder || actual?.validator) {
@@ -208,6 +210,7 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
       title: s.title,
       priority: s.priority,
       passes: s.passes,
+      validated: s.validated,
       notes: s.notes,
       retryCount: s.retryCount,
       blocked: s.blocked,

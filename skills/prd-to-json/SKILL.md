@@ -304,7 +304,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 1. **每个 user story 成为一个 JSON 条目**
 2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延历史最大编号（含源 PRD 中已删除 story 曾占用的编号，不回收），不插号、不重排
 3. **Priority**：基于依赖顺序，然后是文档顺序
-4. **不写状态字段**：passes/notes/retryCount/blocked/escalated 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
+4. **不写状态字段**：passes/validated/notes/retryCount/blocked/escalated 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
@@ -493,12 +493,12 @@ Add ability to mark tasks with different statuses.
    - runner 变化、任一模型被移出目录、目录读取失败，或用户明确要求重配 → 停止保留，重新走目录选择与五道选择题；目录失败时不得退回历史列表或会话内临时列表
    - story 内容无实质变化 → 保留原 `difficulty` 与 `difficultyReason`，包括用户事后修正
    - story 内容有实质变化 → 按固定规则重新评估；用户可明确要求全量重新评估
-3. 若 `state.json` 存在，先把旧 state 缺失的 `escalated` 按 `false` 理解，再按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
+3. 若 `state.json` 存在，先把旧 state 缺失的 `validated` 按同条 `passes` 理解、缺失的 `escalated` 按 `false` 理解，再按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
    - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
-   - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 置 `false`、retryCount 置 `0`、blocked 置 `false`、escalated 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）
+   - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 与 validated 置 `false`、retryCount 置 `0`、blocked 置 `false`、escalated 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）
    - acceptanceCriteria 未变，但 difficulty、models.runner 或该 story 对应的初始 `models.builder[difficulty]` 变化 → 只把 escalated 重置为 `false`，其他执行状态保留
    - 只改 difficultyReason、validator 或 escalation 模型 → escalated 保留；它们不改变该 story 的初始路由
-   - 上述路由变化影响已 blocked story 时，必须让用户选择“保持 blocked”或“用新路由重试”；选择重试时同时设置 blocked=false、retryCount=0、escalated=false，并在 notes 追加模型路由重试说明
+   - 上述路由变化影响已 blocked story 时，必须让用户选择“保持 blocked”或“用新路由重试”；选择重试时同时设置 passes=false、validated=false、blocked=false、retryCount=0、escalated=false，并在 notes 追加模型路由重试说明
    - 新增 id → 不写入 state.json（引擎按初始状态处理）
    - 源 md 已删除的 id → 从 state.json 移除该键，在对照表标注「已移除」
 4. 输出对照表时增加「难度处理」「模型路由」「状态处理」列（保留/重评/重置/新增/移除）
@@ -521,7 +521,7 @@ Add ability to mark tasks with different statuses.
 - [ ] 复杂功能最后有一个闭环集成验证 story
 - [ ] Acceptance criteria 是可验证的（不模糊）
 - [ ] 没有 story 依赖于后面的 story
-- [ ] story 不含任何状态字段（passes/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
+- [ ] story 不含任何状态字段（passes/validated/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] qualityChecks 已配置时：写入前逐条真实跑一遍、确认当前基线全绿——命令不存在、命令写错、基线本来就红，都必须在这里（有人在场的派生环节）拦截，否则 builder 会在循环里白烧 5 轮到 blocked；基线绿同时保证循环中门禁失败必然是 builder 引入的
 - [ ] models 已配置时：runner 已确认；五个模型 ID 全部由用户从该 runner 的全局模型目录选择；每个 story 都有 low/medium/high 与含规则编号、仓库路径的非空理由

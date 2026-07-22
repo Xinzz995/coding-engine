@@ -173,7 +173,7 @@ export function applyGateFailure(
   if (blocked && !prev.blocked) lines.push(`${BLOCKED_LINE_PREFIX}: 已达到最大重试次数，跳过此 story]`);
   return {
     ...state,
-    [storyId]: { ...prev, passes: false, notes: lines.join('\n'), retryCount, blocked },
+    [storyId]: { ...prev, passes: false, validated: false, notes: lines.join('\n'), retryCount, blocked },
   };
 }
 
@@ -214,6 +214,6 @@ export function applyAbortRollback(
   ];
   return {
     ...state,
-    [storyId]: { ...prev, passes: false, notes: lines.join('\n'), retryCount: prev.retryCount, blocked: prev.blocked },
+    [storyId]: { ...prev, passes: false, validated: false, notes: lines.join('\n'), retryCount: prev.retryCount, blocked: prev.blocked },
   };
 }
