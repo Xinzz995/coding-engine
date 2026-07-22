@@ -188,11 +188,16 @@ function gateRunsOf(records: EvidenceRecord[]): Extract<EvidenceRecord, { type: 
   return records.filter((r): r is Extract<EvidenceRecord, { type: 'gate-run' }> => r.type === 'gate-run');
 }
 
+function renderDiagnostic(label: string, value: string | undefined): string {
+  if (!value) return '';
+  return `<details class="evidence-diagnostic"><summary>${text(label)}</summary><pre>${text(value)}</pre></details>`;
+}
+
 function renderGateHistory(records: EvidenceRecord[]): string {
   const runs = gateRunsOf(records);
   if (runs.length === 0) return '';
   const rows = runs.map((r) => {
-    const failNote = r.ok ? '' : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}`;
+    const failNote = r.ok ? '' : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
     return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
   }).join('');
   return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
@@ -214,6 +219,7 @@ function renderTimeline(records: EvidenceRecord[]): string {
     if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
     if (r.validationRollback) flags.push('未签发验收凭证，已回写待复核');
     if (r.validationReceipt) flags.push('验收凭证已签发');
+    if (r.validatorDiagnostic) flags.push('Validator 打回');
     if (r.escalationTriggeredBy) flags.push(`已触发升级（${text(r.escalationTriggeredBy)}）`);
     for (const tamper of r.stateRouteTamper ?? []) {
       flags.push(`${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 escalated（${tamper.expected} → ${tamper.received}）已恢复`);
@@ -221,7 +227,7 @@ function renderTimeline(records: EvidenceRecord[]): string {
     for (const tamper of r.stateValidationTamper ?? []) {
       flags.push(`${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 validated（${tamper.expected} → ${tamper.received}）已恢复`);
     }
-    const flagCell = flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—';
+    const flagCell = `${flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—'}${renderDiagnostic('Validator 打回详情', r.validatorDiagnostic)}`;
     const builder = r.builderRan
       ? `${text(r.builderModel ?? '默认')} [${text(r.builderRouteSource ?? '来源未知')}]`
       : '未跑';
@@ -381,6 +387,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 .evidence-table { border-collapse: collapse; font-size: 12px; margin: 6px 0 10px; }
 .evidence-table th, .evidence-table td { border: 1px solid var(--border); padding: 4px 10px; text-align: left; }
 .evidence-table th { background: hsl(240 4% 93%); font-weight: 600; }
+.evidence-diagnostic { margin-top: 4px; max-width: 440px; }
+.evidence-diagnostic summary { color: hsl(4 90% 40%); font-weight: 600; }
+.evidence-diagnostic pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: hsl(240 4% 95%); border-radius: 6px; padding: 8px; margin: 4px 0 0; font-family: var(--font-mono); }
 .ac-claim { font-size: 12px; margin-left: 6px; word-break: break-all; }
 .claim-tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: hsl(36 100% 50% / 0.15); color: hsl(36 100% 32%); margin-left: 4px; vertical-align: middle; }
 .claim-note { font-size: 12px; color: var(--muted); margin-left: 6px; }

@@ -27,7 +27,7 @@ coding-x 同时是两样东西：
 
 ## 工作原理
 
-引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控；agent 回写结果字段，引擎独占验收凭证与升级状态）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（证据索引：引擎机械记录+agent 截图登记）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理；`state.json` 已存在但损坏时不是迁移信号，report/status/dashboard 会统一把所有 story 按未验证状态显示并提示 repair。
+引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控；agent 回写结果字段，引擎独占验收凭证与升级状态）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（证据索引：引擎机械记录+agent 截图登记；失败门禁的输出尾部与 Validator 正常打回的 notes 会在下一轮覆盖前有界快照）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理；`state.json` 已存在但损坏时不是迁移信号，report/status/dashboard 会统一把所有 story 按未验证状态显示并提示 repair。
 
 ```
                       npx coding-x
@@ -350,7 +350,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
-- **静态验证报告**：循环结束从 PRD guard 的最终冻结快照自动生成 `.workspace/report.html`，并标明“引擎启动快照”；手动 `npx coding-x report` 则诚实读取当前磁盘 PRD。story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页；state 已存在但损坏时所有 story 按未验证渲染，绝不复活 legacy 通过态。报告以 tmp+rename 原子覆盖；截图为相对引用，分享时需连同 `screenshots/` 目录。
+- **静态验证报告**：循环结束从 PRD guard 的最终冻结快照自动生成 `.workspace/report.html`，并标明“引擎启动快照”；手动 `npx coding-x report` 则诚实读取当前磁盘 PRD。story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页；失败门禁的输出尾部与 Validator 正常打回详情会从证据索引折叠展示，即使后续成功重试清空 notes 仍可复盘。state 已存在但损坏时所有 story 按未验证渲染，绝不复活 legacy 通过态。报告以 tmp+rename 原子覆盖；截图为相对引用，分享时需连同 `screenshots/` 目录。
 - **JSON 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json` / `state.json`。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 

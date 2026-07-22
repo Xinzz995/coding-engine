@@ -131,6 +131,46 @@ describe('readEvidence 容错', () => {
     appendEvidence(dir, timedOutRun);
     expect(readEvidence(dir).records).toEqual([timedOutRun]);
   });
+
+  it('门禁与 validator 的有界失败诊断往返保真', () => {
+    const dir = ws();
+    const gateDiagnostic: EvidenceRecord = {
+      type: 'gate-run', source: 'engine', at: '2026-07-22T10:00:00.000Z', iteration: 4,
+      storyId: 'US-001', ok: false, total: 1, ran: 1, ms: 50,
+      failedCommand: 'npm test', exitCode: 1, timedOut: false,
+      diagnosticTail: 'FAIL test_x\nExpected 1, received 2',
+    };
+    const validatorDiagnostic: EvidenceRecord = {
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:01:00.000Z', iteration: 5,
+      storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      builderOutcome: 'completed', validatorOutcome: 'completed',
+      validatorDiagnostic: 'AC 2 未通过：响应码应为 401',
+    };
+    appendEvidence(dir, gateDiagnostic);
+    appendEvidence(dir, validatorDiagnostic);
+    expect(readEvidence(dir)).toEqual({ records: [gateDiagnostic, validatorDiagnostic], skippedLines: 0 });
+  });
+
+  it('拒绝非字符串或超过 2000 字符的失败诊断，避免 agent 写入撑爆报告', () => {
+    const dir = ws();
+    const iteration = {
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:01:00.000Z', iteration: 5,
+      storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+    };
+    writeFileSync(join(dir, EVIDENCE_FILE), [
+      { ...gateRun, diagnosticTail: 42 },
+      { ...gateRun, diagnosticTail: 'x'.repeat(2001) },
+      { ...iteration, validatorDiagnostic: { message: 'bad' } },
+      { ...iteration, validatorDiagnostic: 'x'.repeat(2001) },
+      { ...gateRun, diagnosticTail: 'x'.repeat(2000) },
+      { ...iteration, validatorDiagnostic: 'x'.repeat(2000) },
+    ].map((v) => JSON.stringify(v)).join('\n') + '\n');
+    const result = readEvidence(dir);
+    expect(result.skippedLines).toBe(4);
+    expect(result.records).toHaveLength(2);
+  });
 });
 
 describe('iteration 新可选字段（异常轮语义）', () => {

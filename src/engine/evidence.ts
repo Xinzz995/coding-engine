@@ -33,6 +33,8 @@ export type EvidenceRecord =
       storyDifficulty?: StoryDifficulty;
       /** 本轮首次把 state.escalated 从 false 置 true 的机械原因。 */
       escalationTriggeredBy?: 'gate' | 'validator' | 'noop';
+      /** validator 机械打回时的 notes 快照；有界保存，避免后续成功轮覆盖失败上下文。 */
+      validatorDiagnostic?: string;
       /** agent 对引擎独占字段的改动；引擎已恢复。 */
       stateRouteTamper?: Array<{
         /** 实际被改写的 story；旧 evidence 缺省时消费端回退 iteration.storyId。 */
@@ -47,7 +49,9 @@ export type EvidenceRecord =
       }> }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
       ok: boolean; total: number; ran: number; ms: number;
-      failedCommand?: string; exitCode?: number | null; timedOut?: boolean }
+      failedCommand?: string; exitCode?: number | null; timedOut?: boolean;
+      /** 失败命令 stdout/stderr 合并输出的尾部；有界保存。 */
+      diagnosticTail?: string }
   | { type: 'tamper'; source: 'engine'; at: string; iteration: number; archive: string | null }
   | { type: 'screenshot-claim'; source: 'builder' | 'validator'; at: string; storyId: string;
       file: string; acIndex?: number; note?: string };
@@ -55,6 +59,13 @@ export type EvidenceRecord =
 export type ScreenshotClaim = Extract<EvidenceRecord, { type: 'screenshot-claim' }>;
 
 export const EVIDENCE_FILE = 'evidence.jsonl';
+/** 失败诊断的统一上限：生产端截尾、读取端拒绝超限，防止 agent 写入撑爆报告。 */
+export const EVIDENCE_DIAGNOSTIC_CHARS = 2000;
+
+/** 保留最接近失败点的尾部；门禁输出与 validator notes 共用同一边界。 */
+export function clipEvidenceDiagnostic(value: string): string {
+  return value.slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+}
 
 /** 追加一条记录（一行 JSON）；IO 失败向上抛——调用方定语义（loop 吞错仅 warn）。 */
 export function appendEvidence(workspace: string, record: EvidenceRecord): void {
@@ -74,6 +85,10 @@ function isRec(v: unknown): v is Record<string, unknown> {
 function isRouteSource(v: unknown): v is ModelRouteSource {
   return v === 'cli-builder' || v === 'cli-escalation' || v === 'cli-validator'
     || v === 'difficulty' || v === 'escalation' || v === 'validator' || v === 'runner-default';
+}
+
+function isBoundedDiagnostic(v: unknown): v is string {
+  return typeof v === 'string' && v.length <= EVIDENCE_DIAGNOSTIC_CHARS;
 }
 
 function isStateRouteTamper(v: unknown): boolean {
@@ -111,6 +126,7 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (v.storyDifficulty === undefined || v.storyDifficulty === 'low' || v.storyDifficulty === 'medium' || v.storyDifficulty === 'high')
         && (v.escalationTriggeredBy === undefined || v.escalationTriggeredBy === 'gate'
           || v.escalationTriggeredBy === 'validator' || v.escalationTriggeredBy === 'noop')
+        && (v.validatorDiagnostic === undefined || isBoundedDiagnostic(v.validatorDiagnostic))
         && (v.stateRouteTamper === undefined || isStateRouteTamper(v.stateRouteTamper))
         && (v.stateValidationTamper === undefined || isStateRouteTamper(v.stateValidationTamper));
     case 'gate-run':
@@ -120,7 +136,8 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && typeof v.ran === 'number' && typeof v.ms === 'number'
         && (v.failedCommand === undefined || typeof v.failedCommand === 'string')
         && (v.exitCode === undefined || v.exitCode === null || typeof v.exitCode === 'number')
-        && (v.timedOut === undefined || typeof v.timedOut === 'boolean');
+        && (v.timedOut === undefined || typeof v.timedOut === 'boolean')
+        && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
     case 'tamper':
       return v.source === 'engine' && typeof v.iteration === 'number'
         && (typeof v.archive === 'string' || v.archive === null);

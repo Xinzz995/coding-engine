@@ -17,7 +17,7 @@ import { ModelPreflightError, preflightModelRouting, renderPreflightSummary } fr
 import type { ModelCatalogResult } from './model-catalog.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
-import { appendEvidence, type EvidenceRecord } from './evidence.js';
+import { appendEvidence, clipEvidenceDiagnostic, type EvidenceRecord } from './evidence.js';
 import { acquireLock, LockConflictError, type LockHandle } from './lock.js';
 
 export interface LoopConfig {
@@ -460,11 +460,15 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           storyDifficulty: currentStoryObj?.difficulty ?? null,
         });
         const gate = await runQualityChecks(checks, agentCwd);
+        const gateDiagnostic = gate.failure
+          ? clipEvidenceDiagnostic(gate.failure.outputTail).trim()
+          : '';
         recordEvidence({
           type: 'gate-run', source: 'engine', at: new Date().toISOString(), iteration: i,
           storyId: currentStory, ok: gate.ok, total: gate.total, ran: gate.ran, ms: gate.ms,
           ...(gate.failure ? {
             failedCommand: gate.failure.command, exitCode: gate.failure.exitCode, timedOut: gate.failure.timedOut,
+            ...(gateDiagnostic ? { diagnosticTail: gateDiagnostic } : {}),
           } : {}),
         });
         if (!gate.ok) {
@@ -508,6 +512,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       let validationRollback = false;
       let validationReceipt = false;
       let validatorEscalationTriggered = false;
+      let validatorDiagnostic: string | undefined;
       if (!validator) {
         console.error('❌ validator.md 不存在，本轮无法签发验收凭证');
         validatorOutcome = 'skipped';
@@ -533,7 +538,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           const rejected = !!validatorStateAfter
             && !validatorStateAfter.passes
             && validatorStateAfter.retryCount > currentValidatorStateBefore.retryCount;
-          if (rejected) validatorEscalationTriggered = triggerEscalation('validator');
+          if (rejected) {
+            const diagnostic = clipEvidenceDiagnostic(validatorStateAfter.notes).trim();
+            if (diagnostic) validatorDiagnostic = diagnostic;
+            validatorEscalationTriggered = triggerEscalation('validator');
+          }
           // passes 是 builder 候选声明；只有 validator 启动前已经为 true、正常结束后
           // 仍为 true 且未 blocked，engine 才签发最终凭证。validator 自行伪造
           // validated 会在上方 restoreEngineOwnership 先被恢复。
@@ -576,6 +585,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(validationRollback ? { validationRollback: true as const } : {}),
         ...(validationReceipt ? { validationReceipt: true as const } : {}),
         ...(validatorEscalationTriggered ? { escalationTriggeredBy: 'validator' as const } : {}),
+        ...(validatorDiagnostic ? { validatorDiagnostic } : {}),
       });
 
       if (validatorOutcome === 'timeout' || validatorOutcome === 'error' || validationRollback) {

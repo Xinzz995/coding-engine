@@ -48,6 +48,8 @@ scope: root
 
 `evidence.jsonl` 能记录门禁失败的命令、退出码与轮次，但最终报告对 `US-002` 只保留 `uv run pytest test/unit -q（退出码 1）`，没有保留具体失败测试 `test_llm_qps_guard.py::test_over_cap_rejected` 与断言差异。`US-001` 首次 Validator 的完整失败说明也会随 notes 清理而消失，只因下一轮 Builder 主动写入 progress 才留下摘要。当前报告足以证明“曾失败”，不足以独立复盘“为什么失败”。
 
+后续修复：v0.25.7 在失败当轮把门禁 stdout/stderr 尾部写入 gate-run，并在 Validator 正常打回时把 notes 写入 iteration；两类诊断统一限制为 2000 字符，读取端拒绝超限/错误类型，验证报告按转义后的折叠纯文本展示。后续成功重试即使清空当前 notes，失败原因仍留在证据索引中。
+
 ### 3. 发布物的离线复盘体验偏脆弱
 
 循环结束后只读执行 `npx --yes coding-x@0.25.4 status ...` 仍尝试访问 npm registry；受限网络下报 `ENOTFOUND`，联网后才成功。问题主要来自带版本 spec 的 npx 入口，但对“使用正式发布物做可重复离线审计”的体验有直接影响。
@@ -68,4 +70,4 @@ runner 控制台能看到单次 token 统计，例如 `US-003` Builder/Validator
 
 本轮结论是：`coding-x@0.25.4` 已能在外部真实仓库中完成可审计的多轮收敛，Validator 与机械门禁都提供了真实防线；当前没有需要立即追加功能才能继续使用的 correctness 阻断。
 
-首项摩擦已由 v0.25.6 的标准帮助入口收口。剩余优先级建议为：先为失败轮持久化最小诊断摘要；再评估 agent token/耗时总账与正式包离线调用方式。外部代码是否提交上游，交由人工另行决定。
+前两项摩擦已分别由 v0.25.6 的标准帮助入口与 v0.25.7 的失败诊断快照收口。剩余优先级建议为：先评估 agent token/耗时总账，再改善正式包的离线调用方式。外部代码是否提交上游，交由人工另行决定。

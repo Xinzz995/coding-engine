@@ -3,6 +3,7 @@ import type { RunState } from './state.js';
 import { INITIAL_STORY_STATE } from './state.js';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from './process-tree.js';
+import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 
 /** 打回上限的单一真相源：validator.md 经 {{MAX_RETRIES}} 占位符共享此值 */
 export const MAX_RETRIES = 5;
@@ -68,8 +69,6 @@ export function readQualityChecks(prd: Prd | null): string[] | 'invalid' | null 
 
 /** 每条门禁命令的执行超时（10 分钟）；超时按失败打回，notes 注明 */
 const GATE_TIMEOUT_MS = 600_000;
-/** 打回 notes 只保留输出尾部——失败摘要在尾部，全量会污染 builder 每轮要读的 notes */
-const OUTPUT_TAIL_CHARS = 2000;
 
 function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<GateFailure | null> {
   return new Promise((resolve, reject) => {
@@ -83,7 +82,7 @@ function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<G
     });
     let tail = '';
     const keep = (chunk: Buffer) => {
-      tail = (tail + String(chunk)).slice(-OUTPUT_TAIL_CHARS);
+      tail = (tail + String(chunk)).slice(-EVIDENCE_DIAGNOSTIC_CHARS);
     };
     // tee：实时转发保证无人值守时进度可见，同时滚动缓冲尾部供打回 notes 用
     child.stdout.on('data', (c: Buffer) => { process.stdout.write(c); keep(c); });
