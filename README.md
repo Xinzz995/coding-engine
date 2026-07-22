@@ -5,7 +5,7 @@
 coding-x 同时是两样东西：
 
 - **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude Code、Codex 或 Cursor）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `scenario-alignment` / `technical-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你对齐业务口径与技术合同、把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物并留痕人审裁决，且为项目生成与持续沉淀 docs/ 知识库。
+- **多工具插件** —— 提供 `scenario-alignment` / `technical-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你对齐业务口径与技术合同、把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物并留痕人审裁决，且为项目生成、持续瘦身并分冷热归档 docs/ 知识库。
 
 ---
 
@@ -150,7 +150,7 @@ npx coding-x cursor          # 改用 Cursor Agent
               http://localhost:7331  实时查看进度
                                 │
               ──/review-loop───▶  合并前人审包（审查，建议）
-              ──/compound-docs─▶  经验沉淀回 docs/（收口，可选）
+              ──/compound-docs─▶  沉淀 + 活知识熵 GC + 完成态冷归档（收口，可选）
 ```
 
 ---
@@ -161,7 +161,7 @@ npx coding-x cursor          # 改用 Cursor Agent
 
 在 Claude Code（或其他工具）中：
 
-1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-docs` 生成目录式根 `AGENTS.md` + `docs/` 知识库（架构地图、黄金原则、decisions/plans/prds），单项目与 monorepo 均支持。
+1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-docs` 生成目录式根 `AGENTS.md` + `docs/` 知识库（架构地图、黄金原则、约定与陷阱、词汇表、decisions/plans/prds），单项目与 monorepo 均支持；空的冷档案不会预建。
 2. （可选）输入杂乱（口述/bug/页面调整混杂）或业务口径未定时，先用 `scenario-alignment` skill 对齐场景（对它说「align: 你的需求」）：产出无技术内容的业务 PRD 对齐稿（`docs/prds/align-*.md`），人只拍板 1-3 个关键问题。需求本身已清楚时跳过。
 3. （可选）功能涉及合同级技术决策（新表/改 schema、对外接口、状态机、权限模型、存量数据迁移）时，用 `technical-alignment` skill 对齐技术合同（「tech: ...」）：产出技术对齐稿（`docs/prds/tech-*.md`）——每条合同是可验证陈述，不可逆项单独列出，人只拍板少数贵决策。无此类决策时跳过。
 4. `/planning 我要做的功能描述` 产出完整实现计划。
@@ -282,7 +282,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 ### 第 5 步：收口沉淀（可选）
 
-分支合并后、推送前，回到 Claude Code 等工具运行 `/compound-docs`：它基于当前代码、git 历史与 `progress.md` 的学习记录做交叉取证，把仍然成立的结构变化、稳定约定与高频陷阱分层沉淀进项目 `docs/`（约定与陷阱进 `docs/patterns.md`）。只改文档不改代码，越用文档越准。收口同时会汇总代码中的 `// 取舍:` 标记（builder 对带已知上限简化的就地记录）成取舍账本，提醒你处理未兑现的升级条件。
+分支合并后、推送前，回到 Claude Code 等工具运行 `/compound-docs`：它基于当前代码、git 历史与 `progress.md` 的学习记录做交叉取证，把仍然成立的结构变化、稳定约定与高频陷阱分层沉淀进项目 `docs/`，并对本轮影响的 active 知识做增量熵 GC（失效删除、重复合并、错误落位迁移）。明确说“全量 GC”才逐条审计 patterns/glossary/architecture/golden-principles/prompt-writing；明确说“物理归档”或确认候选清单后，才把 `done/superseded` 的 PRD、plan、spec 等镜像原相对树迁入 `docs/archive/`，不会在普通收口中静默改路径。收口还会汇总代码中的 `// 取舍:` 标记成取舍账本。
 
 ### 命令行参数
 
@@ -294,7 +294,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
-| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
+| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
 | 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；损坏 state 全部按未验证、`--json` 标 `stateCorrupted`；退出码 0=全通过 / 1=未全通过或 state 损坏 / 2=无可读工作区，可作 CI 门禁 |
 | 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会从引擎冻结的 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏（仍写红色诊断报告） / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
@@ -308,7 +308,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
 | `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
-| `--stale-days <n>` | `30` | 仅 `doctor`：git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期 |
+| `--stale-days <n>` | `30` | 仅 `doctor`：active 区文件的 git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期，`docs/archive/` 冷档案不参与 |
 | `--json` | 关闭 | `status`：输出 story 状态、配置路由与 evidence 中最近实际命中；`models`：输出 `available` 或 `error` 的单个 JSON 对象 |
 
 ### 退出码
@@ -362,7 +362,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo；并为 Claude Code 生成 `CLAUDE.md` 桥接（`@AGENTS.md` 导入） |
 | `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
 | `/review-loop` | 循环结束后、合并默认分支前，对分支 diff 做独立审查并产出人审包（改动导读/双维度发现清单/风险聚焦）；只读不改（唯一写入是 .workspace/ 的审查留痕文件），人保持最终裁决 |
-| `/compound-docs` | 循环/分支收口时把经验提炼、验证、分层沉淀回项目文档（约定与陷阱进 `docs/patterns.md`）；只改文档不改代码；汇总代码中 `取舍:` 标记为账本；并核对任务型文档状态（交付的 PRD/计划/spec 置 done、被吸收对齐稿置 superseded） |
+| `/compound-docs` | 收口时沉淀经验、增量清理五类 active 知识熵、核对任务文档状态并汇总 `取舍:` 账本；“全量 GC”才全库审计，“物理归档”或确认候选后才把完成态文档迁入 `docs/archive/`；只改文档不改代码 |
 
 ### Skills（能力，Claude 按语境自动触发）
 
@@ -399,10 +399,11 @@ coding-engine/
 ├── templates/                    # /init-docs、/compound-docs 使用的知识库模板
 │   ├── AGENTS-root.md            #   目录式根 AGENTS.md（四段式）
 │   ├── AGENTS-sub.md             #   子项目薄 AGENTS.md
-│   └── docs/                     #   architecture / golden-principles / patterns / glossary / decision(ADR)
+│   └── docs/                     #   architecture / golden-principles / patterns / glossary / decision / archive-README
 ├── AGENTS.md                     # 本仓库自己的目录式索引（/init-docs dogfood 产物）
 ├── CLAUDE.md                     # Claude Code 桥接：@AGENTS.md 导入（Claude Code 不读 AGENTS.md）
-├── docs/                         # 本仓库知识库：architecture / golden-principles / decisions / plans / prds
+├── docs/                         # 本仓库 active 知识：architecture / principles / decisions / plans / prds
+│   └── archive/                  #   完成态历史冷档案；日常实现/熵 GC 排除，doctor 仍查结构与链接
 │
 ├── .claude-plugin/               # Claude Code 插件清单
 │   ├── plugin.json               #   插件元数据（commands/ skills/ 自动发现）

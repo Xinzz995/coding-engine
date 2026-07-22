@@ -1,7 +1,7 @@
 ---
 title: 003-prd-layered-truth
 status: active
-updated: 2026-07-03
+updated: 2026-07-22
 scope: root
 ---
 
@@ -22,8 +22,8 @@ scope: root
 
 实施分两阶段：
 
-- **第一阶段（v0.4.0，随附计划 docs/superpowers/plans/2026-07-03-prd-layered-truth.md）**：溯源（sourcePrd 字段 + 【溯源】仲裁段）、转换闭环（增强结果回写源 md + 对照表）、稳定 story id、再派生模式（按 id 合并保状态）、builder/validator 提示词对齐。全部为 skills/提示词/轻引擎改动。
-- **第二阶段（v0.5.0 已落地，实施计划 docs/superpowers/plans/2026-07-03-prd-state-separation.md）**：内容与状态分离——passes/notes/retryCount/blocked 迁出到 `.workspace/state.json`（按 story id 键控），prd.json 运行期只读；引擎 join 两文件做 story 选取与完成判定，仪表盘输出合并视图，repair 兼容双文件，旧格式自动迁移。收益：agent 回写不再可能损坏需求内容，再派生天然不丢状态。
+- **第一阶段（v0.4.0，随附计划 docs/archive/superpowers/plans/2026-07-03-prd-layered-truth.md）**：溯源（sourcePrd 字段 + 【溯源】仲裁段）、转换闭环（增强结果回写源 md + 对照表）、稳定 story id、再派生模式（按 id 合并保状态）、builder/validator 提示词对齐。全部为 skills/提示词/轻引擎改动。
+- **第二阶段（v0.5.0 已落地，实施计划 docs/archive/superpowers/plans/2026-07-03-prd-state-separation.md）**：内容与状态分离——passes/notes/retryCount/blocked 迁出到 `.workspace/state.json`（按 story id 键控），prd.json 运行期只读；引擎 join 两文件做 story 选取与完成判定，仪表盘输出合并视图，repair 兼容双文件，旧格式自动迁移。收益：agent 回写不再可能损坏需求内容，再派生天然不丢状态。
 
 ## 理由与备选
 

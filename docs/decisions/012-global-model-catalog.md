@@ -25,7 +25,7 @@ ADR-011 为按 story 难度分档的模型路由建立了稳定的项目合同�
 8. `prd-to-json` 继续把项目的 runner 与五项映射写入 `prd.json`，但候选只能来自全局目录；目录缺失或非法时不得接受会话内临时模型列表绕过。用户可以先维护全局配置，也可以选择不启用模型路由并继续普通转换。再派生只在原五项仍存在于当前目录时保留原选择。
 9. 全局配置不是 workspace 运行时状态：不写入 `--workspace`，不进入 `engine.lock`，不复制进 `prd.json`、state、evidence 或验证报告。evidence 仍只记录某轮实际传给 runner 的模型与路由来源。
 
-本 ADR 只取代 ADR-011 中“公开接口发现 + unsupported/人工降级 + 启动时在线模型可用性复核”的部分；ADR-011 的 runner 绑定、难度分档、首次有效失败升级、CLI 优先级与可观测性继续生效。完整合同见 `docs/superpowers/specs/2026-07-22-global-model-catalog.md`。
+本 ADR 只取代 ADR-011 中“公开接口发现 + unsupported/人工降级 + 启动时在线模型可用性复核”的部分；ADR-011 的 runner 绑定、难度分档、首次有效失败升级、CLI 优先级与可观测性继续生效。完整合同见 `docs/archive/superpowers/specs/2026-07-22-global-model-catalog.md`。
 
 ## 理由与被否备选
 

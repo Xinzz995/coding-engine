@@ -25,8 +25,8 @@
 | 架构地图 | `docs/architecture.md` | 模块划分、分层、数据流、依赖方向 |
 | 黄金原则 | `docs/golden-principles.md` | 3–5 条机械可判定的强制规则 |
 | 设计决策 | `docs/decisions/` | ADR：一事一文件，编号递增 |
-| 实现计划 | `docs/plans/` | /planning 产出（active/done 靠 frontmatter status 区分） |
-| PRD | `docs/prds/` | prd-generate 产出 |
+| 实现计划 | `docs/plans/` | /planning 的 active 产出；完成态可显式迁入冷档案 |
+| PRD | `docs/prds/` | prd-generate 的 active 产出；完成态可显式迁入冷档案 |
 | 约定与陷阱 | `docs/patterns.md` | /compound-docs 收口沉淀的稳定约定与高频陷阱 |
 | 领域词汇表 | `docs/glossary.md` | 共享语言：核心术语定义与禁用同义词，命名与表述以它为准 |
 | {子项目 `<name>`} | `{<path>/AGENTS.md}` | {monorepo 时每个子项目一行；单项目删除} |

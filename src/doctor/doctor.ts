@@ -26,6 +26,8 @@ export interface FreshnessCheckResult {
   staleDays: number;
   gitAvailable: boolean;
   checked: number;
+  /** docs/archive/ 下带 frontmatter 的冷档案数量；只跳过 updated 新鲜度，其他检查照常。 */
+  archivedSkipped: number;
   issues: DoctorIssue[];
 }
 
@@ -455,6 +457,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   const linkIssues: DoctorIssue[] = [];
   let checked = 0;
   let freshnessChecked = 0;
+  let archivedFreshnessSkipped = 0;
   let linksChecked = 0;
   for (const file of files) {
     const content = readFileSync(file, 'utf-8');
@@ -473,6 +476,12 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
       if (filePart !== '' && !existsSync(join(dirname(file), filePart))) {
         linkIssues.push({ file: rel, message: `断链 ${target}（目标不存在）` });
       }
+    }
+    // 冷档案仍检查 frontmatter 必填字段与正文相对链接，但历史文档不再以 updated
+    // 对当前知识的新鲜度负责。只按 docs/archive/ 物理边界判定，不拿 status 猜生命周期。
+    if (relative(docsDir, file).split(sep)[0] === 'archive') {
+      archivedFreshnessSkipped++;
+      continue;
     }
     if (!('updated' in fm)) continue; // 缺 updated 已由完整性检查报告，新鲜度不重复计
     freshnessChecked++;
@@ -511,7 +520,13 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   return {
     docsFound: true,
     frontmatter: { scanned: files.length, checked, issues: fmIssues },
-    freshness: { staleDays, gitAvailable, checked: freshnessChecked, issues: freshnessIssues },
+    freshness: {
+      staleDays,
+      gitAvailable,
+      checked: freshnessChecked,
+      archivedSkipped: archivedFreshnessSkipped,
+      issues: freshnessIssues,
+    },
     agentsIndex,
     links: { checked: linksChecked, issues: linkIssues },
     gate,
@@ -616,10 +631,14 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   }
   lines.push('', `⏰ updated 新鲜度（阈值 ${fresh.staleDays} 天）`);
   if (fresh.issues.length === 0) {
-    const gitNote = fresh.gitAvailable ? '' : '；非 git 仓库，已跳过 git 日期比较';
-    lines.push(`  ✅ 通过（已检查 ${fresh.checked} 个含 updated 文件${gitNote}）`);
+    const notes = [
+      ...(fresh.gitAvailable ? [] : ['非 git 仓库，已跳过 git 日期比较']),
+      ...(fresh.archivedSkipped === 0 ? [] : [`冷档案 ${fresh.archivedSkipped} 份已跳过`]),
+    ];
+    lines.push(`  ✅ 通过（已检查 ${fresh.checked} 个含 updated 文件${notes.length === 0 ? '' : `；${notes.join('；')}`}）`);
   } else {
     for (const issue of fresh.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
+    if (fresh.archivedSkipped > 0) lines.push(`  ℹ️  冷档案 ${fresh.archivedSkipped} 份未参与新鲜度检查`);
   }
   const idx = report.agentsIndex!;
   lines.push('', '📇 AGENTS.md 索引');

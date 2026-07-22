@@ -78,7 +78,7 @@ runner:
   --keep-open                    循环结束后保留仪表盘
   --port <n>                     仪表盘端口（默认 7331）
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
-  --stale-days <n>               文档过期阈值（默认 30，仅 doctor）
+  --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（status/models）
   -h, --help                     显示本帮助并退出
 

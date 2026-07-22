@@ -7,7 +7,7 @@ scope: root
 
 # 全局模型目录：以用户配置取代 runner 自主发现
 
-> 本规格局部修订 [2026-07-21 模型路由重设计](2026-07-21-model-routing-redesign.md) 的“模型发现与启动复核”部分；runner 绑定、low/medium/high 难度路由、首次有效失败升级、CLI 覆盖优先级与可观测性保持不变。决策理由见 [ADR-012](../../decisions/012-global-model-catalog.md)。
+> 本规格局部修订 [2026-07-21 模型路由重设计](2026-07-21-model-routing-redesign.md) 的“模型发现与启动复核”部分；runner 绑定、low/medium/high 难度路由、首次有效失败升级、CLI 覆盖优先级与可观测性保持不变。决策理由见 [ADR-012](../../../decisions/012-global-model-catalog.md)。
 
 ## 背景
 

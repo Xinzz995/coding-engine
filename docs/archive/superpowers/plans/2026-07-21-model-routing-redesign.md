@@ -7,7 +7,7 @@ scope: root
 
 # 模型路由重设计实施计划（v0.23.0）
 
-> **继任说明（2026-07-22）：** 本计划记录 v0.23.0 的已完成实现，不作为当前模型来源实现指引；Task 4–6 中的自主发现、unsupported/人工降级与在线模型复核从 v0.24.0 起由 [全局模型目录实施计划](2026-07-22-global-model-catalog.md)、[focused spec](../specs/2026-07-22-global-model-catalog.md) 和 [ADR-012](../../decisions/012-global-model-catalog.md) 局部取代，其余路由任务仍是有效历史。
+> **继任说明（2026-07-22）：** 本计划记录 v0.23.0 的已完成实现，不作为当前模型来源实现指引；Task 4–6 中的自主发现、unsupported/人工降级与在线模型复核从 v0.24.0 起由 [全局模型目录实施计划](2026-07-22-global-model-catalog.md)、[focused spec](../specs/2026-07-22-global-model-catalog.md) 和 [ADR-012](../../../decisions/012-global-model-catalog.md) 局部取代，其余路由任务仍是有效历史。
 
 **Goal:** 以 runner 绑定的 `low / medium / high` builder 档位替换未发布的 `profiles` 路由；第一次有效失败后用独立状态切换 escalation；为 Claude Code、Codex、Cursor 提供可验证、可观测、失败即停的端到端模型路由。
 

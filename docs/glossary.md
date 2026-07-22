@@ -9,7 +9,8 @@ scope: root
 
 <!-- 项目的共享语言：每个核心领域概念一个词条，人、文档、代码命名、AI 会话全部统一用这个词。
      词条只回答「这个词指什么」，零实现细节——实现细节进 architecture.md，决策理由进 decisions/。
-     「禁用」行列出禁止使用的同义词。新术语与歧义拍板由 /compound-docs 收口沉淀。 -->
+     「禁用」行列出禁止使用的同义词。新术语与歧义拍板由 /compound-docs 收口沉淀，
+     熵 GC 负责合并同义词、删除已退出当前领域模型的词条。 -->
 
 ## 词条
 
@@ -22,11 +23,11 @@ story 的唯一验收依据；validator 逐条核对，源 PRD 与项目文档�
 禁用：验收条件、完成标准
 
 **打回**
-validator 判定某条 acceptanceCriteria 未通过：passes 设回 false、notes 写失败详情、retryCount +1，builder 下轮重试。
+机械门禁或 validator 判定 story 未通过：passes/validated 设回 false、notes 写失败详情、retryCount +1，builder 下轮重试。
 禁用：驳回、退回
 
 **blocked**
-story 达到最大重试次数后被跳过的状态，留给人工处理；与有效通过态一起构成循环完成判定。
+story 被跳过并等待人工处理的状态；可由重试达到上限触发，也可由 agent 配合仲裁标签显式置位。它与有效通过态一起构成循环收敛判定。
 禁用：卡死、挂起
 
 **验收凭证（validated）**
@@ -42,8 +43,20 @@ validator 报告通过但实际未满足验收标准（共谋、敷衍验证或�
 禁用：审查报告
 
 **收口**
-一轮循环或功能分支完成后的收尾动作：/review-loop 人审 + 合并 + /compound-docs 把经验分层沉淀回 docs/。
+一轮循环或功能分支完成后的收尾动作：/review-loop 人审 + 合并 + /compound-docs 沉淀经验、清理活知识熵并收尾任务文档；物理归档须另有显式授权。
 禁用：复盘、总结
+
+**熵 GC**
+/compound-docs 对 active 知识做的证据审计：保留当前事实，改写/合并/迁位仍有效内容，删除已失效或被完整覆盖的内容；不是按字数压缩文档。
+禁用：文档压缩、自动摘要
+
+**物理归档**
+把证据充分的 done/superseded 阶段性文档从 active 区移动到 `docs/archive/`，同步仓库内导航且不留旧路径副本；必须由用户明确要求或确认候选清单。
+禁用：删除历史、状态收尾（状态变更不等于文件移动）
+
+**历史冷档案**
+`docs/archive/` 中仅供追溯的完成态历史文档；日常实现、沉淀与熵 GC 排除，doctor 仍检查 frontmatter 和相对链接但跳过 updated 新鲜度。
+禁用：废纸篓、备份目录
 
 **杠铃策略**
 人力只花在两端——业务口径对齐（scenario-alignment）与合同级技术决策（technical-alignment），中间「怎么写代码」交给自动化流水线。
@@ -66,7 +79,7 @@ builder 有意识选择带已知上限的简单实现时就地留下的 `// 取�
 禁用：插件副本
 
 **workspace**
-引擎运行时状态目录（默认 `.workspace/`），prd.json、state.json、progress.md 所在地；引擎只读写这里。
+引擎运行时状态与证据目录（默认 `.workspace/`），容纳 prd/state/progress、证据、报告、截图与运行锁等产物；不要与编辑器工作区或 `docs/archive/` 历史冷档案混称。
 禁用：工作区（泛指编辑器工作区时易混淆，指本概念时统一用「workspace」）
 
 **工作区锁（engine.lock）**
@@ -94,11 +107,11 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 禁用：回滚（只回写验收状态，不回滚已落盘的提交与产物）
 
 **stall 熔断**
-空转轮与两侧异常轮连续累计达 `--stall-limit`（缺省 3）即提前终止循环（退出码 1）；有真实 state 写入的轮次（含门禁打回轮）清零计数。
+空转轮、两侧异常轮或验收未完整执行且触发待复核回写的轮次，连续累计达 `--stall-limit`（缺省 3）即提前终止循环（退出码 1）；门禁打回与正常完成的有效轮清零计数。
 禁用：空转保护、无进展终止
 
 **收敛出口**
-全部 story 达到有效通过（`passes && validated`）或 blocked 时的统一结束路径（单源函数，快路径与轮末两处行为一致）：全通过退出码 0；存在 blocked 时列出 story 号、退出码 3 交人工处理。
+全部 story 达到有效通过（`passes && validated`）或 blocked 时的结束语义：全通过退出码 0；存在 blocked 时列出 story 号、退出码 3 交人工处理。
 禁用：完成出口、全绿出口
 
 **证据索引**
@@ -136,7 +149,8 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 - 打回递增 retryCount，达到上限转 blocked；全部 story 有效通过或 blocked 即走收敛出口结束循环
 - 异常轮触发回写待复核并计入 stall 熔断；空转轮跳过门禁与 validator、同样计入熔断
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
-- 收口包含人审（/review-loop 产出人审包）与沉淀（/compound-docs，含取舍账本收账）
+- 收口包含人审（/review-loop 产出人审包）与 /compound-docs（沉淀、熵 GC、状态收尾及显式授权后的物理归档）
+- 物理归档把完成态阶段文档从 active 区移入历史冷档案；状态收尾只改 status，不自动构成移动授权
 - 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
 - 验证报告消费证据索引（门禁执行历史、轮次时间线、验收标准↔截图对账均由它派生）；证据索引缺失时报告退回文件名猜测归属
 - 难度档位决定初始路由；首次有效失败置升级状态，后续 builder 走 escalation，与 retryCount 独立

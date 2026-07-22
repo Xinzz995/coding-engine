@@ -18,8 +18,8 @@
 |---|---|---|
 | 架构地图 | `docs/architecture.md` | {仅当为本子项目生成了该文件时保留此行} |
 | 设计决策 | `docs/decisions/` | 仅限本子项目的决策 |
-| 实现计划 | `docs/plans/` | 仅涉及本子项目的功能计划 |
-| PRD | `docs/prds/` | 仅涉及本子项目的 PRD |
+| 实现计划 | `docs/plans/` | 仅涉及本子项目的 active 计划；完成态可显式迁入冷档案 |
+| PRD | `docs/prds/` | 仅涉及本子项目的 active PRD；完成态可显式迁入冷档案 |
 
 ## 子项目模式
 

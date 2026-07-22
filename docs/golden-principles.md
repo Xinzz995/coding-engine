@@ -1,7 +1,7 @@
 ---
 title: 黄金原则
 status: active
-updated: 2026-07-04
+updated: 2026-07-22
 scope: root
 ---
 
@@ -22,10 +22,10 @@ scope: root
 - **为什么**：多工具清单靠相对路径指回唯一源，复制副本会立刻漂移。
 - **怎么检查**：`.cursor-plugin/`、`.codex-plugin/`、`.agents/` 下只有 json 清单，`find` 不到任何 `.md`。
 
-## 4. 引擎运行时状态只读写 workspace 目录
+## 4. 引擎运行时状态只能写入 workspace 目录
 
-- **为什么**：状态散落会让循环不可恢复、无法归档。
-- **怎么检查**：`src/` 中所有文件写入路径都由 `--workspace` 解析而来（review `writeFile`/`appendFile` 调用点）。
+- **为什么**：状态散落会让循环不可恢复、无法归档；用户显式 `config init` 创建的全局配置不属于运行时状态。
+- **怎么检查**：审查 `src/` 的 `writeFile`/`appendFile` 调用点：除 `config init` 明确写全局目录外，run/repair/report 产生的状态与证据路径都必须由 `--workspace` 解析而来。
 
 ## 5. 面向用户的破坏性变更必须升 minor 版本并同步 README
 

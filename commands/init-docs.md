@@ -65,6 +65,8 @@ description: 分析代码库，生成目录式 AGENTS.md 与 docs/ 知识库（�
 | `docs/plans/README.md` | 下方占位内容 | |
 | `docs/prds/README.md` | 下方占位内容 | |
 
+`templates/docs/archive-README.md` 不在初始化时生成。只有项目首次通过 `/compound-docs` 明确执行物理归档时，才用它创建 `docs/archive/README.md` 并把冷档案加入对应 AGENTS.md 索引；不要预建空档案目录。
+
 占位 README 内容（一字不差）：
 
 `docs/decisions/README.md`：
@@ -82,7 +84,7 @@ status 约定：`active`（生效中，含带触发条件的暂缓）/ `supersed
 ```markdown
 # 实现计划
 
-`/planning` 命令的产出目录。活跃与已完成计划共存，靠 frontmatter `status` 字段区分（active/done/superseded）。
+`/planning` 命令的产出目录。这里只保留 active 计划；done/superseded 计划可由 `/compound-docs` 在明确授权后迁入 `docs/archive/`，迁移前靠 frontmatter `status` 区分。
 ```
 
 `docs/prds/README.md`：
@@ -92,7 +94,7 @@ status 约定：`active`（生效中，含带触发条件的暂缓）/ `supersed
 
 `prd-generate` skill 的产出目录，文件名 `prd-[feature-name].md`。
 
-status 约定：`active`（意图生效中/待实施）/ `done`（本轮意图已交付——story 全部通过且已合并；需求演进时翻回 active，修改后再派生）/ `superseded`（被后继 PRD 取代，注明替代者）。对齐稿（`align-*`/`tech-*`）被正式 PRD 吸收后置 `superseded`。
+status 约定：`active`（意图生效中/待实施）/ `done`（本轮意图已交付——story 全部通过且已合并；需求演进时翻回 active，修改后再派生）/ `superseded`（被后继 PRD 取代，注明替代者）。对齐稿（`align-*`/`tech-*`）被正式 PRD 吸收后置 `superseded`；done/superseded 文档可由 `/compound-docs` 在明确授权后迁入 `docs/archive/`。
 ```
 
 `CLAUDE.md`（Claude Code 桥接，一字不差；不带 frontmatter）：

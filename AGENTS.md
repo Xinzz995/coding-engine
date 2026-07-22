@@ -31,6 +31,7 @@ npm run typecheck   # tsc --noEmit
 | Prompt 编写原则 | `docs/prompt-writing.md` | skills/commands/引擎指令的编写与修订判据（no-op 检验、完成判据、锚定词） |
 | 功能设计文档 | `docs/superpowers/specs/` | brainstorming 产出的设计规格 |
 | 实施任务计划 | `docs/superpowers/plans/` | writing-plans 产出的分任务计划 |
+| 历史冷档案 | `docs/archive/` | 完成态历史文档，仅追溯时读取；日常实现与熵 GC 排除 |
 | 用户文档 | `README.md` | 安装、快速开始、CLI 参数、目录结构 |
 
 ## 硬约束

@@ -200,6 +200,33 @@ describe('runDoctor — updated 新鲜度', () => {
       expect(fresh.issues).toEqual([]);
     });
   });
+  it('skips docs/archive files even when updated is old or malformed', () => {
+    withProject(
+      {
+        'docs/current.md': fmDoc('2026-03-01'),
+        'docs/archive/old.md': fmDoc('2020-01-01'),
+        'docs/archive/malformed.md': fmDoc('很久以前'),
+      },
+      (root) => {
+        gitInit(root);
+        gitCommitAll(root, '2026-03-01');
+        const fresh = runDoctor(root, { staleDays: 0 }).freshness!;
+        expect(fresh.checked).toBe(1);
+        expect(fresh.archivedSkipped).toBe(2);
+        expect(fresh.issues).toEqual([]);
+      },
+    );
+  });
+  it('does not use done status as a substitute for the physical archive boundary', () => {
+    const doneButActive = fmDoc('2020-01-01').replace('status: active', 'status: done');
+    withProject({ 'docs/done.md': doneButActive }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-03-01');
+      const fresh = runDoctor(root, { staleDays: 0 }).freshness!;
+      expect(fresh.archivedSkipped).toBe(0);
+      expect(fresh.issues).toHaveLength(1);
+    });
+  });
 });
 
 const AGENTS_MD = [
@@ -353,6 +380,26 @@ describe('runDoctor — 文档相对链接', () => {
       expect(links.issues).toEqual([]);
     });
   });
+  it('still checks frontmatter fields and relative links inside docs/archive', () => {
+    const archived = [
+      '---',
+      'title: 历史文档',
+      'status: done',
+      'updated: 2020-01-01',
+      '---',
+      '',
+      '[断](missing.md)',
+    ].join('\n');
+    withProject({ 'docs/archive/old.md': archived }, (root) => {
+      const report = runDoctor(root);
+      expect(report.frontmatter!.issues).toHaveLength(1);
+      expect(report.frontmatter!.issues[0].message).toContain('scope');
+      expect(report.links!.issues).toHaveLength(1);
+      expect(report.links!.issues[0].message).toContain('missing.md');
+      expect(report.freshness!.checked).toBe(0);
+      expect(report.freshness!.archivedSkipped).toBe(1);
+    });
+  });
 });
 
 describe('renderDoctorReport — 输出与退出码', () => {
@@ -402,6 +449,13 @@ describe('renderDoctorReport — 输出与退出码', () => {
     withProject({ 'docs/a.md': FULL_FM }, (root) => {
       const { text } = renderDoctorReport(runDoctor(root, { staleDays: 7 }));
       expect(text).toContain('7 天');
+    });
+  });
+  it('reports how many cold archive documents were skipped for freshness', () => {
+    withProject({ 'docs/archive/a.md': FULL_FM }, (root) => {
+      const { text, exitCode } = renderDoctorReport(runDoctor(root));
+      expect(exitCode).toBe(0);
+      expect(text).toContain('冷档案 1 份已跳过');
     });
   });
   it('counts missing index paths and broken links into exit code 1', () => {
