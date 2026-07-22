@@ -1,11 +1,89 @@
 # coding-x
 
-> Ralph 自动化 Coding 工作流 —— 把 **Developer → Validator** 循环固化成确定性程序的 harness。
+> 把一句功能需求，变成一条可追踪、可暂停、可复核的 AI 编码流水线。
 
-coding-x 同时是两样东西：
+如果你只记住一句话：**人负责说明“要什么”和做最终裁决；coding-x 负责让 AI 一次只开发一个小任务，再交给另一个角色逐条验收，直到完成或明确停下来等人处理。**
 
-- **TypeScript 引擎**（`npx coding-x`）—— 读取 `prd.json`，自动驱动 AI agent（Claude Code、Codex 或 Cursor）逐个 user story「开发 → 验证 → 提交」，直到全部完成，并提供实时 Web 仪表盘。
-- **多工具插件** —— 提供 `scenario-alignment` / `technical-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills 和 `/priming` `/planning` `/init-docs` `/review-loop` `/compound-docs` 命令，支持 Claude Code、Codex、Cursor 及通用 agent，帮你对齐业务口径与技术合同、把需求拆解成可自动执行的 `prd.json`、在合并前审查循环产物并留痕人审裁决，且为项目生成、持续瘦身并分冷热归档 docs/ 知识库。
+coding-x 同时包含两部分：
+
+- **工作流插件**：运行在 Claude Code、Codex、Cursor 等 AI 编码工具中，用 commands 和 skills 帮你理解项目、澄清需求、生成 PRD、转换执行清单、审查结果和维护项目文档。
+- **自动执行引擎**（`npx coding-x`）：在你的项目目录中读取执行清单，反复启动 Developer（开发者）和 Validator（验收者），逐个 user story 开发、验证并提交，同时提供状态、证据、仪表盘和静态报告。
+
+它不是“输入一句话后无需再看”的黑盒。需求取舍、破坏性修改、审查发现和是否合并，最终都由人决定。
+
+## README 阅读路线
+
+- **第一次使用**：先看「先分清三个位置」「零基础完整流程」「安装」和「使用教程」。
+- **想知道文件从哪里来、最后去哪**：看「文档与运行产物的完整流转」。
+- **不知道该调用哪个能力**：看「Commands 与 Skills 生命周期」。
+- **运行失败或中途改需求**：看「常见情况与处理办法」。
+- **需要全部参数和内部原理**：再看「工作原理」「命令行参数」和「coding-x 源码目录说明」。
+
+---
+
+## 先分清三个位置
+
+新手最容易把工具仓库、目标项目和 AI 工具混在一起：
+
+| 名称 | 它是什么 | 你在哪里操作 |
+| --- | --- | --- |
+| **coding-x（控制端）** | 本仓库提供的插件和 npm 引擎，负责安排步骤、启动 agent、保存状态 | 安装一次；通常不需要修改它的源码 |
+| **目标项目（目标端）** | 你真正想开发的网站、服务、App 或其他 Git 仓库 | commands、skills 和 `npx coding-x` 都应在这个项目根目录执行 |
+| **runner** | 真正执行 AI 任务的命令行工具：`claude`、`codex` 或 `cursor-agent` | 先安装并登录；coding-x 每轮调用它 |
+
+例如，你要给 `my-shop` 增加优惠券功能：coding-x 是控制工具，`my-shop` 是目标项目，Codex 可以是 runner。**不要为了使用 coding-x，把 `my-shop` 的需求和 `.workspace/` 写进 coding-x 源码仓库。**
+
+开发 coding-x 自身时，本仓库可以同时充当控制端和目标端；这是维护者的自用场景，普通用户无需这样做。
+
+### 谁负责什么
+
+| 角色 | 负责 | 不负责 |
+| --- | --- | --- |
+| **你（人）** | 说明目标、确认业务/技术取舍、审阅转换差异、处理 blocked、裁决 review、决定合并/发布 | 不必逐轮提醒 AI 下一步做什么 |
+| **交互式 AI 工具** | 执行 command/skill，和你一起生成文档、转换 PRD、审查和收口 | 不自动获得最终产品裁决权 |
+| **coding-x 引擎** | 选 story、启动角色、执行机械门禁、控制重试/超时、签发验收状态、记录证据 | 不替人修改需求，也不替人批准破坏性动作 |
+| **Developer / Builder** | 一次只实现一个 story，运行检查，提交该 story，再声明候选完成 | 不能给自己签发最终验收凭证 |
+| **Validator** | 针对引擎绑定的 story 和验收标准逐条复核，提交结构化结果 | 不修代码、不改需求、不直接改最终状态 |
+
+### 会话上下文如何工作
+
+- commands 和 skills 通常在你当前打开的 AI 会话中执行，不会因为名字里有 `loop` 就自动新开会话。`/priming` 建立的理解也主要服务于当前会话。
+- 引擎中的每次 Developer 和 Validator 调用都是新的 headless runner 进程，不能依赖上轮聊天记忆；它们通过 Git、`AGENTS.md`、`docs/` 和 `.workspace/` 接力。
+- `/review-loop` 的“独立审查”指重新取证、不采信 Developer/Validator 自述，不等于自动隔离上下文。要降低自审偏差，可以手动新开一个仍指向同一项目目录和分支的会话再运行它。
+
+> **下文命令名的写法：** 为了让三种宿主共用一份说明，本文把命令逻辑名简写成 `/priming`、`/planning` 等。Claude Code 安装插件后的实际名字带命名空间，例如 `/coding-x:priming`；Cursor 以斜杠菜单实际显示的名字为准；Codex 可直接说“使用 coding-x 的 priming 工作流”。如果宿主没有显示裸命令，不要机械输入不存在的 `/priming`，安装和验证方法见「安装」。
+
+---
+
+## 零基础完整流程
+
+下面是一条推荐的完整路线。不是每次都要执行所有可选步骤，后文会说明如何跳过。
+
+1. **准备目标项目。** 确认它是你信任的 Git 仓库，重要内容已经提交或备份，当前没有不明来源的改动。
+2. **安装插件和一个 runner。** Node.js 需要 ≥18；Claude Code、Codex 或 Cursor Agent 至少安装并登录一个。详细命令见「安装」。
+3. **进入目标项目根目录。** 后面的对话和终端命令都在这里进行，而不是在 coding-x 插件源码目录中进行。
+4. **第一次接入时运行 `/init-docs`。** 它只补缺失文件，不覆盖已有文档；然后人工确认生成的黄金原则和架构占位。
+5. **让当前会话理解项目。** 运行 `/priming`。它不改代码，只输出当前项目概览。
+6. **整理需求。** 需求很乱时说 `align: <你的需求>`；涉及数据库、公开接口、状态机、权限或迁移时，再说 `tech: <功能或对齐稿>`。需求已经清楚可以跳过对应步骤。
+7. **规划和生成正式 PRD。** 推荐先运行 `/planning <功能描述或对齐稿>`，再说“基于这些材料创建一个 PRD”。逐项确认 AI 提出、且无法从项目中查证的业务问题。
+8. **生成引擎执行清单。** 说“将 `docs/prds/prd-xxx.md` 转成 `prd.json`”。检查它展示的 story/AC 对照表；有异议时改源 PRD 后重新转换，不要直接手改 `.workspace/prd.json`。
+9. **先体检，再启动。** 运行 `npx coding-x doctor`。初次使用建议保留 `qualityChecks`，模型路由则可以先不启用，直接使用 runner 默认模型。
+10. **运行引擎。** 例如 `npx coding-x codex`。浏览器会打开仪表盘；终端也会持续显示当前 story、阶段和实际模型。
+11. **观察和处理异常。** 随时运行 `npx coding-x status`；需要完整证据时打开 `.workspace/report.html`。退出码 3 或 story 显示 blocked 时，先看 `state.json` 的 notes 和报告，再做人工裁决。
+12. **合并前审查。** 运行 `/review-loop`，逐条给出“已修/接受/推迟/驳回”裁决。它不会自动修复；要修的项需要你明确授权。
+13. **合并和收口。** 所有发现闭环、检查重新通过后，由人决定合并。随后可运行 `/compound-docs`，把仍然成立的经验沉淀到长期文档；物理归档只有在你明确授权时才发生。
+
+最短可用路线是：**已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop`**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
+
+### 首次运行前的安全红线
+
+> ⚠️ coding-x 会以跳过 runner 权限确认的模式运行 AI agent。它可以读写目标项目、执行命令、创建/切换分支并提交代码。
+
+- 只在你信任的仓库中运行；先提交或备份自己的未完成工作。
+- 确认目标项目的测试/typecheck 基线本来就是绿色，否则循环会把旧失败误当成本轮问题反复处理。
+- `.workspace/` 应被 Git 忽略；让 `prd-to-json` 和 `doctor` 检查，不要把运行状态混入产品提交。
+- 不要在引擎运行时修改 `prd.json`、运行 `repair` 或重新派生需求；先停止引擎并确认锁已释放。
+- 不要把密码、密钥写进 PRD、progress、截图或模型目录。全局模型目录只保存模型 ID，不保存账号凭据。
 
 ---
 
@@ -81,78 +159,202 @@ coding-x 同时是两样东西：
 - **Node.js ≥ 18**
 - 已安装、已认证并可在终端调用 **`claude`**（Claude Code CLI）、**`codex`** 或 **`cursor-agent`**（取决于你用哪个 runner）
 
+插件和 runner 是两件事：**插件**让交互式 AI 知道怎样做需求对齐、PRD、review 等工作流；**runner**才是 `npx coding-x` 在自动循环中启动的 AI 命令行程序。只装其中一个不能代替另一个。
+
 ### Claude Code
 
-添加 marketplace 并安装插件：
+在 Claude Code 对话中添加 marketplace、安装插件，并让当前会话重新加载：
 
-```
+```text
 /plugin marketplace add Xinzz995/coding-engine
-/plugin install coding-x
+/plugin install coding-x@coding-x-marketplace
+/reload-plugins
 ```
 
-安装后即可使用 `/priming`、`/planning`、`/init-docs`、`/review-loop`、`/compound-docs` 命令以及 `scenario-alignment` / `technical-alignment` / `prd-generate` / `prd-to-json` / `agent-browser` skills。
+看到 `/coding-x:priming`、`/coding-x:init-docs` 等条目就表示插件已加载。Claude Code 会给插件能力加 `coding-x:` 命名空间；例如本文写的 `/planning 搜索功能`，实际输入 `/coding-x:planning 搜索功能`。skills 也可以由 Claude 按语境自动使用，或显式说出 skill 名。安装机制可参照 [Claude Code 官方插件与 marketplace 文档](https://code.claude.com/docs/en/plugin-marketplaces)。
 
 ### Codex
 
-克隆仓库，仓库根目录的 `.codex-plugin/plugin.json` 清单会把顶层 `skills/`、`commands/` 暴露给 Codex：
+Codex CLI 用户可在普通终端中添加本仓库 marketplace 并安装插件：
 
 ```bash
-git clone https://github.com/Xinzz995/coding-engine.git
+codex plugin marketplace add Xinzz995/coding-engine
+codex plugin add coding-x@coding-x-dev
 ```
 
-按 Codex 的插件加载方式指向该目录即可（清单声明 `"skills": "./skills/"`、`"commands": "./commands/"`，指回仓库中唯一的一份内容）。引擎侧则直接用 `npx coding-x codex` 运行，无需额外安装。
+随后**新开一个 Codex 任务**再使用；也可以在 Codex CLI 输入 `/plugins`，从已配置的 `coding-x-dev` marketplace 安装。Codex 桌面版可重启后打开 Plugins，选择本仓库来源并安装。当前官方支持面是 Codex 桌面版与 Codex CLI，**Codex IDE 扩展不支持插件**；详见 [OpenAI 插件使用说明](https://learn.chatgpt.com/docs/plugins) 和 [插件构建/marketplace 说明](https://learn.chatgpt.com/docs/build-plugins)。
+
+在新任务中可以直接说“使用 coding-x 的 prd-to-json skill 转换这个 PRD”或“使用 coding-x 的 priming 工作流理解项目”。若当前 Codex 版本把 command 兼容加载为 skill，不一定出现与 Claude Code 相同的斜杠名字，以自然语言点名工作流最稳妥。
 
 ### Cursor
 
-同样克隆仓库，`.cursor-plugin/plugin.json` 清单把顶层 `skills/`、`commands/` 暴露给 Cursor：
+在 Cursor 的 Agent 对话中输入 `/add-plugin`，选择从 GitHub/仓库安装，并粘贴：
 
-```bash
-git clone https://github.com/Xinzz995/coding-engine.git
+```text
+https://github.com/Xinzz995/coding-engine
 ```
 
-按 Cursor 的插件/技能加载方式指向该目录即可。
+安装后重新加载 Cursor 窗口，在 Plugins/Skills 中确认 `coding-x` 已启用；然后可从斜杠菜单选择 command，或在对话中显式说出 skill/工作流名。若没有 `/add-plugin`，先更新到支持插件的 Cursor 版本。Cursor 的官方入口说明见 [Cursor 2.5 插件发布说明](https://cursor.com/changelog/2-5) 和 [Cursor Plugins 文档](https://cursor.com/docs/plugins)。
 
-> 说明：三套工具共用**同一份** `skills/` 和 `commands/`，各自只多一个瘦清单指回它（详见下文「目录结构」）。引擎（`npx coding-x`）与用哪个工具无关，任何环境下都能独立运行。
+> 说明：三套工具共用**同一份** `skills/` 和 `commands/`，各自只多一个瘦清单指回它（详见下文「coding-x 源码目录说明」）。宿主对 command 的展示方式不同，但工作流内容不复制。引擎（`npx coding-x`）与插件安装分开；它会调用你在终端选择且已经登录的 runner。
 
 ---
 
 ## 快速开始
 
-```bash
-# 1. 用插件的命令/skills 生成 .workspace/prd.json（会先检查 Git 隔离；见下文工作流程）
+先在 AI 编码工具中完成文档准备。下面以 Claude Code 的实际命令为例：
 
-# 2. 在项目根目录运行引擎
+```text
+/coding-x:init-docs
+/coding-x:priming
+/coding-x:planning 增加一个可以按关键词搜索笔记的功能
+创建一个 PRD
+将 docs/prds/prd-search-notes.md 转成 prd.json
+```
+
+使用 Codex 或 Cursor 时，不必猜命令前缀：直接说“使用 coding-x 的 init-docs 工作流初始化文档”“使用 priming 工作流理解项目”“使用 planning 工作流规划搜索功能”。然后继续说代码块中的“创建一个 PRD”和“将……转成 prd.json”，它们会分别触发 `prd-generate` 和 `prd-to-json` skill。
+
+然后在**目标项目根目录**运行：
+
+```bash
+npx coding-x doctor          # 先检查文档、门禁、模型配置和 workspace 隔离
+npx coding-x status          # 确认执行清单可读；未开始时显示全部待执行
+
 npx coding-x                 # 默认用 claude
 npx coding-x codex           # 改用 codex
 npx coding-x cursor          # 改用 Cursor Agent
 
-# 3. 浏览器会自动打开仪表盘（也可手动访问）
-#    http://localhost:7331   普通视图
-#    http://localhost:7331/p 像素风视图
+# 浏览器通常会自动打开，也可手动访问：
+# http://localhost:7331      普通视图
+# http://localhost:7331/p    像素风视图
 ```
 
-> ⚠️ coding-x 会以**跳过权限确认**模式运行 AI agent（`--dangerously-skip-permissions` / `--dangerously-bypass-approvals-and-sandbox`），它会在无人确认的情况下读写文件、执行命令、提交代码。请务必确认当前目录是你信任的项目工作区。
+`npx` 首次运行时可能询问是否下载 `coding-x`，这是 npm 的正常提示。模型路由是可选项；新手可以先不配置 `models`，直接使用所选 runner 的默认模型。
+
+你可以用三个信号判断接入是否成功：交互式 AI 能按 `priming` 工作流输出项目概览；`npx coding-x --help` 能显示 CLI 用法；生成 `.workspace/prd.json` 后，`npx coding-x doctor` 没有硬错误。任何一项失败，都先按「常见情况与处理办法」排查，不要直接启动自动循环。
 
 ---
 
 ## 基本工作流程
 
 ```
-需求  ──scenario-alignment──▶  业务对齐稿（可选：输入杂乱/口径未定时先对齐）
-      ──technical-alignment─▶  技术对齐稿（可选：涉及持久化/接口/状态机等合同级决策时）
-      ──/planning────────────▶  实现计划（docs/plans/）
-      ──prd-generate skill───▶  PRD（docs/prds/）
-      ──prd-to-json skill────▶  .workspace/prd.json
-                                │
-                  npx coding-x  ▼
-              Developer ⇄ Validator 循环（见「工作原理」）
-                                │
-                                ▼
-              http://localhost:7331  实时查看进度
-                                │
-              ──/review-loop───▶  合并前人审包（审查，建议）
-              ──/compound-docs─▶  沉淀 + 活知识熵 GC + 完成态冷归档（收口，可选）
+原始想法
+   │
+   ├─ scenario-alignment（业务不清楚时）──▶ docs/prds/align-*.md
+   ├─ technical-alignment（技术合同昂贵时）▶ docs/prds/tech-*.md
+   └─ /planning（推荐、可选）─────────────▶ docs/plans/*.md
+   │
+   ▼
+prd-generate ─────────────────────────────▶ docs/prds/prd-*.md
+                                              │  正式意图真相源，进入 Git
+                                              ▼
+prd-to-json ──────────────────────────────▶ .workspace/prd.json
+                                              │  本地执行派生物，不进入 Git
+                                              ▼
+npx coding-x ───────────────▶ Developer → 门禁 → Validator → 下一 story
+                                              │
+                                              ├─ state/progress/evidence/screenshots
+                                              ├─ dashboard / status
+                                              └─ report.html
+                                              ▼
+/review-loop ───────────────▶ review-*.md + 人工四态裁决
+                                              ▼
+人决定合并 ─────────────────▶ /compound-docs（可选沉淀/显式归档）
 ```
+
+---
+
+## 什么时候用哪个步骤
+
+| 你的情况 | 应该做什么 | 可以跳过什么 |
+| --- | --- | --- |
+| 第一次把 coding-x 接入某仓库 | `/init-docs`，人工确认黄金原则，再 `/priming` | 以后文档齐全时无需重复初始化 |
+| 需求是口述、聊天记录、bug 和改版混在一起 | `scenario-alignment` | 需求边界已经清楚时可跳过 |
+| 涉及数据库/schema、公开接口、状态机、权限、存量迁移 | 业务口径确认后执行 `technical-alignment` | 纯页面文案或局部逻辑通常可跳过 |
+| 需要一份别人拿到就能实施的技术路线 | `/planning <功能>` | 极小改动可跳过，但 PRD/AC 仍要清楚 |
+| 要进入自动执行 | `prd-generate` 生成正式 PRD，再用 `prd-to-json` 派生 | 不能只拿 align/tech/plan 直接启动引擎 |
+| 有 UI 验收 | 在 AC 中写清页面、操作、结果；环境有 `agent-browser` 时用它验证和截图 | 不能只写“页面正常”或只做 HTTP 冒烟 |
+| 引擎全部通过，准备合并 | `/review-loop`，人裁决全部发现 | 不建议因为 Validator 已通过而跳过人审 |
+| 功能已合并，需要更新长期知识 | `/compound-docs` | 没有可复用知识时允许零修改 |
+
+---
+
+## 文档与运行产物的完整流转
+
+coding-x 的信息分三层保存：
+
+1. **`docs/` 与 `AGENTS.md`：长期、可评审、应进入 Git。** 它们告诉人和未来 agent“项目现在是什么、这次想做什么”。
+2. **`.workspace/`：当前执行的本地工作台，默认应被 Git 忽略。** 它保存机器状态、过程证据和报告，可以断点续跑，但不应混入产品提交。
+3. **全局配置：跨项目复用。** 默认在 `~/.config/coding-x/config.json`，只保存允许使用的模型 ID。
+
+### 长期项目文档：来源、去处和生命周期
+
+| 产物 | 谁创建或更新 | 来源 | 谁会读取 | 生命周期与去处 |
+| --- | --- | --- | --- | --- |
+| `AGENTS.md` | `/init-docs`；以后人工维护索引 | 代码结构、项目命令和硬约束 | 交互式 agent、Builder、Validator | 长期入口，保持短小；细节下沉 `docs/`，进入 Git |
+| `CLAUDE.md` | `/init-docs` 在缺失时创建 | `@AGENTS.md` 桥接 | Claude Code | 长期薄文件；已有文件不会被覆盖 |
+| `docs/architecture.md` | `/init-docs` 初始化，`/compound-docs` 按事实更新 | 当前代码结构、边界和数据流 | 规划、实现、审查 | 长期 active 文档，结构变化时更新，不归档 |
+| `docs/golden-principles.md` | `/init-docs` 提候选，人确认；后续谨慎维护 | 项目最重要、可机械检查的规则 | `/planning`、Builder、`/review-loop` | 长期 active；保持少量强规则，不作为历史日志 |
+| `docs/patterns.md` / `docs/glossary.md` | `/init-docs` 建骨架，`/compound-docs` 沉淀/去重 | 当前代码、Git、progress 中仍成立的经验 | 后续规划和实现 | 长期 active；失效内容被改写、合并或删除 |
+| `docs/decisions/*.md` | 人或规划过程记录 | 重要架构取舍及理由 | 后续设计与审查 | ADR 长期保留；active/superseded/rejected 表示决策状态，不随普通收口删除 |
+| `docs/prds/align-*.md` | `scenario-alignment` | 原始需求 + 代码/文档事实 + 人工业务裁决 | `technical-alignment`、`prd-generate` | 一次性业务对齐材料；正式 PRD 吸收后置 `superseded`，可显式归档 |
+| `docs/prds/tech-*.md` | `technical-alignment` | 已确认业务口径 + 当前架构 + 人工技术裁决 | `prd-generate` | 一次性技术合同材料；正式 PRD 吸收后置 `superseded`，可显式归档 |
+| `docs/plans/*.md` | `/planning` | 需求/对齐稿 + 代码调研 + 官方资料 | 人、实施 agent、`/review-loop` | 实施路线参考；初始 `active`，实现已合并后置 `done`，可显式归档；**不替代 PRD** |
+| `docs/prds/prd-*.md` | `prd-generate`；`prd-to-json` 只回写增强后的 User Stories | 对齐稿、计划或清楚的原始需求 + 人工回答 | `prd-to-json`、人审、后续需求变更 | **意图真相源**；初始 `active`，全部 story 通过且合并后置 `done`；需求变化时重新 active 并再派生 |
+| `docs/specs/*.md` | 项目自行采用的设计过程或其他工具 | 功能设计 | 规划、实现、审查 | coding-x 当前没有专门生成它的 command；有则按 active/done 管理，可显式归档 |
+| `docs/archive/` | `/compound-docs` 在人明确授权后移动 | 已完成或被替代的任务型文档 | 只在追溯历史/修断链时读取 | **Git 内冷档案**；不再作为日常当前事实，不留旧路径副本 |
+
+`docs/` 任务文档的 frontmatter 常用状态：
+
+| 状态 | 含义 | 下一步 |
+| --- | --- | --- |
+| `active` | 当前仍生效、待实现或待完成 | 保留在 active 区继续维护 |
+| `done` | 已有完成证据；PRD 要求 story 全通过且已经合并 | 可保留，也可在人授权后移入 `docs/archive/` |
+| `superseded` | 内容已被后继文档吸收或取代 | 标明替代者，可在人授权后归档 |
+| `rejected` | 方案评估后明确不做，常用于 ADR | 保留作为先例，避免重复讨论同一提案 |
+
+“改成 done”和“移动到 archive”是两件事：前者是状态裁决，后者是路径变化。`/compound-docs` 可以根据证据更新状态，但没有“物理归档”授权时只列候选，不会移动文件。
+
+### `.workspace/`：来源、用途和去处
+
+| 产物 | 何时产生 | 谁写 / 谁读 | 用途 | 生命周期与去处 |
+| --- | --- | --- | --- | --- |
+| `prd.json` | `prd-to-json` 根据正式 PRD 生成 | skill 写；引擎/agent 读；运行期由引擎冻结保护 | 本轮可执行 story、AC、分支、门禁和可选模型路由 | 当前功能的执行需求；需求改变时从源 PRD 再派生，**不要直接改** |
+| `state.json` | 引擎首次运行自动创建；再派生时按 story ID 调整 | Builder 只写候选 `passes`；最终 verdict、重试、blocked、validated/escalated 由引擎控制 | 当前执行状态和人工仲裁 notes | 断点续跑依据；新功能切换时旧副本进 `.workspace/archive/` |
+| `progress.md` | `prd-to-json` 初始化/切换功能时重置；Builder 逐轮追加 | Builder 写；后续 Builder 和 `/compound-docs` 读 | 跨无记忆轮次传递实现进度、模式和陷阱 | 过程上下文，不是完成证据；随旧运行归档 |
+| `evidence.jsonl` | 引擎运行时逐行追加；agent 可登记截图 | 引擎与 agent 写；status/report 读 | 门禁、轮次、调用、验收 claim、协议裁决、截图索引 | append-only 过程索引；再派生会清理当前副本并归档旧副本 |
+| `validation-result.json` | 每次 Validator 调用临时生成 | Validator 写；引擎读取后删除 | 单轮结构化验收 IPC | **瞬时文件**；不作为长期状态，也不归档 |
+| `screenshots/` | UI 的最终 Builder/Validator 验证时产生 | agent 写；report 读 | 可视化验收工件 | 与本轮 workspace 一起保留/归档；分享报告时要连同该目录 |
+| `report.html` | 每次循环结束自动生成；`coding-x report` 可重建 | 引擎/CLI 写；人读 | 汇总 story、AC、状态、证据、截图、review 和红旗 | 可重复生成的阅读视图；不是新的真相源 |
+| `review-*.md` | `/review-loop` 运行时产生 | 审查 agent 写初稿和裁决回填；人裁决；report 读 | 合并前改动导读、发现、风险和 resolution | 所有发现回填后才闭环；旧运行切换时归档 |
+| `engine.lock` | `run` 或 `repair` 开始时原子创建 | 引擎独占 | 防止两个写者同时改同一 workspace | 正常退出删除；异常遗留由下次运行判定并接管，不要习惯性手删 |
+| `prd.tampered-*.json` | 引擎发现运行期 PRD 被修改时产生 | 引擎写；review/report/人读 | 保存被检测到的篡改版本，当前 PRD 会按启动快照恢复 | 红旗取证；切换功能时随旧运行归档并清出当前根目录 |
+| `archive/<日期-功能>/` | 新功能覆盖旧 workspace，或同功能需求再派生之前 | `prd-to-json` 创建 | 保存旧运行/旧 AC 对应的本地状态和证据 | **本地运行档案**；与 Git 内 `docs/archive/` 完全不同，可按保留策略人工清理 |
+
+`.workspace/` 不是缓存目录：`report.html` 可以重建，但 `state.json`、progress、review、截图和历史证据可能没有其他副本。不要像删除 `dist/` 那样随手删除整个 workspace；要换功能时让 `prd-to-json` 按规则先归档。
+
+### 全局模型目录
+
+`~/.config/coding-x/config.json`（或 `CODING_X_CONFIG` 指定的文件）位于目标项目之外，供多个项目复用。它只声明“允许传给某个 runner 的模型 ID”，不保存 API key、账号或 provider 地址，也不证明模型当前可用。初次使用不需要配置模型路由；只有要按 story 难度选择模型时才需要它。
+
+### 一条需求如何被追踪到底
+
+1. 正式 PRD 中的 `US-001` 等 ID 一旦分配就保持稳定；删除后也不回收编号。
+2. `prd-to-json` 把仓库内源 PRD 的相对路径写进 `prd.json.sourcePrd`，并把增强/拆分后的最终 stories 回写源 PRD，同时展示转换对照表。
+3. `state.json` 用同一个 story ID 保存执行状态；引擎给 Validator 的 request 还绑定 AC 快照/hash、一次性 request ID 和调用前 Git HEAD。
+4. Developer 默认每个 story 单独提交；`evidence.jsonl` 分别记录 `source=validator` 的声明和 `source=engine` 的机械观察/协议裁决。
+5. `/review-loop` 的 `[已修]` resolution 引用修复提交哈希；AC 本身有缺口时还必须引用源 PRD 回补提交。
+6. `report.html` 把上述材料汇总成阅读页面。它方便检查，但不把 agent 可写的记录伪装成不可篡改证明；最终仍要结合当前代码、Git 和人工审查。
+
+### 需求变更时只改哪里
+
+**改 `docs/prds/prd-*.md`，然后重新运行 `prd-to-json`。** 不要为了“快”直接改 `.workspace/prd.json` 或 `state.json`。
+
+- AC 没变的 story：再派生会按稳定 ID 尽量保留已有状态。
+- AC 有实质变化的 story：该 story 会重置为待重新验收。
+- 新增/删除 story：state 按 ID 增删；旧证据先归档，避免对错 AC。
+- branchName 不同：视为新功能，先归档上一轮 workspace，再初始化新一轮。
+- 引擎正在运行：先停止并确认没有活锁，再派生；skill 不会替你强行覆盖。
 
 ---
 
@@ -160,16 +362,24 @@ npx coding-x cursor          # 改用 Cursor Agent
 
 ### 第 1 步：生成 `prd.json`
 
-在 Claude Code（或其他工具）中：
+在目标项目中打开 Claude Code、Codex、Cursor 或其他已加载插件的 AI 工具：
 
-1. （可选）`/priming` 让 agent 先理解你的代码库；`/init-docs` 生成目录式根 `AGENTS.md` + `docs/` 知识库（架构地图、黄金原则、约定与陷阱、词汇表、decisions/plans/prds），单项目与 monorepo 均支持；空的冷档案不会预建。
-2. （可选）输入杂乱（口述/bug/页面调整混杂）或业务口径未定时，先用 `scenario-alignment` skill 对齐场景（对它说「align: 你的需求」）：产出无技术内容的业务 PRD 对齐稿（`docs/prds/align-*.md`），人只拍板 1-3 个关键问题。需求本身已清楚时跳过。
-3. （可选）功能涉及合同级技术决策（新表/改 schema、对外接口、状态机、权限模型、存量数据迁移）时，用 `technical-alignment` skill 对齐技术合同（「tech: ...」）：产出技术对齐稿（`docs/prds/tech-*.md`）——每条合同是可验证陈述，不可逆项单独列出，人只拍板少数贵决策。无此类决策时跳过。
-4. `/planning 我要做的功能描述` 产出完整实现计划。
-5. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」；输入是对齐稿/技术对齐稿时它会跳过澄清、吸收合同直接转）。
-6. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。它先用 `doctor` 检查是否有引擎持锁，真正写入前再检查一次；活锁或无法判定时零写入，陈旧/损坏锁交你确认但不由 skill 删除。随后检查 `.workspace/` 是否被 Git 忽略、是否已有运行时文件被跟踪；异常时停下来交由你决定，不自动改仓库。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
+1. **只在首次接入时初始化知识库**：运行 `/init-docs`。如果它列出 monorepo 子项目或黄金原则候选，先由人确认；已存在的文件会跳过，不会覆盖。
+2. **建立当前会话理解**：运行 `/priming`。检查它识别的项目目标、技术栈、关键目录和当前分支是否正确。
+3. **按需要做两端对齐**：输入杂乱时说 `align: <需求>`；存在昂贵技术合同时说 `tech: <功能或 align 文件路径>`。对齐稿中的待拍板问题必须由人回答。
+4. **生成实现计划（推荐、可选）**：运行 `/planning <功能描述或对齐稿路径>`。计划说明“怎么做”，但不决定最终验收口径。
+5. **生成正式 PRD**：说“基于 `<对齐稿/计划路径>` 创建一个 PRD”。没有前置材料时也可以直接说“为 `<功能>` 创建一个 PRD”。确认 Goals、Non-Goals、每个 story 和 acceptance criteria 后再继续。
+6. **转换为执行清单**：说“将 `docs/prds/prd-xxx.md` 转成 `prd.json`”。skill 会：
+   - 在写入前和真正写入前分别检查引擎锁；活锁或无法判定时保持零写入；
+   - 检查 `.workspace/` 是否被 Git 忽略、是否已有运行文件被跟踪，异常时交给你决定，不擅自改 `.gitignore` 或 Git 索引；
+   - 把模糊 AC 改成可执行断言、拆分过大 story、补闭环 story，并把最终 User Stories 回写仓库内源 PRD；
+   - 在会话里展示“源 story → 执行 story → 变化”的对照表；
+   - 对不同功能先归档上一轮 workspace；对同一功能的需求变化按稳定 story ID 再派生。
+7. **人工检查三个结果**：源 PRD 的变化、转换对照表、`npx coding-x doctor` 的结论。有异议就改源 PRD 并重新转换，不要直接改 JSON。
 
-`prd.json` 结构：
+#### 看懂 `prd.json`（通常不需要手写）
+
+下面的 JSON 只帮助你理解字段；正常流程应由 `prd-to-json` 生成：
 
 ```jsonc
 {
@@ -202,7 +412,9 @@ npx coding-x cursor          # 改用 Cursor Agent
 }
 ```
 
-`state.json` 结构（引擎首跑自动生成；旧版含状态字段的 prd.json 会被自动抽取迁移）：
+#### 看懂 `state.json`（不要手工推进状态）
+
+`state.json` 由引擎首跑自动生成；旧版含状态字段的 prd.json 会被自动抽取迁移：
 
 ```jsonc
 {
@@ -222,6 +434,10 @@ npx coding-x cursor          # 改用 Cursor Agent
 > **0.25.0 验收凭证迁移：** 新状态用 `validated` 区分“builder 声称完成”和“引擎已观察 Validator 正常完成”。旧 state 缺少该字段时，读取阶段按历史 `passes` 值兼容，不会把既有已完成 workspace 全量重验；新一轮自然写回后会补齐字段。显式的 `passes=true, validated=false` 会被视为中断留下的待验收状态并回写待复核。
 
 > **结构化验收协议：** 所有新 Validator 轮次都必须提交 `validation-result.json` v1；不再从 `progress.md` 猜 story，也不再直接改 `state.json`。旧 state/evidence 继续可读，但新轮次不会静默回退到“退出 0 + passes 未变”的旧判定。Git 不可用时 request 明示 `gitHead: null`，此时只有 request/story/AC 绑定，status/report 会显示 `unavailable`，不会伪装成完整产物绑定。
+
+#### 可选进阶：模型路由
+
+模型路由不是启动 coding-x 的前置条件。新手可以在 `prd-to-json` 询问时选择“不启用”，这时不生成 `models`、`difficulty` 和 `difficultyReason`，引擎直接使用 runner 默认模型。
 
 > **0.24.0 模型目录迁移：** coding-x 不再调用 Claude Code、Codex 或 Cursor 查询模型。模型候选统一来自用户维护的全局模型目录；`models` 缺失、没有任何模型 CLI 覆盖时仍是合法零配置，直接使用 runner 默认模型。存在待执行 story，并且（PRD 启用模型路由或本次传入任一模型 CLI 覆盖）时，所需 ID 必须已在目录中声明；已收敛 workspace 跳过目录读取。`prd.json.models` schema 不变，v0.23 已有项目只需先登记原五项 ID，无需迁移项目文件。
 
@@ -249,6 +465,19 @@ npx coding-x cursor          # 改用 Cursor Agent
 `prd-to-json` 在用户选择 runner 后调用 `coding-x models <runner> --json` **只读该目录**，将候选展示一次，再让用户分别选择 low/medium/high builder、validator 和 escalation。目录缺失或非法时可先维护配置后重试，也可明确不启用模型路由并继续普通转换；不能用会话内临时 ID 绕过。
 
 ### 第 2 步：运行引擎
+
+先确认终端当前目录是目标项目根目录，然后运行：
+
+```bash
+npx coding-x doctor
+npx coding-x codex      # 使用 Codex；也可以换成 claude 或 cursor
+```
+
+启动后会依次发生：引擎获取 `.workspace/engine.lock` → 读取/初始化状态 → 预检 runner 与模型 → 启动仪表盘 → 每轮启动一个 Builder → 运行机械门禁 → 启动一个 Validator → 引擎写入裁决 → 继续下一个 story。Builder 会按 PRD 的 `branchName` 检查、创建或切换功能分支，并按 story 提交代码。
+
+可以按 `Ctrl+C` 中止后稍后重跑。已验证 story 会保留；如果进程停在“Builder 声称完成、Validator 尚未签发”之间，下次启动会把该 story 恢复为待复核。异常退出留下的 stale lock 会由下次运行判定接管，不需要日常手删。
+
+下面是完整命令示例；第一次只需关心 `doctor`、一个 runner、`status` 和 `report`：
 
 ```bash
 npx coding-x --help             # 显示完整命令与参数后退出，不读取 workspace 或启动 runner
@@ -279,13 +508,39 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 浏览器打开（默认自动弹出）：<http://localhost:7331>（像素风视图 `/p`）。仪表盘展示迭代次数、当前阶段、story 难度/升级态、完整配置映射，以及当前阶段实际命中的模型与路由来源（CLI/难度/升级/默认）。
 
+- **只想快速知道完成了多少**：`npx coding-x status`。
+- **引擎没在运行但想看仪表盘**：`npx coding-x dashboard`，看完按 `Ctrl+C`。
+- **需要逐条 AC、截图、门禁、调用和红旗证据**：打开 `.workspace/report.html`；review 回填后运行 `npx coding-x report` 刷新。
+- **不要只看 `passes=true`**：story 真正有效通过必须同时满足 `blocked=false`、`passes=true` 和 `validated=true`。
+
 ### 第 4 步：审查合并（建议）
 
-循环全部 story 通过后（引擎会提示），先别急着合并：在 Claude Code 等工具中运行 `/review-loop`，它对本轮分支 diff 做独立审查，产出人审包（红旗区如有 + 三层）并落盘 `.workspace/review-*.md` 留痕，人审后四态回填裁决——改动导读（每个 story 改了什么、数据怎么流）、发现清单（正确性与过度工程双维度，一行一发现）、风险聚焦（建议你重点细看的位置）。它是人审的加速器不是替代品：拿着包审完 diff、处理完发现，再把分支合并进主干。
+循环全部 story 通过后（引擎会提示），先别急着合并：在 Claude Code 等工具中运行 `/review-loop`。为了降低同一 agent 自审偏差，可以手动开一个仍连接同一目录/分支的新会话；命令本身不会自动新开上下文。
+
+它重新读取分支 diff、PRD/AC、项目原则并运行质量检查，产出人审包（红旗区如有 + 三层），同时落盘 `.workspace/review-*.md`：
+
+1. **改动导读**：每个 story 改了什么，数据怎么流。
+2. **发现清单**：正确性与过度工程问题，每条标为“需人裁决 / 机械修 / 仅提示”。
+3. **风险聚焦**：建议人重点细看的 2–4 个位置。
+
+发现问题后，`/review-loop` 不修改业务代码，而是等待人处理：
+
+- `[已修]`：人明确授权后修复、跑检查并提交，再把提交哈希回填；如果是 AC 缺失/错误，还要回补源 PRD 并按需再派生。
+- `[接受]`：发现成立但决定不修，写理由。
+- `[推迟]`：写明后续 issue、计划或版本去向。
+- `[驳回]`：写反证，说明为什么是误报。
+
+所有发现都有 resolution 才算闭环。修过代码后应重新运行目标检查；影响面较大时建议再跑一次最终 diff 审查。随后运行 `npx coding-x report` 刷新人审区，由人决定是否合并——命令不会自动合并、推送或发布。
 
 ### 第 5 步：收口沉淀（可选）
 
-分支合并后、推送前，回到 Claude Code 等工具运行 `/compound-docs`：它基于当前代码、git 历史与 `progress.md` 的学习记录做交叉取证，把仍然成立的结构变化、稳定约定与高频陷阱分层沉淀进项目 `docs/`，并对本轮影响的 active 知识做增量熵 GC（失效删除、重复合并、错误落位迁移）。明确说“全量 GC”才逐条审计 patterns/glossary/architecture/golden-principles/prompt-writing；明确说“物理归档”或确认候选清单后，才把 `done/superseded` 的 PRD、plan、spec 等镜像原相对树迁入 `docs/archive/`，不会在普通收口中静默改路径。收口还会汇总代码中的 `// 取舍:` 标记成取舍账本。
+推荐在分支合并后、推送或发布前，回到 Claude Code 等工具运行 `/compound-docs`。它基于**当前代码优先**，再与 Git、`progress.md`、本轮 PRD 交叉取证，把仍成立的结构变化、稳定约定和高频陷阱分层沉淀进 `docs/`；过程故事、一次性事故和已经失效的说法不会被当成长期知识。
+
+默认只处理本轮影响范围，并执行 active 知识的增量熵 GC、任务文档状态收尾和取舍账本汇总：
+
+- 明确说“全量 GC”才逐条审计全部 patterns/glossary/architecture/golden-principles/prompt-writing。
+- 明确说“物理归档”，或在它展示候选后再次确认，才移动 `done/superseded` 的 PRD、plan、spec 等到 `docs/archive/`。
+- 它只允许修改文档，不会顺手修代码；证据不足时允许零修改或列为待拍板。
 
 ### 命令行参数
 
@@ -338,7 +593,40 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 ---
 
-## 包含内容 / 功能清单
+## Commands 与 Skills 生命周期
+
+先区分两类入口：
+
+- **Command**：你显式输入 `/命令`，启动一套有固定步骤的工作流。
+- **Skill**：你用自然语言表达意图后，AI 工具按语境选用；为了避免误触发，也可以直接说出 skill 名和目标文件。
+
+它们负责准备、检查和收口，**不会因为生成了 PRD 就自动启动引擎**。真正开始无人值守 Developer/Validator 循环的入口始终是终端里的 `npx coding-x`。
+
+### Commands（用户显式触发）
+
+| 命令 | 何时使用 / 输入 | 会读取什么 | 会产出或修改什么 | 生命周期与下一步 |
+| --- | --- | --- | --- | --- |
+| `/priming` | 新会话开始、AI 不了解项目时；无需参数 | Git 文件/状态/近期提交、README/AGENTS/docs、配置和关键源码 | 只在当前对话输出项目概览，默认不落盘、不改代码 | 会话级临时上下文；换会话可重跑，完成后继续需求对齐或任务处理 |
+| `/init-docs` | 一个仓库第一次建立 AI 知识入口时 | 项目形态、配置、目录、技术栈；monorepo 候选需人确认 | 只创建缺失的 `AGENTS.md`、`CLAUDE.md` 和 docs 骨架；已有文件不覆盖 | 基线初始化；可幂等重跑补缺，之后人工确认黄金原则/占位并由 `/compound-docs` 持续维护 |
+| `/planning <功能描述>` | 编码前需要完整技术路线时；输入可为原始需求或 align/tech 对齐稿 | 项目文档、相关代码/测试、官方资料和黄金原则 | `docs/plans/<feature>.md`，含任务顺序、风险、验证命令和原则对照；不写代码 | 初始 `active`；供人/agent 实施和 review 定位，合并后置 `done`，可显式归档；不替代正式 PRD |
+| `/review-loop` | 引擎循环结束、合并默认分支前 | 当前分支 diff、PRD/AC、state/progress（仅背景）、AGENTS/黄金原则，并独立运行质量检查 | 对话人审包 + `.workspace/review-*.md`；除留痕外不改业务代码/文档 | 同一会话执行，不自动开新上下文；发现等人四态裁决，修复需另行授权；全部 resolution 后闭环，再由人决定合并 |
+| `/compound-docs` | 功能分支/引擎轮次收口，推荐合并后、推送前 | 当前代码（最高事实）、Git、progress、PRD 范围和 active 文档 | 只修改文档：沉淀、增量熵 GC、状态收尾、取舍账本；物理归档需明确授权 | 默认只处理本轮；“全量 GC”才全库审计；完成后长期知识继续 active，任务文档可 done/superseded → archive |
+
+### Skills（按语境使用）
+
+| Skill | 何时触发 / 输入 | 主要产出 | 人需要确认什么 | 生命周期与下一步 |
+| --- | --- | --- | --- | --- |
+| `scenario-alignment` | 输入杂乱、业务边界未定；说“`align: ...`”或“场景对齐” | `docs/prds/align-<feature>.md`：不含技术方案的目标、范围、场景、验收口径 | 默认 1–3 个真正影响产品方向的问题；每题有推荐；可要求逐题深挖 | 一次性输入材料；口径确认后交给 technical-alignment（若需要）或 prd-generate；正式 PRD 吸收后置 `superseded` |
+| `technical-alignment` | 业务已清楚，且涉及持久化/接口/状态机/权限/迁移等昂贵合同；说“`tech: ...`” | `docs/prds/tech-<feature>.md`：可验证技术合同和不可逆项 | 少数高代价、难回滚的技术选择；不会替人决定业务口径 | 一次性输入材料；与 align 一起交给 prd-generate，吸收后置 `superseded`；长期技术事实以后由 `/compound-docs` 沉淀 |
+| `prd-generate` | 要把清楚需求或 align/tech 材料变成正式需求；说“创建一个 PRD”并给路径 | `docs/prds/prd-<feature>.md`：Goals、Non-Goals、稳定 story ID、可验证 AC 等 | 无前置对齐稿时回答 3–5 个查证不了的关键问题；逐条审阅 story 和 AC | 正式**意图真相源**；初始 `active`，交给 prd-to-json；合并交付后 `done`，需求演进时改回 `active` |
+| `prd-to-json` | 正式 PRD 已确认、准备运行；说“将 `<PRD 路径>` 转成 prd.json” | 回写源 PRD 最终 User Stories；生成/更新 `.workspace/prd.json`、progress 和必要的归档/状态调整；输出转换对照表 | workspace 隔离异常、门禁命令、是否启用模型路由及模型选择、story/AC 增强差异 | 每次需求变更都从源 PRD 重跑；同功能按 ID 保留/重置状态，不同功能先归档旧 workspace；完成后先 `doctor` 再启动引擎 |
+| `agent-browser` | 需要真实浏览器导航、点击、填表、截图、数据提取或 UI 验收时 | 浏览器操作结果；引擎角色按规范可把最终截图放 `.workspace/screenshots/` 并登记 evidence | 登录、支付、删除等敏感操作仍需按任务授权；核对页面、动作和可观察结果 | 操作型能力，不生成长期需求文档；用完关闭会话。skill 说明不等于已安装二进制，引擎会用 `which agent-browser` 探测 PATH |
+
+不同宿主对“自动选择 skill”的体验可能不同；最稳妥的说法是“使用 `prd-to-json` 将这个文件转换……”。commands/skills 通常沿用当前会话；需要真正独立复核时，由人手动新开会话。
+
+---
+
+## 引擎功能清单
 
 ### 引擎（`npx coding-x`）
 
@@ -358,33 +646,95 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **JSON 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json` / `state.json`。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 
-### 命令（Slash Commands，用户显式触发）
+---
 
-| 命令 | 作用 |
-| --- | --- |
-| `/priming` | 分析代码库结构、文档与关键文件，为 agent 建立项目上下文理解 |
-| `/init-docs` | 分析代码库，生成目录式 `AGENTS.md` 与 `docs/` 知识库（含黄金原则），支持 monorepo；并为 Claude Code 生成 `CLAUDE.md` 桥接（`@AGENTS.md` 导入） |
-| `/planning <功能描述>` | 通过系统化分析与调研，把需求转化为完整实现计划 |
-| `/review-loop` | 循环结束后、合并默认分支前，对分支 diff 做独立审查并产出人审包（改动导读/双维度发现清单/风险聚焦）；只读不改（唯一写入是 .workspace/ 的审查留痕文件），人保持最终裁决 |
-| `/compound-docs` | 收口时沉淀经验、增量清理五类 active 知识熵、核对任务文档状态并汇总 `取舍:` 账本；“全量 GC”才全库审计，“物理归档”或确认候选后才把完成态文档迁入 `docs/archive/`；只改文档不改代码 |
+## 目标项目中会出现什么
 
-### Skills（能力，Claude 按语境自动触发）
+接入 coding-x 后，一个典型目标项目会多出这些内容：
 
-| Skill | 作用 | 触发示例 |
-| --- | --- | --- |
-| `scenario-alignment` | 杠铃第一端「场景对齐」：把杂乱输入（口述/bug/调整混杂）整理成无技术内容的业务 PRD 对齐稿（`docs/prds/align-*.md`），默认最多问 1-3 个关键问题且必附推荐答案；说「一个一个问」可切逐题深挖模式（逐题追问到剩余问题不再影响产品方向为止）；口径确认后交 `prd-generate` 转正式 PRD | 「align: 你的需求」「场景对齐」 |
-| `technical-alignment` | 杠铃第二端「技术对齐」：把改起来贵的合同级技术决策（持久化/对外接口/状态机/权限承接/兼容迁移）整理成技术对齐稿（`docs/prds/tech-*.md`）——每条合同是可验证陈述、不可逆项单列；实现细节不进合同 | 「tech: ...」「技术对齐」「技术合同」 |
-| `prd-generate` | 为新功能生成结构清晰、可执行的 PRD（输入为对齐稿/技术对齐稿时跳过澄清、吸收合同直接转） | 「创建一个 prd」 |
-| `prd-to-json` | 把已有 PRD 转换成引擎使用的 `prd.json` 格式 | 「将 prd 转成 prd.json」 |
-| `agent-browser` | 浏览器自动化：导航、填表、截图、数据提取，用于 UI story 验证 | 需要在浏览器中验证 UI 时 |
+```text
+my-project/
+├── AGENTS.md                         # 所有 agent 共用的短索引和硬约束，应进 Git
+├── CLAUDE.md                         # Claude Code 到 AGENTS.md 的薄桥接，应进 Git
+├── docs/                             # 长期项目知识和任务文档，应进 Git
+│   ├── architecture.md
+│   ├── golden-principles.md
+│   ├── patterns.md
+│   ├── glossary.md
+│   ├── decisions/
+│   ├── plans/
+│   ├── prds/
+│   └── archive/                      # 只有首次真实物理归档后才出现
+├── .workspace/                       # 当前/历史运行状态，默认不进 Git
+│   ├── prd.json
+│   ├── state.json
+│   ├── progress.md
+│   ├── evidence.jsonl
+│   ├── screenshots/
+│   ├── review-*.md
+│   ├── report.html
+│   └── archive/
+└── <项目原有源码、测试和配置>
+```
 
-> commands 与 skills 的区别：**command 是你敲 `/命令` 显式触发、支持传参的工作流；skill 是 Claude 根据你说的话自动选用的能力**。二者是 Claude Code 的两种不同原语，分别放在插件根目录的 `commands/` 与 `skills/`，由 Claude Code 自动发现。
+请把 `docs/archive/` 和 `.workspace/archive/` 分开理解：前者是进入 Git 的历史文档，后者是被 Git 忽略的旧运行快照。目标项目自身如果已有 `dist/`，它通常仍是该项目的构建产物，与 coding-x 的 workspace 无关。
 
 ---
 
-## 目录结构详细说明
+## 常见情况与处理办法
 
-skill / command 内容在整个仓库里**只存一份**，各工具用一个瘦清单指回它，因此没有副本、无需同步、不会漂移（做法参考 [superpowers](https://github.com/obra/superpowers)）。
+| 现象 | 先看哪里 | 正确动作 |
+| --- | --- | --- |
+| 找不到 `/init-docs`、`/planning` 等命令 | 插件是否加载、当前 AI 工具是否支持 commands、是否在目标项目会话 | 重新加载插件或按宿主的插件方式指向 coding-x 仓库；不要在目标项目里复制一份 command 内容 |
+| `prd-to-json` 说 `.workspace/` 未忽略或已有文件被 Git 跟踪 | `npx coding-x doctor`、`.gitignore`、`git ls-files .workspace` | 先决定是否修正 Git 隔离；skill 不会自动改 `.gitignore` 或执行 `git rm --cached` |
+| `doctor` 发现 qualityChecks 基线失败 | 直接运行它列出的 typecheck/lint/test | 先修复项目原有失败或重新确认门禁，基线全绿后再跑引擎 |
+| 报“找不到 prd.json” | `.workspace/prd.json` 是否存在、`--workspace` 是否一致 | 用 `prd-to-json` 从正式 PRD 生成；不要手工拼一个不完整 JSON |
+| 退出码 `2`，提示 `engine.lock` 被占用 | 是否已有 `coding-x` 或 `repair` 在运行 | 有活进程就等待/停止它；异常 stale 锁让下次引擎接管，不要把删锁当常规解决方案 |
+| `state.json` 或 `prd.json` JSON 损坏 | `status`/`report` 的保守警告 | 确认无活锁后运行 `npx coding-x repair`；repair 只修 JSON 结构，不会替你解决业务失败 |
+| 退出码 `1`：达到最大轮次或 stall 熔断 | `npx coding-x status`、终端异常尾部、`report.html` 时间线 | 区分代码失败、runner 认证/网络、超时和空转；处理根因后重跑，已有有效状态会续跑 |
+| 退出码 `3` 或 story `blocked` | `state.json` 对应 story 的 notes、报告红旗和仲裁标签 | 人决定改需求、修环境还是重试；需求/AC 有问题就改源 PRD、再运行 `prd-to-json`，然后重跑引擎 |
+| 运行中途需求改变 | 源 `docs/prds/prd-*.md` | 先停止引擎；修改源 PRD 并重新转换。AC 变化的 story 会重验，旧证据会先归档 |
+| UI story 没有浏览器证据 | PATH 中是否有 `agent-browser`、`.workspace/screenshots/`、报告截图对账 | 安装/提供浏览器工具后真实操作；AC 要写明 URL、动作、期望结果，不能只写“页面正常” |
+| 仪表盘端口 7331 被占用 | 终端端口错误 | 使用 `npx coding-x --port 7332`；离线 dashboard 也可带同一参数 |
+| `/review-loop` 已回填，但报告还显示旧内容 | `.workspace/report.html` 的生成时间 | 运行 `npx coding-x report` 刷新；报告不会监听 review 文件实时更新 |
+| 要开始另一个功能 | 新旧 `branchName`、旧 `progress.md` | 重新执行 `prd-to-json`；它会把旧运行复制进 `.workspace/archive/`，再清理会污染新轮的状态/证据 |
+| 所有 story 已通过 | `status`、report、当前 Git diff | 仍先做 `/review-loop` 和人工 diff 审查；通过不等于自动授权合并、推送或发布 |
+
+### 不要这样做
+
+- 不要直接把 `.workspace/prd.json` 当需求文档长期维护；改源 PRD，再派生。
+- 不要为了“让进度变绿”手改 `state.json` 的 `passes`、`validated`、`blocked` 或 `retryCount`。
+- 不要提交 `.workspace/`；它含本地状态、诊断、截图，可能还有敏感信息。
+- 不要把 `.workspace/` 当纯缓存整目录删除；需要换任务时先按规则归档。
+- 不要只看 Builder 的提交说明、`progress.md` 或 `passes=true` 就认定完成。
+- 不要让同一个 review finding 既没有修复，也没有接受/推迟/驳回记录。
+- 不要让 `AGENTS.md` 变成长手册；它是入口，细节应放进 `docs/`。
+
+---
+
+## 常用术语
+
+| 术语 | 给新手的解释 |
+| --- | --- |
+| **harness** | 控制 AI 工作顺序、重试、超时、状态和验收的程序外壳；coding-x 的引擎就是 harness |
+| **runner** | 被引擎实际调用的 AI CLI：Claude Code、Codex 或 Cursor Agent |
+| **User Story** | 一小块可独立实现、独立验收的用户价值，编号如 `US-001` |
+| **AC / acceptance criteria** | “什么现象出现才算完成”的可验证清单；不是“写了某个函数”这种实现描述 |
+| **Builder / Developer** | 实现单个 story 的角色；`passes=true` 只是它的候选声明 |
+| **Validator** | 独立逐条检查 AC 的角色；它提交 claim，最终状态仍由引擎裁决 |
+| **机械门禁** | 由程序直接执行的 typecheck/lint/test 命令，失败就打回，不依赖模型自述 |
+| **workspace** | `.workspace/` 本地执行工作台，保存需求派生物、状态、证据和报告 |
+| **源 PRD** | `docs/prds/prd-*.md`，人维护的正式意图真相源；需求变化改这里 |
+| **blocked** | story 已达到失败上限或需要人工介入，引擎暂时跳过，等待人处理 |
+| **假绿** | 状态看似通过，但 AC 实际没完成或证据没有验证目标；机械门禁、目标绑定和 review 都在降低它 |
+| **验收凭证** | 引擎在目标、协议、状态和 Validator 结果都满足约束后写入的 `validated=true` |
+| **dogfood** | 用 coding-x 真实运行 coding-x 或固定测试项目，以实际使用发现问题；普通目标项目使用者无需维护 dogfood fixture |
+
+---
+
+## coding-x 源码目录说明（维护者参考）
+
+下面是 coding-x 工具仓库自身的结构，不是要求每个目标项目都照搬。skill / command 内容在整个仓库里**只存一份**，各工具用一个瘦清单指回它，因此没有副本、无需同步、不会漂移。
 
 ```
 coding-engine/
@@ -406,8 +756,10 @@ coding-engine/
 │   └── docs/                     #   architecture / golden-principles / patterns / glossary / decision / archive-README
 ├── AGENTS.md                     # 本仓库自己的目录式索引（/init-docs dogfood 产物）
 ├── CLAUDE.md                     # Claude Code 桥接：@AGENTS.md 导入（Claude Code 不读 AGENTS.md）
-├── docs/                         # 本仓库 active 知识：architecture / principles / decisions / plans / prds
+├── docs/                         # 本仓库 active 知识：architecture / principles / decisions / specs / plans / prds
+│   ├── dogfood-regression.md     #   真实引擎运行的行为级回归断言
 │   └── archive/                  #   完成态历史冷档案；日常实现/熵 GC 排除，doctor 仍查结构与链接
+├── .coding-x-local/              # 仅维护者本机可能有：忽略的 dogfood/SDD 过程证据，不发布
 │
 ├── .claude-plugin/               # Claude Code 插件清单
 │   ├── plugin.json               #   插件元数据（commands/ skills/ 自动发现）
@@ -423,6 +775,7 @@ coding-engine/
 │   └── dashboard/
 │       ├── dashboard.html        #   仪表盘普通视图
 │       └── dashboard-p.html      #   仪表盘像素风视图
+├── dist/                         # npm run build 生成的可发布包；删后可重新构建，不手改
 │
 ├── src/                          # TypeScript 引擎源码
 │   ├── cli.ts                    #   命令行入口、参数解析
@@ -462,7 +815,9 @@ coding-engine/
 **两条资产链路：**
 
 - **面向工具**：`skills/`、`commands/` 是唯一源，各工具的瘦清单用相对路径 `./skills/` `./commands/` 指回它，随插件仓库分发。
-- **面向引擎**：`assets/instructions`、`assets/dashboard` 由 `npm run build`（tsup 的 `onSuccess` 钩子）拷进 `dist/instructions`、`dist/public`；引擎通过 `import.meta.url` 定位并读取。`package.json` 的 `files` 只发布 `dist`、`assets/instructions`、`assets/dashboard`。
+- **面向引擎**：`assets/instructions`、`assets/dashboard` 由 `npm run build`（tsup 的 `onSuccess` 钩子）拷进 `dist/instructions`、`dist/public`；引擎通过 `import.meta.url` 定位并读取。`package.json` 的 `files` 只发布 `dist`，两个 assets 目录不会单独发布，而是以构建后的副本包含在 `dist` 中。
+
+`dist/` 是构建产物，发布 npm 包前由 `npm run build` 产生，可以删除后重建；`.coding-x-local/` 是维护 coding-x 时留在本机的 dogfood/设计过程材料，不是 npm 包内容，也不是目标项目的 `.workspace/`。普通使用者不需要创建或维护它。
 
 ---
 

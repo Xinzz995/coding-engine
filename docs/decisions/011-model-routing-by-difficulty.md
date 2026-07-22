@@ -26,7 +26,7 @@ ADR-006 以阶段默认、story 直接模型名、retryCount 阈值升级为主�
 7. `models.runner` 在未显式指定后端时自动选择 runner；显式 runner 错配拒绝启动。
 8. 实际模型与路由来源写 evidence，并在控制台、dashboard、status 和 report 区分“配置路由”与“实际调用”。
 
-完整 schema、分档规则、优先级、再派生与错误矩阵见 `docs/archive/superpowers/specs/2026-07-21-model-routing-redesign.md`。
+完整 schema、分档规则、优先级、再派生与错误矩阵见 `docs/archive/specs/2026-07-21-model-routing-redesign.md`。
 
 ## 理由与被否备选
 

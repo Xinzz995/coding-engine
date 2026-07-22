@@ -28,7 +28,7 @@ docs/ 知识库是 agent 每轮阅读的记录系统，但它会腐烂：文件�
 **Acceptance Criteria：**
 - [ ] 运行 `coding-x doctor` 会递归扫描项目根 `docs/` 目录树下的全部 `.md` 文件
 - [ ] 对以 `---` frontmatter 块开头的文件，检查其 frontmatter 是否包含 `title`、`status`、`updated`、`scope` 四个字段；缺失的文件逐条输出「文件路径 + 缺失字段名」
-- [ ] 不以 frontmatter 开头的 `.md`（如各目录 README 占位、docs/superpowers/ 下的工作产物）不参与本项检查、不产生任何报错
+- [ ] 不以 frontmatter 开头的 `.md`（如各目录 README 占位、设计规格与实施计划工作产物）不参与本项检查、不产生任何报错
 - [ ] 全部通过时输出明确的通过信息（含已检查文件数）
 - [ ] 存在任何问题时进程退出码为 1，全部通过时为 0
 - [ ] 项目根不存在 `docs/` 目录时：输出提示建议先运行 /init-docs 生成知识库，以退出码 0 结束
@@ -103,6 +103,6 @@ docs/ 知识库是 agent 每轮阅读的记录系统，但它会腐烂：文件�
 
 ## Open Questions
 
-- 二期是否加 `--strict` 模式把「无 frontmatter 的 docs/*.md」也判违规（当前跳过是为不误伤 superpowers 产物与 README 占位）
+- 二期是否加 `--strict` 模式把「无 frontmatter 的 docs/*.md」也判违规（当前跳过是为不误伤设计/计划工作产物与 README 占位）
 - 二期是否随 monorepo 支持一并检查子项目文档与子 AGENTS.md
 - `status: superseded/done` 的文档是否应豁免新鲜度检查（当前一视同仁）

@@ -9,13 +9,13 @@ scope: root
 
 ## 背景
 
-2026-07-17 dogfood 真实跑（`docs/archive/superpowers/2026-07-17-dogfood-findings.md`）实证三个引擎缺陷（发现 A/B/C；发现 D 见下文「决策」第 5 点），共同根因：引擎对 agent 进程异常结局（超时/中断/空转）一律「当轮作废、下轮重试」，但作废既不回滚已落盘的产物，也不留痕，重试按 `state.json` 前进而非按验收完备性前进。
+2026-07-17 dogfood 真实跑（`docs/archive/dogfood/2026-07-17-dogfood-findings.md`）实证三个引擎缺陷（发现 A/B/C；发现 D 见下文「决策」第 5 点），共同根因：引擎对 agent 进程异常结局（超时/中断/空转）一律「当轮作废、下轮重试」，但作废既不回滚已落盘的产物，也不留痕，重试按 `state.json` 前进而非按验收完备性前进。
 
 - **发现 A（最重）**：builder 在开发超时线前已完成实现并将某 story 的 `passes` 置为 `true`（且已提交），进程随即被 SIGTERM 终止；引擎当轮 continue，下轮按 `state.json` 前进选择下一个 story——该 story 的全部验收标准（US-004 的 8 条 AC）在零复核的情况下收官。同族场景：validator 侧 API 中断，复核缺席，builder 自行置位的 `true` 原样幸存。
-- **发现 B**：超时轮的 continue 发生在机械门禁之前，`evidence.jsonl` 当轮既无 `iteration` 记录也无 `gate-run` 记录，时间线上是纯粹的空洞；彼时 `loop.ts` 里一条注释声称「轮号跳跃可对照门禁历史还原打回轮」，但这一还原关系只对门禁打回轮成立，对超时/中断轮不成立——dogfood 断言 #12（`docs/superpowers/dogfood-regression.md`）因此被判定为「部分成立」。
+- **发现 B**：超时轮的 continue 发生在机械门禁之前，`evidence.jsonl` 当轮既无 `iteration` 记录也无 `gate-run` 记录，时间线上是纯粹的空洞；彼时 `loop.ts` 里一条注释声称「轮号跳跃可对照门禁历史还原打回轮」，但这一还原关系只对门禁打回轮成立，对超时/中断轮不成立——dogfood 断言 #12（`docs/dogfood-regression.md`）因此被判定为「部分成立」。
 - **发现 C**：builder 零输出、状态零变化的空转轮无任何检测，机械门禁与 validator（通常是更贵的强模型）照常被拉起执行，白白消耗一轮预算与一次强模型调用。
 
-代码事实（设计前核实，详见 `docs/archive/superpowers/specs/2026-07-17-agent-abort-semantics-design.md`）：引擎彼时只识别 builder 的 `timedOut`，builder 非零退出仍照常走门禁与验收；validator 的返回值整体被丢弃（`await runAgent(...)` 无接收）。完成判定是 `passes || blocked`，story 选择条件是 `!passes && !blocked`。
+代码事实（设计前核实，详见 `docs/archive/specs/2026-07-17-agent-abort-semantics-design.md`）：引擎彼时只识别 builder 的 `timedOut`，builder 非零退出仍照常走门禁与验收；validator 的返回值整体被丢弃（`await runAgent(...)` 无接收）。完成判定是 `passes || blocked`，story 选择条件是 `!passes && !blocked`。
 
 ## 决策
 
