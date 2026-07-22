@@ -1,10 +1,49 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { buildAgentArgs, resolveBinary, runAgent } from './agent.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fake = join(here, '__fixtures__', 'fake-agent.mjs');
+
+async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise<void> {
+  const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-tree-'));
+  const marker = join(cwd, 'fake-agent-child.pid');
+  const originalBin = process.env.CODING_X_CLAUDE_BIN;
+  const exitListenersBefore = process.listenerCount('exit');
+  let childPid: number | null = null;
+  let childConfirmedGone = false;
+  process.env.CODING_X_CLAUDE_BIN = `node ${fake} ${mode}`;
+  try {
+    const r = await runAgent({ kind: 'claude', prompt: '', cwd, timeoutMs: 1000 });
+    expect(r).toEqual({ timedOut: true, exitCode: null });
+    childPid = Number(readFileSync(marker, 'utf-8'));
+    expect(Number.isSafeInteger(childPid) && childPid > 0).toBe(true);
+
+    let probeError: string | undefined;
+    try { process.kill(childPid, 0); } catch (err) {
+      probeError = (err as NodeJS.ErrnoException).code;
+    }
+    childConfirmedGone = probeError === 'ESRCH';
+    expect(probeError).toBe('ESRCH');
+    expect(process.listenerCount('exit')).toBe(exitListenersBefore);
+  } finally {
+    if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+    else process.env.CODING_X_CLAUDE_BIN = originalBin;
+    if (!childConfirmedGone) {
+      if (childPid === null && existsSync(marker)) childPid = Number(readFileSync(marker, 'utf-8'));
+      if (childPid !== null && Number.isSafeInteger(childPid) && childPid > 0) {
+        try {
+          process.kill(childPid, 0);
+          process.kill(childPid, 'SIGKILL');
+        } catch { /* 已退出 */ }
+      }
+    }
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
 
 describe('buildAgentArgs', () => {
   it('builds claude print command by default', () => {
@@ -68,4 +107,12 @@ describe('runAgent', () => {
     expect(r.timedOut).toBe(true);
     delete process.env.CODING_X_CLAUDE_BIN;
   });
+
+  it.runIf(process.platform !== 'win32')('does not resolve a timeout until the whole agent process tree has exited', async () => {
+    await expectTimedOutTreeExited('tree');
+  });
+
+  it.runIf(process.platform !== 'win32')('escalates to SIGKILL before resolving when an agent descendant traps SIGTERM', async () => {
+    await expectTimedOutTreeExited('stubborn-tree');
+  }, 12_000);
 });
