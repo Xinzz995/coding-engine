@@ -84,7 +84,7 @@ describe('renderReportHtml', () => {
     expect(html).toContain('<!DOCTYPE html>');
   });
 
-  it('徽章三态：通过 ✅ / blocked ⛔ / 未完成 ⬜，重试次数仅 >0 显示', () => {
+  it('通过 / blocked / 未完成徽章，重试次数仅 >0 显示', () => {
     const passed = renderReportHtml(data());
     expect(passed).toContain('✅ 通过');
     expect(passed).not.toContain('重试');

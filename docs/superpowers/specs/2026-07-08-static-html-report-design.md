@@ -1,7 +1,7 @@
 ---
 title: "静态 HTML 验证报告设计"
 status: done
-updated: 2026-07-08
+updated: 2026-07-22
 scope: root
 ---
 
@@ -30,7 +30,7 @@ scope: root
 
 1. **头部概要**——project / branchName / sourcePrd / 生成时间；结果横幅三态：全部通过（N/N）、有 blocked（N passed, M blocked）、进行中（报告可在任意时刻生成，诚实呈现当下）；门禁配置 qualityChecks 逐条（未启用则明示）；模型路由 models 段（未配置则省略）；统计（story 数 / 截图工件数 / review 文件数）。
 2. **红旗区**（条件渲染，置顶红色）——存在 `prd.tampered-*.json` 时逐个列出 + 核对指引（「diff 该存档与 prd.json，核对运行期被改了什么」，ADR-007），与 /review-loop 人审包红旗区同一语义。无篡改文件时整区不渲染。
-3. **story 证据卡片**（核心区，每 story 一卡）——标题行：id + title + 状态徽章（✅ 通过 / ⛔ blocked / ⬜ 未完成，沿用 status 的三态符号）+ 重试次数（retryCount>0 才显示）；acceptanceCriteria 逐条列表；notes 全文等宽呈现，其中仲裁标签行（`ARBITRATION_PREFIXES`）、`[门禁失败…]` 行、`[BLOCKED…]` 行分别高亮样式；截图画廊按命名规范归属到 story，builder / validator 分组标注，图片点击 `<a target="_blank">` 看原图，非图片工件（如 `-export.pdf`）渲染为文件链接行。
+3. **story 证据卡片**（核心区，每 story 一卡）——标题行：id + title + 状态徽章（✅ 通过 / 🟨 待引擎验收 / ⛔ blocked / ⬜ 未完成，沿用 status 的四态符号）+ 重试次数（retryCount>0 才显示）；acceptanceCriteria 逐条列表；notes 全文等宽呈现，其中仲裁标签行（`ARBITRATION_PREFIXES`）、`[门禁失败…]` 行、`[BLOCKED…]` 行分别高亮样式；截图画廊按命名规范归属到 story，builder / validator 分组标注，图片点击 `<a target="_blank">` 看原图，非图片工件（如 `-export.pdf`）渲染为文件链接行。
 4. **未归类工件**（条件渲染）——screenshots/ 内命名无法归属到任何 story 的文件列于卡片区之后。workspace 根的散落文件（如 agent 下载的临时产物）**不枚举**：报告只认结构化产物与 screenshots/，避免把 report.html 自身卷进来。
 5. **review 留痕区**——全部 `review-*.md` 按文件名序渲染；一份都没有时显示「尚无人审包——循环结束后运行 /review-loop，再跑 `coding-x report` 刷新本报告」。
 6. **progress 过程记录**——progress.md 全文，`<details>` 默认折叠的附录（对裁决是背景不是主线）。
@@ -94,7 +94,7 @@ export function collectReport(workspace: string, now: Date): ReportSource;
 ## 测试
 
 - collect：三态；截图归属各变体（`builder-US-008-6.png` / `validator-us-008-pass-1.png` / `-export.pdf` 非图片 / 大小写混用 / 未归类）；review/tampered 收集与排序；state 损坏标记。
-- render：徽章三态；红旗区条件渲染（有/无）；仲裁行高亮 class；AC 文本呈现；img 相对 src 与 URL 编码；**转义**（notes 含 `<script>` 输出必须是 `&lt;script&gt;`）；「尚无人审包」占位；md 渲染器六构造。
+- render：徽章四态；红旗区条件渲染（有/无）；仲裁行高亮 class；AC 文本呈现；img 相对 src 与 URL 编码；**转义**（notes 含 `<script>` 输出必须是 `&lt;script&gt;`）；「尚无人审包」占位；md 渲染器六构造。
 - cli：report 子命令解析与三退出码路径。
 - loop：fake-agent 端到端跑完后 `report.html` 存在且含关键标记。
 - 提交前 `npm run typecheck` + `npm test` 全绿（硬约束）。

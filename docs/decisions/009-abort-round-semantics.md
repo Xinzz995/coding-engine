@@ -1,7 +1,7 @@
 ---
 title: 009-abort-round-semantics
 status: active
-updated: 2026-07-20
+updated: 2026-07-22
 scope: root
 ---
 
@@ -49,7 +49,7 @@ agent 结局机械三分（builder/validator 两侧同一判定，只看进程�
 
 - validator 正常完成但 agent CLI 意外以非零码退出 → 触发误回写，多烧一轮重新走门禁与验收去确认——回写是幂等操作，代价是多一轮而非数据损坏，接受。
 - API 中断但 agent CLI 最终以 `exit 0` 结束 → 落在机械信号的盲区，该轮被判定为 `completed`，实质漏检；靠下一轮的幂等重试与 `/review-loop` 人审兜底。若实测中此类漏检频繁出现，需重新评估输出心跳等增强手段（当前明确不做）。
-- 回写与 agent 写 state 之间存在理论竞态窗口：异常路径下 agent 进程已经退出，引擎在该窗口内是唯一写者，工作区锁（ADR-008）已保证跨进程互斥，窗口实际关闭，不构成真实风险。
+- 回写与 agent 写 state 之间存在理论竞态窗口：超时路径下 `runAgent` 会终止整棵 agent 进程树（POSIX 独占进程组 SIGTERM→SIGKILL；Windows `taskkill /T /F`）并确认退出后才返回，因此引擎回写时已经是唯一写者；工作区锁（ADR-008）另保证引擎实例间互斥，窗口实际关闭，不构成真实风险。
 - blocked 置位与异常结局发生在同一轮时，收敛识别推迟到下一轮——异常轮提前 continue 到不了轮末完成判定，需等下一轮 builder 干净退出后才走收敛出口。方向 fail-safe（只推迟收敛、不假收敛），代价是多一轮；`maxIterations` 恰在此轮耗尽时以「跑满」退出码 1 结束而非 3。
 - 退出码 3（blocked 收敛）是新增对外行为，升级为 **0.22.0** minor 版本（硬约束 5）；README 的退出码表与 `--stall-limit` 参数说明随本轮同步。以退出码 0 判定「全部完成」的既有 CI 脚本，遇到存在 blocked story 的工作区时会从「误判为 0」变为「诚实收到 3」——这是行为订正，但外部消费方需要感知 3 是新增语义。
 - `state.json` 无 schema 变更（notes 仍是纯文本，无新增字段），旧版 workspace 零迁移；evidence 新增字段全部可选，旧 `evidence.jsonl` 与旧版报告渲染零破坏。
