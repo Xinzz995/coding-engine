@@ -1,6 +1,6 @@
-import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync, realpathSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { AgentKind } from '../engine/agent.js';
 import {
   readGlobalModelConfig,
@@ -67,6 +67,21 @@ export interface LockCheckResult {
   pid: number | null;
 }
 
+export interface WorkspaceGitCheckResult {
+  /** 展示用的 workspace 路径（默认 .workspace）。 */
+  workspacePath: string;
+  /** workspace 目录当前是否存在。 */
+  workspaceFound: boolean;
+  /** 项目根是否位于 Git worktree 内；false 时其余 Git 检查跳过。 */
+  gitAvailable: boolean;
+  /** workspace 是否位于项目根所属的同一个 Git worktree 内。 */
+  insideRepository: boolean;
+  /** workspace 目录是否命中 Git ignore 规则（即使目录尚未创建也可判定）。 */
+  ignored: boolean;
+  /** workspace 下已经进入 Git 索引的文件（Git worktree 相对路径）。 */
+  trackedFiles: string[];
+}
+
 export interface ModelCatalogCheckResult {
   /** 展示用的 workspace/prd.json 路径。 */
   prdPath: string;
@@ -96,6 +111,7 @@ export interface DoctorReport {
   links: LinksCheckResult | null;
   gate: GateConfigCheckResult;
   modelCatalog: ModelCatalogCheckResult;
+  workspaceGit: WorkspaceGitCheckResult;
   lock: LockCheckResult;
 }
 
@@ -215,6 +231,84 @@ function isGitWorkTree(root: string): boolean {
   }
 }
 
+/**
+ * 只读检查运行时 workspace 是否与 story commit 隔离。ignore 规则只能阻止
+ * 新文件进入索引，所以已跟踪文件必须单独列出，且由用户决定如何停止跟踪。
+ */
+export function checkWorkspaceGitIsolation(root: string, workspace: string): WorkspaceGitCheckResult {
+  const workspacePath = workspace;
+  // macOS 的临时目录常同时以 /var 与 /private/var 表示；比较仓库边界前先消除该别名。
+  const canonicalRoot = realpathSync(root);
+  const unresolvedWorkspace = resolve(canonicalRoot, workspace);
+  const workspaceAbs = existsSync(unresolvedWorkspace)
+    ? realpathSync(unresolvedWorkspace)
+    : unresolvedWorkspace;
+  const base: WorkspaceGitCheckResult = {
+    workspacePath,
+    workspaceFound: existsSync(workspaceAbs),
+    gitAvailable: false,
+    insideRepository: false,
+    ignored: false,
+    trackedFiles: [],
+  };
+
+  let gitRoot: string;
+  try {
+    gitRoot = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: root,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim());
+  } catch {
+    return base;
+  }
+  if (gitRoot === '') return base;
+
+  const relFromGitRoot = relative(gitRoot, workspaceAbs);
+  const insideRepository = relFromGitRoot === ''
+    || (!isAbsolute(relFromGitRoot)
+      && relFromGitRoot !== '..'
+      && !relFromGitRoot.startsWith(`..${sep}`));
+  if (!insideRepository) return { ...base, gitAvailable: true };
+
+  // Git 的 pathspec 固定使用正斜杠；workspace=仓库根时不能把整个仓库误列为运行时文件。
+  const pathspec = relFromGitRoot.split(sep).join('/');
+  let trackedFiles: string[] = [];
+  if (pathspec !== '') {
+    try {
+      const tracked = execFileSync('git', ['ls-files', '-z', '--', pathspec], {
+        cwd: gitRoot,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      trackedFiles = tracked.split('\0').filter(Boolean).sort();
+    } catch {
+      // rev-parse 已确认仓库；单项查询失败时保守地保持空列表并继续给出 ignore 建议。
+    }
+  }
+
+  let ignored = false;
+  if (pathspec !== '') {
+    try {
+      execFileSync('git', ['check-ignore', '-q', '--no-index', '--', `${pathspec}/`], {
+        cwd: gitRoot,
+        stdio: 'ignore',
+      });
+      ignored = true;
+    } catch {
+      // exit 1 表示未命中 ignore；其他错误同样不冒充已受保护。
+    }
+  }
+
+  return {
+    ...base,
+    gitAvailable: true,
+    insideRepository: true,
+    ignored,
+    trackedFiles,
+  };
+}
+
 /** 文件在 git 的最后提交日期（%cs，YYYY-MM-DD）；尚无提交记录或 git 失败返回 null。 */
 function gitLastCommitDate(root: string, relFile: string): string | null {
   try {
@@ -332,6 +426,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   const prdPath = resolve(root, prdRel);
   const modelConfigPath = options.modelConfigPath ?? resolveGlobalConfigPath();
   const modelCatalog = checkModelCatalog(prdPath, prdRel, modelConfigPath);
+  const workspaceGit = checkWorkspaceGitIsolation(root, workspace);
   let gate: GateConfigCheckResult = { prdPath: prdRel, prdFound: false, configured: false };
   // resolve（非 join）：workspace 可能是绝对路径（如 --workspace 巡检异地目录）；join 会把
   // 已是绝对路径的第二段原样拼在 root 之下产生不存在的路径，resolve 则在遇到绝对路径段时
@@ -350,7 +445,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
     return {
       docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null,
-      gate, modelCatalog, lock,
+      gate, modelCatalog, workspaceGit, lock,
     };
   }
   const files = walkMarkdownFiles(docsDir);
@@ -421,6 +516,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     links: { checked: linksChecked, issues: linkIssues },
     gate,
     modelCatalog,
+    workspaceGit,
     lock,
   };
 }
@@ -473,6 +569,29 @@ function renderLockLines(lock: LockCheckResult): string[] {
   return lines;
 }
 
+function renderWorkspaceGitLines(result: WorkspaceGitCheckResult): string[] {
+  const lines = ['🧹 workspace Git 隔离'];
+  if (!result.gitAvailable) {
+    lines.push('  ℹ️  非 Git 项目：已跳过 workspace 忽略检查');
+  } else if (!result.insideRepository) {
+    lines.push(`  ✅ ${result.workspacePath} 位于当前 Git 仓库之外，不会进入当前仓库提交`);
+  } else if (result.trackedFiles.length > 0) {
+    const shown = result.trackedFiles.slice(0, 5).join('、');
+    const more = result.trackedFiles.length > 5 ? ` 等 ${result.trackedFiles.length} 个文件` : '';
+    lines.push(
+      `  💡 ${result.workspacePath} 下的以下文件已被 Git 跟踪：${shown}${more}`,
+      '  💡 请人工决定如何停止跟踪并忽略 workspace；doctor 不会自动修改 Git 索引或 .gitignore（建议项，不计失败）',
+    );
+  } else if (result.ignored) {
+    lines.push(`  ✅ ${result.workspacePath} 已被 Git 忽略（运行时文件不会进入 story commit）`);
+  } else if (result.workspaceFound) {
+    lines.push(`  💡 ${result.workspacePath} 未被 Git 忽略：建议先配置忽略规则；doctor 不会自动修改 .gitignore（建议项，不计失败）`);
+  } else {
+    lines.push(`  💡 ${result.workspacePath} 尚未创建且未命中 Git 忽略规则：创建前请确认忽略配置；doctor 不会自动修改 .gitignore（建议项，不计失败）`);
+  }
+  return lines;
+}
+
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
     const total = report.modelCatalog.issues.length;
@@ -481,6 +600,7 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
         'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
         '', ...renderGateLines(report.gate),
         '', ...renderModelCatalogLines(report.modelCatalog),
+        '', ...renderWorkspaceGitLines(report.workspaceGit),
         '', ...renderLockLines(report.lock),
       ].join('\n'),
       exitCode: total === 0 ? 0 : 1,
@@ -519,6 +639,7 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   }
   lines.push('', ...renderGateLines(report.gate));
   lines.push('', ...renderModelCatalogLines(report.modelCatalog));
+  lines.push('', ...renderWorkspaceGitLines(report.workspaceGit));
   lines.push('', ...renderLockLines(report.lock));
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
     + report.modelCatalog.issues.length;

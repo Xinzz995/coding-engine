@@ -682,6 +682,81 @@ describe('runDoctor global model catalog check', () => {
   });
 });
 
+describe('runDoctor workspace Git isolation check', () => {
+  it('reports an ignored workspace as protected', () => {
+    withProject({
+      '.gitignore': '.workspace/\n',
+      '.workspace/prd.json': '{}',
+    }, (root) => {
+      gitInit(root);
+      const report = runDoctor(root);
+      expect(report.workspaceGit).toEqual({
+        workspacePath: '.workspace',
+        workspaceFound: true,
+        gitAvailable: true,
+        insideRepository: true,
+        ignored: true,
+        trackedFiles: [],
+      });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('workspace Git 隔离');
+      expect(text).toContain('已被 Git 忽略');
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  it('advises without failing when an existing workspace is not ignored', () => {
+    withProject({ '.workspace/prd.json': '{}' }, (root) => {
+      gitInit(root);
+      const report = runDoctor(root);
+      expect(report.workspaceGit).toMatchObject({
+        workspaceFound: true,
+        gitAvailable: true,
+        insideRepository: true,
+        ignored: false,
+        trackedFiles: [],
+      });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('.workspace 未被 Git 忽略');
+      expect(text).toContain('不会自动修改 .gitignore');
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  it('reports tracked runtime files even when a later ignore rule matches the workspace', () => {
+    withProject({ '.workspace/prd.json': '{}' }, (root) => {
+      gitInit(root);
+      gitCommitAll(root, '2026-07-22');
+      writeFileSync(join(root, '.gitignore'), '.workspace/\n');
+      const report = runDoctor(root);
+      expect(report.workspaceGit).toMatchObject({ ignored: true });
+      expect(report.workspaceGit.trackedFiles).toEqual(['.workspace/prd.json']);
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('已被 Git 跟踪');
+      expect(text).toContain('.workspace/prd.json');
+      expect(text).toContain('不会自动修改 Git 索引');
+      expect(exitCode).toBe(0);
+    });
+  });
+
+  it('skips safely outside a Git worktree and still works without docs/', () => {
+    withProject({ '.workspace/prd.json': '{}' }, (root) => {
+      const report = runDoctor(root);
+      expect(report.docsFound).toBe(false);
+      expect(report.workspaceGit).toMatchObject({
+        workspaceFound: true,
+        gitAvailable: false,
+        insideRepository: false,
+        ignored: false,
+        trackedFiles: [],
+      });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('非 Git 项目');
+      expect(exitCode).toBe(0);
+    });
+  });
+});
+
 describe('runDoctor workspace lock check', () => {
   it('reports found=false when no engine.lock exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-lock-'));

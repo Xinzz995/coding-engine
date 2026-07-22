@@ -19,7 +19,7 @@ coding-x 同时是两样东西：
 
 1. **确定性 harness，而非一次性对话。** 循环、超时、重试、完成判定都由程序控制，不依赖模型「记得」自己该干什么。
 2. **开发与验收分离。** 写代码的 agent 和验收的 agent 是两个独立角色，验收方只认「验收标准」，不受开发方自述影响，避免「自己判自己及格」。
-3. **单一 story、频繁提交、进度可追溯。** 每轮只推进一个 user story，通过即提交，学习与踩坑写入 `progress.md` 供后续迭代复用。
+3. **单一 story、频繁提交、进度可追溯。** 每轮只推进一个 user story，只提交该 story 的实现/测试/必要文档，再把学习与踩坑写入 workspace 的 `progress.md` 供后续迭代复用。
 
 技法来源：Ralph 自主循环 + Anthropic harness 设计。
 
@@ -38,8 +38,8 @@ coding-x 同时是两样东西：
    │   │ 1. 读 prd.json+state.json，选最高优先级未完成 story │ │
    │   │ 2. 只实现这一个 story                               │ │
    │   │ 3. 跑质量检查（typecheck / lint / test）            │ │
-   │   │ 4. 通过则写 passes=true（候选）并提交 feat: ...     │ │
-   │   │ 5. 把进度 + 学习追加到 progress.md                  │ │
+   │   │ 4. 通过则只提交 story 文件（不提交 workspace）      │ │
+   │   │ 5. 再写 passes=true 候选并追加 progress.md           │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
    │   ┌── 机械门禁（qualityChecks，可选）──────────────────┐ │
@@ -68,6 +68,7 @@ coding-x 同时是两样东西：
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。
 - **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。门禁配置受快照保护：运行期改写 prd.json（含删改 `qualityChecks` / 验收标准）会被检测、恢复并存档，无法架空门禁与验收（ADR-007）。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
+- **workspace Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 在首次写入前检查它是否已被忽略、是否已有文件进入 Git 索引；`doctor` 可随时只读复核并给出建议。两者都不会擅自修改 `.gitignore` 或 Git 索引。
 - **状态共享**：引擎与 agent 都在项目根目录运行，读写同一组 `prd.json` / `state.json` / `progress.md`（需求只读，状态写 state.json）；`validated`、`escalated` 由引擎独占，agent 必须原样保留。指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
 
 ---
@@ -117,7 +118,7 @@ git clone https://github.com/Xinzz995/coding-engine.git
 ## 快速开始
 
 ```bash
-# 1. 用插件的命令/skills 生成 .workspace/prd.json（见下文工作流程）
+# 1. 用插件的命令/skills 生成 .workspace/prd.json（会先检查 Git 隔离；见下文工作流程）
 
 # 2. 在项目根目录运行引擎
 npx coding-x                 # 默认用 claude
@@ -165,7 +166,7 @@ npx coding-x cursor          # 改用 Cursor Agent
 3. （可选）功能涉及合同级技术决策（新表/改 schema、对外接口、状态机、权限模型、存量数据迁移）时，用 `technical-alignment` skill 对齐技术合同（「tech: ...」）：产出技术对齐稿（`docs/prds/tech-*.md`）——每条合同是可验证陈述，不可逆项单独列出，人只拍板少数贵决策。无此类决策时跳过。
 4. `/planning 我要做的功能描述` 产出完整实现计划。
 5. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」；输入是对齐稿/技术对齐稿时它会跳过澄清、吸收合同直接转）。
-6. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
+6. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。写入前会检查 `.workspace/` 是否被 Git 忽略、是否已有运行时文件被跟踪；异常时停下来交由你决定，不自动改仓库。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
 
 `prd.json` 结构：
 
@@ -265,7 +266,7 @@ npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.j
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 npx coding-x status             # 终端一屏速览工作区执行状态（退出码 0/1/2 可作 CI 门禁）
 npx coding-x status --json      # 同上，stdout 输出单个 JSON 对象供脚本与 agent 消费
-npx coding-x doctor             # docs/ 知识库健康检查（问题以退出码 1 结束，可作 CI 门禁）
+npx coding-x doctor             # docs/、workspace Git 隔离等健康检查（硬错误以退出码 1 结束）
 npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30）
 npx coding-x report             # 手动（重）生成 .workspace/report.html 静态验证报告
 ```
@@ -291,7 +292,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
-| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接）、机械门禁建议与全局模型目录/PRD 映射核对；发现错误以退出码 1 结束，可作 CI 门禁 |
+| 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
 | 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
 | 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会自动生成；退出码 0=已生成 / 1=写入失败 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
@@ -300,7 +301,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | `--builder-model <id>` | — | 本次运行的初始 builder 覆盖；优先于 `models.builder[story.difficulty]`，但不压过已触发的专用 escalation 路由 |
 | `--validator-model <id>` | — | 本次运行的 validator 覆盖；优先于 `models.validator` |
 | `--escalation-model <id>` | — | 本次运行的升级 builder 覆盖；仅在 `state.escalated=true` 时生效，优先于 `models.escalation` |
-| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录；`doctor` 用它定位 prd.json 做门禁与项目模型映射检查 |
+| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录；`doctor` 用它定位 prd.json，并检查门禁、项目模型映射与 Git 隔离 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
@@ -341,6 +342,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
+- **workspace Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 写前阻止静默污染，`doctor` 只读报告未忽略或已跟踪文件，不替用户改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、validator 正常打回或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
 - **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
@@ -433,7 +435,7 @@ coding-engine/
 │   │   ├── progress.ts           #   读取 progress.md
 │   │   └── repair.ts             #   jsonrepair 修复 prd.json / state.json
 │   ├── doctor/
-│   │   └── doctor.ts             #   docs、门禁与全局模型目录健康检查
+│   │   └── doctor.ts             #   docs、门禁、模型目录与 workspace Git 隔离检查
 │   ├── report/
 │   │   ├── report.ts             #   验证报告数据收集与写盘（collectReport/writeReport）
 │   │   └── render.ts             #   验证报告 HTML 渲染（零浏览器 JS、全文本转义）

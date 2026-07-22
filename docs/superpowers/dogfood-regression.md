@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-07-20
+updated: 2026-07-22
 scope: root
 
 ---
@@ -29,3 +29,7 @@ scope: root
 | 10 | /compound-docs 收口交付说明含「状态变更清单」节（有变更列明细，无变更写「无状态变更」），任务型文档按证据表判定收尾 | 0.15.0 | 收口交付说明检查 |
 | 11 | 循环结束（完成或跑满）workspace 根自动生成验证报告 report.html：结果横幅与 state 一致、story 卡片截图与 screenshots/ 对账、存在 prd.tampered-* 时红旗区必亮、review-*.md 收录进人审留痕区且带免责标注 | 0.19.0 | 打开 report.html 与工件对账 |
 | 12 | 证据索引真实链路：evidence.jsonl 含三类 engine 记录且时间线可重建（iteration 记录每轮一条（时间线零空洞），异常轮带 outcome/noop/gateRejected/abortRollback 标注可直读还原）；builder/validator 按指令登记 screenshot-claim（grep acIndex 分布核对输入质量：整数、1 起、无越界泛滥）；报告 AC 对账区与门禁执行历史真实渲染 | 0.20.0（终审风险②③④固化）；0.22.0 还原链重构 | 真实跑后逐类 grep evidence.jsonl + 打开 report.html 对账 |
+| 13 | 启用按难度模型路由时，真实 builder/validator 分别命中 story 档位与 validator 映射；启动摘要、evidence、status JSON 与 report 时间线里的模型 ID 和 route source 四处一致 | 0.23.0 / 0.24.0 | 对账控制台、iteration 记录、`status --json.recentActual` 与 report 时间线 |
+| 14 | builder 与 validator 都原样保留 `validated`/`escalated`；只有 validator 正常完成且候选仍通过后，引擎签发 `validated=true`，status/report 才显示全绿 | 0.25.0–0.25.1 | builder 后候选态、最终 state、iteration.validationReceipt、status/report 四处对账 |
+| 15 | 使用 npm 正式发布物运行时，全局模型目录、预检与真实 runner 调用贯通；目录不做在线发现，provider 的非阻断诊断噪声不得改变引擎对进程结局和验收凭证的机械判定 | 0.24.0 / 0.25.2 | `config validate`、启动目录摘要、runner 实际结局、最终退出码与锁释放对账 |
+| 16 | builder 的 story 提交只包含实现与测试，不包含 prd/state/progress/evidence/report/lock 等 workspace 运行时文件；即使目标仓尚未 gitignore workspace，也必须先提交业务改动，再单独回写 state/progress | 0.25.2 真实链路发现 | `git show --name-only` 对账 story commit，循环结束后检查 runtime diff 只留在 workspace |

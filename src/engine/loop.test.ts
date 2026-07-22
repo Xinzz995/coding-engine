@@ -1452,6 +1452,17 @@ describe('instruction assets engine-owned state contract', () => {
   });
 });
 
+describe('instruction assets workspace commit isolation contract', () => {
+  it('builder commits story files before updating runtime state and never stages the workspace', () => {
+    const content = read('builder.md');
+    expect(content).toContain('只 stage/commit 本 story 的实现、测试与必要文档');
+    expect(content).toContain('禁止 stage 或 commit `{{WORKSPACE}}`');
+    expect(content).toContain('不要使用 `git add .` 或 `git add -A`');
+    expect(content).toContain('`git diff --cached --name-only`');
+    expect(content).toContain('提交成功后再更新');
+  });
+});
+
 describe('runLoop prd freeze', () => {
   it('builder 删除 qualityChecks 也架空不了门禁：文件被恢复、门禁照跑照打回', async () => {
     // 漏洞路径：builder 改写 prd.json 删掉 qualityChecks → 下轮门禁静默失效。

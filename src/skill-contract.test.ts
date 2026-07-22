@@ -43,6 +43,17 @@ describe('prd-to-json 模型路由 prompt 合同', () => {
     ]) expect(skill).toContain(anchor);
   });
 
+  it('写入前机械检查 workspace Git 隔离且不擅改用户仓库', () => {
+    for (const anchor of [
+      'git rev-parse --is-inside-work-tree',
+      'git ls-files -- .workspace',
+      'git check-ignore -q --no-index .workspace/',
+      '不得自动修改 `.gitignore`',
+      '不得自动执行 `git rm --cached`',
+      '用户明确选择',
+    ]) expect(skill).toContain(anchor);
+  });
+
   it('移除旧 schema 与 runner 自主查询语义', () => {
     for (const removed of [
       '"profiles"', 'escalateAfter', 'story.model', 'unsupported',

@@ -13,6 +13,17 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 获取 PRD（markdown 文件或文本；PRD 通常位于 `docs/prds/`，monorepo 中也可能在 `<子项目>/docs/prds/`——但对来源路径无硬依赖，任何路径或直接粘贴的文本都可以）并将其转换为 `prd.json`（保存到当前项目根路径下 `.workspace/prd.json`）。
 
+## 写入前：workspace Git 隔离
+
+在创建、改写或归档 `.workspace/` 中的任何文件之前，先机械检查它不会混入 story commit：
+
+1. 运行 `git rev-parse --is-inside-work-tree`。若当前目录不是 Git worktree，说明已跳过本项并继续。
+2. 在 Git worktree 中运行 `git ls-files -- .workspace`。只要有输出，就停止写入并列出已跟踪文件；说明 ignore 规则不会自动移除既有索引项，且不得自动执行 `git rm --cached`。
+3. 若没有已跟踪文件，运行 `git check-ignore -q --no-index .workspace/`。退出码为 0 才表示已隔离；未命中时停止写入，建议用户添加适合其仓库的 ignore 规则，但不得自动修改 `.gitignore`。
+4. 遇到已跟踪或未忽略的 workspace 时，必须等用户明确选择如何处理并重新检查；用户也可以明确选择知情继续，不能由 skill 静默代替用户决策。
+
+这些检查只读 Git 状态。不要自动改 Git 索引或仓库忽略策略。
+
 ---
 
 ## 输出格式
@@ -511,6 +522,7 @@ Add ability to mark tasks with different statuses.
 
 在编写 prd.json 之前，验证：
 
+- [ ] `.workspace/` 已通过 Git 隔离检查；若已跟踪或未忽略，已取得用户明确选择，且未自动修改 `.gitignore` 或执行 `git rm --cached`
 - [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json、evidence.jsonl、prd.tampered-*.json）
 - [ ] 每个 story 可以在一次迭代中完成（足够小）
 - [ ] Stories 按依赖顺序排序（schema 到 backend 到 UI）
