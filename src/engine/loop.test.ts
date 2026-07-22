@@ -629,6 +629,32 @@ describe('runLoop', () => {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
+
+  it('uses the PRD guard snapshot for the final report even when restoring disk fails', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const prdPath = join(workspace, 'prd.json');
+    const fake = join(workspace, 'fake-prd-directory.mjs');
+    // 把 prd.json 换成目录：guard 能检出篡改，但原子 rename 无法覆盖目录，稳定制造 restoreFailed。
+    writeFileSync(fake, `
+      import { rmSync, mkdirSync } from 'node:fs';
+      rmSync(${JSON.stringify(prdPath)});
+      mkdirSync(${JSON.stringify(prdPath)});
+      process.exit(0);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(1);
+      const html = readFileSync(join(workspace, 'report.html'), 'utf-8');
+      expect(html).toContain('US-001');
+      expect(html).toContain('引擎启动快照');
+      expect(html).not.toContain('验证报告未生成');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
 });
 
 describe('runLoop quality gate', () => {

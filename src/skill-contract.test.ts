@@ -54,6 +54,17 @@ describe('prd-to-json 模型路由 prompt 合同', () => {
     ]) expect(skill).toContain(anchor);
   });
 
+  it('归档或再派生前检查活跃工作区锁且不擅自删锁', () => {
+    for (const anchor of [
+      'npx coding-x doctor --workspace .workspace',
+      '`engine.lock`',
+      '引擎运行中',
+      '停止派生',
+      '不得删除 `engine.lock`',
+      '真正写入前再次运行',
+    ]) expect(skill).toContain(anchor);
+  });
+
   it('移除旧 schema 与 runner 自主查询语义', () => {
     for (const removed of [
       '"profiles"', 'escalateAfter', 'story.model', 'unsupported',

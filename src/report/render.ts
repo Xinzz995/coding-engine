@@ -1,5 +1,5 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
-import { isStoryPassed, type StoryView } from '../engine/state.js';
+import { INITIAL_STORY_STATE, isStoryPassed, type StoryView } from '../engine/state.js';
 import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX } from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
@@ -157,7 +157,8 @@ ${renderGallery(shots, anyClaims ? new Set(claims.map((c) => c.file)) : null)}
 </section>`;
 }
 
-function renderBanner(stories: StoryView[]): string {
+function renderBanner(stories: StoryView[], stateCorrupted: boolean): string {
+  if (stateCorrupted) return '<div class="banner blocked">❌ 状态不可验证：state.json 已损坏</div>';
   const total = stories.length;
   if (total === 0) return '<div class="banner blocked">⚠️ prd.json 中没有任何 story</div>';
   const passed = stories.filter(isStoryPassed).length;
@@ -387,7 +388,12 @@ footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 2
 `;
 
 export function renderReportHtml(data: ReportData): string {
-  const { prd, stories } = data;
+  const { prd } = data;
+  // 双层 fail-closed：collectReport 已使用空白 state；渲染层再消毒一次，避免未来
+  // 其他调用方直接构造 ReportData 时把损坏态与通过态组合成假绿报告。
+  const stories = data.stateCorrupted
+    ? data.stories.map((story) => ({ ...story, ...INITIAL_STORY_STATE }))
+    : data.stories;
   const byStory = new Map<string, ScreenshotEntry[]>();
   for (const s of data.screenshots) {
     if (s.storyId === null) continue;
@@ -412,7 +418,10 @@ export function renderReportHtml(data: ReportData): string {
     ? '<p class="placeholder">「agent 声明」类证据由 builder/validator 自行登记，真实性以截图内容与 git 历史为准。</p>'
     : '';
   const stateWarn = data.stateCorrupted
-    ? '<div class="meta-line warn">⚠️ state.json 已损坏，已按 prd.json 内嵌旧格式状态回退显示，可能非最新执行结果（建议 npx coding-x repair）</div>'
+    ? '<div class="meta-line warn">⚠️ state.json 已损坏，按全部 story 未验证处理；未使用 prd.json 内嵌旧格式状态（建议 npx coding-x repair）</div>'
+    : '';
+  const prdSource = data.prdSource === 'engine-snapshot'
+    ? '<div class="meta-line">需求来源：引擎启动快照（运行期冻结）</div>'
     : '';
   const evidenceWarn = data.evidence.skippedLines > 0
     ? `<div class="meta-line warn">⚠️ evidence.jsonl 有 ${data.evidence.skippedLines} 行无法解析已跳过</div>`
@@ -430,9 +439,10 @@ export function renderReportHtml(data: ReportData): string {
 <main>
 <header class="card">
 <h1>${title}</h1>
-${renderBanner(stories)}
+${renderBanner(stories, data.stateCorrupted)}
 <div class="meta-line">分支：<code>${text(prd.branchName)}</code>${prd.sourcePrd ? ` · 源 PRD：<code>${text(prd.sourcePrd)}</code>` : ''}</div>
 <div class="meta-line">生成时间：${formatStamp(data.generatedAt)} · workspace：<code>${text(data.workspace)}</code></div>
+${prdSource}
 ${stateWarn}
 ${evidenceWarn}
 ${renderGateConfig(data)}

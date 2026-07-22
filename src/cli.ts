@@ -222,6 +222,10 @@ export async function main(argv: string[]): Promise<number> {
         return 2;
       }
       console.log(`📄 验证报告: ${result.path}`);
+      if (result.stateCorrupted) {
+        console.error('❌ state.json 已损坏：已生成保守诊断报告，所有 story 按未验证处理。请运行 npx coding-x repair 后重新生成。');
+        return 1;
+      }
       return 0;
     } catch (err) {
       console.error(`❌ 验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);

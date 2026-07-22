@@ -1,7 +1,8 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
-import { tryReadState, mergedStories, initialStateFor, type StoryView } from '../engine/state.js';
+import { tryReadState, mergedStories, initialStateFor, blankStateFor, type StoryView } from '../engine/state.js';
+import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import { readProgress } from '../engine/progress.js';
 import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
 import { renderReportHtml } from './render.js';
@@ -19,7 +20,9 @@ export interface ReportData {
   /** 由调用方注入，保持纯函数可测 */
   generatedAt: Date;
   prd: Prd;
-  /** mergedStories 合并视图；state 缺失/损坏回退语义与 status/dashboard 一致 */
+  /** PRD 信任来源：手动 report 读磁盘；引擎收口使用启动时冻结快照。 */
+  prdSource: 'disk' | 'engine-snapshot';
+  /** mergedStories 合并视图；state 缺失兼容 legacy，损坏则全部按未验证处理。 */
   stories: StoryView[];
   /** state.json 存在但解析失败——报告内警示 */
   stateCorrupted: boolean;
@@ -37,6 +40,11 @@ export type ReportSource =
   | { status: 'ok'; data: ReportData };
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
+
+export interface ReportOptions {
+  /** 仅供已经建立信任边界的引擎调用方注入；提供后不再读取磁盘 prd.json。 */
+  trustedPrd?: Prd;
+}
 
 // 只读一层、只收常规文件；目录不存在/不可读一律按空处理（报告容错：有什么记什么）
 function listFiles(dir: string): string[] {
@@ -65,15 +73,19 @@ export function parseScreenshotEntry(filename: string, storyIds: string[]): Scre
   return { filename, storyId: hit, phase, isImage };
 }
 
-export function collectReport(workspace: string, now: Date): ReportSource {
+export function collectReport(workspace: string, now: Date, options: ReportOptions = {}): ReportSource {
   const prdPath = join(workspace, 'prd.json');
-  if (!existsSync(prdPath)) return { status: 'missing', workspace };
-  const prd = tryReadPrd(prdPath);
+  const prdSource = options.trustedPrd === undefined ? 'disk' : 'engine-snapshot';
+  if (prdSource === 'disk' && !existsSync(prdPath)) return { status: 'missing', workspace };
+  const prd = options.trustedPrd ?? tryReadPrd(prdPath);
   if (prd === null || !Array.isArray(prd.userStories)) return { status: 'unparsable', workspace };
   const statePath = join(workspace, 'state.json');
   const stateExists = existsSync(statePath);
   const rawState = stateExists ? tryReadState(statePath) : null;
-  const state = rawState ?? initialStateFor(prd);
+  const stateCorrupted = stateExists && rawState === null;
+  // 缺失文件仍兼容从旧版 PRD 迁移；文件已经存在但损坏时，绝不让内嵌 legacy
+  // passes 复活为绿灯，统一按未验证初始态生成诊断报告。
+  const state = stateCorrupted ? blankStateFor(prd) : rawState ?? initialStateFor(prd);
   const rootFiles = listFiles(workspace);
   const reviews: { filename: string; content: string }[] = [];
   for (const filename of rootFiles.filter((n) => /^review-.*\.md$/.test(n)).sort()) {
@@ -88,8 +100,9 @@ export function collectReport(workspace: string, now: Date): ReportSource {
       workspace,
       generatedAt: now,
       prd,
+      prdSource,
       stories: mergedStories(prd, state),
-      stateCorrupted: stateExists && rawState === null,
+      stateCorrupted,
       progress: readProgress(join(workspace, 'progress.md')),
       reviews,
       tamperedArchives: rootFiles.filter((n) => /^prd\.tampered-.*\.json$/.test(n)).sort(),
@@ -100,7 +113,7 @@ export function collectReport(workspace: string, now: Date): ReportSource {
 }
 
 export type WriteReportResult =
-  | { status: 'written'; path: string }
+  | { status: 'written'; path: string; stateCorrupted: boolean }
   | { status: 'missing'; workspace: string }
   | { status: 'unparsable'; workspace: string };
 
@@ -109,10 +122,10 @@ export type WriteReportResult =
  * missing/unparsable 原样透传不写盘；写盘 IO 失败向上抛——调用方定语义
  * （cli 退出 1 / loop 仅 warn，报告是副产物绝不影响循环结果）。
  */
-export function writeReport(workspace: string, now: Date): WriteReportResult {
-  const source = collectReport(workspace, now);
+export function writeReport(workspace: string, now: Date, options: ReportOptions = {}): WriteReportResult {
+  const source = collectReport(workspace, now, options);
   if (source.status !== 'ok') return source;
   const path = join(workspace, 'report.html');
-  writeFileSync(path, renderReportHtml(source.data), 'utf-8');
-  return { status: 'written', path };
+  writeFileAtomicSync(path, renderReportHtml(source.data));
+  return { status: 'written', path, stateCorrupted: source.data.stateCorrupted };
 }

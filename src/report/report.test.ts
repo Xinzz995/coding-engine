@@ -38,6 +38,19 @@ describe('collectReport 三态', () => {
     writeFileSync(join(b, 'prd.json'), JSON.stringify({ project: 'p', userStories: 'nope' }));
     expect(collectReport(b, new Date()).status).toBe('unparsable');
   });
+
+  it('调用方提供引擎快照时不再读取磁盘 prd.json', () => {
+    const dir = ws(); // 故意不创建 prd.json：模拟 guard 最终恢复失败
+    const trustedPrd = {
+      project: 'trusted', branchName: 'ralph/trusted', description: 'd',
+      userStories: [story('US-TRUSTED')],
+    };
+    const src = collectReport(dir, new Date(), { trustedPrd });
+    if (src.status !== 'ok') throw new Error('expected ok');
+    expect(src.data.prd).toBe(trustedPrd);
+    expect(src.data.prdSource).toBe('engine-snapshot');
+    expect(src.data.stories.map((s) => s.id)).toEqual(['US-TRUSTED']);
+  });
 });
 
 describe('collectReport ok 收集', () => {
@@ -61,6 +74,7 @@ describe('collectReport ok 收集', () => {
     const d = src.data;
     expect(d.generatedAt).toBe(now);
     expect(d.prd.project).toBe('proj');
+    expect(d.prdSource).toBe('disk');
     expect(d.stories.map((s) => [s.id, s.passes, s.blocked])).toEqual([
       ['US-001', true, false], ['US-002', false, true],
     ]);
@@ -88,14 +102,16 @@ describe('collectReport ok 收集', () => {
     expect(src.data.progress).toBe('');
   });
 
-  it('state.json 损坏标记 stateCorrupted 且按初始态显示', () => {
+  it('state.json 损坏时 fail-closed，不复活 prd 内嵌 legacy 通过态', () => {
     const dir = ws();
-    writePrd(dir, [story('US-001')]);
+    writePrd(dir, [{ ...story('US-001'), passes: true, notes: 'legacy', retryCount: 4, blocked: false }]);
     writeFileSync(join(dir, 'state.json'), '{ broken');
     const src = collectReport(dir, new Date());
     if (src.status !== 'ok') throw new Error('expected ok');
     expect(src.data.stateCorrupted).toBe(true);
-    expect(src.data.stories[0].passes).toBe(false);
+    expect(src.data.stories[0]).toMatchObject({
+      passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false,
+    });
   });
 
   it('screenshots 子目录被忽略', () => {
@@ -149,7 +165,7 @@ describe('writeReport', () => {
     const dir = ws();
     writePrd(dir, [story('US-001')]);
     const result = writeReport(dir, new Date('2026-07-08T12:00:00'));
-    expect(result).toEqual({ status: 'written', path: join(dir, 'report.html') });
+    expect(result).toEqual({ status: 'written', path: join(dir, 'report.html'), stateCorrupted: false });
     const html = readFileSync(join(dir, 'report.html'), 'utf-8');
     expect(html).toContain('<!DOCTYPE html>');
     expect(html).toContain('US-001');
@@ -173,6 +189,28 @@ describe('writeReport', () => {
     const html = readFileSync(join(dir, 'report.html'), 'utf-8');
     expect(html).toContain('US-002');
     expect(html).toContain('2026-07-08 13:00');
+  });
+
+  it('state 损坏仍原子写出保守诊断报告，并在结果中暴露不可信状态', () => {
+    const dir = ws();
+    writePrd(dir, [{ ...story('US-001'), passes: true }]);
+    writeFileSync(join(dir, 'state.json'), '{ broken');
+    const result = writeReport(dir, new Date('2026-07-08T12:00:00'));
+    expect(result).toEqual({ status: 'written', path: join(dir, 'report.html'), stateCorrupted: true });
+    const html = readFileSync(join(dir, 'report.html'), 'utf-8');
+    expect(html).toContain('状态不可验证');
+    expect(html).not.toContain('全部通过');
+  });
+
+  it('原子写失败时保留上一份完整 report.html', () => {
+    const dir = ws();
+    writePrd(dir, [story('US-001')]);
+    const reportPath = join(dir, 'report.html');
+    writeFileSync(reportPath, 'trusted-old-report');
+    // writeFileAtomicSync 的已知 tmp 命名；目录占位让临时写失败，目标文件不应先被截断。
+    mkdirSync(`${reportPath}.tmp-${process.pid}`);
+    expect(() => writeReport(dir, new Date())).toThrow();
+    expect(readFileSync(reportPath, 'utf-8')).toBe('trusted-old-report');
   });
 });
 

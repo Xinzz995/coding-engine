@@ -15,6 +15,7 @@ function data(over: Partial<ReportData> = {}): ReportData {
   return {
     workspace: '.workspace',
     generatedAt: new Date('2026-07-08T12:34:00'),
+    prdSource: 'disk',
     prd: {
       project: 'proj', branchName: 'ralph/x', description: 'd',
       userStories: [
@@ -272,11 +273,19 @@ describe('renderReportHtml', () => {
     expect(html).toContain('prd-to-json');
   });
 
-  it('state 损坏警示条件渲染，文案对齐真实回退语义（读 prd 内嵌旧格式字段，非"未开始"）', () => {
+  it('state 损坏时横幅与 story 卡都 fail-closed，不显示任何通过态', () => {
     expect(renderReportHtml(data())).not.toContain('state.json 已损坏');
     const html = renderReportHtml(data({ stateCorrupted: true }));
     expect(html).toContain('state.json 已损坏');
-    expect(html).toContain('回退');
+    expect(html).toContain('状态不可验证');
+    expect(html).toContain('按全部 story 未验证处理');
+    expect(html).not.toContain('全部通过');
+    expect(html).not.toContain('✅ 通过');
+  });
+
+  it('引擎自动报告标明 PRD 来自启动快照，手动磁盘报告不冒充快照', () => {
+    expect(renderReportHtml(data())).not.toContain('引擎启动快照');
+    expect(renderReportHtml(data({ prdSource: 'engine-snapshot' }))).toContain('引擎启动快照');
   });
 
   it('报告零浏览器 JS', () => {

@@ -27,9 +27,11 @@ scope: root
 - 2026-07-08 增强类副产物的写入（证据记录、验证报告生成等「记录/存档」动作）一律 try/catch 吞错仅 warn（同类告警去重一次），绝不影响主循环的控制流与退出码——副产物失败比主流程被副产物拖垮诚实得多（见 loop.ts `recordEvidence` 与 writeReport 调用两例）。
 - 2026-07-08 多写方共享的追加式记录文件用 JSONL（每行一条独立 JSON 带 `source` 字段）：读取端逐行解析+逐字段守卫+未知 type 跳过计数（前向兼容，新版本写的类型旧消费方不炸），坏行只损失自己；「文件不存在」（ENOENT）是唯一合法空态，其余 IO 故障必须上抛——把 EACCES/EISDIR 伪装成「零记录」是审计信道的假阴性（见 `evidence.ts readEvidence`）。
 - 2026-07-08 新增 workspace 运行产物时三处必须同步：prd-to-json 归档清单的**复制**动作、**删除**动作（残留旧轮数据会污染新轮）、以及报告等消费端的文件集合——任何一处缺席都是「归档回看断链」或「新轮红旗区被旧轮污染」（0.20.0 终审实证：tampered 存档曾三处全缺）。
-- 2026-07-16 引擎对 workspace 关键 JSON（prd.json、state.json 及其归档）的覆盖写一律走 `writeFileAtomicSync`（fs-atomic 的 tmp+rename），不裸用 `writeFileSync`——进程中途被杀只损失 tmp、目标文件永远完整（见 state 落盘/门禁打回/prd 篡改归档与快照恢复/repair 落盘五调用点）。例外：幂等可重生成的副产物（report.html）与 append-only 信道（evidence.jsonl）不适用。
+- 2026-07-16 workspace 中需要“旧版或新版、绝不半份”的覆盖写一律走 `writeFileAtomicSync`（fs-atomic 的 tmp+rename），不裸用 `writeFileSync`——包括 prd.json/state.json 及其归档，也包括可重生成但会被人直接打开裁决的 report.html。进程中途被杀只损失 tmp、目标文件永远完整；append-only 信道（evidence.jsonl）不适用此模式。
 - 2026-07-22 共享 state 里的 agent 结果与引擎事实必须分字段建模：`passes` 是 builder/validator 可写的候选结果，`validated` 是 validator 正常完成后由引擎签发的验收凭证；所有选 story、收敛、status、dashboard、report 消费端统一复用 `isStoryPassed`（或等价的 `passes && validated`），禁止继续把裸 `passes=true` 渲染成全绿。agent 返回后按阶段前快照恢复引擎独占字段，异常/跳过路径与启动恢复都要清掉未签发凭证的候选 true（ADR-013）。
 - 2026-07-22 workspace 是运行时边界，不是功能提交的一部分：prd-to-json 首次写入前用 `git ls-files` + `git check-ignore --no-index` 检查“已跟踪/未忽略”两种风险，doctor 只读复核；builder 只显式 stage story 文件、检查暂存清单、提交成功后才回写 state/progress。自动化不得替用户修改 `.gitignore`、执行 `git rm --cached` 或重置既有暂存区。
+- 2026-07-22 收口副产物必须沿用主流程已经建立的信任来源：loop 自动报告只消费终轮 PRD guard 返回的冻结快照，并显式标注来源；不能在裁决完成后重新读取 agent 可改写的磁盘 PRD。手动报告没有该信任来源，只能标成磁盘读取。state 文件“缺失”才允许 legacy 迁移；“存在但损坏”在验证报告里必须 fail-closed 为全部未验证、输出红色诊断且 CLI 非零（ADR-014）。
+- 2026-07-22 skill 要改写 workspace 前，先通过 doctor 读取工作区锁结论，完成只读准备后在首次真实写入前再次检查；活锁、无法判定或结论变化都保持零写入，陈旧/损坏锁不由 skill 删除。双检查只缩小 TOCTOU 窗口，文案不得把它冒充 O_EXCL 机械互斥。
 - 2026-07-16 把 CLI 传入的 workspace 路径与项目根拼接时用 `resolve` 不用 `join`——`--workspace` 可传绝对路径，`join` 会把已是绝对路径的段原样拼在 root 之下产生不存在的路径，检查类消费方表现为假阴性（doctor 的锁检查「引擎运行中却报无锁」与门禁配置检查同款实翻，0.21.0 终审端到端实测检出）。
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。
 - 2026-07-20 引擎对 agent 的一切判定只消费机械信号：进程结局按超时标志与退出码三分（completed/timeout/error），产物变化按轮首/轮后内容字符串对比（不 parse）——agent 自己声明的「做完了」不可信，与机械门禁不可共谋同源（见 loop.ts `outcomeOf` 与 no-op 双无变化判定；ADR-009）。给判定加新维度时先自问是否仍是引擎自己观测的确定性事实。
@@ -39,7 +41,7 @@ scope: root
 
 <!-- 容易再次踩、与本项目框架/数据边界/路由方式强相关的坑 -->
 
-- 2026-07-03 运行期状态需要回退时用「全部归零」的空初始化，不要复用带历史字段抽取的迁移初始化——迁移路径会把已废弃的旧格式状态重新激活（对比 `blankStateFor` 只写初始常量、`initialStateFor` 读旧字段）。2026-07-08 补消费端语境规则：回看类端点（dashboard/status/验证报告）允许走迁移回退换离线可用性，但呈现处必须如实标注「可能非最新执行结果」（见 render.ts stateWarn）——在验证证据语境里，静默回退呈现陈旧的 passes:true 等于假绿面。
+- 2026-07-03 运行期状态需要回退时用「全部归零」的空初始化，不要复用带历史字段抽取的迁移初始化——迁移路径会把已废弃的旧格式状态重新激活（对比 `blankStateFor` 只写初始常量、`initialStateFor` 读旧字段）。文件**缺失**是旧 workspace 迁移信号，可以读 legacy；文件**存在但损坏**不是迁移信号。dashboard/status 为离线诊断兼容 legacy 时必须醒目告警；验证报告属于裁决证据，损坏态必须全部归零并红色 fail-closed，否则陈旧 passes:true 会形成假绿面（ADR-014）。
 - 2026-07-03 临时目录里跑 git 的单测须先 `git config commit.gpgsign false`（否则全局签名配置会让 commit 失败），并用 `GIT_COMMITTER_DATE`/`GIT_AUTHOR_DATE` 固定日期（`git log %cs` 取的是 committer date），否则依赖提交日期的断言不稳定（见 doctor.test.ts 的 git fixture）。
 - 2026-07-03 单测里的路径断言用 `join('docs', 'sub', 'x.md')` 拼接，不要硬编码 `/` 分隔的字面串，否则 Windows 上会假失败。
 - 2026-07-04 版本号除 package.json 外还有多处落点（package-lock、`.claude-plugin/`/`.cursor-plugin/`/`.codex-plugin/` 三个插件清单），靠人记必漂移——0.6.0–0.7.1 期间插件清单曾停在 0.5.1 三个版本没人发现。机械防线（三道）：`npm version` 生命周期钩子跑 `build/sync-plugin-versions.mjs` 自动同步；`build/version-consistency.test.mjs` 随 npm test 常态校验全部落点一致（本地与 CI test.yml，漂移提交即红）；publish.yml 发版门禁兜底。新增版本号落点时登记进 `PLUGIN_MANIFESTS`（或一致性测试的 entries）即可全线生效。同理，会随版本演进的枚举内容（如清单 description 里列 skills/commands 名单）不要复制到多处，写稳定表述。

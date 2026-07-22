@@ -13,6 +13,19 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 获取 PRD（markdown 文件或文本；PRD 通常位于 `docs/prds/`，monorepo 中也可能在 `<子项目>/docs/prds/`——但对来源路径无硬依赖，任何路径或直接粘贴的文本都可以）并将其转换为 `prd.json`（保存到当前项目根路径下 `.workspace/prd.json`）。
 
+## 写入前：活跃运行检查
+
+在创建、改写、归档或删除 `.workspace/` 中的任何文件之前，先运行 `npx coding-x doctor --workspace .workspace`，读取其中的 workspace 锁结论：
+
+1. 若 doctor 报告 `engine.lock` 对应“引擎运行中”，立即停止派生；本次必须保持零写入，不得归档、覆盖、删除或修复任何 workspace 文件。
+2. 若锁被判定为陈旧或损坏，只能请用户确认对应进程确实不再运行；不得删除 `engine.lock`，也不得由 skill 擅自接管或清锁。用户确认后仍由后续引擎命令按自身锁协议处理。
+3. 若 doctor 无法启动、输出中断，或输出不含可判定的 workspace 锁结论，停止派生并说明无法建立单写者前提，不能把“检查失败”当作“没有活跃运行”。doctor 的整体退出码可能受其他体检项影响；只要完整输出中有明确锁结论，本节不把无关项的非零退出误判成锁检查失败。
+4. 完成需求澄清、模型选择、对照表等只读准备后，在真正写入前再次运行同一 doctor 命令；只要结论变为活跃、无法判定或与首次检查不一致，就停止派生并保持零写入。
+
+这是协作层的尽力防护，不能消除检查与首次写入之间的 TOCTOU 窗口；因此不得绕过引擎自己的 `engine.lock` 协议，也不得把本检查描述成强事务锁。
+
+---
+
 ## 写入前：workspace Git 隔离
 
 在创建、改写或归档 `.workspace/` 中的任何文件之前，先机械检查它不会混入 story commit：
@@ -522,6 +535,7 @@ Add ability to mark tasks with different statuses.
 
 在编写 prd.json 之前，验证：
 
+- [ ] 已运行 `npx coding-x doctor --workspace .workspace`；未发现“引擎运行中”，且真正写入前再次运行的结论仍可判定、未变化；未删除 `engine.lock`
 - [ ] `.workspace/` 已通过 Git 隔离检查；若已跟踪或未忽略，已取得用户明确选择，且未自动修改 `.gitignore` 或执行 `git rm --cached`
 - [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json、evidence.jsonl、prd.tampered-*.json）
 - [ ] 每个 story 可以在一次迭代中完成（足够小）

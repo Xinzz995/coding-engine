@@ -611,6 +611,35 @@ describe('main — report subcommand', () => {
       } finally { console.error = orig; }
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
+
+  it('state.json 损坏时写出保守诊断报告但返回 1，绝不假绿', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
+    try {
+      writeFileSync(join(dir, 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd',
+        userStories: [{
+          id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
+          passes: true, notes: '', retryCount: 0, blocked: false,
+        }],
+      }));
+      writeFileSync(join(dir, 'state.json'), '{ broken');
+      const logs: string[] = [];
+      const errs: string[] = [];
+      const log = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
+      const error = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errs.push(a.join(' ')); });
+      try {
+        expect(await main(['report', '--workspace', dir])).toBe(1);
+      } finally {
+        log.mockRestore();
+        error.mockRestore();
+      }
+      expect(logs.some((l) => l.includes('report.html'))).toBe(true);
+      expect(errs.some((e) => e.includes('state.json 已损坏'))).toBe(true);
+      const html = readFileSync(join(dir, 'report.html'), 'utf-8');
+      expect(html).toContain('状态不可验证');
+      expect(html).not.toContain('全部通过');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });
 
 describe('repair 与工作区锁', () => {

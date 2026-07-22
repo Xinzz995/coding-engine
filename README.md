@@ -68,7 +68,7 @@ coding-x 同时是两样东西：
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。
 - **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。门禁配置受快照保护：运行期改写 prd.json（含删改 `qualityChecks` / 验收标准）会被检测、恢复并存档，无法架空门禁与验收（ADR-007）。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
-- **workspace Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 在首次写入前检查它是否已被忽略、是否已有文件进入 Git 索引；`doctor` 可随时只读复核并给出建议。两者都不会擅自修改 `.gitignore` 或 Git 索引。
+- **workspace 写入避让与 Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 在任何变更前及首次真实写入前各用 `doctor` 检查工作区锁，发现引擎运行中或无法判定就保持零写入，且绝不删除 `engine.lock`；随后检查目录是否被忽略、是否已有文件进入 Git 索引。它不会擅自修改 `.gitignore` 或 Git 索引。锁检查是尽力避让，不替代引擎的机械互斥。
 - **状态共享**：引擎与 agent 都在项目根目录运行，读写同一组 `prd.json` / `state.json` / `progress.md`（需求只读，状态写 state.json）；`validated`、`escalated` 由引擎独占，agent 必须原样保留。指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
 
 ---
@@ -166,7 +166,7 @@ npx coding-x cursor          # 改用 Cursor Agent
 3. （可选）功能涉及合同级技术决策（新表/改 schema、对外接口、状态机、权限模型、存量数据迁移）时，用 `technical-alignment` skill 对齐技术合同（「tech: ...」）：产出技术对齐稿（`docs/prds/tech-*.md`）——每条合同是可验证陈述，不可逆项单独列出，人只拍板少数贵决策。无此类决策时跳过。
 4. `/planning 我要做的功能描述` 产出完整实现计划。
 5. 用 `prd-generate` skill 生成 PRD（对它说「创建一个 prd」；输入是对齐稿/技术对齐稿时它会跳过澄清、吸收合同直接转）。
-6. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。写入前会检查 `.workspace/` 是否被 Git 忽略、是否已有运行时文件被跟踪；异常时停下来交由你决定，不自动改仓库。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
+6. 用 `prd-to-json` skill 把 PRD 转成 `.workspace/prd.json`（「将 prd 转成 prd.json」）。它先用 `doctor` 检查是否有引擎持锁，真正写入前再检查一次；活锁或无法判定时零写入，陈旧/损坏锁交你确认但不由 skill 删除。随后检查 `.workspace/` 是否被 Git 忽略、是否已有运行时文件被跟踪；异常时停下来交由你决定，不自动改仓库。转换会把增强后的 stories 回写源 PRD 并输出对照表供确认；需求中途变更时改源 PRD 后重新转换（再派生按 story id 保留执行状态）。
 
 `prd.json` 结构：
 
@@ -268,7 +268,7 @@ npx coding-x status             # 终端一屏速览工作区执行状态（退�
 npx coding-x status --json      # 同上，stdout 输出单个 JSON 对象供脚本与 agent 消费
 npx coding-x doctor             # docs/、workspace Git 隔离等健康检查（硬错误以退出码 1 结束）
 npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30）
-npx coding-x report             # 手动（重）生成 .workspace/report.html 静态验证报告
+npx coding-x report             # 手动（重）生成 .workspace/report.html；state 损坏时产出红色诊断报告并退出 1
 ```
 
 ### 第 3 步：查看实时进度
@@ -294,7 +294,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
 | 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；退出码 0=全通过 / 1=未全通过 / 2=无可读工作区，可作 CI 门禁 |
-| 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会自动生成；退出码 0=已生成 / 1=写入失败 / 2=无可读工作区 |
+| 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会从引擎冻结的 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏（仍写红色诊断报告） / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
@@ -342,13 +342,13 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html �
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证——LLM 验证链之下不可共谋、不可绕过的确定性防线。
-- **workspace Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 写前阻止静默污染，`doctor` 只读报告未忽略或已跟踪文件，不替用户改索引。
+- **workspace 写入避让与 Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 双次检查活跃工作区锁、写前阻止静默污染，`doctor` 只读报告锁与 Git 隔离状态，不替用户删锁或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、validator 正常打回或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
 - **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
-- **静态验证报告**：循环结束自动生成 `.workspace/report.html`——story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页，双击打开；0.20.0 起叠加 evidence 结构化索引：门禁执行历史（含通过轮）、轮次时间线、截图↔验收标准对账（agent 登记，报告诚实标注信任级别）；/review-loop 裁决回填后 `npx coding-x report` 随时刷新。截图为相对引用，分享报告需连同 `screenshots/` 目录。
+- **静态验证报告**：循环结束从 PRD guard 的最终冻结快照自动生成 `.workspace/report.html`，并标明“引擎启动快照”；手动 `npx coding-x report` 则诚实读取当前磁盘 PRD。story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页；state 已存在但损坏时所有 story 按未验证渲染，绝不复活 legacy 通过态。报告以 tmp+rename 原子覆盖；截图为相对引用，分享时需连同 `screenshots/` 目录。
 - **JSON 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json` / `state.json`。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 
@@ -437,7 +437,7 @@ coding-engine/
 │   ├── doctor/
 │   │   └── doctor.ts             #   docs、门禁、模型目录与 workspace Git 隔离检查
 │   ├── report/
-│   │   ├── report.ts             #   验证报告数据收集与写盘（collectReport/writeReport）
+│   │   ├── report.ts             #   验证报告收集、可信 PRD 来源与原子写盘
 │   │   └── render.ts             #   验证报告 HTML 渲染（零浏览器 JS、全文本转义）
 │   ├── status/
 │   │   └── status.ts             #   workspace 状态与实际路由终端速览

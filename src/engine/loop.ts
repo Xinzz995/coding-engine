@@ -613,7 +613,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // 循环结束无条件生成静态验证报告（进行中态也诚实存档）；
     // 报告是副产物：任何失败只 warn，绝不影响循环退出码。
     try {
-      const report = writeReport(cfg.workspace, new Date());
+      // closeRead 是最终一次 PRD guard 读：只要启动时建立过可信快照，即使磁盘恢复
+      // 失败也必须用快照出报告。guard 从未建立快照的异常输入才保留磁盘诊断回退。
+      const report = closeRead.prd === null
+        ? writeReport(cfg.workspace, new Date())
+        : writeReport(cfg.workspace, new Date(), { trustedPrd: closeRead.prd });
       if (report.status === 'written') {
         console.log(`📄 验证报告: ${report.path}`);
       } else {

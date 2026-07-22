@@ -40,6 +40,6 @@ fixture 是依赖为零的 Node ESM 小项目，初始测试因缺少 `src/norma
 - **流程 finding（已修）：workspace 运行时文件污染 story commit。** 原始架构约定默认 gitignore `.workspace/`，但 prd-to-json/引擎没有机械保证目标仓已经落实该约定。本 fixture 未忽略 workspace 时，Terra 没有遵守 builder 指令第 7–9 步“先提交、再写 state/progress”的顺序，反而把新建的 `state.json` 与已跟踪的 `progress.md` 连同实现一起提交；引擎签发 `validated=true` 后工作树又留下 state diff。修复后 builder 只允许显式 stage story 文件、提交前核对暂存清单、提交成功后再写 state/progress；prd-to-json 写入前检查 ignore/索引状态，doctor 只读报告未忽略或已跟踪文件。三处都明确不擅改用户 `.gitignore`、Git 索引或既有暂存区。
 - 已把成功合同固化为 dogfood 回归断言 #13–15，并将上述 finding 的修复合同固化为断言 #16；prompt 静态合同与临时 Git fixture 覆盖已落地。
 
-## 下一候选
+## 后续候选进展
 
-下一候选是“可信收口报告”：自动报告消费 PRD guard 最终快照、验证报告在 state 损坏时 fail-closed、report 原子写入，并让 prd-to-json 再派生前检查活跃工作区锁。这些来自既有审查延期项，不属于本轮 dogfood 修复范围。
+本记录提出的下一候选“可信收口报告”已在后续 0.25.4 候选实现中闭环：自动报告消费 PRD guard 最终快照并标注来源，state 损坏时 fail-closed，report 原子写入；prd-to-json 在任何 workspace 变更前与首次真实写入前双次检查活跃工作区锁，且不删除锁。该实现不改写本次 v0.25.2 dogfood 的历史结论；发布前仍需按回归断言 #11、#17、#18 完成候选版本验证。
