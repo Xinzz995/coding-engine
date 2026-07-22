@@ -35,10 +35,14 @@ export type EvidenceRecord =
       escalationTriggeredBy?: 'gate' | 'validator' | 'noop';
       /** agent 对引擎独占字段的改动；引擎已恢复。 */
       stateRouteTamper?: Array<{
+        /** 实际被改写的 story；旧 evidence 缺省时消费端回退 iteration.storyId。 */
+        storyId?: string;
         expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
       }>;
       /** agent 对引擎独占 validated 的改动；引擎已恢复。 */
       stateValidationTamper?: Array<{
+        /** 实际被改写的 story；旧 evidence 缺省时消费端回退 iteration.storyId。 */
+        storyId?: string;
         expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
       }> }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
@@ -74,6 +78,7 @@ function isRouteSource(v: unknown): v is ModelRouteSource {
 
 function isStateRouteTamper(v: unknown): boolean {
   return Array.isArray(v) && v.every((item) => isRec(item)
+    && (item.storyId === undefined || typeof item.storyId === 'string')
     && typeof item.expected === 'boolean'
     && (typeof item.received === 'boolean' || item.received === 'missing')
     && (item.side === 'builder' || item.side === 'validator'));

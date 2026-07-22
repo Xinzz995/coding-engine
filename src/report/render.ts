@@ -215,10 +215,10 @@ function renderTimeline(records: EvidenceRecord[]): string {
     if (r.validationReceipt) flags.push('验收凭证已签发');
     if (r.escalationTriggeredBy) flags.push(`已触发升级（${text(r.escalationTriggeredBy)}）`);
     for (const tamper of r.stateRouteTamper ?? []) {
-      flags.push(`${tamper.side} 改写 escalated（${tamper.expected} → ${tamper.received}）已恢复`);
+      flags.push(`${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 escalated（${tamper.expected} → ${tamper.received}）已恢复`);
     }
     for (const tamper of r.stateValidationTamper ?? []) {
-      flags.push(`${tamper.side} 改写 validated（${tamper.expected} → ${tamper.received}）已恢复`);
+      flags.push(`${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 validated（${tamper.expected} → ${tamper.received}）已恢复`);
     }
     const flagCell = flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—';
     const builder = r.builderRan
@@ -259,12 +259,12 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
   const stateRouteTampers = records
     .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration')
     .flatMap((r) => (r.stateRouteTamper ?? []).map((t) => ({
-      ...t, iteration: r.iteration, at: r.at, storyId: r.storyId,
+      ...t, iteration: r.iteration, at: r.at, storyId: t.storyId ?? r.storyId,
     })));
   const stateValidationTampers = records
     .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration')
     .flatMap((r) => (r.stateValidationTamper ?? []).map((t) => ({
-      ...t, iteration: r.iteration, at: r.at, storyId: r.storyId,
+      ...t, iteration: r.iteration, at: r.at, storyId: t.storyId ?? r.storyId,
     })));
   if (tampered.length === 0 && tamperEvents.length === 0
       && stateRouteTampers.length === 0 && stateValidationTampers.length === 0) return '';

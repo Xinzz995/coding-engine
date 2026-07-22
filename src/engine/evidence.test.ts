@@ -203,7 +203,7 @@ describe('iteration 新可选字段（异常轮语义）', () => {
       validatorRan: false, validatorModel: null, skippedValidator: true, agentBlocked: false,
       validationRollback: true,
       stateValidationTamper: [
-        { expected: false, received: true, side: 'builder' },
+        { storyId: 'US-010', expected: false, received: true, side: 'builder' },
         { expected: false, received: 'missing', side: 'validator' },
       ],
     });
@@ -213,7 +213,7 @@ describe('iteration 新可选字段（异常轮语义）', () => {
     expect(readEvidence(dir).records[1]).toMatchObject({
       validationRollback: true,
       stateValidationTamper: [
-        { expected: false, received: true, side: 'builder' },
+        { storyId: 'US-010', expected: false, received: true, side: 'builder' },
         { expected: false, received: 'missing', side: 'validator' },
       ],
     });
@@ -231,7 +231,8 @@ describe('iteration 新可选字段（异常轮语义）', () => {
       { ...base, validationRollback: 'yes' },
       { ...base, validationReceipt: true, validationRollback: true },
       { ...base, stateValidationTamper: [{ expected: false, received: 1, side: 'builder' }] },
+      { ...base, stateValidationTamper: [{ storyId: 7, expected: false, received: true, side: 'builder' }] },
     ].map((v) => JSON.stringify(v)).join('\n') + '\n');
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 4 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 5 });
   });
 });

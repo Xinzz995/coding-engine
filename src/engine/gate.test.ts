@@ -40,13 +40,14 @@ describe('readQualityChecks', () => {
 
 describe('applyGateFailure', () => {
   const base: RunState = {
-    'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
+    'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
   };
   const now = new Date(2026, 6, 5, 14, 30); // 本地时间 2026-07-05 14:30
 
   it('flips passes to false, bumps retryCount, writes gate failure notes', () => {
     const next = applyGateFailure(base, 'US-001', failure(), now);
     expect(next['US-001'].passes).toBe(false);
+    expect(next['US-001'].validated).toBe(false);
     expect(next['US-001'].retryCount).toBe(1);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain('[门禁失败 - 第1次] 2026-07-05 14:30');
@@ -59,6 +60,7 @@ describe('applyGateFailure', () => {
     const next = applyGateFailure(base, 'US-001', failure(), now);
     expect(next).not.toBe(base);
     expect(base['US-001'].passes).toBe(true);
+    expect(base['US-001'].validated).toBe(true);
     expect(base['US-001'].notes).toBe('');
   });
 
@@ -257,9 +259,10 @@ describe('applyAbortRollback', () => {
   const at = new Date('2026-07-17T10:00:00');
 
   it('回写 passes=false 并写入中断标记行；retryCount 与 blocked 不动', () => {
-    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 2, blocked: false, escalated: false } };
+    const state = { 'US-001': { passes: true, validated: true, notes: '', retryCount: 2, blocked: false, escalated: false } };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
     expect(next['US-001'].passes).toBe(false);
+    expect(next['US-001'].validated).toBe(false);
     expect(next['US-001'].retryCount).toBe(2);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain(ABORT_LINE_PREFIX);
@@ -267,6 +270,7 @@ describe('applyAbortRollback', () => {
     expect(next['US-001'].notes).toContain('执行超时被终止');
     // 不可变：原 state 不被就地修改
     expect(state['US-001'].passes).toBe(true);
+    expect(state['US-001'].validated).toBe(true);
   });
 
   it('error 结局的标记行含退出码', () => {

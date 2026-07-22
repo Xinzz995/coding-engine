@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { runInNewContext } from 'node:vm';
 import { setState, buildApiResponse, start, configureWorkspace, browserOpenCommand } from './server.js';
 
 let cleanup: Array<() => void> = [];
@@ -21,6 +22,69 @@ function tempWorkspace(): string {
   writeFileSync(join(dir, 'progress.md'), '## US-001\n- done');
   return dir;
 }
+
+type DashboardStory = {
+  id: string;
+  passes: boolean;
+  validated: boolean;
+  notes: string;
+  retryCount: number;
+  blocked: boolean;
+};
+
+const dashboardAssets = [
+  { label: '普通页', file: 'dashboard.html', stateFunction: 'getState', currentStoryArgument: true },
+  { label: '像素页', file: 'dashboard-p.html', stateFunction: 'getStoryState', currentStoryArgument: false },
+] as const;
+
+function readDashboardAsset(file: string): string {
+  return readFileSync(join(process.cwd(), 'assets', 'dashboard', file), 'utf-8');
+}
+
+function extractStateFunction(html: string, name: string): string {
+  const source = html.match(new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}`));
+  expect(source, `${name} should remain an inline dashboard function`).not.toBeNull();
+  return source![0];
+}
+
+function dashboardState(
+  asset: (typeof dashboardAssets)[number],
+  story: DashboardStory,
+  currentStory: string | null = null,
+): string {
+  const source = extractStateFunction(readDashboardAsset(asset.file), asset.stateFunction);
+  const invocation = asset.currentStoryArgument
+    ? `(${source})(story, currentStory)`
+    : `(${source})(story)`;
+  return runInNewContext(invocation, {
+    story,
+    currentStory,
+    getRuntime: () => ({ current_story: currentStory }),
+  }) as string;
+}
+
+describe.each(dashboardAssets)('$label dashboard published-state contract', (asset) => {
+  const story = (over: Partial<DashboardStory> = {}): DashboardStory => ({
+    id: 'US-001', passes: false, validated: false, notes: '', retryCount: 0, blocked: false, ...over,
+  });
+
+  it('按 active/blocked/passed/awaiting/failed/pending 状态矩阵分类', () => {
+    expect(dashboardState(asset, story(), 'US-001')).toBe('active');
+    expect(dashboardState(asset, story({ blocked: true }))).toBe('blocked');
+    expect(dashboardState(asset, story({ passes: true, validated: true }))).toBe('passed');
+    expect(dashboardState(asset, story({ passes: true, validated: false }))).toBe('awaiting');
+    expect(dashboardState(asset, story({ retryCount: 1 }))).toBe('failed');
+    expect(dashboardState(asset, story())).toBe('pending');
+  });
+
+  it('将待验收标记为「待引擎验收」，且完成计数必须同时要求 passes 与 validated', () => {
+    const html = readDashboardAsset(asset.file);
+    expect(html).toMatch(/awaiting\s*:\s*(?:\{[^}]*label\s*:\s*)?['"]待引擎验收['"]/);
+    expect(html).toMatch(
+      /stories\.filter\(s\s*=>\s*!s\.blocked\s*&&\s*s\.passes\s*===\s*true\s*&&\s*s\.validated\s*===\s*true\)\.length/,
+    );
+  });
+});
 
 describe('buildApiResponse', () => {
   it('reflects state + workspace files', () => {
