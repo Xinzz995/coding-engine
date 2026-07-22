@@ -12,6 +12,7 @@ description: 循环结束后、合并默认分支前，对本轮分支 diff 做�
 2. 独立复核：不得以「validator 已通过」「progress.md 说完成」作为任何结论的证据；验证必须独立重推（读代码、跑质量检查、必要时实际执行）
 3. 质量维度的发现只列出，不作为合并阻塞；正确性发现按严重度排序，最终裁决归人
 4. 例外（自指豁免）：若目标项目自身就是此类 harness 工具，其子命令名、CLI 参数名等是领域词汇——不要把它们本身当作缺陷（如 assume:）报告，正常出现在审查输出中即可（同 /compound-docs 的自指豁免精神）
+5. 黄金原则不是自述：目标项目存在 `docs/golden-principles.md` 时必须逐条独立复核；计划或 PRD 的「已遵循」只能帮助定位设计意图，不能替代代码、测试与运行证据
 
 ## 1. 建立范围
 
@@ -19,6 +20,7 @@ description: 循环结束后、合并默认分支前，对本轮分支 diff 做�
 - 读 `.workspace/prd.json`：branchName、story 列表与各自 acceptanceCriteria（顶层 `sourcePrd` 存在时可读源 PRD 补背景）
 - 读 `.workspace/state.json`：notes 中的仲裁标签行（`[需求冲突]`、`[需要人工核实]`）与失败历史（理解背景用，不作证据）
 - 读 `.workspace/progress.md`：理解各 story 的实现意图（不作证据）
+- 读根 `AGENTS.md` 及其索引的 `docs/golden-principles.md`（存在时）；若原则要求在计划或 PRD 留对照，定位本功能对应文档并核对是否逐条裁决，无对照或笼统写「均遵循」本身就是发现
 - git 取证基线（同 /compound-docs）：
 
 ```bash
@@ -39,6 +41,7 @@ git diff --stat "$MERGE_BASE"..HEAD -- . ':!package-lock.json' ':!*.lock' ':!dis
 - 跑一遍项目质量检查（typecheck/lint/test），确认当前分支真实全绿
 - 业务逻辑读取的每个文件/路径：干净检出（CI）环境下存在吗？被 .gitignore 了吗？路径是绝对的吗？依赖本机特有状态吗？
 - 逐条 acceptanceCriteria：找到对应的测试断言；断言真的在测这条 AC 吗（不是测 mock、期望值不是与实现同源计算出来的）？
+- 逐条黄金原则：从实际 diff、测试和运行工件寻找独立证据；尤其核对完成合同是否可证伪、生成方是否自签、自治扩张是否同步增加防线、是否重复平台原生能力、真实失败是否已有回归去向
 - 反向核对（scope 嗅探）：逐个改动 hunk 问「哪条 AC 要求它？」——映射不到任何 story acceptanceCriteria 的行为/文件变更，列为 `scope:` 发现（validator 按 AC 正向验收永远发现不了 AC 之外的私货，这条防线只在这里）
 - 新增的每个外部输入（CLI 参数、文件内容、环境变量）：空串/0/负数/非法格式会发生什么？
 - 修改过的共享函数：grep 其所有调用方，逐个核对语义仍成立
@@ -74,6 +77,7 @@ git diff --stat "$MERGE_BASE"..HEAD -- . ':!package-lock.json' ':!*.lock' ':!dis
 - `assume:` 环境隐含假设（gitignored 文件被业务逻辑读取、绝对路径、本机特有状态）
 - `test-gap:` 测试未真正覆盖 acceptanceCriteria（断言与 AC 不对应、测了 mock、同义反复——断言的期望值用与实现相同的算法重新计算而非来自独立真相源，构造性通过、永远无法与代码不一致）
 - `scope:` 越权改动（任何 story 的 acceptanceCriteria 都不要求的行为/文件变更——自作主张的功能、顺手改的无关文件）
+- `principle:` 违反目标项目黄金原则（点名原则、计划/PRD 原裁决、代码或证据中的反例；原则要求不适用理由但未填写时也属此类）
 - `edge:` 边界缺失（空串/0/负数/非法格式）
 
 质量族（在后，按可砍行数排序）：

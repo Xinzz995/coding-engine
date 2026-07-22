@@ -22,7 +22,7 @@ npm run typecheck   # tsc --noEmit
 | 主题 | 路径 | 说明 |
 |---|---|---|
 | 架构地图 | `docs/architecture.md` | 引擎/插件双形态、模块划分、数据流、依赖方向 |
-| 黄金原则 | `docs/golden-principles.md` | 机械可判定的强制规则 |
+| 黄金原则 | `docs/golden-principles.md` | 新功能立项、实现与验收必须逐条对照的五条机械规则 |
 | 设计决策 | `docs/decisions/` | ADR：一事一文件，编号递增 |
 | 实现计划 | `docs/plans/` | /planning 产出 |
 | PRD | `docs/prds/` | prd-generate 产出；意图真相源，`.workspace/prd.json` 由它派生（ADR-003）；两端对齐稿（scenario-alignment 的 `align-*.md`、technical-alignment 的 `tech-*.md`）亦落此处，被正式 PRD 吸收后置 superseded |
@@ -42,3 +42,4 @@ npm run typecheck   # tsc --noEmit
 4. 引擎运行时状态只读写 `--workspace` 目录（默认 `.workspace/`）
 5. 面向用户的破坏性变更（命令改名、产物路径）必须升 minor 版本并同步 README
 6. 提交说明必须用中文书写（conventional 类型前缀 feat:/fix:/docs: 等保留英文）
+7. 新功能编码前必须在实现计划或 PRD 中逐条完成 `docs/golden-principles.md` 对照；不适用项写明理由，未裁决项先交用户确认
