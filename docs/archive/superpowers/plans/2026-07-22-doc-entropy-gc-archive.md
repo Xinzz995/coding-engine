@@ -1,6 +1,6 @@
 ---
 title: "实施计划：doc-gardening 熵 GC 与物理归档"
-status: active
+status: done
 updated: 2026-07-22
 scope: root
 ---

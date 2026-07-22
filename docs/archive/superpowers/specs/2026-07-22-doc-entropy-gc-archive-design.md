@@ -1,6 +1,6 @@
 ---
 title: "设计：doc-gardening 第二阶段——熵 GC 与物理归档"
-status: active
+status: done
 updated: 2026-07-22
 scope: root
 ---
