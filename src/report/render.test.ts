@@ -426,6 +426,24 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('红旗区：运行期状态 / PRD 篡改');
   });
 
+  it('跨 story 所有权篡改展示实际目标，旧 evidence 回退轮次 storyId', () => {
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'iteration', source: 'engine', at: '2026-07-22T06:02:00.000Z',
+        iteration: 5, storyId: 'US-001', builderRan: true, builderModel: null,
+        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+        stateValidationTamper: [
+          { storyId: 'US-002', expected: false, received: true, side: 'builder' },
+          { expected: false, received: 'missing', side: 'validator' },
+        ],
+      },
+    ])));
+    expect(html).toContain('US-002：builder 改写 validated（false → true）已恢复');
+    expect(html).toContain('US-001：validator 改写 validated（false → missing）已恢复');
+    expect(html).toContain('US-002：builder 改写引擎独占字段 <code>validated</code>');
+    expect(html).toContain('US-001：validator 改写引擎独占字段 <code>validated</code>');
+  });
+
   it('路由证据展示难度、实际模型来源、升级触发与状态篡改', () => {
     const base = data();
     const html = renderReportHtml(data({

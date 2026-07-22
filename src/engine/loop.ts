@@ -9,7 +9,7 @@ import {
   ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved,
   enableEscalation, restoreEscalated, restoreValidated, issueValidationReceipt,
   rollbackUnvalidatedPass, rollbackUnvalidatedPasses, tryReadEngineOwnedFields,
-  INITIAL_STORY_STATE, type RunState, type StoryState,
+  INITIAL_STORY_STATE, type RunState,
 } from './state.js';
 import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
 import { resolveBuilderModel, resolveValidatorModel } from './models.js';
@@ -235,66 +235,85 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const before = beforeRead.prd;
       // 写回失败=磁盘仍是篡改版=本轮 validator 读到的验收标准不可信 → 跳过（下轮开头重试恢复）
       let skipValidator = beforeRead.restoreFailed;
-      const beforeState = before ? readRunState(statePath, before) : null;
+      let beforeState = before ? readRunState(statePath, before) : null;
+      // 上一轮可能由非当前 story 的所有权篡改留下 passes=true/validated=false。
+      // 在选取 current story 前统一回写，避免该候选因 passes=true 被 builder 跳过而空转；
+      // 这里只发生在轮界，不会碰当前轮 builder→validator 之间的合法候选。
+      if (beforeState) {
+        const recovered = rollbackUnvalidatedPasses(beforeState);
+        if (recovered.storyIds.length > 0) {
+          beforeState = recovered.state;
+          writeFileAtomicSync(statePath, JSON.stringify(beforeState, null, 2));
+          stateRawBefore = rawOf(statePath);
+          console.warn(`⚠️  检测到跨轮未签发的待验收状态，已回写待复核：${recovered.storyIds.join(', ')}`);
+        }
+      }
       const currentStory = before && beforeState ? getCurrentStoryId(before, beforeState) : null;
       const currentStoryObj = before?.userStories.find((s) => s.id === currentStory) ?? null;
-      const currentStoryState = currentStory && beforeState
-        ? (beforeState[currentStory] ?? INITIAL_STORY_STATE)
-        : undefined;
-      // 旧 state 只读时不迁移；一旦 story 真正进入执行轮，就先把引擎独占字段
-      // 实体化。这样 agent 后续删除字段能与 legacy 缺省明确区分，且把基线更新到
-      // 实体化之后，避免这次引擎写入被 no-op 检测误算成 builder 产出。
-      if (currentStory && beforeState && currentStoryState) {
-        const owned = tryReadEngineOwnedFields(statePath, currentStory);
-        if (owned && (owned.validated !== currentStoryState.validated
-            || owned.escalated !== currentStoryState.escalated)) {
-          writeFileAtomicSync(statePath, JSON.stringify({
-            ...beforeState, [currentStory]: { ...currentStoryState },
-          }, null, 2));
+      const ownershipStoryIds = before?.userStories.map((story) => story.id) ?? [];
+      // 旧 state 只读时不迁移；一旦进入执行轮，就先把全部 PRD story 的引擎
+      // 独占字段实体化。这样 agent 后续删除字段能与 legacy 缺省明确区分，且
+      // 非当前 story 也不能靠伪造 validated/escalated 绕过选取与完成判定。
+      if (beforeState) {
+        let materialized = beforeState;
+        let materializedChanged = false;
+        for (const storyId of ownershipStoryIds) {
+          const expected = beforeState[storyId] ?? INITIAL_STORY_STATE;
+          const owned = tryReadEngineOwnedFields(statePath, storyId);
+          if (!owned || (owned.validated === expected.validated
+              && owned.escalated === expected.escalated)) continue;
+          materialized = { ...materialized, [storyId]: { ...expected } };
+          materializedChanged = true;
+        }
+        if (materializedChanged) {
+          writeFileAtomicSync(statePath, JSON.stringify(materialized, null, 2));
           stateRawBefore = rawOf(statePath);
         }
       }
       const routeTampers: Array<{
-        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
+        storyId: string; expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
       }> = [];
       const validationTampers: Array<{
-        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
+        storyId: string; expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
       }> = [];
       const restoreEngineOwnership = (
-        side: 'builder' | 'validator', expectedState: StoryState | undefined,
+        side: 'builder' | 'validator', expectedState: RunState | null,
       ): { storyMissing: boolean } => {
-        if (!currentStory || !expectedState) return { storyMissing: false };
+        if (!expectedState) return { storyMissing: false };
         const state = tryReadState(statePath);
         if (!state) return { storyMissing: false };
-        const storyMissing = !state[currentStory];
-        const observed = tryReadEngineOwnedFields(statePath, currentStory);
-        const route = restoreEscalated(
-          state, currentStory, expectedState.escalated, expectedState, observed?.escalated,
-        );
-        // 两个 helper 都从同一原始 state 检测，story 整项被删时能分别留下两条所有权证据；
-        // 最终以 route.state 为底，再覆盖 validated 的期望值合并成一次原子写。
-        const validation = restoreValidated(
-          state, currentStory, expectedState.validated, expectedState, observed?.validated,
-        );
-        if (!route.tamper && !validation.tamper) return { storyMissing };
-        if (route.tamper) {
-          routeTampers.push({ ...route.tamper, side });
-          console.warn(
-            `⚠️  ${side} 修改了引擎独占的 ${currentStory}.escalated ` +
-            `(${route.tamper.expected} → ${route.tamper.received})，已恢复`,
+        const storyMissing = !!currentStory && !state[currentStory];
+        let restored = state;
+        let changed = false;
+        for (const storyId of ownershipStoryIds) {
+          const expected = expectedState[storyId] ?? INITIAL_STORY_STATE;
+          const observed = tryReadEngineOwnedFields(statePath, storyId);
+          const route = restoreEscalated(
+            restored, storyId, expected.escalated, expected, observed?.escalated,
           );
-        }
-        if (validation.tamper) {
-          validationTampers.push({ ...validation.tamper, side });
-          console.warn(
-            `⚠️  ${side} 修改了引擎独占的 ${currentStory}.validated ` +
-            `(${validation.tamper.expected} → ${validation.tamper.received})，已恢复`,
+          restored = route.state;
+          const validation = restoreValidated(
+            restored, storyId, expected.validated, expected, observed?.validated,
           );
+          restored = validation.state;
+          if (route.tamper) {
+            changed = true;
+            routeTampers.push({ storyId, ...route.tamper, side });
+            console.warn(
+              `⚠️  ${side} 修改了引擎独占的 ${storyId}.escalated ` +
+              `(${route.tamper.expected} → ${route.tamper.received})，已恢复`,
+            );
+          }
+          if (validation.tamper) {
+            changed = true;
+            validationTampers.push({ storyId, ...validation.tamper, side });
+            console.warn(
+              `⚠️  ${side} 修改了引擎独占的 ${storyId}.validated ` +
+              `(${validation.tamper.expected} → ${validation.tamper.received})，已恢复`,
+            );
+          }
         }
-        const restored = route.state[currentStory]
-          ? { ...route.state, [currentStory]: { ...route.state[currentStory], validated: expectedState.validated } }
-          : validation.state;
-        writeFileAtomicSync(statePath, JSON.stringify(restored, null, 2));
+        if (changed) writeFileAtomicSync(statePath, JSON.stringify(restored, null, 2));
         return { storyMissing };
       };
       const hasDedicatedEscalation = Boolean(cfg.escalationModel || preflight.config?.escalation);
@@ -374,7 +393,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           model: builderChoice.model,
         });
         builderOutcome = outcomeOf(dev);
-        restoreEngineOwnership('builder', currentStoryState);
+        restoreEngineOwnership('builder', beforeState);
         if (builderOutcome !== 'completed') {
           builderRollback = rollbackIfUnvalidatedPass('builder', dev);
           // evidence=引擎机械事实：agentBlocked 不能硬编码 false——agent 可能同轮已置 blocked:true
@@ -497,7 +516,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         validatorOutcome = 'skipped';
       } else if (!agentBlocked) {
         console.log(`🧠 validator 实际模型: ${validatorModel ?? 'runner 默认'} [${validatorChoice.source}]`);
-        const validatorStateBefore = currentStory ? tryReadState(statePath)?.[currentStory] : undefined;
+        const validatorStateBefore = tryReadState(statePath);
+        const currentValidatorStateBefore = currentStory ? validatorStateBefore?.[currentStory] : undefined;
         const val = await runAgent({
           kind: runKind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
           model: validatorModel,
@@ -507,17 +527,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (validatorOutcome !== 'completed') {
           // validator 异常结局：本轮 builder 置的 true 未经复核 → 回写待复核
           validatorRollback = rollbackIfUnvalidatedPass('validator', val);
-        } else if (currentStory && validatorStateBefore && !validatorOwnership.storyMissing) {
+        } else if (currentStory && currentValidatorStateBefore && !validatorOwnership.storyMissing) {
           let stateAfter = tryReadState(statePath);
           const validatorStateAfter = stateAfter?.[currentStory];
           const rejected = !!validatorStateAfter
             && !validatorStateAfter.passes
-            && validatorStateAfter.retryCount > validatorStateBefore.retryCount;
+            && validatorStateAfter.retryCount > currentValidatorStateBefore.retryCount;
           if (rejected) validatorEscalationTriggered = triggerEscalation('validator');
           // passes 是 builder 候选声明；只有 validator 启动前已经为 true、正常结束后
           // 仍为 true 且未 blocked，engine 才签发最终凭证。validator 自行伪造
           // validated 会在上方 restoreEngineOwnership 先被恢复。
-          if (stateAfter && validatorStateBefore.passes && !validatorStateBefore.blocked
+          if (stateAfter && currentValidatorStateBefore.passes && !currentValidatorStateBefore.blocked
               && validatorStateAfter?.passes && !validatorStateAfter.blocked) {
             // triggerEscalation 可能已原子写过 state，签发前重读，避免用旧快照覆盖升级状态。
             stateAfter = tryReadState(statePath);
