@@ -143,17 +143,18 @@ describe('renderReportHtml', () => {
     expect(html).toContain('docs/prds/x.md');
   });
 
-  it('notes 行分类高亮：仲裁标签行/门禁失败行/BLOCKED 行', () => {
+  it('notes 行分类高亮：仲裁/门禁/Validator 失败/BLOCKED', () => {
     const s = data().stories[0];
     const html = renderReportHtml(data({
       stories: [{
         ...s, passes: false,
-        notes: '[需求冲突] 与文档矛盾\n[门禁失败 - 第1次] 2026-07-08 12:00\n[BLOCKED: 已达到最大重试次数，跳过此 story]\n普通行',
+        notes: '[需求冲突] 与文档矛盾\n[门禁失败 - 第1次] 2026-07-08 12:00\n[验证失败 - 第2次] 2026-07-08 12:10\n[BLOCKED: 已达到最大重试次数，跳过此 story]\n普通行',
       }],
     }));
     expect(html).toContain('class="note-line arbitration"');
     expect(html).toContain('class="note-line gate-fail"');
     expect(html).toContain('class="note-line blocked-line"');
+    expect(html).toContain('[验证失败 - 第2次]');
   });
 
   it('notes 注入不执行：<script> 必须被转义', () => {
@@ -408,6 +409,44 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('AC 2 未通过');
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
     expect(html).not.toContain('<img src=x onerror=alert(1)>');
+  });
+
+  it('结构化 claim 与协议错误分源展示并转义 agent 文本', () => {
+    const hash = `sha256:${'a'.repeat(64)}`;
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'validation-claim', source: 'validator', at: '2026-07-22T06:00:00.000Z',
+        iteration: 2, requestId: 'request-2', storyId: 'US-001',
+        acceptanceHash: hash, gitHead: null, verdict: 'failed',
+        checks: [{ acIndex: 1, passed: false, evidence: '收到 200 <script>alert(1)</script>' }],
+        summary: 'AC 1 未通过',
+      },
+      {
+        type: 'iteration', source: 'engine', at: '2026-07-22T06:00:01.000Z',
+        iteration: 2, storyId: 'US-001', builderRan: true, builderModel: null,
+        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+        validationProtocol: 'invalid',
+        validationTarget: {
+          requestId: 'request-2', storyId: 'US-001', acceptanceHash: hash, gitHead: null,
+        },
+        validationProtocolError: { code: 'state-mutated', diagnostic: 'Validator 修改 state.json' },
+        validatorStateMutation: true,
+        validationRollback: true,
+      },
+    ])));
+
+    expect(html).toContain('Validator 结构化声明');
+    expect(html).toContain('source=validator');
+    expect(html).toContain('不是安全签名或 CI 证明');
+    expect(html).toContain('❌ AC 1');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('结构化验收协议无效');
+    expect(html).toContain('Git unavailable');
+    expect(html).toContain('结构化验收协议错误');
+    expect(html).toContain('state-mutated: Validator 修改 state.json');
+    expect(html).toContain('Validator 改写 <code>state.json</code>');
+    expect(html).toContain('拒绝该轮 claim');
   });
 
   it('passes=true 但无引擎验收凭证时不显示全绿', () => {

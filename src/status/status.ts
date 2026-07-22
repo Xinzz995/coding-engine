@@ -7,7 +7,10 @@ import {
 } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
-import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
+import {
+  readEvidence, type EvidenceRecord, type ValidationTargetEvidence,
+  type LoopValidationProtocolErrorCode,
+} from '../engine/evidence.js';
 import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
 
 export interface RecentModelRoute {
@@ -21,6 +24,14 @@ export interface StoryRecentActual {
   validator?: RecentModelRoute;
 }
 
+export interface StoryRecentValidation {
+  protocol: 'passed' | 'failed' | 'invalid';
+  iteration: number;
+  target?: ValidationTargetEvidence;
+  error?: { code: LoopValidationProtocolErrorCode; diagnostic: string };
+  stateMutation: boolean;
+}
+
 export type StatusReport =
   | { status: 'missing'; workspace: string }
   | { status: 'unparsable'; workspace: string }
@@ -32,6 +43,7 @@ export type StatusReport =
       latestProgress: string | null;
       modelRouting: ModelRoutingReadResult;
       recentActual: Record<string, StoryRecentActual>;
+      recentValidation: Record<string, StoryRecentValidation>;
       evidenceSkippedLines: number;
       evidenceUnavailable: boolean;
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
@@ -70,6 +82,21 @@ function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentAc
   return recent;
 }
 
+function recentValidationOf(records: EvidenceRecord[]): Record<string, StoryRecentValidation> {
+  const recent: Record<string, StoryRecentValidation> = {};
+  for (const record of records) {
+    if (record.type !== 'iteration' || record.storyId === null || !record.validationProtocol) continue;
+    recent[record.storyId] = {
+      protocol: record.validationProtocol,
+      iteration: record.iteration,
+      ...(record.validationTarget ? { target: record.validationTarget } : {}),
+      ...(record.validationProtocolError ? { error: record.validationProtocolError } : {}),
+      stateMutation: record.validatorStateMutation === true,
+    };
+  }
+  return recent;
+}
+
 /** 只读收集 workspace 执行状态；state.json 缺失兼容 legacy，存在但损坏则 fail-closed。 */
 export function collectStatus(workspace: string): StatusReport {
   const prdPath = join(workspace, 'prd.json');
@@ -94,6 +121,7 @@ export function collectStatus(workspace: string): StatusReport {
     latestProgress: latestProgressTitle(readProgress(join(workspace, 'progress.md'))),
     modelRouting: readModelRouting(prd),
     recentActual: recentActualOf(evidence.records),
+    recentValidation: recentValidationOf(evidence.records),
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
     stateCorrupted,
@@ -149,8 +177,8 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     const retry = s.retryCount > 0 ? `（已重试 ${s.retryCount} 次）` : '';
     const difficulty = s.difficulty ? ` [${s.difficulty}]` : '';
     const escalated = s.escalated ? ' ⬆️ 已升级' : '';
-    const validation = !s.blocked && s.passes && !s.validated ? ' ⏳ 待引擎验收' : '';
-    lines.push(`  ${markOf(s)} ${s.id} ${s.title}${difficulty}${escalated}${validation}${retry}`);
+    const pendingValidationLabel = !s.blocked && s.passes && !s.validated ? ' ⏳ 待引擎验收' : '';
+    lines.push(`  ${markOf(s)} ${s.id} ${s.title}${difficulty}${escalated}${pendingValidationLabel}${retry}`);
     if (s.difficultyReason) lines.push(`      · 难度依据：${s.difficultyReason}`);
     const actual = report.recentActual[s.id];
     if (actual?.builder || actual?.validator) {
@@ -158,6 +186,20 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
         ? `${side.model ?? '默认'} [${side.source ?? '来源未知'}]@第${side.iteration}轮`
         : '无';
       lines.push(`      · 最近实际：builder=${route(actual.builder)} · validator=${route(actual.validator)}`);
+    }
+    const recentValidation = report.recentValidation[s.id];
+    if (recentValidation) {
+      const target = recentValidation.target
+        ? ` · AC=${recentValidation.target.acceptanceHash.slice(0, 15)}… · Git=${recentValidation.target.gitHead?.slice(0, 12) ?? 'unavailable'}`
+        : '';
+      if (recentValidation.protocol === 'invalid') {
+        const reason = recentValidation.error
+          ? `${recentValidation.error.code}：${recentValidation.error.diagnostic}`
+          : '原因未记录';
+        lines.push(`      ⚠️ 最近验收协议：invalid@第${recentValidation.iteration}轮（${reason}）${target}`);
+      } else {
+        lines.push(`      · 最近验收协议：${recentValidation.protocol}@第${recentValidation.iteration}轮${target}`);
+      }
     }
     for (const raw of s.notes.split('\n')) {
       const note = raw.trim();
@@ -217,6 +259,7 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
     })),
     modelRouting: report.modelRouting,
     recentActual: report.recentActual,
+    recentValidation: report.recentValidation,
     evidence: {
       skippedLines: report.evidenceSkippedLines,
       unavailable: report.evidenceUnavailable,

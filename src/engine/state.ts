@@ -216,7 +216,7 @@ export function restoreValidated(
   };
 }
 
-/** validator 正常完成且候选结果仍通过时，由引擎签发验收凭证。 */
+/** 结构化 Validator passed claim 通过目标/协议/state 检查且候选仍通过时，由引擎签发。 */
 export function issueValidationReceipt(
   state: RunState,
   storyId: string,

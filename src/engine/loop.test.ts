@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { runLoop, renderInstruction } from './loop.js';
+import { runLoop as runProductionLoop, renderInstruction, type LoopConfig } from './loop.js';
 import { readEvidence } from './evidence.js';
 import { readLockInfo, LOCK_FILE } from './lock.js';
 import * as dashboard from '../dashboard/server.js';
@@ -57,6 +57,14 @@ const catalogWith = (...ids: string[]) => async () => ({
 const read = (f: string) =>
   readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
 
+// 历史 fixture 让 fake Validator 直接改 state；保留这些状态机回归时必须显式
+// opt-in，生产 runLoop 默认始终走结构化 validation protocol。新协议集成测试直接
+// 调 runProductionLoop，防止 test-only 兼容路径遮住假绿。
+const runLoop = (cfg: LoopConfig): Promise<number> => runProductionLoop({
+  ...cfg,
+  legacyValidatorProtocolForTests: true,
+});
+
 // builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
 function fakeCounting(workspace: string): { fake: string; calls: string } {
   const fake = join(workspace, 'fake.mjs');
@@ -71,6 +79,198 @@ function fakeCounting(workspace: string): { fake: string; calls: string } {
   `);
   return { fake, calls };
 }
+
+type BoundValidatorMode =
+  | 'passed'
+  | 'failed'
+  | 'missing'
+  | 'wrong-story'
+  | 'state-mutation'
+  | 'aborted-after-result';
+
+function fakeBoundValidator(workspace: string, mode: BoundValidatorMode): string {
+  const fake = join(workspace, `fake-bound-${mode}.mjs`);
+  const calls = join(workspace, 'bound-calls.txt');
+  const statePath = join(workspace, 'state.json');
+  const progressPath = join(workspace, 'progress.md');
+  writeFileSync(fake, String.raw`
+    import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+    const statePath = ${JSON.stringify(statePath)};
+    let call = 1;
+    try { call = Number(readFileSync(${JSON.stringify(calls)}, 'utf8')) + 1; } catch {}
+    writeFileSync(${JSON.stringify(calls)}, String(call));
+    if (call === 1) {
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      state['US-001'].validated = false;
+      writeFileSync(statePath, JSON.stringify(state, null, 2));
+      appendFileSync(${JSON.stringify(progressPath)}, '## builder completed US-001\n');
+      process.exit(0);
+    }
+    const prompt = process.argv.at(-1) ?? '';
+    const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+    const jsonAt = prompt.indexOf('{', markerAt);
+    const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);
+    if (markerAt < 0 || jsonAt < 0 || fenceAt < 0) process.exit(9);
+    const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+    const mode = ${JSON.stringify(mode)};
+    if (mode === 'missing') process.exit(0);
+    const checks = request.acceptanceCriteria.map((_, index) => ({
+      acIndex: index + 1,
+      passed: mode !== 'failed' || index !== 0,
+      evidence: mode === 'failed' && index === 0 ? 'expected 401, received 200' : 'fixture verified AC',
+    }));
+    const result = {
+      version: 1,
+      requestId: request.requestId,
+      storyId: mode === 'wrong-story' ? 'US-999' : request.storyId,
+      acceptanceHash: request.acceptanceHash,
+      gitHead: request.gitHead,
+      verdict: mode === 'failed' ? 'failed' : 'passed',
+      checks,
+      summary: mode === 'failed' ? 'AC 1 未通过' : '全部 AC 通过',
+    };
+    if (mode === 'state-mutation') {
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].notes = 'Validator 越权改写';
+      writeFileSync(statePath, JSON.stringify(state));
+    }
+    writeFileSync(request.resultPath, JSON.stringify(result));
+    process.exit(mode === 'aborted-after-result' ? 1 : 0);
+  `);
+  return fake;
+}
+
+function strictConfig(workspace: string, instructionsDir: string): LoopConfig {
+  return {
+    kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+    workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 3,
+  };
+}
+
+describe('runLoop structured validation protocol', () => {
+  it('issues a receipt only for a fresh, fully bound passed claim', async () => {
+    const { workspace, instructionsDir } = setup([story({
+      acceptanceCriteria: ['返回 401', '记录 request id'],
+    })]);
+    const fake = fakeBoundValidator(workspace, 'passed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(0);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({ passes: true, validated: true, retryCount: 0 });
+      const records = readEvidence(workspace).records;
+      expect(records.find((r) => r.type === 'iteration')).toMatchObject({
+        validationProtocol: 'passed', validationReceipt: true,
+        validationTarget: { storyId: 'US-001', acceptanceHash: expect.stringMatching(/^sha256:/) },
+      });
+      expect(records.find((r) => r.type === 'validation-claim')).toMatchObject({
+        source: 'validator', storyId: 'US-001', verdict: 'passed',
+        checks: [{ acIndex: 1, passed: true }, { acIndex: 2, passed: true }],
+      });
+      expect(existsSync(join(workspace, 'validation-result.json'))).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('lets the engine apply a valid failed claim without Validator editing state', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    const fake = fakeBoundValidator(workspace, 'failed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(1);
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
+      expect(state).toMatchObject({ passes: false, validated: false, retryCount: 1, blocked: false });
+      expect(state.notes).toContain('[验证失败 - 第1次]');
+      expect(state.notes).toContain('expected 401, received 200');
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({ validationProtocol: 'failed', validatorOutcome: 'completed' });
+      expect(iteration).not.toHaveProperty('validationReceipt');
+      expect(iteration).not.toHaveProperty('validationRollback');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('clears a stale result and fails closed when this Validator writes no result', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    writeFileSync(join(workspace, 'validation-result.json'), JSON.stringify({ stale: true }));
+    const fake = fakeBoundValidator(workspace, 'missing');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false });
+      expect(readEvidence(workspace).records.find((r) => r.type === 'iteration')).toMatchObject({
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'missing-result' },
+        validationRollback: true,
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rejects a result bound to another story', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    const fake = fakeBoundValidator(workspace, 'wrong-story');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(1);
+      expect(readEvidence(workspace).records.find((r) => r.type === 'iteration')).toMatchObject({
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'binding-mismatch' },
+        validationRollback: true,
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rejects a valid claim when Validator also mutates state.json', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    const fake = fakeBoundValidator(workspace, 'state-mutation');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(1);
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
+      expect(state).toMatchObject({ passes: false, validated: false });
+      expect(state.notes).not.toContain('Validator 越权改写');
+      expect(readEvidence(workspace).records.find((r) => r.type === 'iteration')).toMatchObject({
+        validationProtocol: 'invalid', validatorStateMutation: true,
+        validationProtocolError: { code: 'state-mutated' },
+        validationRollback: true,
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rejects a well-shaped result when the Validator process exits abnormally', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    const fake = fakeBoundValidator(workspace, 'aborted-after-result');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(1);
+      const records = readEvidence(workspace).records;
+      expect(records.find((r) => r.type === 'iteration')).toMatchObject({
+        validatorOutcome: 'error', validationProtocol: 'invalid',
+        validationProtocolError: { code: 'agent-aborted' },
+        abortRollback: { storyId: 'US-001' },
+      });
+      expect(records.some((r) => r.type === 'validation-claim')).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+});
 
 describe('runLoop', () => {
   it('returns 0 when all stories are already resolved after one pass', async () => {
@@ -1256,7 +1456,7 @@ describe('模型升级触发与状态所有权', () => {
     }
   });
 
-  it('validator 正常打回后，下轮 builder 改走 escalation', async () => {
+  it('引擎接受 Validator failed claim 后，下轮 builder 改走 escalation', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     const fake = join(workspace, 'fake-validator-route.mjs');
     const calls = join(workspace, 'calls.txt');
@@ -1484,16 +1684,17 @@ describe('renderInstruction arbitration placeholder', () => {
 });
 
 describe('instruction assets arbitration contract', () => {
-  it('builder.md and validator.md reference the arbitration placeholder, not hardcoded label lists', () => {
+  it('builder.md references the arbitration placeholder; Validator verdict state is engine-owned', () => {
     expect(read('builder.md')).toContain('{{ARBITRATION_PREFIXES}}');
-    expect(read('validator.md')).toContain('{{ARBITRATION_PREFIXES}}');
+    expect(read('validator.md')).not.toContain('{{ARBITRATION_PREFIXES}}');
+    expect(read('validator.md')).toContain('最终状态由引擎裁决和写入');
   });
 
-  it('both instructions carry the prd.json authority statement', () => {
-    for (const f of ['builder.md', 'validator.md']) {
-      expect(read(f)).toContain('prd.tampered-');
-      expect(read(f)).toContain('快照保护');
-    }
+  it('builder uses guarded prd while Validator uses the engine-bound AC snapshot', () => {
+    expect(read('builder.md')).toContain('prd.tampered-');
+    expect(read('builder.md')).toContain('快照保护');
+    expect(read('validator.md')).toContain('request.acceptanceCriteria');
+    expect(read('validator.md')).toContain('唯一验收标准');
   });
 });
 
@@ -1512,16 +1713,31 @@ describe('instruction assets evidence contract', () => {
 });
 
 describe('instruction assets engine-owned state contract', () => {
-  it('builder.md and validator.md reserve validated and escalated for the engine', () => {
-    for (const f of ['builder.md', 'validator.md']) {
-      const content = read(f);
-      expect(content).toContain('`validated`');
-      expect(content).toContain('`escalated`');
-      expect(content).toContain('引擎独占字段');
-      expect(content).toContain('原样保留');
-    }
+  it('builder preserves engine fields and Validator must not write any verdict state', () => {
+    const builder = read('builder.md');
+    expect(builder).toContain('`validated`');
+    expect(builder).toContain('`escalated`');
+    expect(builder).toContain('引擎独占字段');
+    expect(builder).toContain('原样保留');
     expect(read('builder.md')).toContain('待 Validator 复核的候选结果');
-    expect(read('validator.md')).toContain('引擎在观察到本次验证正常完成后签发');
+    const validator = read('validator.md');
+    expect(validator).toContain('不得修改 `{{WORKSPACE}}/state.json`');
+    expect(validator).toContain('`validated`');
+    expect(validator).toContain('`escalated`');
+    expect(validator).toContain('全部由引擎根据 result 写入');
+  });
+});
+
+describe('instruction assets structured validation contract', () => {
+  it('binds Validator to the injected request and exact v1 result schema', () => {
+    const content = read('validator.md');
+    expect(content).toContain('ENGINE-BOUND VALIDATION REQUEST');
+    expect(content).toContain('不得从 `{{WORKSPACE}}/progress.md`');
+    expect(content).toContain('"acceptanceHash"');
+    expect(content).toContain('"gitHead"');
+    expect(content).toContain('"checks"');
+    expect(content).toContain('字段必须恰好匹配');
+    expect(content).toContain('source=validator');
   });
 });
 

@@ -19,11 +19,11 @@ prd.json 中的最小交付单元（`US-NNN`），带 acceptanceCriteria，引�
 禁用：任务、需求项、工单（统一用「story」）
 
 **acceptanceCriteria（验收标准）**
-story 的唯一验收依据；validator 逐条核对，源 PRD 与项目文档都不构成验收依据。
+story 的唯一验收依据；引擎把本轮有序快照放进 validation request，validator 必须逐条核对，源 PRD 与项目文档都不构成验收依据。
 禁用：验收条件、完成标准
 
 **打回**
-机械门禁或 validator 判定 story 未通过：passes/validated 设回 false、notes 写失败详情、retryCount +1，builder 下轮重试。
+机械门禁失败，或引擎接受 Validator 的结构化 failed claim 后执行的状态转移：passes/validated 设回 false、notes 写失败详情、retryCount +1，builder 下轮重试。
 禁用：驳回、退回
 
 **blocked**
@@ -31,11 +31,23 @@ story 被跳过并等待人工处理的状态；可由重试达到上限触发�
 禁用：卡死、挂起
 
 **验收凭证（validated）**
-引擎观察到 validator 正常完成且 `passes` 仍为 true 后签发的 story 通过凭证；由引擎独占，agent 不得改写。story 只有 `blocked=false` 且 `passes && validated` 才是有效通过。
+Validator 正常完成、结构化 result 与本轮 story/AC hash/Git HEAD/request ID 全部匹配、逐 AC 结论通过且未改写 state 后，由引擎签发的 story 通过凭证。由引擎独占，agent 不得改写；story 只有 `blocked=false` 且 `passes && validated` 才是有效通过。
 禁用：验证标记、通过凭证（统一用「验收凭证」；字段名用 `validated`）
 
+**validation request（验收请求）**
+引擎为一次 Validator 调用生成的唯一目标合同：含一次性 request ID、story ID、有序验收标准快照/hash、调用前 Git HEAD 和 resultPath。它绑定“本轮要验什么”，不是密码学挑战。
+禁用：Validator prompt、验收任务（统一用「validation request」或「验收请求」）
+
+**Validator claim（Validator 声明）**
+Validator 按 v1 schema 提交的逐 AC 结构化结论（passed/failed、evidence、summary）。引擎会校验新鲜度、目标和自洽性后决定状态；claim 是 `source=validator` 的 agent 声明，不是引擎/CI 证明或安全签名。
+禁用：验收证明、Validator 凭证、验证证书
+
+**结构化验收协议**
+validation request → Validator claim → engine protocol verdict/receipt 的 runner-neutral 控制面合同。缺结果、错绑定、畸形 schema、产物变化或 Validator 改写 state 一律 invalid 并 fail closed。
+禁用：Validator IPC、结果文件协议（只描述媒介，掩盖目标绑定与状态机）
+
 **假绿**
-validator 报告通过但实际未满足验收标准（共谋、敷衍验证或同义反复测试所致）——review-loop 独立复核存在的理由。
+系统显示 story 通过，但实际上未完成指定 AC 或没有验证指定产物。正常控制流中的无结果、错目标、旧结果由结构化验收协议关闭；同权限 agent 伪造观察、共谋或敷衍验证仍需机械门禁与 review-loop 独立复核。
 禁用：误报通过、虚假通过
 
 **人审包**
@@ -115,7 +127,7 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 禁用：完成出口、全绿出口
 
 **证据索引**
-一次运行的结构化证据记录文件（`<workspace>/evidence.jsonl`，append-only 每行一条）：引擎写机械记录（门禁执行含通过轮、轮次事件、篡改事件，以及失败门禁输出尾部与 Validator 正常打回详情的有界快照），builder/validator 按指令登记截图元数据（story/验收标准关联）。记录的 `source` 字段是信任级别标记——engine=机械事实、builder/validator=agent 声明；整个文件都在 agent 可写区，消费端按来源诚实标注、不假装防伪。
+一次运行的结构化证据记录文件（`<workspace>/evidence.jsonl`，append-only 每行一条）：引擎写门禁、轮次、篡改、目标绑定与协议裁决，Validator result 另以 `validation-claim` 保存逐 AC 声明，builder/validator 也可登记截图元数据。`source` 是信任级别标记——engine=机械观察/状态机事实，builder/validator=agent 声明；整个文件仍在 agent 可写区，消费端按来源诚实标注、不假装防伪。
 禁用：evidence 结构化索引、结构化证据索引（统一用「证据索引」；指文件本身时用 `evidence.jsonl`）
 
 **难度档位（difficulty）**
@@ -135,7 +147,7 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 禁用：默认路由（runner default 只是其中一种回落）
 
 **有效失败**
-可归因于当前实现/推理结果的首次机械事件：门禁打回、validator 正常打回或 builder completed no-op。超时、非零退出、认证、网络和环境故障不是有效失败。
+可归因于当前实现/推理结果的首次机械事件：门禁打回、引擎接受 Validator 的 failed claim 或 builder completed no-op。超时、非零退出、认证、网络和环境故障不是有效失败。
 禁用：失败轮（会与异常轮混淆）
 
 **升级状态（escalated）**
@@ -145,14 +157,14 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 ## 关系
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
-- builder 把 `passes=true` 作为候选结果，validator 正常完成且仍通过后由引擎签发验收凭证；两者同时为 true 才是有效通过
+- builder 把 `passes=true` 作为候选结果；引擎生成 validation request，Validator 提交逐 AC claim，引擎确认目标绑定/协议/state 不变式后才写 verdict 或签发验收凭证；passes 与 validated 同时为 true 才是有效通过
 - 打回递增 retryCount，达到上限转 blocked；全部 story 有效通过或 blocked 即走收敛出口结束循环
 - 异常轮触发回写待复核并计入 stall 熔断；空转轮跳过门禁与 validator、同样计入熔断
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含人审（/review-loop 产出人审包）与 /compound-docs（沉淀、熵 GC、状态收尾及显式授权后的物理归档）
 - 物理归档把完成态阶段文档从 active 区移入历史冷档案；状态收尾只改 status，不自动构成移动授权
 - 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
-- 验证报告消费证据索引（门禁执行历史、轮次时间线、验收标准↔截图对账均由它派生）；证据索引缺失时报告退回文件名猜测归属
+- 验证报告消费证据索引（门禁历史、Validator claim、协议裁决、轮次时间线、验收标准↔截图对账均由它派生）；证据索引缺失时报告退回文件名猜测截图归属
 - 难度档位决定初始路由；首次有效失败置升级状态，后续 builder 走 escalation，与 retryCount 独立
 - 全局模型目录限定显式模型策略可引用的 ID；项目 PRD 保存五项具体映射；某轮实际传给 runner 的模型只记录进证据索引
 - runner-default 不构成显式模型策略，因此无需全局模型目录；目录声明与 provider 是否接受模型是两个独立事实

@@ -2,7 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES, applyAbortRollback, ABORT_LINE_PREFIX } from './gate.js';
+import {
+  readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES,
+  applyAbortRollback, ABORT_LINE_PREFIX, applyValidatorFailure,
+  applyValidatorSuccess,
+} from './gate.js';
 import type { GateFailure } from './gate.js';
 import type { RunState } from './state.js';
 import type { Prd } from './prd.js';
@@ -147,6 +151,69 @@ describe('applyGateFailure', () => {
     expect(next['US-001'].blocked).toBe(true);
     expect(next['US-001'].retryCount).toBe(1);
     expect(next['US-001'].notes).not.toContain('[BLOCKED: 已达到最大重试次数');
+  });
+});
+
+describe('engine-owned Validator verdict state', () => {
+  const now = new Date(2026, 6, 22, 18, 30);
+  const base: RunState = {
+    'US-001': {
+      passes: true,
+      validated: false,
+      notes: '[需求冲突] 保留这条仲裁\n旧失败详情',
+      retryCount: 2,
+      blocked: false,
+      escalated: true,
+    },
+  };
+
+  it('applies a passed claim without letting Validator self-sign the receipt', () => {
+    const next = applyValidatorSuccess(base, 'US-001');
+
+    expect(next['US-001']).toEqual({
+      passes: true,
+      validated: false,
+      notes: '[需求冲突] 保留这条仲裁',
+      retryCount: 0,
+      blocked: false,
+      escalated: true,
+    });
+    expect(base['US-001'].retryCount).toBe(2);
+  });
+
+  it('applies failed AC claims, increments retry and preserves arbitration', () => {
+    const next = applyValidatorFailure(base, 'US-001', {
+      checks: [
+        { acIndex: 1, passed: false, evidence: 'expected 401, received 200' },
+        { acIndex: 2, passed: true, evidence: 'audit assertion passed' },
+        { acIndex: 3, passed: false, evidence: 'missing request id' },
+      ],
+      summary: '鉴权和审计字段未达标',
+    }, now);
+
+    expect(next['US-001'].passes).toBe(false);
+    expect(next['US-001'].validated).toBe(false);
+    expect(next['US-001'].retryCount).toBe(3);
+    expect(next['US-001'].blocked).toBe(false);
+    expect(next['US-001'].notes).toContain('[需求冲突] 保留这条仲裁\n[验证失败 - 第3次] 2026-07-22 18:30');
+    expect(next['US-001'].notes).toContain('- AC 1：expected 401, received 200');
+    expect(next['US-001'].notes).toContain('- AC 3：missing request id');
+    expect(next['US-001'].notes).not.toContain('audit assertion passed');
+    expect(next['US-001'].notes).toContain('- Validator 总结：鉴权和审计字段未达标');
+  });
+
+  it('blocks exactly at MAX_RETRIES and keeps the standard banner', () => {
+    const state: RunState = {
+      'US-001': { ...base['US-001'], retryCount: MAX_RETRIES - 1 },
+    };
+    const next = applyValidatorFailure(state, 'US-001', {
+      checks: [{ acIndex: 1, passed: false, evidence: 'still failing' }],
+      summary: '未通过',
+    }, now);
+
+    expect(next['US-001'].retryCount).toBe(MAX_RETRIES);
+    expect(next['US-001'].blocked).toBe(true);
+    expect(next['US-001'].notes).toContain('[BLOCKED: 已达到最大重试次数，跳过此 story]');
   });
 });
 

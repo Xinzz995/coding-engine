@@ -17,11 +17,11 @@
 5. 实现该单个 user story,只实现这一个user story的内容
 6. 运行质量检查（例如，typecheck、lint、test - 使用项目所需的任何工具）
 7. 如果检查通过，先只 stage/commit 本 story 的实现、测试与必要文档：
-   - 禁止 stage 或 commit `{{WORKSPACE}}` 下的任何运行时文件（包括 prd.json、state.json、progress.md、evidence、截图与报告）
+   - 禁止 stage 或 commit `{{WORKSPACE}}` 下的任何运行时文件（包括 prd.json、state.json、progress.md、evidence、validation-result、截图与报告）
    - 用明确的文件路径执行 `git add <path...>`，不要使用 `git add .` 或 `git add -A`
    - commit 前执行 `git diff --cached --name-only`，确认暂存区只含本 story 文件；若发现 workspace 或无关文件，不得把它们带入提交，也不要擅自重置用户已有暂存内容
    - 提交消息为：`feat: [Story ID] - [Story Title]`
-8. 提交成功后再更新 `state.json`，将已完成 story 对应 id 的 `passes` 设为 `true`（**不要修改 prd.json**——它是只读的需求文件）；`validated` 与 `escalated` 是引擎独占字段，必须原样保留——`passes=true` 只是待 Validator 复核的候选结果，引擎会在 Validator 正常完成后签发 `validated=true`
+8. 提交成功后再更新 `state.json`，将已完成 story 对应 id 的 `passes` 设为 `true`（**不要修改 prd.json**——它是只读的需求文件）；`validated` 与 `escalated` 是引擎独占字段，必须原样保留——`passes=true` 只是待 Validator 复核的候选结果，引擎只会在 Validator 的结构化 passed claim 通过目标绑定与协议检查后签发 `validated=true`
 9. 每次完成运行后, 将你的进度追加到 `progress.md`
 
 ## 进度报告格式

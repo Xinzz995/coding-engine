@@ -276,3 +276,73 @@ describe('iteration 新可选字段（异常轮语义）', () => {
     expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 5 });
   });
 });
+
+describe('结构化 Validator claim 与协议判定证据', () => {
+  const hash = `sha256:${'a'.repeat(64)}`;
+  const head = 'b'.repeat(40);
+
+  it('区分 validator claim 与 engine protocol/receipt 事实', () => {
+    const dir = ws();
+    const validationClaim: EvidenceRecord = {
+      type: 'validation-claim', source: 'validator', at: '2026-07-22T11:00:00.000Z',
+      iteration: 3, requestId: 'request-3', storyId: 'US-003',
+      acceptanceHash: hash, gitHead: head, verdict: 'passed',
+      checks: [{ acIndex: 1, passed: true, evidence: 'npm test exit 0' }],
+      summary: 'AC 1 通过',
+    };
+    const iteration: EvidenceRecord = {
+      type: 'iteration', source: 'engine', at: '2026-07-22T11:00:01.000Z', iteration: 3,
+      storyId: 'US-003', builderRan: true, builderModel: null,
+      validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      validationProtocol: 'passed',
+      validationTarget: {
+        requestId: 'request-3', storyId: 'US-003', acceptanceHash: hash, gitHead: head,
+      },
+      validationReceipt: true,
+    };
+    appendEvidence(dir, validationClaim);
+    appendEvidence(dir, iteration);
+
+    expect(readEvidence(dir)).toEqual({ records: [validationClaim, iteration], skippedLines: 0 });
+  });
+
+  it('保留 invalid 原因和显式 unavailable Git identity', () => {
+    const dir = ws();
+    const iteration: EvidenceRecord = {
+      type: 'iteration', source: 'engine', at: '2026-07-22T11:01:00.000Z', iteration: 4,
+      storyId: 'US-004', builderRan: true, builderModel: null,
+      validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      validationProtocol: 'invalid',
+      validationTarget: {
+        requestId: 'request-4', storyId: 'US-004', acceptanceHash: hash, gitHead: null,
+      },
+      validationProtocolError: { code: 'state-mutated', diagnostic: 'Validator 修改了 state.json' },
+      validatorStateMutation: true,
+      validationRollback: true,
+    };
+    appendEvidence(dir, iteration);
+    expect(readEvidence(dir).records).toEqual([iteration]);
+  });
+
+  it('拒绝 claim 结论矛盾、空证据及错误的 protocol error 组合', () => {
+    const dir = ws();
+    const baseClaim = {
+      type: 'validation-claim', source: 'validator', at: 'x', iteration: 1,
+      requestId: 'r', storyId: 'US-001', acceptanceHash: hash, gitHead: head,
+      verdict: 'passed', checks: [{ acIndex: 1, passed: true, evidence: 'ok' }], summary: 'ok',
+    };
+    const baseIteration = {
+      type: 'iteration', source: 'engine', at: 'x', iteration: 1, storyId: 'US-001',
+      builderRan: true, builderModel: null, validatorRan: true, validatorModel: null,
+      skippedValidator: false, agentBlocked: false,
+    };
+    writeFileSync(join(dir, EVIDENCE_FILE), [
+      { ...baseClaim, checks: [{ acIndex: 1, passed: false, evidence: 'failed' }] },
+      { ...baseClaim, checks: [{ acIndex: 1, passed: true, evidence: '' }] },
+      { ...baseIteration, validationProtocol: 'passed', validationProtocolError: { code: 'invalid-json', diagnostic: 'bad' } },
+      { ...baseIteration, validationProtocol: 'invalid', validationProtocolError: { code: 'unknown', diagnostic: 'bad' } },
+    ].map((value) => JSON.stringify(value)).join('\n') + '\n');
+
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 4 });
+  });
+});

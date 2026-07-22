@@ -2,6 +2,23 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ModelRouteSource } from './models.js';
 import type { StoryDifficulty } from './prd.js';
+import type {
+  ValidationCheck,
+  ValidationProtocolErrorCode,
+} from './validation-protocol.js';
+
+export interface ValidationTargetEvidence {
+  requestId: string;
+  storyId: string;
+  acceptanceHash: string;
+  gitHead: string | null;
+}
+
+export type LoopValidationProtocolErrorCode = ValidationProtocolErrorCode
+  | 'state-mutated'
+  | 'candidate-not-passing'
+  | 'result-cleanup-failed'
+  | 'agent-aborted';
 
 /**
  * evidence.jsonl 的记录 schema 单源（判别联合）。append-only、每行一条独立 JSON：
@@ -27,6 +44,14 @@ export type EvidenceRecord =
       validationRollback?: true;
       /** validator completed 且候选结果保持通过，引擎已签发验收凭证。 */
       validationReceipt?: true;
+      /** 引擎对本轮结构化协议的机械判定；旧记录/未启动 Validator 时缺省。 */
+      validationProtocol?: 'passed' | 'failed' | 'invalid';
+      /** 本轮引擎生成的精确目标；gitHead=null 表示产物身份不可用而非已验证。 */
+      validationTarget?: ValidationTargetEvidence;
+      /** invalid 的有界原因；不能与 passed/failed 同时出现。 */
+      validationProtocolError?: { code: LoopValidationProtocolErrorCode; diagnostic: string };
+      /** Validator 改写了 state.json；引擎已恢复调用前快照并拒绝该轮 claim。 */
+      validatorStateMutation?: true;
       /** 本轮实际路由来源；旧记录缺失时消费端显示“来源未知”。 */
       builderRouteSource?: ModelRouteSource;
       validatorRouteSource?: ModelRouteSource;
@@ -53,6 +78,9 @@ export type EvidenceRecord =
       /** 失败命令 stdout/stderr 合并输出的尾部；有界保存。 */
       diagnosticTail?: string }
   | { type: 'tamper'; source: 'engine'; at: string; iteration: number; archive: string | null }
+  | { type: 'validation-claim'; source: 'validator'; at: string; iteration: number;
+      requestId: string; storyId: string; acceptanceHash: string; gitHead: string | null;
+      verdict: 'passed' | 'failed'; checks: ValidationCheck[]; summary: string }
   | { type: 'screenshot-claim'; source: 'builder' | 'validator'; at: string; storyId: string;
       file: string; acIndex?: number; note?: string };
 
@@ -91,12 +119,48 @@ function isBoundedDiagnostic(v: unknown): v is string {
   return typeof v === 'string' && v.length <= EVIDENCE_DIAGNOSTIC_CHARS;
 }
 
+function isBoundedClaimText(v: unknown): v is string {
+  return isBoundedDiagnostic(v) && v.trim().length > 0;
+}
+
 function isStateRouteTamper(v: unknown): boolean {
   return Array.isArray(v) && v.every((item) => isRec(item)
     && (item.storyId === undefined || typeof item.storyId === 'string')
     && typeof item.expected === 'boolean'
     && (typeof item.received === 'boolean' || item.received === 'missing')
     && (item.side === 'builder' || item.side === 'validator'));
+}
+
+function isGitHead(v: unknown): v is string | null {
+  return v === null || (typeof v === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(v));
+}
+
+function isAcceptanceHash(v: unknown): v is string {
+  return typeof v === 'string' && /^sha256:[a-f0-9]{64}$/.test(v);
+}
+
+function isValidationTarget(v: unknown): v is ValidationTargetEvidence {
+  return isRec(v) && typeof v.requestId === 'string' && v.requestId.length > 0
+    && typeof v.storyId === 'string' && v.storyId.length > 0
+    && isAcceptanceHash(v.acceptanceHash) && isGitHead(v.gitHead);
+}
+
+function isValidationProtocolErrorCode(v: unknown): v is LoopValidationProtocolErrorCode {
+  return v === 'missing-result' || v === 'unreadable-result' || v === 'result-too-large'
+    || v === 'invalid-json' || v === 'invalid-schema' || v === 'binding-mismatch'
+    || v === 'artifact-changed' || v === 'state-mutated'
+    || v === 'candidate-not-passing' || v === 'result-cleanup-failed'
+    || v === 'agent-aborted';
+}
+
+function isValidationProtocolError(v: unknown): boolean {
+  return isRec(v) && isValidationProtocolErrorCode(v.code) && isBoundedDiagnostic(v.diagnostic);
+}
+
+function isValidationChecks(v: unknown): v is ValidationCheck[] {
+  return Array.isArray(v) && v.every((check, index) => isRec(check)
+    && check.acIndex === index + 1
+    && typeof check.passed === 'boolean' && isBoundedClaimText(check.evidence));
 }
 
 // 落盘数据不直接类型断言（patterns 约定）：按 type 分支逐字段校验，未知 type 一律不认——
@@ -121,6 +185,12 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (v.validationRollback === undefined || v.validationRollback === true)
         && (v.validationReceipt === undefined || v.validationReceipt === true)
         && !(v.validationRollback === true && v.validationReceipt === true)
+        && (v.validationProtocol === undefined || v.validationProtocol === 'passed'
+          || v.validationProtocol === 'failed' || v.validationProtocol === 'invalid')
+        && (v.validationTarget === undefined || isValidationTarget(v.validationTarget))
+        && (v.validationProtocolError === undefined || isValidationProtocolError(v.validationProtocolError))
+        && (v.validationProtocolError === undefined || v.validationProtocol === 'invalid')
+        && (v.validatorStateMutation === undefined || v.validatorStateMutation === true)
         && (v.builderRouteSource === undefined || isRouteSource(v.builderRouteSource))
         && (v.validatorRouteSource === undefined || isRouteSource(v.validatorRouteSource))
         && (v.storyDifficulty === undefined || v.storyDifficulty === 'low' || v.storyDifficulty === 'medium' || v.storyDifficulty === 'high')
@@ -141,6 +211,16 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
     case 'tamper':
       return v.source === 'engine' && typeof v.iteration === 'number'
         && (typeof v.archive === 'string' || v.archive === null);
+    case 'validation-claim': {
+      if (v.source !== 'validator' || typeof v.iteration !== 'number'
+          || typeof v.requestId !== 'string' || v.requestId.length === 0
+          || typeof v.storyId !== 'string' || v.storyId.length === 0
+          || !isAcceptanceHash(v.acceptanceHash) || !isGitHead(v.gitHead)
+          || (v.verdict !== 'passed' && v.verdict !== 'failed')
+          || !isValidationChecks(v.checks) || !isBoundedClaimText(v.summary)) return false;
+      const allPassed = v.checks.every((check) => check.passed);
+      return (v.verdict === 'passed') === allPassed;
+    }
     case 'screenshot-claim':
       return (v.source === 'builder' || v.source === 'validator')
         && typeof v.storyId === 'string' && typeof v.file === 'string'

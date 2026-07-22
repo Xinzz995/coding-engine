@@ -4,8 +4,9 @@ import { INITIAL_STORY_STATE } from './state.js';
 import { spawn } from 'node:child_process';
 import { terminateProcessTree } from './process-tree.js';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
+import type { ValidationCheck } from './validation-protocol.js';
 
-/** 打回上限的单一真相源：validator.md 经 {{MAX_RETRIES}} 占位符共享此值 */
+/** 打回上限的单一真相源：门禁与结构化 Validator failed claim 都由引擎应用。 */
 export const MAX_RETRIES = 5;
 
 /**
@@ -18,11 +19,13 @@ export const ARBITRATION_PREFIXES = ['[需求冲突]', '[需要人工核实]'] a
 
 /**
  * 门禁打回与阻塞上限的 notes 行前缀单源。生产方：applyGateFailure；
- * 第二生产方 assets/instructions/validator.md 的 BLOCKED 文案模板（改措辞须同步）；
- * 消费方：report/render.ts 行分类高亮。
+ * 第二生产方 applyValidatorFailure；消费方：report/render.ts 行分类高亮。
  */
 export const GATE_FAIL_LINE_PREFIX = '[门禁失败';
 export const BLOCKED_LINE_PREFIX = '[BLOCKED';
+
+/** Validator 结构化 claim 被引擎机械打回后的 notes 前缀。 */
+export const VALIDATOR_FAIL_LINE_PREFIX = '[验证失败';
 
 /**
  * 中断轮回写的 notes 行前缀单源。生产方：applyAbortRollback；
@@ -171,6 +174,66 @@ export function applyGateFailure(
   return {
     ...state,
     [storyId]: { ...prev, passes: false, validated: false, notes: lines.join('\n'), retryCount, blocked },
+  };
+}
+
+/**
+ * 合法 passed claim 的状态收口（纯函数）：清掉瞬时失败并重置重试，但不签发
+ * validated；receipt 仍须由 loop 在全部协议/绑定检查完成后单独签发。
+ */
+export function applyValidatorSuccess(state: RunState, storyId: string): RunState {
+  const prev = state[storyId] ?? INITIAL_STORY_STATE;
+  const arbitrationLines = prev.notes.split('\n').filter(isArbitrationLine);
+  return {
+    ...state,
+    [storyId]: {
+      ...prev,
+      validated: false,
+      notes: arbitrationLines.join('\n'),
+      retryCount: 0,
+    },
+  };
+}
+
+export interface ValidatorFailureClaim {
+  checks: readonly ValidationCheck[];
+  summary: string;
+}
+
+/**
+ * 合法 failed claim 的状态收口（纯函数）：只有引擎执行 retry/blocked/verdict 写入。
+ * notes 仅复制未通过 AC 的 claim 证据；完整逐项 claim 另存 append-only evidence。
+ */
+export function applyValidatorFailure(
+  state: RunState,
+  storyId: string,
+  claim: ValidatorFailureClaim,
+  now: Date,
+): RunState {
+  const prev = state[storyId] ?? INITIAL_STORY_STATE;
+  const retryCount = prev.retryCount + 1;
+  const blocked = prev.blocked || retryCount >= MAX_RETRIES;
+  const arbitrationLines = prev.notes.split('\n').filter(isArbitrationLine);
+  const failedChecks = claim.checks.filter((check) => !check.passed);
+  const lines = [
+    ...arbitrationLines,
+    `${VALIDATOR_FAIL_LINE_PREFIX} - 第${retryCount}次] ${formatStamp(now)}`,
+    ...failedChecks.map((check) => `- AC ${check.acIndex}：${check.evidence}`),
+    `- Validator 总结：${claim.summary}`,
+  ];
+  if (blocked && !prev.blocked) {
+    lines.push(`${BLOCKED_LINE_PREFIX}: 已达到最大重试次数，跳过此 story]`);
+  }
+  return {
+    ...state,
+    [storyId]: {
+      ...prev,
+      passes: false,
+      validated: false,
+      notes: lines.join('\n'),
+      retryCount,
+      blocked,
+    },
   };
 }
 

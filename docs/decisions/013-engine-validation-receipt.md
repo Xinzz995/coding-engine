@@ -32,3 +32,7 @@ agent 改写该字段时按阶段前值恢复并留 evidence。validator 未实�
 - `passes=true, validated=false` 成为可观察的短暂“待验收”态，任何消费端都不得算作通过。
 - 异常轮、门禁、升级与 blocked 语义保持；实现需审计循环的全部 continue/break/自然耗尽出口，保证未签发凭证的 true 不跨轮泄漏。
 - 版本随新增公开状态字段与展示语义升到 0.25.0。
+
+## 后续修订
+
+ADR-015 保留本 ADR 的 `passes && validated && !blocked` 最终语义与 legacy 兼容，但 supersede 了“只凭正常退出和 state 前后值签发、暂不引入结构化 verdict”的范围裁决：所有新 Validator 轮次必须绑定引擎 request，并由引擎消费结构化 claim 后写 verdict 状态。

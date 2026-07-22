@@ -485,6 +485,42 @@ describe('renderStatusReport', () => {
       rmSync(ws, { recursive: true, force: true });
     }
   });
+
+  it('展示最近一次结构化验收绑定与 invalid 原因', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({
+        'US-001': { passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
+      }));
+      writeFileSync(join(ws, 'evidence.jsonl'), JSON.stringify({
+        type: 'iteration', source: 'engine', at: '2026-07-22T11:00:00.000Z',
+        iteration: 5, storyId: 'US-001', builderRan: true, builderModel: null,
+        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
+        validationProtocol: 'invalid',
+        validationTarget: {
+          requestId: 'request-5', storyId: 'US-001',
+          acceptanceHash: `sha256:${'a'.repeat(64)}`, gitHead: null,
+        },
+        validationProtocolError: { code: 'binding-mismatch', diagnostic: 'story ID 不匹配' },
+      }) + '\n');
+
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report).text;
+      expect(human).toContain('最近验收协议：invalid@第5轮');
+      expect(human).toContain('binding-mismatch：story ID 不匹配');
+      expect(human).toContain('Git=unavailable');
+
+      const json = JSON.parse(renderStatusJson(report).text);
+      expect(json.recentValidation['US-001']).toMatchObject({
+        protocol: 'invalid', iteration: 5,
+        error: { code: 'binding-mismatch', diagnostic: 'story ID 不匹配' },
+        target: { gitHead: null },
+      });
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('renderStatusJson', () => {

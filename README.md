@@ -27,7 +27,7 @@ coding-x 同时是两样东西：
 
 ## 工作原理
 
-引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控；agent 回写结果字段，引擎独占验收凭证与升级状态）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（证据索引：引擎机械记录+agent 截图登记；失败门禁的输出尾部与 Validator 正常打回的 notes 会在下一轮覆盖前有界快照）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理；`state.json` 已存在但损坏时不是迁移信号，report/status/dashboard 会统一把所有 story 按未验证状态显示并提示 repair。
+引擎在项目根目录启动，围绕 workspace 的三份核心文件运转：`prd.json`（需求，运行期由引擎快照冻结）、`state.json`（执行状态；builder 只写候选完成，Validator verdict/重试/凭证由引擎写）和 `progress.md`（进度与学习日志）。`evidence.jsonl` 追加引擎机械记录、`source=validator` 的逐 AC claim 与 agent 截图登记；`validation-result.json` 只是一轮 Validator 调用的瞬时 IPC，消费后删除，不能当长期状态。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理；`state.json` 已存在但损坏时不是迁移信号，report/status/dashboard 会统一把所有 story 按未验证状态显示并提示 repair。
 
 ```
                       npx coding-x
@@ -48,14 +48,14 @@ coding-x 同时是两样东西：
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
    │   ┌── Validator（validator.md）────────────────────────┐ │
-   │   │ 1. 从 progress.md 找出刚完成的 story                │ │
-   │   │ 2. 逐条核对 acceptanceCriteria                      │ │
-   │   │ 3. 通过 → 保持 passes=true、清 notes、重试归零      │ │
-   │   │    失败 → passes=false、写失败原因、retryCount+1     │ │
-   │   │           （累计 5 次 → blocked=true 跳过）         │ │
+   │   │ 1. 接收引擎绑定的 story / AC hash / Git HEAD        │ │
+   │   │ 2. 按 request 快照逐条核对 acceptanceCriteria       │ │
+   │   │ 3. 只写逐 AC 结构化 claim，不修改 state.json        │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
-   │   引擎：Validator 正常完成且仍通过 → validated=true     │
+   │   引擎：校验 nonce/目标/产物/schema/state 不变式         │
+   │         passed → validated=true                         │
+   │         failed → 写 notes/retryCount/blocked            │
    │   所有 story 都 passes&&validated 或 blocked ?          │
    │                                  是 ──▶ 成功退出         │
    │                                       否 ──▶ 下一轮       │
@@ -68,8 +68,9 @@ coding-x 同时是两样东西：
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。
 - **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。门禁配置受快照保护：运行期改写 prd.json（含删改 `qualityChecks` / 验收标准）会被检测、恢复并存档，无法架空门禁与验收（ADR-007）。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
+- **可信目标绑定**：每轮 Validator 都收到一次性 request ID、精确 story、AC 快照/hash 和调用前 Git HEAD，必须提交版本化、逐 AC、自洽的结构化 claim。缺结果、旧结果、错 story/hash/commit、漏 AC、产物变化或改写 `state.json` 全部 fail closed，不签发凭证（ADR-015）。该协议消除正常控制流中的错目标/无结果假绿，但同权限 agent 仍能伪造观察，不能替代机械门禁和人审。
 - **workspace 写入避让与 Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 在任何变更前及首次真实写入前各用 `doctor` 检查工作区锁，发现引擎运行中或无法判定就保持零写入，且绝不删除 `engine.lock`；随后检查目录是否被忽略、是否已有文件进入 Git 索引。它不会擅自修改 `.gitignore` 或 Git 索引。锁检查是尽力避让，不替代引擎的机械互斥。
-- **状态共享**：引擎与 agent 都在项目根目录运行，读写同一组 `prd.json` / `state.json` / `progress.md`（需求只读，状态写 state.json）；`validated`、`escalated` 由引擎独占，agent 必须原样保留。指令模板用 `{{WORKSPACE}}` 占位符注入实际工作区路径。
+- **状态所有权**：引擎与 agent 都在项目根目录运行，但写权限按角色收紧：builder 只写候选 `passes`/进度，Validator 只写本轮 result 与可选截图 claim，所有 Validator verdict 状态和 `validated`/`escalated` 由引擎独占。指令模板用 `{{WORKSPACE}}` 注入路径，validation request 由引擎逐轮追加，三种 runner 共用同一协议。
 
 ---
 
@@ -207,10 +208,10 @@ npx coding-x cursor          # 改用 Cursor Agent
 {
   "US-001": {
     "passes": false,      // builder 完成后置 true；只是待验证的候选结果
-    "validated": false,   // validator 正常完成且结果仍通过后由引擎置 true；agent 不得改写
-    "notes": "",          // 验证失败原因 / 仲裁标签（[需求冲突]、[需要人工核实]）/ [需求已变更] 记录
-    "retryCount": 0,      // 失败重试次数
-    "blocked": false,     // 累计失败 5 次后置 true，跳过
+    "validated": false,   // 结构化 claim 通过全部绑定/不变式后由引擎置 true；agent 不得改写
+    "notes": "",          // 引擎写验证失败原因；builder 仲裁标签会被机械路径保全
+    "retryCount": 0,      // 引擎确认的门禁/Validator failed 次数
+    "blocked": false,     // 引擎累计失败 5 次后置 true；builder 也可配合仲裁显式置位
     "escalated": false    // 首次有效失败后由引擎置 true；agent 不得改写
   }
 }
@@ -219,6 +220,8 @@ npx coding-x cursor          # 改用 Cursor Agent
 引擎每轮选择 `priority` 最高、尚未同时满足 `passes && validated` 且 `blocked: false` 的 story（状态读自 `state.json`）。
 
 > **0.25.0 验收凭证迁移：** 新状态用 `validated` 区分“builder 声称完成”和“引擎已观察 Validator 正常完成”。旧 state 缺少该字段时，读取阶段按历史 `passes` 值兼容，不会把既有已完成 workspace 全量重验；新一轮自然写回后会补齐字段。显式的 `passes=true, validated=false` 会被视为中断留下的待验收状态并回写待复核。
+
+> **结构化验收协议：** 所有新 Validator 轮次都必须提交 `validation-result.json` v1；不再从 `progress.md` 猜 story，也不再直接改 `state.json`。旧 state/evidence 继续可读，但新轮次不会静默回退到“退出 0 + passes 未变”的旧判定。Git 不可用时 request 明示 `gitHead: null`，此时只有 request/story/AC 绑定，status/report 会显示 `unavailable`，不会伪装成完整产物绑定。
 
 > **0.24.0 模型目录迁移：** coding-x 不再调用 Claude Code、Codex 或 Cursor 查询模型。模型候选统一来自用户维护的全局模型目录；`models` 缺失、没有任何模型 CLI 覆盖时仍是合法零配置，直接使用 runner 默认模型。存在待执行 story，并且（PRD 启用模型路由或本次传入任一模型 CLI 覆盖）时，所需 ID 必须已在目录中声明；已收敛 workspace 跳过目录读取。`prd.json.models` schema 不变，v0.23 已有项目只需先登记原五项 ID，无需迁移项目文件。
 
@@ -295,21 +298,21 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
-| 位置参数 `status` | — | 终端速览 workspace 执行状态（story 通过/阻塞/重试、notes 与仲裁标签（`[需求冲突]`、`[需要人工核实]`）醒目标记、当前 story、最近进展）；损坏 state 全部按未验证、`--json` 标 `stateCorrupted`；退出码 0=全通过 / 1=未全通过或 state 损坏 / 2=无可读工作区，可作 CI 门禁 |
-| 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story 状态+AC、门禁、截图、review 留痕、篡改红旗区）；循环结束时也会从引擎冻结的 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏（仍写红色诊断报告） / 2=无可读工作区 |
+| 位置参数 `status` | — | 终端速览 story 状态/重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`；退出码 0=全通过 / 1=未全通过或 state 损坏 / 2=无可读工作区 |
+| 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story+AC、门禁、分源 Validator claim/engine 裁决、截图、review、篡改红旗）；循环结束也从冻结 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
 | `--builder-model <id>` | — | 本次运行的初始 builder 覆盖；优先于 `models.builder[story.difficulty]`，但不压过已触发的专用 escalation 路由 |
 | `--validator-model <id>` | — | 本次运行的 validator 覆盖；优先于 `models.validator` |
 | `--escalation-model <id>` | — | 本次运行的升级 builder 覆盖；仅在 `state.escalated=true` 时生效，优先于 `models.escalation` |
-| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` 所在目录；`doctor` 用它定位 prd.json，并检查门禁、项目模型映射与 Git 隔离 |
+| `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` / `evidence.jsonl` 与瞬时 validation result 所在目录；`doctor` 用它定位 prd.json，并检查门禁、项目模型映射与 Git 隔离 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
 | `--port <n>` | `7331` | 仪表盘端口 |
 | `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：active 区文件的 git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期，`docs/archive/` 冷档案不参与 |
-| `--json` | 关闭 | `status`：输出 story 状态、配置路由与 evidence 中最近实际命中；`models`：输出 `available` 或 `error` 的单个 JSON 对象 |
+| `--json` | 关闭 | `status`：输出 story 状态、配置/实际路由与最近结构化验收；`models`：输出 `available` 或 `error` 的单个 JSON 对象 |
 
 ### 退出码
 
@@ -340,17 +343,17 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 ### 引擎（`npx coding-x`）
 
 - **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
-- **引擎验收凭证**：`passes=true` 只是 builder 的候选声明；仅当 Validator 被引擎观察为正常完成且结果仍通过，才签发 `validated=true`。所有完成判定与展示面统一要求二者同时为 true（ADR-013）。
+- **引擎验收凭证 + 可信目标绑定**：`passes=true` 只是 builder 候选；引擎向 Validator 注入 request ID/story/AC hash/Git HEAD，严格消费逐 AC claim，确认 schema、绑定、产物和 state 不变式后才写 verdict 或签发 `validated=true`（ADR-013、015）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证；超时会终止并确认整棵门禁进程树退出后才进入下一轮——LLM 验证链之下不可共谋、不可绕过的确定性防线。
 - **workspace 写入避让与 Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 双次检查活跃工作区锁、写前阻止静默污染，`doctor` 只读报告锁与 Git 隔离状态，不替用户删锁或改索引。
-- **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、validator 正常打回或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
+- **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
 - **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
-- **静态验证报告**：循环结束从 PRD guard 的最终冻结快照自动生成 `.workspace/report.html`，并标明“引擎启动快照”；手动 `npx coding-x report` 则诚实读取当前磁盘 PRD。story 验收证据（AC/notes/截图）、门禁配置、人审留痕（review-*.md）、篡改红旗区汇总为零依赖单页；失败门禁的输出尾部与 Validator 正常打回详情会从证据索引折叠展示，即使后续成功重试清空 notes 仍可复盘。state 已存在但损坏时所有 story 按未验证渲染，绝不复活 legacy 通过态。报告以 tmp+rename 原子覆盖；截图为相对引用，分享时需连同 `screenshots/` 目录。
+- **静态验证报告**：循环结束从 PRD guard 的最终冻结快照自动生成 `.workspace/report.html`，手动 `npx coding-x report` 读取当前磁盘 PRD。报告把 `source=validator` 的逐 AC claim 与 `source=engine` 的目标/协议/receipt 分开，协议错误和 Validator 改 state 进入红旗；同时汇总 story、门禁、截图、人审与篡改。state 损坏时全部未验证；报告原子覆盖，截图分享需连同 `screenshots/`。
 - **JSON 修复**：`npx coding-x repair` 用 `jsonrepair` 修复被 agent 写坏的 `prd.json` / `state.json`。
 - **可配置工作区**：`--workspace` 指定文件目录，指令用 `{{WORKSPACE}}` 占位符注入。
 
@@ -415,7 +418,7 @@ coding-engine/
 ├── assets/                       # 引擎专用静态资产（构建时拷进 dist/，工具不读）
 │   ├── instructions/
 │   │   ├── builder.md            #   Developer 指令（含 {{WORKSPACE}} 占位符）
-│   │   └── validator.md          #   Validator 指令
+│   │   └── validator.md          #   Validator 逐 AC 结构化 claim 指令
 │   └── dashboard/
 │       ├── dashboard.html        #   仪表盘普通视图
 │       └── dashboard-p.html      #   仪表盘像素风视图
@@ -436,6 +439,7 @@ coding-engine/
 │   │   ├── prd-guard.ts          #   运行期 PRD 快照、篡改存档与恢复
 │   │   ├── prd.ts                #   读取 prd.json（需求内容）
 │   │   ├── state.ts              #   state.json 读写、验收凭证、选 story、完成判定、合并视图
+│   │   ├── validation-protocol.ts #   Validator request/result、目标绑定与严格解析
 │   │   ├── progress.ts           #   读取 progress.md
 │   │   └── repair.ts             #   jsonrepair 修复 prd.json / state.json
 │   ├── doctor/
@@ -444,7 +448,7 @@ coding-engine/
 │   │   ├── report.ts             #   验证报告收集、可信 PRD 来源与原子写盘
 │   │   └── render.ts             #   验证报告 HTML 渲染（零浏览器 JS、全文本转义）
 │   ├── status/
-│   │   └── status.ts             #   workspace 状态与实际路由终端速览
+│   │   └── status.ts             #   workspace 状态、实际路由与最近结构化验收速览
 │   └── dashboard/
 │       └── server.ts             #   仪表盘 HTTP 服务 + 自动开浏览器
 │

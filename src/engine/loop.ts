@@ -11,14 +11,29 @@ import {
   rollbackUnvalidatedPass, rollbackUnvalidatedPasses, tryReadEngineOwnedFields,
   INITIAL_STORY_STATE, type RunState,
 } from './state.js';
-import { runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback, abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES } from './gate.js';
+import {
+  runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback,
+  abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES, applyValidatorFailure,
+  applyValidatorSuccess,
+} from './gate.js';
 import { resolveBuilderModel, resolveValidatorModel } from './models.js';
 import { ModelPreflightError, preflightModelRouting, renderPreflightSummary } from './model-preflight.js';
 import type { ModelCatalogResult } from './model-catalog.js';
 import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
-import { appendEvidence, clipEvidenceDiagnostic, type EvidenceRecord } from './evidence.js';
+import {
+  appendEvidence, clipEvidenceDiagnostic, type EvidenceRecord,
+  type LoopValidationProtocolErrorCode, type ValidationTargetEvidence,
+} from './evidence.js';
 import { acquireLock, LockConflictError, type LockHandle } from './lock.js';
+import {
+  clearValidationResult,
+  createValidationRequest,
+  readGitHead,
+  readValidationResult,
+  renderValidatorInstruction,
+  type ValidationRequest,
+} from './validation-protocol.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -45,6 +60,11 @@ export interface LoopConfig {
   interrupt?: Promise<void>;
   /** 连续无进展轮（no-op/超时/异常退出）熔断上限；缺省 3 */
   stallLimit?: number;
+  /**
+   * 仅供历史单测 fixture：允许旧 Validator 直接改 state。CLI 从不设置；生产默认
+   * 必须提交结构化 validation result，禁止静默降级。
+   */
+  legacyValidatorProtocolForTests?: boolean;
 }
 
 function waitForSigint(): Promise<void> {
@@ -110,7 +130,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   const builderRaw = readInstruction(cfg.instructionsDir, 'builder.md');
   const validatorRaw = readInstruction(cfg.instructionsDir, 'validator.md');
   const builder = builderRaw === null ? null : renderInstruction(builderRaw, cfg.workspace);
-  const validator = validatorRaw === null ? null : renderInstruction(validatorRaw, cfg.workspace);
+  const validatorBase = validatorRaw === null ? null : renderInstruction(validatorRaw, cfg.workspace);
 
   let server: ReturnType<typeof dashboard.start> | null = null;
   try {
@@ -501,67 +521,195 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Validator
       const validatorChoice = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: preflight.config });
       const validatorModel = validatorChoice.model;
-      const validatorWillRun = !!validator && !skipValidator && !agentBlocked;
+      const structuredValidation = !cfg.legacyValidatorProtocolForTests;
+      const validatorWillRun = !!validatorBase && !skipValidator && !agentBlocked
+        && (!structuredValidation || !!currentStoryObj);
       dashboard.setState({
         phase: 'validating', model: validatorWillRun ? (validatorModel ?? null) : null,
         routeSource: validatorWillRun ? validatorChoice.source : null,
         storyDifficulty: currentStoryObj?.difficulty ?? null,
       });
       let validatorOutcome: 'completed' | 'timeout' | 'error' | 'skipped' | undefined;
+      let validatorActuallyRan = false;
       let validatorRollback = false;
       let validationRollback = false;
       let validationReceipt = false;
       let validatorEscalationTriggered = false;
       let validatorDiagnostic: string | undefined;
-      if (!validator) {
+      let validationProtocol: 'passed' | 'failed' | 'invalid' | undefined;
+      let validationTarget: ValidationTargetEvidence | undefined;
+      let validationProtocolError: {
+        code: LoopValidationProtocolErrorCode;
+        diagnostic: string;
+      } | undefined;
+      let validatorStateMutation = false;
+      const rejectProtocol = (code: LoopValidationProtocolErrorCode, diagnostic: string) => {
+        validationProtocol = 'invalid';
+        validationProtocolError = {
+          code,
+          diagnostic: clipEvidenceDiagnostic(diagnostic),
+        };
+        console.warn(`⚠️  ${currentStory ?? '当前 story'} Validator 结构化结果无效（${code}）：${diagnostic}`);
+      };
+
+      if (!validatorBase) {
         console.error('❌ validator.md 不存在，本轮无法签发验收凭证');
         validatorOutcome = 'skipped';
       } else if (skipValidator) {
         console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
         validatorOutcome = 'skipped';
-      } else if (!agentBlocked) {
+      } else if (!agentBlocked && (!structuredValidation || currentStoryObj)) {
         console.log(`🧠 validator 实际模型: ${validatorModel ?? 'runner 默认'} [${validatorChoice.source}]`);
         const validatorStateBefore = tryReadState(statePath);
         const currentValidatorStateBefore = currentStory ? validatorStateBefore?.[currentStory] : undefined;
-        const val = await runAgent({
-          kind: runKind, prompt: validator, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
-          model: validatorModel,
-        });
-        validatorOutcome = outcomeOf(val);
-        const validatorOwnership = restoreEngineOwnership('validator', validatorStateBefore);
-        if (validatorOutcome !== 'completed') {
-          // validator 异常结局：本轮 builder 置的 true 未经复核 → 回写待复核
-          validatorRollback = rollbackIfUnvalidatedPass('validator', val);
-        } else if (currentStory && currentValidatorStateBefore && !validatorOwnership.storyMissing) {
-          let stateAfter = tryReadState(statePath);
-          const validatorStateAfter = stateAfter?.[currentStory];
-          const rejected = !!validatorStateAfter
-            && !validatorStateAfter.passes
-            && validatorStateAfter.retryCount > currentValidatorStateBefore.retryCount;
-          if (rejected) {
-            const diagnostic = clipEvidenceDiagnostic(validatorStateAfter.notes).trim();
-            if (diagnostic) validatorDiagnostic = diagnostic;
-            validatorEscalationTriggered = triggerEscalation('validator');
+        const stateRawBeforeValidator = rawOf(statePath);
+        let validationRequest: ValidationRequest | null = null;
+        let validatorPrompt = validatorBase;
+        let canStartValidator = true;
+
+        if (structuredValidation && currentStoryObj) {
+          validationRequest = createValidationRequest(
+            currentStoryObj,
+            cfg.workspace,
+            readGitHead(agentCwd),
+          );
+          validationTarget = {
+            requestId: validationRequest.requestId,
+            storyId: validationRequest.storyId,
+            acceptanceHash: validationRequest.acceptanceHash,
+            gitHead: validationRequest.gitHead,
+          };
+          validatorPrompt = renderValidatorInstruction(validatorBase, validationRequest);
+          try {
+            clearValidationResult(validationRequest.resultPath);
+          } catch (err) {
+            canStartValidator = false;
+            validatorOutcome = 'skipped';
+            rejectProtocol(
+              'result-cleanup-failed',
+              `无法清理上一轮 validation result：${err instanceof Error ? err.message : String(err)}`,
+            );
           }
-          // passes 是 builder 候选声明；只有 validator 启动前已经为 true、正常结束后
-          // 仍为 true 且未 blocked，engine 才签发最终凭证。validator 自行伪造
-          // validated 会在上方 restoreEngineOwnership 先被恢复。
-          if (stateAfter && currentValidatorStateBefore.passes && !currentValidatorStateBefore.blocked
-              && validatorStateAfter?.passes && !validatorStateAfter.blocked) {
-            // triggerEscalation 可能已原子写过 state，签发前重读，避免用旧快照覆盖升级状态。
-            stateAfter = tryReadState(statePath);
-            if (stateAfter) {
-              const issued = issueValidationReceipt(stateAfter, currentStory);
-              if (issued.changed) {
-                writeFileAtomicSync(statePath, JSON.stringify(issued.state, null, 2));
-                validationReceipt = true;
-                console.log(`✅ ${currentStory} validator 已正常完成，引擎验收凭证已签发`);
+        }
+
+        if (canStartValidator) {
+          validatorActuallyRan = true;
+          const val = await runAgent({
+            kind: runKind, prompt: validatorPrompt, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
+            model: validatorModel,
+          });
+          validatorOutcome = outcomeOf(val);
+          const stateRawAfterValidator = rawOf(statePath);
+          const validatorOwnership = restoreEngineOwnership('validator', validatorStateBefore);
+
+          if (structuredValidation && stateRawAfterValidator !== stateRawBeforeValidator) {
+            validatorStateMutation = true;
+            if (stateRawBeforeValidator !== null) {
+              writeFileAtomicSync(statePath, stateRawBeforeValidator);
+            }
+            console.warn(`⚠️  ${currentStory} Validator 修改了 state.json，已恢复调用前快照并拒绝本轮结论`);
+          }
+
+          if (!structuredValidation) {
+            // 历史单测专用兼容路径：生产 CLI 永不进入。旧 Validator 直接写 state，
+            // 仍按 v0.25 receipt 语义恢复引擎字段并判定。
+            if (validatorOutcome !== 'completed') {
+              validatorRollback = rollbackIfUnvalidatedPass('validator', val);
+            } else if (currentStory && currentValidatorStateBefore && !validatorOwnership.storyMissing) {
+              let stateAfter = tryReadState(statePath);
+              const validatorStateAfter = stateAfter?.[currentStory];
+              const rejected = !!validatorStateAfter
+                && !validatorStateAfter.passes
+                && validatorStateAfter.retryCount > currentValidatorStateBefore.retryCount;
+              if (rejected) {
+                const diagnostic = clipEvidenceDiagnostic(validatorStateAfter.notes).trim();
+                if (diagnostic) validatorDiagnostic = diagnostic;
+                validatorEscalationTriggered = triggerEscalation('validator');
               }
+              if (stateAfter && currentValidatorStateBefore.passes && !currentValidatorStateBefore.blocked
+                  && validatorStateAfter?.passes && !validatorStateAfter.blocked) {
+                stateAfter = tryReadState(statePath);
+                if (stateAfter) {
+                  const issued = issueValidationReceipt(stateAfter, currentStory);
+                  if (issued.changed) {
+                    writeFileAtomicSync(statePath, JSON.stringify(issued.state, null, 2));
+                    validationReceipt = true;
+                    console.log(`✅ ${currentStory} validator 已正常完成，引擎验收凭证已签发`);
+                  }
+                }
+              }
+            }
+          } else if (validationRequest) {
+            const protocol = readValidationResult(
+              validationRequest.resultPath,
+              validationRequest,
+              readGitHead(agentCwd),
+            );
+            try {
+              clearValidationResult(validationRequest.resultPath);
+            } catch (err) {
+              // nonce 已阻止下轮复用；留存清理故障但不把已完成的当前绑定判成假失败。
+              console.warn(`⚠️  validation result 清理失败，下轮会再次拒绝旧文件：${err instanceof Error ? err.message : String(err)}`);
+            }
+
+            if (validatorOutcome !== 'completed') {
+              rejectProtocol('agent-aborted', `Validator ${abortDesc(val)}`);
+              validatorRollback = rollbackIfUnvalidatedPass('validator', val);
+            } else if (validatorStateMutation) {
+              rejectProtocol('state-mutated', 'Validator 修改了引擎独占的 state.json');
+            } else if (!protocol.ok) {
+              rejectProtocol(protocol.code, protocol.diagnostic);
+            } else if (currentStory && validatorStateBefore && currentValidatorStateBefore) {
+              recordEvidence({
+                type: 'validation-claim', source: 'validator', at: new Date().toISOString(), iteration: i,
+                requestId: protocol.result.requestId,
+                storyId: protocol.result.storyId,
+                acceptanceHash: protocol.result.acceptanceHash,
+                gitHead: protocol.result.gitHead,
+                verdict: protocol.result.verdict,
+                checks: protocol.result.checks,
+                summary: protocol.result.summary,
+              });
+              if (protocol.result.verdict === 'failed') {
+                validationProtocol = 'failed';
+                const failed = applyValidatorFailure(
+                  validatorStateBefore,
+                  currentStory,
+                  protocol.result,
+                  new Date(),
+                );
+                const enabled = enableEscalation(failed, currentStory, hasDedicatedEscalation);
+                writeFileAtomicSync(statePath, JSON.stringify(enabled.state, null, 2));
+                validatorEscalationTriggered = enabled.changed;
+                if (enabled.changed) {
+                  console.log(`⬆️  ${currentStory} 首次有效失败（validator），下轮起使用 escalation 模型`);
+                }
+                const diagnostic = clipEvidenceDiagnostic(enabled.state[currentStory]?.notes ?? '').trim();
+                if (diagnostic) validatorDiagnostic = diagnostic;
+              } else if (!currentValidatorStateBefore.passes || currentValidatorStateBefore.blocked) {
+                rejectProtocol('candidate-not-passing', 'Builder 未留下可验收的 passes=true 候选态');
+              } else {
+                const passed = applyValidatorSuccess(validatorStateBefore, currentStory);
+                const issued = issueValidationReceipt(passed, currentStory);
+                if (issued.changed) {
+                  writeFileAtomicSync(statePath, JSON.stringify(issued.state, null, 2));
+                  validationProtocol = 'passed';
+                  validationReceipt = true;
+                  console.log(`✅ ${currentStory} 结构化验收目标匹配，引擎验收凭证已签发`);
+                } else {
+                  rejectProtocol('candidate-not-passing', '引擎无法对当前候选态签发验收凭证');
+                }
+              }
+            } else {
+              rejectProtocol('candidate-not-passing', '当前 story 或调用前状态缺失');
             }
           }
         }
       } else if (agentBlocked) {
         validatorOutcome = 'skipped';
+      } else if (structuredValidation && !currentStoryObj) {
+        validatorOutcome = 'skipped';
+        rejectProtocol('candidate-not-passing', '无法从可信 PRD 快照定位当前 story');
       }
 
       // 除 blocked 外，任何没有签发凭证的路径都不能把 builder 的 passes=true 带到
@@ -575,7 +723,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // 每轮一条 iteration 不变式：continue 路径（builder 异常/no-op/门禁打回）各自留痕后跳出，
       // 走到这里的轮在此记录——evidence 时间线零空洞（v0.22.0，dogfood 发现 B）。
       recordIteration({
-        validatorRan: !!validator && !skipValidator && !agentBlocked,
+        validatorRan: validatorActuallyRan,
         validatorModel: validatorModel ?? null,
         validatorRouteSource: validatorChoice.source,
         skippedValidator: skipValidator, agentBlocked,
@@ -584,6 +732,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(validatorRollback ? { abortRollback: { storyId: currentStory! } } : {}),
         ...(validationRollback ? { validationRollback: true as const } : {}),
         ...(validationReceipt ? { validationReceipt: true as const } : {}),
+        ...(validationProtocol ? { validationProtocol } : {}),
+        ...(validationTarget ? { validationTarget } : {}),
+        ...(validationProtocolError ? { validationProtocolError } : {}),
+        ...(validatorStateMutation ? { validatorStateMutation: true as const } : {}),
         ...(validatorEscalationTriggered ? { escalationTriggeredBy: 'validator' as const } : {}),
         ...(validatorDiagnostic ? { validatorDiagnostic } : {}),
       });

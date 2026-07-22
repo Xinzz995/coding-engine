@@ -181,7 +181,7 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 ### 运行时升级语义（生成时必须让用户知道）
 
-第一次有效失败——机械门禁失败、validator 正常打回或 builder completed no-op——会让下一轮及以后持续使用 `escalation`。超时、非零退出、认证、网络或环境错误不升级。升级状态保存在 `state.json.escalated`，与 `retryCount` 分离且只由引擎修改。
+第一次有效失败——机械门禁失败、引擎接受 Validator 的 failed claim 或 builder completed no-op——会让下一轮及以后持续使用 `escalation`。超时、非零退出、认证、网络或环境错误不升级。升级状态保存在 `state.json.escalated`，与 `retryCount` 分离且只由引擎修改。
 
 ---
 
@@ -497,10 +497,11 @@ Add ability to mark tasks with different statuses.
 2. 检查 `branchName` 是否与新功能的 branch name 不同
 3. 如果不同且 `progress.md` 在 header 之外有内容：
    - 创建归档文件夹：`.workspace/archive/YYYY-MM-DD-feature-name/`
-   - 将当前的 `prd.json`、`state.json`、`progress.md`、`review-*.md` 留痕、`evidence.jsonl`、`report.html`、`screenshots/` 目录与 `prd.tampered-*.json`（均为如存在）复制到归档
+   - 将当前的 `prd.json`、`state.json`、`progress.md`、`review-*.md` 留痕、`evidence.jsonl`、`report.html`、`screenshots/` 目录与 `prd.tampered-*.json`（均为如存在）复制到归档；`validation-result.json` 是单轮瞬时 IPC，完整 claim 已进入 evidence，**不复制**
    - **删除工作区中的旧 `state.json`**——story id 惯例都从 US-001 起编，新旧几乎必然撞车；引擎信任既存 state.json，残留会把旧轮的 `passes: true` 误判为新 story 已完成、循环空转结束
    - **同时删除工作区中的旧 `evidence.jsonl`**——记录按轮次追加且不含轮次归属标识以外的运行标记，残留旧轮记录会污染新轮验证报告的门禁历史与时间线
    - **同时删除工作区中的旧 `prd.tampered-*.json`**——取证已随归档保留，残留会污染新轮报告红旗区
+   - **同时删除工作区中的旧 `validation-result.json`**——它只能由当前引擎 request 消费；崩溃残留既不归档，也不得带入新 PRD
    - 使用新的 header 重置 `progress.md`
 
 如果你在运行之间手动更新 prd.json，请先按上述步骤归档旧运行，再写入新的 prd.json。
@@ -511,7 +512,7 @@ Add ability to mark tasks with different statuses.
 
 源 PRD 修改后重新执行本 skill，若 `.workspace/prd.json` 已存在且 `branchName` 与新转换结果**相同**（同一功能），进入再派生模式（branchName 不同则走上方「归档之前的运行」流程）：
 
-1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件、`evidence.jsonl`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）；**同时删除工作区中的旧 `evidence.jsonl`**——需求变更后旧登记按 acIndex 位置匹配，会错挂到改写后的验收标准上，一律作废重验
+1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件、`evidence.jsonl`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）；**同时删除工作区中的旧 `evidence.jsonl` 与 `validation-result.json`**——需求变更后旧登记按 acIndex 位置匹配会错挂，瞬时 result 也不再属于新 request，一律作废重验
 2. 先处理模型再派生，再用新结果**整体重写** `prd.json`：
    - runner 相同，且原五个模型在本次 `coding-x models <runner> --json` 返回的全局目录中仍有声明 → 保留原选择，不重复提问
    - runner 变化、任一模型被移出目录、目录读取失败，或用户明确要求重配 → 停止保留，重新走目录选择与五道选择题；目录失败时不得退回历史列表或会话内临时列表
@@ -537,7 +538,7 @@ Add ability to mark tasks with different statuses.
 
 - [ ] 已运行 `npx coding-x doctor --workspace .workspace`；未发现“引擎运行中”，且真正写入前再次运行的结论仍可判定、未变化；未删除 `engine.lock`
 - [ ] `.workspace/` 已通过 Git 隔离检查；若已跟踪或未忽略，已取得用户明确选择，且未自动修改 `.gitignore` 或执行 `git rm --cached`
-- [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json、evidence.jsonl、prd.tampered-*.json）
+- [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json、evidence.jsonl、validation-result.json、prd.tampered-*.json）
 - [ ] 每个 story 可以在一次迭代中完成（足够小）
 - [ ] Stories 按依赖顺序排序（schema 到 backend 到 UI）
 - [ ] 每个 story 都有 "Typecheck passes" 作为标准
@@ -554,6 +555,6 @@ Add ability to mark tasks with different statuses.
 - [ ] models 未配置时：所有 story 都没有 difficulty/difficultyReason，避免半套配置
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
-- [ ] 同功能再派生时已先归档副本（含 state.json、evidence.jsonl），已删除工作区中的旧 evidence.jsonl，并按 id、难度与初始路由精确调整 state.json；blocked 路由重试已由用户选择
+- [ ] 同功能再派生时已先归档副本（含 state.json、evidence.jsonl），已删除工作区中的旧 evidence.jsonl 与瞬时 validation-result.json，并按 id、难度与初始路由精确调整 state.json；blocked 路由重试已由用户选择
 
 写入后运行：`npx coding-x repair`（用 jsonrepair 修复并二次校验 prd.json 与 state.json，后者不存在则跳过）。

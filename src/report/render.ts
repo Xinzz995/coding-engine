@@ -1,6 +1,9 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import { INITIAL_STORY_STATE, isStoryPassed, type StoryView } from '../engine/state.js';
-import { isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX } from '../engine/gate.js';
+import {
+  isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX,
+  VALIDATOR_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX,
+} from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
 
@@ -72,7 +75,9 @@ function imgSrc(filename: string): string {
 
 function noteLineClass(line: string): string {
   if (isArbitrationLine(line)) return 'note-line arbitration';
-  if (line.startsWith(GATE_FAIL_LINE_PREFIX)) return 'note-line gate-fail';
+  if (line.startsWith(GATE_FAIL_LINE_PREFIX) || line.startsWith(VALIDATOR_FAIL_LINE_PREFIX)) {
+    return 'note-line gate-fail';
+  }
   if (line.startsWith(BLOCKED_LINE_PREFIX)) return 'note-line blocked-line';
   // 中断轮待复核：与门禁失败行同属「引擎机械回写」性质，样式复用 gate-fail（不新开 CSS 类）
   if (line.startsWith(ABORT_LINE_PREFIX)) return 'note-line gate-fail';
@@ -219,6 +224,16 @@ function renderTimeline(records: EvidenceRecord[]): string {
     if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
     if (r.validationRollback) flags.push('未签发验收凭证，已回写待复核');
     if (r.validationReceipt) flags.push('验收凭证已签发');
+    if (r.validationProtocol === 'passed') flags.push('结构化验收协议通过');
+    if (r.validationProtocol === 'failed') flags.push('结构化验收结论未通过');
+    if (r.validationProtocol === 'invalid') flags.push('结构化验收协议无效');
+    if (r.validationTarget) {
+      flags.push(
+        `目标 ${text(r.validationTarget.storyId)} · AC ${text(r.validationTarget.acceptanceHash.slice(0, 15))}…` +
+        ` · Git ${text(r.validationTarget.gitHead?.slice(0, 12) ?? 'unavailable')}`,
+      );
+    }
+    if (r.validatorStateMutation) flags.push('Validator 改写 state.json，快照已恢复');
     if (r.validatorDiagnostic) flags.push('Validator 打回');
     if (r.escalationTriggeredBy) flags.push(`已触发升级（${text(r.escalationTriggeredBy)}）`);
     for (const tamper of r.stateRouteTamper ?? []) {
@@ -227,7 +242,12 @@ function renderTimeline(records: EvidenceRecord[]): string {
     for (const tamper of r.stateValidationTamper ?? []) {
       flags.push(`${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 validated（${tamper.expected} → ${tamper.received}）已恢复`);
     }
-    const flagCell = `${flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—'}${renderDiagnostic('Validator 打回详情', r.validatorDiagnostic)}`;
+    const protocolDiagnostic = r.validationProtocolError
+      ? `${r.validationProtocolError.code}: ${r.validationProtocolError.diagnostic}`
+      : undefined;
+    const flagCell = `${flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—'}` +
+      `${renderDiagnostic('结构化验收协议错误', protocolDiagnostic)}` +
+      `${renderDiagnostic('Validator 打回详情', r.validatorDiagnostic)}`;
     const builder = r.builderRan
       ? `${text(r.builderModel ?? '默认')} [${text(r.builderRouteSource ?? '来源未知')}]`
       : '未跑';
@@ -240,6 +260,25 @@ function renderTimeline(records: EvidenceRecord[]): string {
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>难度</th><th>builder 实际路由</th><th>validator 实际路由</th><th>状态</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>` +
     `<p class="placeholder">每轮一条记录；异常轮（超时/异常退出/空转/门禁打回）见状态列标注。</p></details></section>`;
+}
+
+function renderValidationClaims(records: EvidenceRecord[]): string {
+  const claims = records.filter((record): record is Extract<EvidenceRecord, { type: 'validation-claim' }> =>
+    record.type === 'validation-claim');
+  if (claims.length === 0) return '';
+  const rows = claims.map((claim) => {
+    const checks = claim.checks.map((check) =>
+      `<li>${check.passed ? '✅' : '❌'} AC ${check.acIndex}：${text(check.evidence)}</li>`).join('');
+    const detail = `<details><summary>${text(claim.summary)}</summary><ol>${checks}</ol></details>`;
+    return `<tr><td>${claim.iteration}</td><td>${text(claim.storyId)}</td>` +
+      `<td>${claim.verdict === 'passed' ? '✅ passed' : '❌ failed'}</td>` +
+      `<td>${text(claim.acceptanceHash.slice(0, 15))}…</td>` +
+      `<td>${text(claim.gitHead?.slice(0, 12) ?? 'unavailable')}</td><td>${detail}</td></tr>`;
+  }).join('');
+  return `<section class="card"><details><summary><h2>Validator 结构化声明</h2></summary>` +
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>claim</th><th>AC hash</th><th>Git HEAD</th><th>逐项证据</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<p class="placeholder">这些记录的 source=validator，是经引擎做新鲜度与目标绑定校验后的 agent claim；它们不是安全签名或 CI 证明。</p>` +
+    `</details></section>`;
 }
 
 function claimLink(c: ScreenshotClaim): string {
@@ -273,8 +312,12 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
     .flatMap((r) => (r.stateValidationTamper ?? []).map((t) => ({
       ...t, iteration: r.iteration, at: r.at, storyId: t.storyId ?? r.storyId,
     })));
+  const validatorStateMutations = records
+    .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> =>
+      r.type === 'iteration' && r.validatorStateMutation === true);
   if (tampered.length === 0 && tamperEvents.length === 0
-      && stateRouteTampers.length === 0 && stateValidationTampers.length === 0) return '';
+      && stateRouteTampers.length === 0 && stateValidationTampers.length === 0
+      && validatorStateMutations.length === 0) return '';
   const eventOf = new Map(tamperEvents.filter((t) => t.archive !== null).map((t) => [t.archive as string, t]));
   const files = tampered.map((f) => {
     const ev = eventOf.get(f);
@@ -294,10 +337,13 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
   const validationItems = stateValidationTampers.map((t) =>
     `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>validated</code>（${t.expected} → ${t.received}），已恢复</li>`,
   ).join('');
+  const validatorMutationItems = validatorStateMutations.map((r) =>
+    `<li>第 ${r.iteration} 轮 ${stampOf(r.at)} ${text(r.storyId ?? '—')}：Validator 改写 <code>state.json</code>，引擎已恢复调用前快照并拒绝该轮 claim</li>`,
+  ).join('');
   return `<section class="card red-flag">
 <h2>🚩 红旗区：运行期状态 / PRD 篡改</h2>
-<p>引擎检出并恢复了不应由 agent 修改的数据（PRD 防护见 ADR-007，状态所有权见 ADR-013）。合并裁决前请逐个核对：</p>
-<ul>${files}${deletions}${missing}${routeItems}${validationItems}</ul>
+<p>引擎检出并恢复了不应由 agent 修改的数据（PRD 防护见 ADR-007，状态所有权见 ADR-013/ADR-015）。合并裁决前请逐个核对：</p>
+<ul>${files}${deletions}${missing}${routeItems}${validationItems}${validatorMutationItems}</ul>
 <p>指引：核对上述记录及对应存档；与预期不符须停止合并。</p>
 </section>`;
 }
@@ -464,6 +510,7 @@ ${renderRedFlags(data.tamperedArchives, data.evidence.records)}
 ${claimDisclaimer}
 ${cards}
 ${renderUnattributed(data.screenshots, orphanClaims)}
+${renderValidationClaims(data.evidence.records)}
 ${renderTimeline(data.evidence.records)}
 ${renderReviews(data.reviews)}
 ${renderProgressSection(data.progress)}

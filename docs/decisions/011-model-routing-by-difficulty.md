@@ -20,7 +20,7 @@ ADR-006 以阶段默认、story 直接模型名、retryCount 阈值升级为主�
 1. `prd.json.models` 绑定单一 `runner`，包含 `builder.low/medium/high`、固定 `validator` 与固定 `escalation` 五个实际模型标识；不再支持 `profiles`、`escalateAfter` 或 story `model`。
 2. story 保存 `difficulty: low|medium|high` 与可审计的 `difficultyReason`。`prd-to-json` 在最终 stories 上结合代码库按固定风险规则自动判定，写入后展示；源 PRD 不写模型策略。
 3. 模型路由可选；启用后 schema 完整性、未知键、runner 和模型可用性全部 fail-fast。未启用时沿用 runner 默认模型，CLI 临时覆盖仍可独立使用。
-4. 第一次有效失败（门禁失败、validator 正常打回、builder completed no-op）后，下轮起持续使用 escalation；超时、非零退出、认证和环境错误不升级。
+4. 第一次有效失败（门禁失败、引擎接受 Validator 的 failed claim、builder completed no-op）后，下轮起持续使用 escalation；超时、非零退出、认证和环境错误不升级。Validator 的失败输入后由 ADR-015 收敛为绑定目标的结构化 claim，升级语义不变。
 5. `state.json` 新增引擎独占的 `escalated`，与 `retryCount` 分离；旧 state 缺失时按 false，agent 改动由引擎恢复并留痕。
 6. 新增 Cursor runner、`--escalation-model` 与公开 `coding-x models [runner] [--json]`。模型发现只用公开机器接口，发现不了时人工提供列表；不解析交互 TUI、不内置模型名单。
 7. `models.runner` 在未显式指定后端时自动选择 runner；显式 runner 错配拒绝启动。
