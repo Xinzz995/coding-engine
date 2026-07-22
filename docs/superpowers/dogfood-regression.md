@@ -36,3 +36,4 @@ scope: root
 | 17 | prd-to-json 在归档、再派生或首次创建 workspace 前先运行 doctor 检查工作区锁；发现“引擎运行中”或无法判定时停止且保持零写入，不删除 `engine.lock` | 0.25.4 可信收口 | 持活锁触发 skill，前后对账 workspace 文件哈希与锁内容均不变 |
 | 18 | prd-to-json 完成澄清、模型选择等只读准备后，在首次真实写入前再次运行 doctor；若锁结论变活跃、无法判定或与首次不同，停止且不写任何文件 | 0.25.4 TOCTOU 尽力收窄 | 首检后启动持锁引擎，再推进到写入点；核对第二次 doctor 被执行且 workspace 零变化 |
 | 19 | Validator 只验证 engine-bound request 指定的 story/AC/Git HEAD，并按 1..N 写 v1 result；缺结果、复用旧文件、错 story/hash/HEAD、漏 AC 或改写 state 任一场景都不得签发凭证 | ADR-015 可信目标绑定 | 正常 pass/fail 各跑一次，再依次注入 missing/stale/mismatch/state-mutation；对账 `validation-claim` 来源、iteration protocol/error、state 回写与 report 红旗 |
+| 20 | 真实 runner 的 provider/认证/网络异常（实证：Claude Code 402）必须保持 state 未通过、跳过 Validator、释放锁，并在 iteration/status/report 留下 outcome、退出码、调用收口耗时与有界原始诊断；成功调用不持久化 transcript | 2026-07-22 Claude/Codex 双 runner dogfood / ADR-016 | fake 402 自动回归；真实失败时对账终端、state、engine.lock、`builderInvocation`/`validatorInvocation`、status 与 report |

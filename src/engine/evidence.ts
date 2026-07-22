@@ -14,6 +14,13 @@ export interface ValidationTargetEvidence {
   gitHead: string | null;
 }
 
+/** 引擎对一次真实 runner 子进程调用的观察；diagnosticTail 只在异常结局持久化。 */
+export interface AgentInvocationEvidence {
+  durationMs: number;
+  exitCode: number | null;
+  diagnosticTail?: string;
+}
+
 export type LoopValidationProtocolErrorCode = ValidationProtocolErrorCode
   | 'state-mutated'
   | 'candidate-not-passing'
@@ -34,6 +41,9 @@ export type EvidenceRecord =
       /** agent 进程结局（异常轮语义，v0.22.0 起）；缺省=该侧未拉起或旧版本记录 */
       builderOutcome?: 'completed' | 'timeout' | 'error';
       validatorOutcome?: 'completed' | 'timeout' | 'error' | 'skipped';
+      /** 实际启动的子进程调用凭证；旧记录/未启动该侧时缺省。 */
+      builderInvocation?: AgentInvocationEvidence;
+      validatorInvocation?: AgentInvocationEvidence;
       /** builder completed 但 state.json 与 progress.md 双无变化（空转轮） */
       noop?: true;
       /** 本轮门禁打回（细节在同轮 gate-run 记录；此处保「每轮一条 iteration」的轮语义） */
@@ -119,6 +129,25 @@ function isBoundedDiagnostic(v: unknown): v is string {
   return typeof v === 'string' && v.length <= EVIDENCE_DIAGNOSTIC_CHARS;
 }
 
+function isInvocationEvidence(v: unknown): v is AgentInvocationEvidence {
+  return isRec(v)
+    && Number.isSafeInteger(v.durationMs) && (v.durationMs as number) >= 0
+    && (v.exitCode === null || Number.isInteger(v.exitCode))
+    && (v.diagnosticTail === undefined
+      || (isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0));
+}
+
+function isInvocationForOutcome(
+  value: unknown,
+  outcome: unknown,
+): value is AgentInvocationEvidence {
+  if (!isInvocationEvidence(value)) return false;
+  if (outcome === 'completed') return value.exitCode === 0 && value.diagnosticTail === undefined;
+  if (outcome === 'timeout') return value.exitCode === null;
+  if (outcome === 'error') return value.exitCode !== 0;
+  return false;
+}
+
 function isBoundedClaimText(v: unknown): v is string {
   return isBoundedDiagnostic(v) && v.trim().length > 0;
 }
@@ -179,6 +208,11 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && typeof v.agentBlocked === 'boolean'
         && (v.builderOutcome === undefined || v.builderOutcome === 'completed' || v.builderOutcome === 'timeout' || v.builderOutcome === 'error')
         && (v.validatorOutcome === undefined || v.validatorOutcome === 'completed' || v.validatorOutcome === 'timeout' || v.validatorOutcome === 'error' || v.validatorOutcome === 'skipped')
+        && (v.builderInvocation === undefined || (v.builderRan === true
+          && isInvocationForOutcome(v.builderInvocation, v.builderOutcome)))
+        && (v.validatorInvocation === undefined || (v.validatorRan === true
+          && v.validatorOutcome !== undefined && v.validatorOutcome !== 'skipped'
+          && isInvocationForOutcome(v.validatorInvocation, v.validatorOutcome)))
         && (v.noop === undefined || v.noop === true)
         && (v.gateRejected === undefined || v.gateRejected === true)
         && (v.abortRollback === undefined || (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string'))

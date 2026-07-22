@@ -486,6 +486,38 @@ describe('renderStatusReport', () => {
     }
   });
 
+  it('最近实际调用展示耗时/退出码，并在文本与 JSON 保留 402 恢复诊断', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'evidence.jsonl'), JSON.stringify({
+        type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z',
+        iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
+        validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+        builderRouteSource: 'runner-default', builderOutcome: 'error',
+        builderInvocation: {
+          durationMs: 4571, exitCode: 1,
+          diagnosticTail: 'API Error: 402 Account overdue',
+        },
+      }) + '\n');
+
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report).text;
+      expect(human).toContain('builder=默认 [runner-default]@第1轮 · error · 4.6s · exit=1');
+      expect(human).toContain('builder 诊断：API Error: 402 Account overdue');
+      const json = JSON.parse(renderStatusJson(report).text);
+      expect(json.recentActual['US-001'].builder).toMatchObject({
+        outcome: 'error',
+        invocation: {
+          durationMs: 4571, exitCode: 1,
+          diagnosticTail: 'API Error: 402 Account overdue',
+        },
+      });
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it('展示最近一次结构化验收绑定与 invalid 原因', () => {
     const ws = makeWorkspace();
     try {

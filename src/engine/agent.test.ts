@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -18,7 +18,9 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
   process.env.CODING_X_CLAUDE_BIN = `node ${fake} ${mode}`;
   try {
     const r = await runAgent({ kind: 'claude', prompt: '', cwd, timeoutMs: 1000 });
-    expect(r).toEqual({ timedOut: true, exitCode: null });
+    expect(r).toMatchObject({ timedOut: true, exitCode: null });
+    expect(r.durationMs).toBeGreaterThanOrEqual(1000);
+    expect(r.outputTail).toBe('');
     childPid = Number(readFileSync(marker, 'utf-8'));
     expect(Number.isSafeInteger(childPid) && childPid > 0).toBe(true);
 
@@ -98,13 +100,49 @@ describe('runAgent', () => {
     const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
     expect(r.timedOut).toBe(false);
     expect(r.exitCode).toBe(0);
+    expect(r.durationMs).toBeGreaterThanOrEqual(0);
+    expect(r.outputTail).toBe('');
     delete process.env.CODING_X_CLAUDE_BIN;
+  });
+
+  it('tees stdout/stderr while returning a bounded diagnostic tail', async () => {
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake} diagnostic`;
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
+      expect(r).toMatchObject({ timedOut: false, exitCode: 1 });
+      expect(r.durationMs).toBeGreaterThanOrEqual(0);
+      expect(r.outputTail).toContain('runner started');
+      expect(r.outputTail).toContain('API Error: 402 Account overdue');
+      expect(stdout.mock.calls.flat().join('')).toContain('runner started');
+      expect(stderr.mock.calls.flat().join('')).toContain('API Error: 402 Account overdue');
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('keeps only the bounded tail of long runner output', async () => {
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake} long-diagnostic`;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
+      expect(r.exitCode).toBe(1);
+      expect(r.outputTail.length).toBeLessThanOrEqual(2000);
+      expect(r.outputTail).toContain('TAIL-END');
+    } finally {
+      stderr.mockRestore();
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
   });
 
   it('resolves timedOut=true and kills a hanging process', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} hang`;
     const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 300 });
     expect(r.timedOut).toBe(true);
+    expect(r.durationMs).toBeGreaterThanOrEqual(300);
     delete process.env.CODING_X_CLAUDE_BIN;
   });
 

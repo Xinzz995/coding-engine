@@ -397,6 +397,23 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('防伪加固属后续评估'); // engine 记录区免责标注（A3，发现 5 裁决）
   });
 
+  it('Agent 调用凭证展示耗时/退出码，并把异常输出按纯文本转义', () => {
+    const html = renderReportHtml(data(ev([{
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z',
+      iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      builderOutcome: 'error',
+      builderInvocation: {
+        durationMs: 4571, exitCode: 1,
+        diagnosticTail: 'API Error: 402 <script>Account overdue</script>',
+      },
+    }])));
+    expect(html).toContain('4.6s · exit 1');
+    expect(html).toContain('Builder 进程输出尾部');
+    expect(html).toContain('API Error: 402 &lt;script&gt;Account overdue&lt;/script&gt;');
+    expect(html).not.toContain('<script>Account overdue</script>');
+  });
+
   it('validator 打回诊断进入时间线且按纯文本转义', () => {
     const html = renderReportHtml(data(ev([{
       type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z',

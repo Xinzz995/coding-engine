@@ -8,7 +8,7 @@ import {
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
 import {
-  readEvidence, type EvidenceRecord, type ValidationTargetEvidence,
+  readEvidence, type AgentInvocationEvidence, type EvidenceRecord, type ValidationTargetEvidence,
   type LoopValidationProtocolErrorCode,
 } from '../engine/evidence.js';
 import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
@@ -17,6 +17,8 @@ export interface RecentModelRoute {
   model: string | null;
   source: ModelRouteSource | null;
   iteration: number;
+  outcome?: 'completed' | 'timeout' | 'error';
+  invocation?: AgentInvocationEvidence;
 }
 
 export interface StoryRecentActual {
@@ -68,6 +70,8 @@ function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentAc
         model: record.builderModel,
         source: record.builderRouteSource ?? null,
         iteration: record.iteration,
+        ...(record.builderOutcome ? { outcome: record.builderOutcome } : {}),
+        ...(record.builderInvocation ? { invocation: record.builderInvocation } : {}),
       };
     }
     if (record.validatorRan) {
@@ -75,6 +79,9 @@ function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentAc
         model: record.validatorModel,
         source: record.validatorRouteSource ?? null,
         iteration: record.iteration,
+        ...(record.validatorOutcome && record.validatorOutcome !== 'skipped'
+          ? { outcome: record.validatorOutcome } : {}),
+        ...(record.validatorInvocation ? { invocation: record.validatorInvocation } : {}),
       };
     }
     recent[record.storyId] = current;
@@ -140,6 +147,11 @@ function markOf(s: StoryView): string {
   return isStoryPassed(s) ? '✅' : s.blocked ? '⛔' : s.passes ? '🟨' : '⬜';
 }
 
+function diagnosticSummary(value: string): string {
+  const singleLine = value.replace(/\s+/g, ' ').trim();
+  return singleLine.length <= 240 ? singleLine : `…${singleLine.slice(-239)}`;
+}
+
 export function renderStatusReport(report: StatusReport): { text: string; exitCode: number } {
   if (report.status === 'missing') {
     return {
@@ -183,9 +195,19 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     const actual = report.recentActual[s.id];
     if (actual?.builder || actual?.validator) {
       const route = (side: RecentModelRoute | undefined) => side
-        ? `${side.model ?? '默认'} [${side.source ?? '来源未知'}]@第${side.iteration}轮`
+        ? `${side.model ?? '默认'} [${side.source ?? '来源未知'}]@第${side.iteration}轮` +
+          `${side.outcome ? ` · ${side.outcome}` : ''}` +
+          `${side.invocation ? ` · ${(side.invocation.durationMs / 1000).toFixed(1)}s` : ''}` +
+          `${side.invocation?.exitCode !== undefined
+            ? ` · exit=${side.invocation.exitCode ?? 'unavailable'}` : ''}`
         : '无';
       lines.push(`      · 最近实际：builder=${route(actual.builder)} · validator=${route(actual.validator)}`);
+      if (actual.builder?.invocation?.diagnosticTail) {
+        lines.push(`      ⚠️ builder 诊断：${diagnosticSummary(actual.builder.invocation.diagnosticTail)}`);
+      }
+      if (actual.validator?.invocation?.diagnosticTail) {
+        lines.push(`      ⚠️ validator 诊断：${diagnosticSummary(actual.validator.invocation.diagnosticTail)}`);
+      }
     }
     const recentValidation = report.recentValidation[s.id];
     if (recentValidation) {

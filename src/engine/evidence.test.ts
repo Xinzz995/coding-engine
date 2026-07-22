@@ -346,3 +346,42 @@ describe('结构化 Validator claim 与协议判定证据', () => {
     expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 4 });
   });
 });
+
+describe('Agent 调用凭证', () => {
+  const base = {
+    type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z', iteration: 1,
+    storyId: 'US-001', builderRan: true, builderModel: null,
+    validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+    builderOutcome: 'error',
+  } as const;
+
+  it('保留 402 的退出码、耗时和有界诊断', () => {
+    const dir = ws();
+    const iteration: EvidenceRecord = {
+      ...base,
+      builderInvocation: {
+        durationMs: 4571,
+        exitCode: 1,
+        diagnosticTail: 'API Error: 402 Account overdue',
+      },
+    };
+    appendEvidence(dir, iteration);
+    expect(readEvidence(dir)).toEqual({ records: [iteration], skippedLines: 0 });
+  });
+
+  it('拒绝负耗时、超限诊断、未运行侧凭证和成功结局诊断', () => {
+    const dir = ws();
+    writeFileSync(join(dir, EVIDENCE_FILE), [
+      { ...base, builderInvocation: { durationMs: -1, exitCode: 1 } },
+      { ...base, builderInvocation: { durationMs: 1, exitCode: 1, diagnosticTail: 'x'.repeat(2001) } },
+      { ...base, validatorInvocation: { durationMs: 1, exitCode: 1 } },
+      {
+        ...base, builderOutcome: 'completed',
+        builderInvocation: { durationMs: 1, exitCode: 0, diagnosticTail: 'success transcript' },
+      },
+      { ...base, builderOutcome: 'completed', builderInvocation: { durationMs: 1, exitCode: 1 } },
+      { ...base, builderOutcome: 'timeout', builderInvocation: { durationMs: 1, exitCode: 1 } },
+    ].map((value) => JSON.stringify(value)).join('\n') + '\n');
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 6 });
+  });
+});

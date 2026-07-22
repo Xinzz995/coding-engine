@@ -34,6 +34,7 @@ scope: root
 - 2026-07-22 workspace 是运行时边界，不是功能提交的一部分：prd-to-json 首次写入前用 `git ls-files` + `git check-ignore --no-index` 检查“已跟踪/未忽略”两种风险，doctor 只读复核；builder 只显式 stage story 文件、检查暂存清单、提交成功后才回写 state/progress。自动化不得替用户修改 `.gitignore`、执行 `git rm --cached` 或重置既有暂存区。
 - 2026-07-22 收口副产物必须沿用主流程已经建立的信任来源：loop 自动报告只消费终轮 PRD guard 返回的冻结快照并显式标注来源，不能在裁决完成后重新读取 agent 可改写的磁盘 PRD；手动报告没有该信任来源，只能标成磁盘读取（ADR-014）。
 - 2026-07-22 会在超时后继续读写 workspace 的子进程调用，Promise 只能在整棵进程树确认退出后结算；POSIX 用独占进程组 SIGTERM→宽限→SIGKILL 并探活确认，Windows 等待 `taskkill /T /F`。agent 与机械门禁必须复用 `process-tree.ts`，禁止一侧等待退出、另一侧只安排延时补杀后立即返回。
+- 2026-07-22 无人值守子进程的错误恢复不能依赖当时终端滚屏：stdout/stderr 用 pipe+tee 保持实时可见，同时只滚动保留统一上限的尾部；duration 必须覆盖超时后的整棵进程树收口。成功 transcript 不持久化，异常尾部才进入 evidence/status/report；provider 的人类可读 token/费用文案不得用正则伪装成稳定计量，需等结构化 adapter 合同（ADR-016）。
 - 2026-07-22 skill 要改写 workspace 前，先通过 doctor 读取工作区锁结论，完成只读准备后在首次真实写入前再次检查；活锁、无法判定或结论变化都保持零写入，陈旧/损坏锁不由 skill 删除。双检查只缩小 TOCTOU 窗口，文案不得把它冒充 O_EXCL 机械互斥。
 - 2026-07-16 把 CLI 传入的 workspace 路径与项目根拼接时用 `resolve` 不用 `join`——`--workspace` 可传绝对路径，`join` 会把已是绝对路径的段原样拼在 root 之下产生不存在的路径，检查类消费方表现为假阴性（doctor 的锁检查「引擎运行中却报无锁」与门禁配置检查同款实翻，0.21.0 终审端到端实测检出）。
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。

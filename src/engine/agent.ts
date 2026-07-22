@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { forceKillProcessTreeOnExit, terminateProcessTree } from './process-tree.js';
+import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 
 export type AgentKind = 'claude' | 'codex' | 'cursor';
 
@@ -36,6 +37,10 @@ export function buildAgentArgs(kind: AgentKind, prompt: string, model?: string):
 export interface RunResult {
   timedOut: boolean;
   exitCode: number | null;
+  /** 从 spawn 前到 runner stdio 关闭的墙钟耗时；超时路径含整棵进程树终止等待。 */
+  durationMs: number;
+  /** stdout/stderr 实时 tee 后保留的有界合并尾部；是否持久化由 loop 按结局决定。 */
+  outputTail: string;
 }
 
 export function runAgent(opts: {
@@ -54,20 +59,34 @@ export function runAgent(opts: {
   const args = [...head.slice(1), ...argv.slice(1)];
 
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawn(cmd, args, {
-      cwd: opts.cwd, stdio: 'inherit', detached: process.platform !== 'win32',
+      cwd: opts.cwd, stdio: ['inherit', 'pipe', 'pipe'], detached: process.platform !== 'win32',
     });
+    let outputTail = '';
+    const keep = (chunk: Buffer | string) => {
+      outputTail = (outputTail + String(chunk)).slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+    };
+    // headless runner 的 stdout/stderr 继续实时可见，同时只滚动保留最近的有界尾部。
+    // 与 gate 的 tee 语义一致；不等待整段输出、不把成功 transcript 持久化。
+    child.stdout?.on('data', (chunk: Buffer) => { process.stdout.write(chunk); keep(chunk); });
+    child.stderr?.on('data', (chunk: Buffer) => { process.stderr.write(chunk); keep(chunk); });
     let settled = false;
     let terminating = false;
     const killOnParentExit = () => forceKillProcessTreeOnExit(child);
     process.once('exit', killOnParentExit);
 
-    const finish = (result: RunResult) => {
+    const finish = (timedOut: boolean, exitCode: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       process.removeListener('exit', killOnParentExit);
-      resolve(result);
+      resolve({
+        timedOut,
+        exitCode,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        outputTail,
+      });
     };
     const fail = (err: unknown) => {
       if (settled) return;
@@ -82,19 +101,21 @@ export function runAgent(opts: {
       if (settled || terminating) return;
       terminating = true;
       void terminateProcessTree(child).then(() => {
-        finish({ timedOut: true, exitCode: null });
+        finish(true, null);
       }, fail);
     }, opts.timeoutMs);
 
-    child.once('exit', (code) => {
+    // close 晚于 exit，保证 pipe 中最后一段 stdout/stderr 已被 tee/采集后再写 evidence。
+    child.once('close', (code) => {
       if (terminating) return;
-      finish({ timedOut: false, exitCode: code });
+      finish(false, code);
     });
 
     child.once('error', (err) => {
       if (terminating) return;
       console.error(`\n❌ Agent 错误: ${err.message}`);
-      finish({ timedOut: false, exitCode: 1 });
+      keep(err.message);
+      finish(false, 1);
     });
   });
 }

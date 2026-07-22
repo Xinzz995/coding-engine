@@ -110,6 +110,10 @@ notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验�
 builder 或 validator 进程以异常结局结束的轮次。结局判定机械三分（completed / timeout / error），只看引擎自己观测的超时信号与退出码，不解析 agent 输出内容（ADR-009）。
 禁用：失败轮、作废轮（异常轮不作废产物——提交与文件保留，走回写待复核）
 
+**Agent 调用凭证**
+引擎对一次真实 Builder/Validator 子进程调用的机械观察：进程树完全收口前的墙钟耗时、退出码，以及仅在异常时保留的有界 stdout/stderr 尾部。输出内容是恢复诊断，不是 provider 事实、账单证明或验收结论。
+禁用：调用日志、执行证明、成本凭证
+
 **空转轮（no-op）**
 builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳过机械门禁与 validator（省一次强模型调用），计入 stall 熔断。
 禁用：空跑轮、无效轮
@@ -127,7 +131,7 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 禁用：完成出口、全绿出口
 
 **证据索引**
-一次运行的结构化证据记录文件（`<workspace>/evidence.jsonl`，append-only 每行一条）：引擎写门禁、轮次、篡改、目标绑定与协议裁决，Validator result 另以 `validation-claim` 保存逐 AC 声明，builder/validator 也可登记截图元数据。`source` 是信任级别标记——engine=机械观察/状态机事实，builder/validator=agent 声明；整个文件仍在 agent 可写区，消费端按来源诚实标注、不假装防伪。
+一次运行的结构化证据记录文件（`<workspace>/evidence.jsonl`，append-only 每行一条）：引擎写门禁、轮次、调用凭证、篡改、目标绑定与协议裁决，Validator result 另以 `validation-claim` 保存逐 AC 声明，builder/validator 也可登记截图元数据。`source` 是信任级别标记——engine=机械观察/状态机事实，builder/validator=agent 声明；整个文件仍在 agent 可写区，消费端按来源诚实标注、不假装防伪。
 禁用：evidence 结构化索引、结构化证据索引（统一用「证据索引」；指文件本身时用 `evidence.jsonl`）
 
 **难度档位（difficulty）**
@@ -160,6 +164,7 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 - builder 把 `passes=true` 作为候选结果；引擎生成 validation request，Validator 提交逐 AC claim，引擎确认目标绑定/协议/state 不变式后才写 verdict 或签发验收凭证；passes 与 validated 同时为 true 才是有效通过
 - 打回递增 retryCount，达到上限转 blocked；全部 story 有效通过或 blocked 即走收敛出口结束循环
 - 异常轮触发回写待复核并计入 stall 熔断；空转轮跳过门禁与 validator、同样计入熔断
+- 每次实际启动的 Builder/Validator 都产生 Agent 调用凭证；status/report 从证据索引恢复耗时、退出码和异常诊断，但不把输出内容当裁决依据
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含人审（/review-loop 产出人审包）与 /compound-docs（沉淀、熵 GC、状态收尾及显式授权后的物理归档）
 - 物理归档把完成态阶段文档从 active 区移入历史冷档案；状态收尾只改 status，不自动构成移动授权

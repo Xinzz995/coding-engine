@@ -198,6 +198,12 @@ function renderDiagnostic(label: string, value: string | undefined): string {
   return `<details class="evidence-diagnostic"><summary>${text(label)}</summary><pre>${text(value)}</pre></details>`;
 }
 
+function invocationMeta(value: { durationMs: number; exitCode: number | null } | undefined): string {
+  if (!value) return '';
+  const exit = value.exitCode === null ? 'exit unavailable' : `exit ${value.exitCode}`;
+  return ` · ${(value.durationMs / 1000).toFixed(1)}s · ${exit}`;
+}
+
 function renderGateHistory(records: EvidenceRecord[]): string {
   const runs = gateRunsOf(records);
   if (runs.length === 0) return '';
@@ -246,13 +252,17 @@ function renderTimeline(records: EvidenceRecord[]): string {
       ? `${r.validationProtocolError.code}: ${r.validationProtocolError.diagnostic}`
       : undefined;
     const flagCell = `${flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—'}` +
+      `${renderDiagnostic('Builder 进程输出尾部', r.builderInvocation?.diagnosticTail)}` +
+      `${renderDiagnostic('Validator 进程输出尾部', r.validatorInvocation?.diagnosticTail)}` +
       `${renderDiagnostic('结构化验收协议错误', protocolDiagnostic)}` +
       `${renderDiagnostic('Validator 打回详情', r.validatorDiagnostic)}`;
     const builder = r.builderRan
-      ? `${text(r.builderModel ?? '默认')} [${text(r.builderRouteSource ?? '来源未知')}]`
+      ? `${text(r.builderModel ?? '默认')} [${text(r.builderRouteSource ?? '来源未知')}]` +
+        invocationMeta(r.builderInvocation)
       : '未跑';
     const validator = r.validatorRan
-      ? `${text(r.validatorModel ?? '默认')} [${text(r.validatorRouteSource ?? '来源未知')}]`
+      ? `${text(r.validatorModel ?? '默认')} [${text(r.validatorRouteSource ?? '来源未知')}]` +
+        invocationMeta(r.validatorInvocation)
       : (r.agentBlocked ? '跳过（agent blocked）' : r.skippedValidator ? '跳过（快照写回失败）' : '未跑');
     return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${text(r.storyDifficulty ?? '—')}</td><td>${builder}</td><td>${validator}</td><td>${flagCell}</td><td>${stampOf(r.at)}</td></tr>`;
   }).join('');

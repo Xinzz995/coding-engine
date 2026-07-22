@@ -1,7 +1,7 @@
 import { join, basename } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
-import { permissionWarning, runAgent, type AgentKind } from './agent.js';
+import { permissionWarning, runAgent, type AgentKind, type RunResult } from './agent.js';
 import { type Prd } from './prd.js';
 import { createPrdGuard } from './prd-guard.js';
 import type { PrdReadResult } from './prd-guard.js';
@@ -23,7 +23,8 @@ import * as dashboard from '../dashboard/server.js';
 import { writeReport } from '../report/report.js';
 import {
   appendEvidence, clipEvidenceDiagnostic, type EvidenceRecord,
-  type LoopValidationProtocolErrorCode, type ValidationTargetEvidence,
+  type AgentInvocationEvidence, type LoopValidationProtocolErrorCode,
+  type ValidationTargetEvidence,
 } from './evidence.js';
 import { acquireLock, LockConflictError, type LockHandle } from './lock.js';
 import {
@@ -203,6 +204,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     };
     const outcomeOf = (r: { timedOut: boolean; exitCode: number | null }): 'completed' | 'timeout' | 'error' =>
       r.timedOut ? 'timeout' : r.exitCode === 0 ? 'completed' : 'error';
+    const invocationOf = (
+      result: RunResult,
+      outcome: 'completed' | 'timeout' | 'error',
+    ): AgentInvocationEvidence => {
+      const diagnostic = outcome === 'completed'
+        ? ''
+        : clipEvidenceDiagnostic(result.outputTail).trim();
+      return {
+        durationMs: result.durationMs,
+        exitCode: result.exitCode,
+        ...(diagnostic ? { diagnosticTail: diagnostic } : {}),
+      };
+    };
     // evidence 是增强不是关键路径：写入失败只 warn（去重一次），绝不影响循环
     let warnedEvidence = false;
     const recordEvidence = (record: EvidenceRecord) => {
@@ -375,6 +389,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         config: preflight.config, story: currentStoryObj,
         escalated: currentStory && beforeState ? (beforeState[currentStory]?.escalated ?? false) : false,
       });
+      let builderInvocation: AgentInvocationEvidence | undefined;
+      let validatorInvocation: AgentInvocationEvidence | undefined;
       // 「每轮一条 iteration」五个写入点的公共底座单源：各点只传差异字段——
       // 0.22.0 轮五点位分四批才靠审查抓齐，字段漂移风险有实证，底座必须只有一份。
       const recordIteration = (over: Partial<Extract<EvidenceRecord, { type: 'iteration' }>>) => {
@@ -386,6 +402,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ...(currentStoryObj?.difficulty ? { storyDifficulty: currentStoryObj.difficulty } : {}),
           ...(routeTampers.length > 0 ? { stateRouteTamper: [...routeTampers] } : {}),
           ...(validationTampers.length > 0 ? { stateValidationTamper: [...validationTampers] } : {}),
+          ...(builderInvocation ? { builderInvocation } : {}),
+          ...(validatorInvocation ? { validatorInvocation } : {}),
           ...over,
         });
       };
@@ -413,6 +431,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           model: builderChoice.model,
         });
         builderOutcome = outcomeOf(dev);
+        builderInvocation = invocationOf(dev, builderOutcome);
         restoreEngineOwnership('builder', beforeState);
         if (builderOutcome !== 'completed') {
           builderRollback = rollbackIfUnvalidatedPass('builder', dev);
@@ -599,6 +618,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             model: validatorModel,
           });
           validatorOutcome = outcomeOf(val);
+          validatorInvocation = invocationOf(val, validatorOutcome);
           const stateRawAfterValidator = rawOf(statePath);
           const validatorOwnership = restoreEngineOwnership('validator', validatorStateBefore);
 

@@ -164,7 +164,15 @@ describe('runLoop structured validation protocol', () => {
       expect(records.find((r) => r.type === 'iteration')).toMatchObject({
         validationProtocol: 'passed', validationReceipt: true,
         validationTarget: { storyId: 'US-001', acceptanceHash: expect.stringMatching(/^sha256:/) },
+        builderInvocation: { durationMs: expect.any(Number), exitCode: 0 },
+        validatorInvocation: { durationMs: expect.any(Number), exitCode: 0 },
       });
+      expect(records.find((r) => r.type === 'iteration')).not.toHaveProperty(
+        'builderInvocation.diagnosticTail',
+      );
+      expect(records.find((r) => r.type === 'iteration')).not.toHaveProperty(
+        'validatorInvocation.diagnosticTail',
+      );
       expect(records.find((r) => r.type === 'validation-claim')).toMatchObject({
         source: 'validator', storyId: 'US-001', verdict: 'passed',
         checks: [{ acIndex: 1, passed: true }, { acIndex: 2, passed: true }],
@@ -2149,6 +2157,36 @@ describe('workspace 并发锁', () => {
 });
 
 describe('异常轮回写（builder 侧）', () => {
+  it('builder provider 402：state 保持未通过，iteration 留退出码/耗时/诊断供报告恢复', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake-402.mjs');
+    writeFileSync(fake, `
+      process.stderr.write('API Error: 402 Account overdue\\n');
+      process.exit(1);
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false, retryCount: 0 });
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        builderOutcome: 'error', validatorRan: false,
+        builderInvocation: {
+          durationMs: expect.any(Number), exitCode: 1,
+          diagnosticTail: 'API Error: 402 Account overdue',
+        },
+      });
+      expect(readFileSync(join(workspace, 'report.html'), 'utf-8'))
+        .toContain('API Error: 402 Account overdue');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('builder 写 true 后非零退出：回写 false+待复核标记，evidence 记 error 结局与回写', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
