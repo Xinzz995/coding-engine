@@ -51,7 +51,39 @@ jobs:
       - name: Build
         run: npm run build
 
+      # 允许 tag workflow 安全重跑：版本已存在时必须证明它就是当前 tag 的产物，
+      # 不能把同版本的其他提交静默当成成功。
+      - name: Check whether npm version already exists
+        id: npm_version
+        shell: bash
+        run: |
+          PACKAGE="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+
+          set +e
+          VIEW_OUTPUT="$(npm view "${PACKAGE}@${VERSION}" version 2>&1)"
+          VIEW_CODE=$?
+          set -e
+
+          if [ "$VIEW_CODE" -eq 0 ]; then
+            PUBLISHED_GIT_HEAD="$(npm view "${PACKAGE}@${VERSION}" gitHead)"
+            if [ "$PUBLISHED_GIT_HEAD" != "$GITHUB_SHA" ]; then
+              echo "::error::${PACKAGE}@${VERSION} 已存在，但 gitHead ${PUBLISHED_GIT_HEAD:-<缺失>} 与当前 tag 提交 $GITHUB_SHA 不一致"
+              exit 1
+            fi
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${PACKAGE}@${VERSION} 已由当前 tag 提交发布，跳过重复 publish"
+          elif [[ "$VIEW_OUTPUT" == *"E404"* ]]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "${PACKAGE}@${VERSION} 尚未发布"
+          else
+            echo "::error::无法确认 ${PACKAGE}@${VERSION} 是否已发布"
+            printf '%s\n' "$VIEW_OUTPUT"
+            exit "$VIEW_CODE"
+          fi
+
       - name: Publish to npm
+        if: steps.npm_version.outputs.exists != 'true'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -71,4 +103,8 @@ jobs:
             COMPARE=""
           fi
           NOTES="$(printf '## 变更\n\n%s\n\n%s\n' "$CHANGES" "$COMPARE")"
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$NOTES"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub Release ${GITHUB_REF_NAME} 已存在，跳过重复创建"
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "$NOTES"
+          fi
