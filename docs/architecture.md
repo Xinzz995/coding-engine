@@ -18,7 +18,7 @@ scope: root
 
 | 模块 | 路径 | 职责 |
 |---|---|---|
-| CLI 入口 | `src/cli.ts` | 参数解析、启动循环/仪表盘，提供 `models` 全局目录查询与 `config path/init/validate` 入口 |
+| CLI 入口 | `src/cli.ts` | 参数解析、启动循环/仪表盘，提供 `models` 全局目录查询与 `config path/init/validate` 入口；`help`/`-h`/`--help` 在子命令校验与任何 workspace/runner 副作用前统一短路 |
 | 主循环 | `src/engine/loop.ts` | Developer ⇄ Validator 迭代；agent 结局机械三分与异常轮处理（no-op 检测、stall 熔断、终轮篡改收口）；validator 正常完成后签发验收凭证；完成判定与收敛出口（ADR-009、ADR-013） |
 | Agent 进程 | `src/engine/agent.ts` | 拉起 claude/codex/cursor 子进程、模型参数与超时控制 |
 | 进程树终止 | `src/engine/process-tree.ts` | agent 与机械门禁共享的跨平台超时收口：POSIX 进程组 SIGTERM→SIGKILL 并确认退出；Windows 等待 `taskkill /T /F`，调用方只在整棵树停止后继续写 workspace |

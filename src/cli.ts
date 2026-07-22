@@ -23,6 +23,8 @@ import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
   command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config';
+  /** 全局帮助请求；先于任何子命令校验与副作用处理。 */
+  help: boolean;
   configAction: 'path' | 'init' | 'validate' | null;
   kind: AgentKind;
   /** 用户是否通过位置参数显式选择 runner；models.runner 自动选择依赖此信息。 */
@@ -42,6 +44,46 @@ export interface CliConfig {
   stallLimit: number;
 }
 
+export const CLI_HELP = `coding-x — Ralph 自动化编码 harness
+
+用法:
+  coding-x [claude|codex|cursor] [选项]
+  coding-x <命令> [选项]
+  coding-x help | --help | -h
+
+runner:
+  claude                         使用 Claude Code（默认）
+  codex                          使用 Codex
+  cursor                         使用 Cursor Agent
+
+命令:
+  repair                         修复 workspace 中的 prd.json/state.json
+  dashboard                      启动只读离线仪表盘
+  doctor                         检查文档、门禁、模型与 workspace 健康度
+  status                         输出 workspace 执行状态
+  report                         生成静态验证报告 report.html
+  models [claude|codex|cursor]   查询全局模型目录
+  config path|init|validate      查看、初始化或校验全局模型配置
+  help                           显示本帮助
+
+选项:
+  --max-iter <n>                 最大迭代轮数（默认 50）
+  --dev-timeout <分钟>           Builder 超时（默认 30）
+  --val-timeout <分钟>           Validator 超时（默认 60）
+  --builder-model <id>           临时覆盖初始 Builder 模型
+  --validator-model <id>         临时覆盖 Validator 模型
+  --escalation-model <id>        临时覆盖升级 Builder 模型
+  --workspace <dir>              workspace 路径（默认 .workspace）
+  --no-open                      不自动打开仪表盘
+  --keep-open                    循环结束后保留仪表盘
+  --port <n>                     仪表盘端口（默认 7331）
+  --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
+  --stale-days <n>               文档过期阈值（默认 30，仅 doctor）
+  --json                         JSON 输出（status/models）
+  -h, --help                     显示本帮助并退出
+
+更多说明: https://github.com/Xinzz995/coding-engine#readme`;
+
 export function parseCliArgs(argv: string[]): CliConfig {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -60,10 +102,12 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'stale-days': { type: 'string' },
       json: { type: 'boolean' },
       'stall-limit': { type: 'string' },
+      help: { type: 'boolean', short: 'h' },
     },
   });
 
   const first = positionals[0];
+  const help = values.help === true || first === 'help';
   const command: CliConfig['command'] =
     first === 'repair' ? 'repair'
     : first === 'dashboard' ? 'dashboard'
@@ -76,20 +120,21 @@ export function parseCliArgs(argv: string[]): CliConfig {
   let configAction: CliConfig['configAction'] = null;
   if (command === 'config') {
     const rawAction = positionals[1];
-    if (rawAction !== 'path' && rawAction !== 'init' && rawAction !== 'validate') {
+    if (rawAction === 'path' || rawAction === 'init' || rawAction === 'validate') {
+      configAction = rawAction;
+    } else if (!help) {
       throw new Error('❌ config 子命令必须是 path、init 或 validate');
     }
-    configAction = rawAction;
   }
-  if (command === 'config' && positionals.length > 2) {
+  if (!help && command === 'config' && positionals.length > 2) {
     throw new Error(`❌ config ${configAction} 不接受额外位置参数`);
   }
   const runnerPositional = command === 'models' ? positionals[1] : first;
-  if (command === 'models' && runnerPositional !== undefined
+  if (!help && command === 'models' && runnerPositional !== undefined
     && runnerPositional !== 'claude' && runnerPositional !== 'codex' && runnerPositional !== 'cursor') {
     throw new Error(`❌ models runner 必须是 claude、codex 或 cursor，收到「${runnerPositional}」`);
   }
-  if (command === 'models' && positionals.length > 2) {
+  if (!help && command === 'models' && positionals.length > 2) {
     throw new Error('❌ models 不接受 runner 以外的额外位置参数');
   }
   const kind: AgentKind = runnerPositional === 'codex' ? 'codex' : runnerPositional === 'cursor' ? 'cursor' : 'claude';
@@ -100,7 +145,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
   if (values['stale-days'] !== undefined) {
     const raw = values['stale-days'];
     // 字面量校验：只接受纯十进制数字串，排除 Number() 会静默接受的 ''/0x10/1e2 等写法
-    if (command === 'doctor' && !/^\d+$/.test(raw)) {
+    if (!help && command === 'doctor' && !/^\d+$/.test(raw)) {
       throw new Error(`❌ --stale-days 必须是非负整数，收到「${raw}」`);
     }
     staleDays = Number(raw);
@@ -109,7 +154,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
   let stallLimit = 3;
   if (values['stall-limit'] !== undefined) {
     const raw = values['stall-limit'];
-    if (command === 'run' && !/^[1-9]\d*$/.test(raw)) {
+    if (!help && command === 'run' && !/^[1-9]\d*$/.test(raw)) {
       throw new Error(`❌ --stall-limit 必须是正整数，收到「${raw}」`);
     }
     stallLimit = Number(raw);
@@ -117,6 +162,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
 
   return {
     command,
+    help,
     configAction,
     kind,
     kindExplicit,
@@ -170,6 +216,11 @@ export async function main(argv: string[]): Promise<number> {
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     return 1;
+  }
+
+  if (cfg.help) {
+    console.log(CLI_HELP);
+    return 0;
   }
 
   if (cfg.command === 'repair') {

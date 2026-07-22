@@ -165,6 +165,72 @@ describe('parseCliArgs', () => {
   it('does not validate --stall-limit outside the run command', () => {
     expect(() => parseCliArgs(['doctor', '--stall-limit', 'abc'])).not.toThrow();
   });
+
+  it('recognizes --help, -h and help before subcommand-specific validation', () => {
+    expect(parseCliArgs(['--help']).help).toBe(true);
+    expect(parseCliArgs(['-h']).help).toBe(true);
+    expect(parseCliArgs(['help']).help).toBe(true);
+    expect(parseCliArgs(['config', '--help']).help).toBe(true);
+    expect(parseCliArgs(['models', 'unknown', '--help']).help).toBe(true);
+  });
+});
+
+describe('main — help', () => {
+  it.each([
+    ['--help'],
+    ['-h'],
+    ['help'],
+    ['config', '--help'],
+  ])('%s prints help to stdout and exits 0', async (...args) => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await main(args)).toBe(0);
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(logSpy.mock.calls[0][0]).toEqual(expect.stringContaining('用法'));
+      expect(errSpy).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  it('lists every command, runner and option in one canonical help view', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['--help'])).toBe(0);
+      const output = String(logSpy.mock.calls[0][0]);
+      for (const token of [
+        'claude', 'codex', 'cursor',
+        'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config',
+        '--max-iter', '--dev-timeout', '--val-timeout', '--builder-model',
+        '--validator-model', '--escalation-model', '--workspace', '--no-open',
+        '--keep-open', '--port', '--stall-limit', '--stale-days', '--json',
+        '--help', '-h',
+      ]) {
+        expect(output, `help 缺少 ${token}`).toContain(token);
+      }
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('does not create workspace/config files or start a runner for help', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-help-'));
+    const workspace = join(dir, 'workspace-that-must-not-exist');
+    const configPath = join(dir, 'config-that-must-not-exist.json');
+    process.env.CODING_X_CONFIG = configPath;
+    process.env.CODING_X_CLAUDE_BIN = join(dir, 'missing-runner');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['--help', '--workspace', workspace])).toBe(0);
+      expect(existsSync(workspace)).toBe(false);
+      expect(existsSync(configPath)).toBe(false);
+    } finally {
+      logSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('main — invalid --stale-days', () => {

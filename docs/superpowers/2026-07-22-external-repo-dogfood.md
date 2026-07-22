@@ -42,6 +42,8 @@ scope: root
 
 `npx --yes coding-x@0.25.4 --help` 稳定退出 1，并输出 `Unknown option '--help'`。这不会影响主链路，但会在首次使用和自动探测时制造不必要摩擦。
 
+后续修复：v0.25.6 增加 `help`、`-h`、`--help` 三个等价入口，在任何 workspace/runner 副作用前退出 0，并用构建产物烟测守卫 npm bin 入口。
+
 ### 2. 成功重试后的失败取证不够完整
 
 `evidence.jsonl` 能记录门禁失败的命令、退出码与轮次，但最终报告对 `US-002` 只保留 `uv run pytest test/unit -q（退出码 1）`，没有保留具体失败测试 `test_llm_qps_guard.py::test_over_cap_rejected` 与断言差异。`US-001` 首次 Validator 的完整失败说明也会随 notes 清理而消失，只因下一轮 Builder 主动写入 progress 才留下摘要。当前报告足以证明“曾失败”，不足以独立复盘“为什么失败”。
@@ -66,4 +68,4 @@ runner 控制台能看到单次 token 统计，例如 `US-003` Builder/Validator
 
 本轮结论是：`coding-x@0.25.4` 已能在外部真实仓库中完成可审计的多轮收敛，Validator 与机械门禁都提供了真实防线；当前没有需要立即追加功能才能继续使用的 correctness 阻断。
 
-暂不进入实现轮。后续若恢复开发，优先级建议为：先补标准 `--help`；再为失败轮持久化最小诊断摘要；最后评估 agent token/耗时总账与正式包离线调用方式。外部代码是否提交上游，交由人工另行决定。
+首项摩擦已由 v0.25.6 的标准帮助入口收口。剩余优先级建议为：先为失败轮持久化最小诊断摘要；再评估 agent token/耗时总账与正式包离线调用方式。外部代码是否提交上游，交由人工另行决定。

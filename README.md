@@ -27,7 +27,7 @@ coding-x 同时是两样东西：
 
 ## 工作原理
 
-引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控；agent 回写结果字段，引擎独占验收凭证与升级状态）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（结构化证据索引：引擎机械记录+agent 截图登记）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理；`state.json` 已存在但损坏时不是迁移信号，report/status/dashboard 会统一把所有 story 按未验证状态显示并提示 repair。
+引擎在项目根目录启动，围绕工作区里的三份文件运转：`prd.json`（需求，运行期只读且被引擎冻结——启动时快照，运行中的磁盘修改会被自动恢复并存档为 `.workspace/prd.tampered-*.json` 供人审；改需求请停引擎 → 修订源 PRD → 重新派生 → 重跑）、`state.json`（执行状态，按 story id 键控；agent 回写结果字段，引擎独占验收凭证与升级状态）和 `progress.md`（进度与学习日志）。0.20.0 起叠加 `evidence.jsonl`（证据索引：引擎机械记录+agent 截图登记）。`prd.json` 是 `docs/prds/` 源 PRD 的派生物：md 是**意图真相源**（人写人审，需求变更改它），`prd.json` + `state.json` 是**执行真相源**（机器与 agent 读写）；需求冲突时以 md 为准重新派生（见 `docs/decisions/003-prd-layered-truth.md`）。旧版 workspace（状态写在 prd.json 里、无 state.json）在 v0.5.0 引擎首次运行时自动抽取迁移，无需手工处理；`state.json` 已存在但损坏时不是迁移信号，report/status/dashboard 会统一把所有 story 按未验证状态显示并提示 repair。
 
 ```
                       npx coding-x
@@ -248,6 +248,7 @@ npx coding-x cursor          # 改用 Cursor Agent
 ### 第 2 步：运行引擎
 
 ```bash
+npx coding-x --help             # 显示完整命令与参数后退出，不读取 workspace 或启动 runner
 npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x cursor             # 改用 Cursor Agent 后端
@@ -287,6 +288,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
+| 位置参数 `help` / `-h, --help` | — | 输出完整用法并退出 0；可放在子命令后（如 `config --help`），不读取 workspace、不获取锁、不启动 runner/dashboard |
 | 位置参数 `claude` / `codex` / `cursor` | — | 显式选择 runner；若 PRD 启用了模型路由，必须与 `models.runner` 一致。未显式指定时优先用 `models.runner`，否则默认 claude |
 | 位置参数 `config path\|init\|validate` | — | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁 |
 | 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
