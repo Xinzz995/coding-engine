@@ -1,6 +1,6 @@
 ---
 title: "引擎验收凭证实施计划"
-status: active
+status: done
 updated: 2026-07-22
 scope: root
 ---
@@ -73,4 +73,4 @@ scope: root
 - `.superpowers/` 已从仓库级 `.gitignore` 移除，当前 clone 改用 `.git/info/exclude`；本地 fixture 未删除。
 - `npm run typecheck` 通过；`npm test -- --silent` 为 24 files / 502 tests 全通过；`npm run build` 通过，`dist/cli.js` 为 135.54 KB；`coding-x doctor` exit 0；`npm pack --dry-run` 确认 0.25.1 发布包仍为既定 8 个文件。
 - 构建产物已在隔离临时 workspace 走完不调用真实模型的 fake-agent smoke：builder 与 validator 各调用一次，run/status/report 均 exit 0，最终 state 为 `passes=true, validated=true`，iteration evidence 含 `validationReceipt:true`，报告显示 `✅ 全部通过 1/1`。
-- 两路独立复审最终无阻断；复审期间发现并修复了跨 story 伪造后未签发 `passes` 跨轮残留的空转问题，以及对应测试可假阳性的缺口。PR、合并与发布尚待登记；上述 smoke 是确定性构建产物链路验证，不声称覆盖真实 provider 网络与 CLI 健康。
+- 两路独立复审最终无阻断；复审期间发现并修复了跨 story 伪造后未签发 `passes` 跨轮残留的空转问题，以及对应测试可假阳性的缺口。核心热修提交为 `5f1bc2b`，交付入口为 GitHub PR #3；合并、`v0.25.1` tag、GitHub Release 与 npm registry 的最终状态以对应外部台账为准。上述 smoke 是确定性构建产物链路验证，不声称覆盖真实 provider 网络与 CLI 健康。
