@@ -71,9 +71,17 @@ export function readQualityChecks(prd: Prd | null): string[] | 'invalid' | null 
 }
 
 /** 每条门禁命令的执行超时（10 分钟）；超时按失败打回，notes 注明 */
-const GATE_TIMEOUT_MS = 600_000;
+export const GATE_TIMEOUT_MS = 600_000;
 
-function runOneCheck(command: string, cwd: string, timeoutMs: number): Promise<GateFailure | null> {
+/**
+ * 执行一条用户批准的完整 shell 命令。普通 qualityChecks 与 TDD coverageCheck
+ * 必须共用这一实现，避免超时、进程树收口和诊断截尾语义漂移。
+ */
+export function runGateCommand(
+  command: string,
+  cwd: string,
+  timeoutMs: number = GATE_TIMEOUT_MS,
+): Promise<GateFailure | null> {
   return new Promise((resolve, reject) => {
     // shell 语义：qualityChecks 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`）。
     // patterns.md 的「不经 shell」约定针对代码拼接固定命令+变量参数的场景，不适用于此。
@@ -130,7 +138,7 @@ export async function runQualityChecks(
   let ran = 0;
   for (const command of checks) {
     ran++;
-    const failed = await runOneCheck(command, cwd, timeoutMs);
+    const failed = await runGateCommand(command, cwd, timeoutMs);
     if (failed) return { ok: false, failure: failed, total: checks.length, ran, ms: Date.now() - started };
   }
   return { ok: true, failure: null, total: checks.length, ran, ms: Date.now() - started };

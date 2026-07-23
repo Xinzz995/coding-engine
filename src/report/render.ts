@@ -6,6 +6,7 @@ import {
 } from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
+import { readTddConfig } from '../engine/tdd-gate.js';
 
 export function escapeHtml(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -183,6 +184,19 @@ function renderGateConfig(data: ReportData): string {
     `<ul class="checks">${checks.map((c) => `<li><code>${escapeHtml(c)}</code></li>`).join('')}</ul>`;
 }
 
+function renderTddConfig(data: ReportData): string {
+  const parsed = readTddConfig(data.prd);
+  if (parsed.status === 'disabled') return '';
+  if (parsed.status === 'invalid') {
+    return `<div class="meta-line warn">TDD 门禁：配置非法（${text(parsed.error)}）</div>`;
+  }
+  const config = parsed.config;
+  return '<div class="meta-line">TDD 门禁：已启用</div>'
+    + `<ul class="checks"><li><code>${text(config.coverageCheck)}</code></li>`
+    + `<li>政策文件 ${config.policyFiles.length} 个 · 生产路径 ${config.sourcePathspecs.length} 个`
+    + ` · 基线 <code>${text(config.baselineRef.slice(0, 12))}</code></li></ul>`;
+}
+
 /** ISO at → 本地 YYYY-MM-DD HH:mm；非法输入原样转义呈现（evidence 是 agent 可写区数据） */
 function stampOf(at: string): string {
   const d = new Date(at);
@@ -214,6 +228,31 @@ function renderGateHistory(records: EvidenceRecord[]): string {
   return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>`;
+}
+
+function renderTddHistory(records: EvidenceRecord[]): string {
+  const runs = records.filter((record): record is Extract<EvidenceRecord, { type: 'tdd-gate' }> =>
+    record.type === 'tdd-gate');
+  if (runs.length === 0) return '';
+  const rows = runs.map((run) => {
+    const phase = run.phase === 'preflight' ? '启动预检' : `第 ${run.iteration} 轮`;
+    const policy = run.policyOk ? '政策通过' : '政策未通过';
+    const command = !run.commandRan
+      ? '未执行'
+      : run.ok ? '覆盖命令通过' : '覆盖命令未通过';
+    const failure = run.ok
+      ? ''
+      : `${text(run.failureCode ?? '')} · ${text(run.failedCommand ?? '')}`
+        + `${run.timedOut ? '（超时）' : run.exitCode !== undefined && run.exitCode !== null ? `（退出码 ${run.exitCode}）` : ''}`
+        + renderDiagnostic('TDD 门禁输出尾部', run.diagnosticTail);
+    return `<tr><td>${phase}</td><td>${text(run.storyId ?? '—')}</td>`
+      + `<td>${run.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${policy}</td><td>${command}</td>`
+      + `<td>${(run.ms / 1000).toFixed(1)}s</td><td>${stampOf(run.at)}</td><td>${failure}</td></tr>`;
+  }).join('');
+  return '<div class="meta-line">TDD 门禁执行历史（engine 记录）：</div>'
+    + '<table class="evidence-table"><thead><tr><th>阶段</th><th>story</th><th>结果</th>'
+    + '<th>政策</th><th>覆盖命令</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead>'
+    + `<tbody>${rows}</tbody></table>`;
 }
 
 function renderTimeline(records: EvidenceRecord[]): string {
@@ -511,7 +550,9 @@ ${prdSource}
 ${stateWarn}
 ${evidenceWarn}
 ${renderGateConfig(data)}
+${renderTddConfig(data)}
 ${renderGateHistory(data.evidence.records)}
+${renderTddHistory(data.evidence.records)}
 ${renderModels(data)}
 <div class="meta-line">统计：${stories.length} story · ${data.screenshots.length} 个截图工件 · ${data.reviews.length} 份人审留痕</div>
 </header>

@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runLoop as runProductionLoop, renderInstruction, type LoopConfig } from './loop.js';
 import { readEvidence } from './evidence.js';
@@ -145,6 +146,19 @@ function strictConfig(workspace: string, instructionsDir: string): LoopConfig {
   return {
     kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
     workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 3,
+  };
+}
+
+function currentRepoTdd(coverageCheck: string): Record<string, unknown> {
+  return {
+    coverageCheck,
+    sourcePathspecs: [':(glob)src/__coding_x_tdd_fixture_only__/**'],
+    policyFiles: [],
+    baselineRef: execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim(),
+    forbiddenAddedPatterns: ['istanbul ignore', 'c8 ignore'],
   };
 }
 
@@ -973,6 +987,99 @@ describe('runLoop quality gate', () => {
   });
 });
 
+describe('runLoop TDD gate', () => {
+  it('fails closed before any agent starts when tdd config is malformed', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      tdd: { coverageCheck: '' },
+    });
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(1);
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('reruns the TDD command after builder, rejects the story, and skips validator', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "process.exit(0)"'],
+      tdd: currentRepoTdd('node -e "console.error(\'coverage 80% < 90%\'); process.exit(7)"'),
+    });
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(1);
+      expect(readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(1);
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
+      expect(state).toMatchObject({ passes: false, retryCount: 1, blocked: false });
+      expect(state.notes).toContain('coverage 80% < 90%');
+      const records = readEvidence(workspace).records;
+      expect(records.filter((record) => record.type === 'tdd-gate')).toHaveLength(2);
+      expect(records.find((record) =>
+        record.type === 'tdd-gate' && record.phase === 'post-builder')).toMatchObject({
+        ok: false,
+        policyOk: true,
+        commandRan: true,
+        failureCode: 'coverage-check-failed',
+        exitCode: 7,
+      });
+      expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+        gateRejected: true,
+        validatorOutcome: 'skipped',
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('passes coding-x workspace and project root to both agents and lets validator run after TDD passes', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      tdd: currentRepoTdd('node -e "process.exit(0)"'),
+    });
+    const fake = join(workspace, 'fake-env.mjs');
+    const calls = join(workspace, 'env-calls.jsonl');
+    writeFileSync(fake, `
+      import { appendFileSync, writeFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, JSON.stringify({
+        workspace: process.env.CODING_X_WORKSPACE,
+        projectRoot: process.env.CODING_X_PROJECT_ROOT,
+      }) + '\\n');
+      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
+        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+      }));
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude', maxIterations: 2, devTimeoutMs: 5000, valTimeoutMs: 5000,
+        workspace, instructionsDir, port: 0, openBrowser: false,
+      })).toBe(0);
+      const envs = readFileSync(calls, 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+      expect(envs).toHaveLength(2);
+      expect(envs).toEqual([
+        { workspace: resolve(workspace), projectRoot: resolve(process.cwd()) },
+        { workspace: resolve(workspace), projectRoot: resolve(process.cwd()) },
+      ]);
+      expect(readEvidence(workspace).records.find((record) =>
+        record.type === 'tdd-gate' && record.phase === 'post-builder')).toMatchObject({
+        ok: true,
+        policyOk: true,
+        commandRan: true,
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+});
+
 describe('runLoop evidence records', () => {
   it('writes gate-run (pass) and iteration records for a completing run', async () => {
     const { workspace, instructionsDir } = setup([story()], {
@@ -1681,6 +1788,13 @@ describe('renderInstruction', () => {
   it('substitutes {{MAX_RETRIES}} with the engine constant', () => {
     const out = renderInstruction('如果 retryCount 已经达到 {{MAX_RETRIES}}：', '.workspace');
     expect(out).toBe('如果 retryCount 已经达到 5：');
+  });
+
+  it('injects the TDD skill reference only when TDD is enabled', () => {
+    expect(renderInstruction('x{{TDD_WORKFLOW}}y', '.workspace', false)).toBe('xy');
+    const enabled = renderInstruction('x{{TDD_WORKFLOW}}y', '.workspace', true);
+    expect(enabled).toContain('`tdd` skill');
+    expect(enabled).toContain('acceptanceCriteria');
   });
 });
 

@@ -14,6 +14,7 @@
    - `blocked: false`
    
    如果该 story 在 `state.json` 的 `notes` 不为空——可能是 Validator 的失败记录、需求变更记录（`[需求已变更]`）或待人工裁决的仲裁记录（{{ARBITRATION_PREFIXES}}）——请先阅读并针对性处理，而不是重新实现。
+{{TDD_WORKFLOW}}
 5. 实现该单个 user story,只实现这一个user story的内容
 6. 运行质量检查（例如，typecheck、lint、test - 使用项目所需的任何工具）
 7. 如果检查通过，先只 stage/commit 本 story 的实现、测试与必要文档：

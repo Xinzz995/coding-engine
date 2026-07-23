@@ -10,6 +10,7 @@ import { readModelRouting } from '../engine/models.js';
 import { tryReadPrd } from '../engine/prd.js';
 import { readQualityChecks } from '../engine/gate.js';
 import { isPidAlive, readLockInfo, LOCK_FILE } from '../engine/lock.js';
+import { checkTddPolicy, readTddConfig } from '../engine/tdd-gate.js';
 
 export interface DoctorIssue {
   file: string;
@@ -59,6 +60,14 @@ export interface GateConfigCheckResult {
   prdFound: boolean;
   /** prd.json 存在时：顶层是否配置了非空合法 qualityChecks */
   configured: boolean;
+}
+
+export interface TddConfigCheckResult {
+  /** 展示用的 workspace/prd.json 路径。 */
+  prdPath: string;
+  status: 'missing' | 'disabled' | 'invalid' | 'ready' | 'policy-error';
+  /** 非空即为必须修复的配置/政策完整性问题；doctor 计入失败。 */
+  issues: DoctorIssue[];
 }
 
 export interface LockCheckResult {
@@ -112,6 +121,7 @@ export interface DoctorReport {
   agentsIndex: AgentsIndexCheckResult | null;
   links: LinksCheckResult | null;
   gate: GateConfigCheckResult;
+  tdd: TddConfigCheckResult;
   modelCatalog: ModelCatalogCheckResult;
   workspaceGit: WorkspaceGitCheckResult;
   lock: LockCheckResult;
@@ -430,12 +440,44 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   const modelCatalog = checkModelCatalog(prdPath, prdRel, modelConfigPath);
   const workspaceGit = checkWorkspaceGitIsolation(root, workspace);
   let gate: GateConfigCheckResult = { prdPath: prdRel, prdFound: false, configured: false };
+  let tdd: TddConfigCheckResult = { prdPath: prdRel, status: 'missing', issues: [] };
   // resolve（非 join）：workspace 可能是绝对路径（如 --workspace 巡检异地目录）；join 会把
   // 已是绝对路径的第二段原样拼在 root 之下产生不存在的路径，resolve 则在遇到绝对路径段时
   // 正确丢弃 root，相对 workspace 的既有行为不变（终审 2026-07-16 发现 1）。
   if (existsSync(prdPath)) {
-    const checks = readQualityChecks(tryReadPrd(prdPath));
+    const prd = tryReadPrd(prdPath);
+    const checks = readQualityChecks(prd);
     gate = { prdPath: prdRel, prdFound: true, configured: Array.isArray(checks) };
+    if (prd === null) {
+      tdd = {
+        prdPath: prdRel,
+        status: 'invalid',
+        issues: [{ file: prdRel, message: 'prd.json 无法解析，不能检查 TDD 政策' }],
+      };
+    } else {
+      const parsed = readTddConfig(prd);
+      if (parsed.status === 'disabled') {
+        tdd = { prdPath: prdRel, status: 'disabled', issues: [] };
+      } else if (parsed.status === 'invalid') {
+        tdd = {
+          prdPath: prdRel,
+          status: 'invalid',
+          issues: [{ file: prdRel, message: parsed.error }],
+        };
+      } else {
+        const policy = checkTddPolicy(parsed.config, root);
+        tdd = policy.ok
+          ? { prdPath: prdRel, status: 'ready', issues: [] }
+          : {
+              prdPath: prdRel,
+              status: 'policy-error',
+              issues: [{
+                file: prdRel,
+                message: policy.failure?.outputTail || 'TDD 政策完整性检查失败',
+              }],
+            };
+      }
+    }
   }
   const lockPath = resolve(root, workspace, LOCK_FILE);
   let lock: LockCheckResult = { found: false, stale: false, pid: null };
@@ -447,7 +489,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
     return {
       docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null,
-      gate, modelCatalog, workspaceGit, lock,
+      gate, tdd, modelCatalog, workspaceGit, lock,
     };
   }
   const files = walkMarkdownFiles(docsDir);
@@ -530,6 +572,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     agentsIndex,
     links: { checked: linksChecked, issues: linkIssues },
     gate,
+    tdd,
     modelCatalog,
     workspaceGit,
     lock,
@@ -544,6 +587,23 @@ function renderGateLines(gate: GateConfigCheckResult): string[] {
     lines.push('  ✅ 已配置 qualityChecks（引擎每轮 builder 后确定性执行）');
   } else {
     lines.push('  💡 建议在 prd.json 顶层配置 qualityChecks（如 ["npm run typecheck", "npm test"]）：引擎将在每轮 builder 之后机械执行、失败确定性打回（建议项，不计失败）');
+  }
+  return lines;
+}
+
+function renderTddLines(result: TddConfigCheckResult): string[] {
+  const lines = ['🧪 TDD 门禁'];
+  if (result.status === 'missing') {
+    lines.push(`  ℹ️  未找到 ${result.prdPath}：已跳过 TDD 配置检查`);
+  } else if (result.status === 'disabled') {
+    lines.push('  ℹ️  未启用；现有普通门禁行为不变');
+  } else if (result.status === 'ready') {
+    lines.push(
+      '  ✅ 配置、Git 基线、政策摘要与新增忽略标记检查通过',
+      '  ℹ️  doctor 未运行覆盖率命令；真实门禁由提交前 hook 与 coding-x 运行时执行',
+    );
+  } else {
+    for (const issue of result.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
   return lines;
 }
@@ -609,11 +669,12 @@ function renderWorkspaceGitLines(result: WorkspaceGitCheckResult): string[] {
 
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
-    const total = report.modelCatalog.issues.length;
+    const total = report.modelCatalog.issues.length + report.tdd.issues.length;
     return {
       text: [
         'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
         '', ...renderGateLines(report.gate),
+        '', ...renderTddLines(report.tdd),
         '', ...renderModelCatalogLines(report.modelCatalog),
         '', ...renderWorkspaceGitLines(report.workspaceGit),
         '', ...renderLockLines(report.lock),
@@ -657,11 +718,12 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
     for (const issue of links.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
   lines.push('', ...renderGateLines(report.gate));
+  lines.push('', ...renderTddLines(report.tdd));
   lines.push('', ...renderModelCatalogLines(report.modelCatalog));
   lines.push('', ...renderWorkspaceGitLines(report.workspaceGit));
   lines.push('', ...renderLockLines(report.lock));
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
-    + report.modelCatalog.issues.length;
+    + report.modelCatalog.issues.length + report.tdd.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
 }

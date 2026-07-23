@@ -1,4 +1,4 @@
-import { join, basename } from 'node:path';
+import { join, basename, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
 import { permissionWarning, runAgent, type AgentKind, type RunResult } from './agent.js';
@@ -35,6 +35,7 @@ import {
   renderValidatorInstruction,
   type ValidationRequest,
 } from './validation-protocol.js';
+import { checkTddPolicy, readTddConfig, runTddGate, type TddConfig } from './tdd-gate.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -85,11 +86,24 @@ function readInstruction(dir: string, file: string): string | null {
 // agent runs at the project root, and cfg.workspace is resolved the same way
 // the engine resolves it (relative to the project root, or absolute), so the
 // agent and engine always share the same prd.json / state.json / progress.md.
-export function renderInstruction(text: string, workspace: string): string {
+const TDD_WORKFLOW_INSTRUCTION = [
+  '',
+  '本轮已启用 TDD。读取并遵循已安装的 `tdd` skill；本 story 的 acceptanceCriteria 已获用户批准，',
+  '把它们作为行为清单逐项完成真实 RED→GREEN→重构。若 acceptanceCriteria 不足以确定公共行为、',
+  '与源码事实冲突或需要新增覆盖排除，使用 [需要人工核实] 并将 story 置 blocked，不自行补意图。',
+  '',
+].join('\n');
+
+export function renderInstruction(
+  text: string,
+  workspace: string,
+  tddEnabled = false,
+): string {
   return text
     .replaceAll('{{WORKSPACE}}', workspace)
     .replaceAll('{{MAX_RETRIES}}', String(MAX_RETRIES))
-    .replaceAll('{{ARBITRATION_PREFIXES}}', ARBITRATION_PREFIXES.join('、'));
+    .replaceAll('{{ARBITRATION_PREFIXES}}', ARBITRATION_PREFIXES.join('、'))
+    .replaceAll('{{TDD_WORKFLOW}}', tddEnabled ? TDD_WORKFLOW_INSTRUCTION : '');
 }
 
 // 运行期读取执行状态；缺失/损坏时按全部未开始处理（绝不覆盖原文件，交给 repair）。
@@ -130,8 +144,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   const guard = createPrdGuard(prdPath);
   const builderRaw = readInstruction(cfg.instructionsDir, 'builder.md');
   const validatorRaw = readInstruction(cfg.instructionsDir, 'validator.md');
-  const builder = builderRaw === null ? null : renderInstruction(builderRaw, cfg.workspace);
-  const validatorBase = validatorRaw === null ? null : renderInstruction(validatorRaw, cfg.workspace);
 
   let server: ReturnType<typeof dashboard.start> | null = null;
   try {
@@ -156,6 +168,62 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         console.warn(`⚠️  检测到未完成 validator 的待验收状态，已回写待复核：${recovered.storyIds.join(', ')}`);
       }
     }
+    const agentCwd = resolve(process.cwd());
+    const agentEnv: NodeJS.ProcessEnv = {
+      CODING_X_WORKSPACE: resolve(cfg.workspace),
+      CODING_X_PROJECT_ROOT: agentCwd,
+    };
+    const tddRead = readTddConfig(bootPrd);
+    let tddConfig: TddConfig | null = null;
+    if (tddRead.status === 'invalid') {
+      const diagnostic = clipEvidenceDiagnostic(tddRead.error);
+      try {
+        appendEvidence(cfg.workspace, {
+          type: 'tdd-gate', source: 'engine', at: new Date().toISOString(),
+          phase: 'preflight', iteration: 0, storyId: null,
+          ok: false, policyOk: false, commandRan: false, ms: 0,
+          failureCode: 'invalid-config', failedCommand: '[tdd-config]',
+          exitCode: null, timedOut: false, diagnosticTail: diagnostic,
+        });
+      } catch (err) {
+        console.warn(`⚠️  TDD 预检 evidence 写入失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+      console.error(`❌ TDD 配置预检失败：${tddRead.error}`);
+      return 1;
+    }
+    if (tddRead.status === 'enabled') {
+      tddConfig = tddRead.config;
+      const policy = checkTddPolicy(tddConfig, agentCwd);
+      const diagnostic = policy.failure
+        ? clipEvidenceDiagnostic(policy.failure.outputTail).trim()
+        : '';
+      try {
+        appendEvidence(cfg.workspace, {
+          type: 'tdd-gate', source: 'engine', at: new Date().toISOString(),
+          phase: 'preflight', iteration: 0, storyId: null,
+          ok: policy.ok, policyOk: policy.ok, commandRan: false, ms: policy.ms,
+          ...(policy.failure ? {
+            failureCode: policy.failure.code,
+            failedCommand: policy.failure.command,
+            exitCode: policy.failure.exitCode,
+            timedOut: policy.failure.timedOut,
+            diagnosticTail: diagnostic || 'TDD 政策预检失败',
+          } : {}),
+        });
+      } catch (err) {
+        console.warn(`⚠️  TDD 预检 evidence 写入失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (!policy.ok) {
+        console.error(`❌ TDD 政策预检失败：${policy.failure!.outputTail}`);
+        return 1;
+      }
+    }
+    const builder = builderRaw === null
+      ? null
+      : renderInstruction(builderRaw, cfg.workspace, tddConfig !== null);
+    const validatorBase = validatorRaw === null
+      ? null
+      : renderInstruction(validatorRaw, cfg.workspace, tddConfig !== null);
     let preflight;
     try {
       preflight = await preflightModelRouting({
@@ -197,7 +265,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // agent resolve '.workspace/prd.json' to <root>/.workspace/.workspace/prd.json,
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
-    const agentCwd = process.cwd();
     const progressPath = join(cfg.workspace, 'progress.md');
     const rawOf = (p: string): string | null => {
       try { return readFileSync(p, 'utf-8'); } catch { return null; }
@@ -428,7 +495,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         );
         const dev = await runAgent({
           kind: runKind, prompt: builder, cwd: agentCwd, timeoutMs: cfg.devTimeoutMs,
-          model: builderChoice.model,
+          model: builderChoice.model, env: agentEnv,
         });
         builderOutcome = outcomeOf(dev);
         builderInvocation = invocationOf(dev, builderOutcome);
@@ -537,6 +604,56 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         }
       }
 
+      // TDD 最终门禁：普通检查之后、Validator 之前重新校验受保护政策面并运行
+      // coverageCheck。它不消费或信任宿主 hook 的结果。
+      if (!agentBlocked && tddConfig && currentStory) {
+        dashboard.setState({
+          phase: 'gating', model: null, routeSource: null,
+          storyDifficulty: currentStoryObj?.difficulty ?? null,
+        });
+        const tddGate = await runTddGate(tddConfig, agentCwd);
+        const diagnostic = tddGate.failure
+          ? clipEvidenceDiagnostic(tddGate.failure.outputTail).trim()
+          : '';
+        recordEvidence({
+          type: 'tdd-gate', source: 'engine', at: new Date().toISOString(),
+          phase: 'post-builder', iteration: i, storyId: currentStory,
+          ok: tddGate.ok, policyOk: tddGate.policyOk,
+          commandRan: tddGate.commandRan, ms: tddGate.ms,
+          ...(tddGate.failure ? {
+            failureCode: tddGate.failure.code,
+            failedCommand: tddGate.failure.command,
+            exitCode: tddGate.failure.exitCode,
+            timedOut: tddGate.failure.timedOut,
+            diagnosticTail: diagnostic || 'TDD 门禁失败',
+          } : {}),
+        });
+        if (!tddGate.ok) {
+          console.error(`\n❌ TDD 门禁未通过（${tddGate.failure!.command}），打回 ${currentStory} 待下轮重试`);
+          const st = tryReadState(statePath);
+          if (st) {
+            const failed = applyGateFailure(st, currentStory, tddGate.failure!, new Date());
+            const enabled = enableEscalation(failed, currentStory, hasDedicatedEscalation);
+            writeFileAtomicSync(statePath, JSON.stringify(enabled.state, null, 2));
+            if (enabled.changed) console.log(`⬆️  ${currentStory} 首次有效失败（gate），下轮起使用 escalation 模型`);
+            recordIteration({
+              ...(builderOutcome ? { builderOutcome } : {}),
+              validatorOutcome: 'skipped', gateRejected: true,
+              ...(enabled.changed ? { escalationTriggeredBy: 'gate' as const } : {}),
+            });
+          } else {
+            console.warn('⚠️  state.json 缺失或不可读，TDD 门禁打回未落盘；若文件损坏请运行 npx coding-x repair');
+          }
+          if (!st) recordIteration({
+            ...(builderOutcome ? { builderOutcome } : {}),
+            validatorOutcome: 'skipped', gateRejected: true,
+          });
+          stallCount = 0;
+          dashboard.setState({ phase: 'idle', model: null, routeSource: null, storyDifficulty: null });
+          continue;
+        }
+      }
+
       // Validator
       const validatorChoice = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: preflight.config });
       const validatorModel = validatorChoice.model;
@@ -615,7 +732,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           validatorActuallyRan = true;
           const val = await runAgent({
             kind: runKind, prompt: validatorPrompt, cwd: agentCwd, timeoutMs: cfg.valTimeoutMs,
-            model: validatorModel,
+            model: validatorModel, env: agentEnv,
           });
           validatorOutcome = outcomeOf(val);
           validatorInvocation = invocationOf(val, validatorOutcome);

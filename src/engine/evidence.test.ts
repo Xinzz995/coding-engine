@@ -347,6 +347,71 @@ describe('结构化 Validator claim 与协议判定证据', () => {
   });
 });
 
+describe('TDD 门禁证据', () => {
+  it('保留启动预检与每轮最终门禁的机械结局', () => {
+    const dir = ws();
+    const preflight: EvidenceRecord = {
+      type: 'tdd-gate',
+      source: 'engine',
+      at: '2026-07-23T01:00:00.000Z',
+      phase: 'preflight',
+      iteration: 0,
+      storyId: null,
+      ok: true,
+      policyOk: true,
+      commandRan: false,
+      ms: 12,
+    };
+    const failed: EvidenceRecord = {
+      type: 'tdd-gate',
+      source: 'engine',
+      at: '2026-07-23T01:01:00.000Z',
+      phase: 'post-builder',
+      iteration: 1,
+      storyId: 'US-001',
+      ok: false,
+      policyOk: true,
+      commandRan: true,
+      ms: 420,
+      failureCode: 'coverage-check-failed',
+      failedCommand: 'npm run coverage',
+      exitCode: 7,
+      timedOut: false,
+      diagnosticTail: 'lines 88% < 90%',
+    };
+    appendEvidence(dir, preflight);
+    appendEvidence(dir, failed);
+    expect(readEvidence(dir)).toEqual({ records: [preflight, failed], skippedLines: 0 });
+  });
+
+  it('拒绝自相矛盾或超限的 TDD 门禁记录', () => {
+    const dir = ws();
+    const base = {
+      type: 'tdd-gate',
+      source: 'engine',
+      at: 'x',
+      phase: 'post-builder',
+      iteration: 1,
+      storyId: 'US-001',
+      ok: false,
+      policyOk: true,
+      commandRan: true,
+      ms: 1,
+      failureCode: 'coverage-check-failed',
+      failedCommand: 'npm test',
+      exitCode: 1,
+      timedOut: false,
+    };
+    writeFileSync(join(dir, EVIDENCE_FILE), [
+      { ...base, ok: true },
+      { ...base, phase: 'unknown' },
+      { ...base, policyOk: false, commandRan: true },
+      { ...base, diagnosticTail: 'x'.repeat(2001) },
+    ].map((value) => JSON.stringify(value)).join('\n') + '\n');
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 4 });
+  });
+});
+
 describe('Agent 调用凭证', () => {
   const base = {
     type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z', iteration: 1,

@@ -102,6 +102,15 @@ describe('parseCliArgs', () => {
     expect(() => parseCliArgs(['config', 'unknown'])).toThrow('config 子命令');
     expect(() => parseCliArgs(['config', 'path', 'extra'])).toThrow('额外位置参数');
   });
+  it('recognizes Cursor hook management and rejects incomplete forms', () => {
+    expect(parseCliArgs(['hooks', 'cursor', 'install']).hooksAction).toBe('install');
+    expect(parseCliArgs(['hooks', 'cursor', 'status']).hooksAction).toBe('status');
+    expect(parseCliArgs(['hooks', 'cursor', 'remove']).hooksAction).toBe('remove');
+    expect(() => parseCliArgs(['hooks'])).toThrow('hooks 子命令');
+    expect(() => parseCliArgs(['hooks', 'claude', 'install'])).toThrow('hooks 子命令');
+    expect(() => parseCliArgs(['hooks', 'cursor', 'unknown'])).toThrow('hooks 子命令');
+    expect(() => parseCliArgs(['hooks', 'cursor', 'install', 'extra'])).toThrow('额外位置参数');
+  });
   it('passes --workspace through to the report subcommand', () => {
     expect(parseCliArgs(['report', '--workspace', 'ws-x']).workspace).toBe('ws-x');
   });
@@ -202,7 +211,7 @@ describe('main — help', () => {
       const output = String(logSpy.mock.calls[0][0]);
       for (const token of [
         'claude', 'codex', 'cursor',
-        'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config',
+        'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config', 'hooks cursor',
         '--max-iter', '--dev-timeout', '--val-timeout', '--builder-model',
         '--validator-model', '--escalation-model', '--workspace', '--no-open',
         '--keep-open', '--port', '--stall-limit', '--stale-days', '--json',

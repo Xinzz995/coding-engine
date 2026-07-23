@@ -1,7 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { buildAgentArgs, resolveBinary, runAgent } from './agent.js';
 
@@ -59,9 +66,16 @@ describe('buildAgentArgs', () => {
     ]);
   });
   it('builds cursor headless force command', () => {
-    expect(buildAgentArgs('cursor', 'P')).toEqual([
-      'cursor-agent', '-p', '--force', 'P',
-    ]);
+    const original = process.env.CODING_X_CURSOR_BIN;
+    process.env.CODING_X_CURSOR_BIN = 'agent';
+    try {
+      expect(buildAgentArgs('cursor', 'P')).toEqual([
+        'agent', '-p', '--force', 'P',
+      ]);
+    } finally {
+      if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
+      else process.env.CODING_X_CURSOR_BIN = original;
+    }
   });
   it('appends --model before the prompt for claude when a model is given', () => {
     expect(buildAgentArgs('claude', 'P', 'opus')).toEqual([
@@ -74,9 +88,16 @@ describe('buildAgentArgs', () => {
     ]);
   });
   it('appends --model before the prompt for cursor when a model is given', () => {
-    expect(buildAgentArgs('cursor', 'P', 'composer-1')).toEqual([
-      'cursor-agent', '-p', '--force', '--model', 'composer-1', 'P',
-    ]);
+    const original = process.env.CODING_X_CURSOR_BIN;
+    process.env.CODING_X_CURSOR_BIN = 'agent';
+    try {
+      expect(buildAgentArgs('cursor', 'P', 'composer-1')).toEqual([
+        'agent', '-p', '--force', '--model', 'composer-1', 'P',
+      ]);
+    } finally {
+      if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
+      else process.env.CODING_X_CURSOR_BIN = original;
+    }
   });
 });
 
@@ -92,9 +113,72 @@ describe('resolveBinary', () => {
     delete process.env.CODING_X_CODEX_BIN;
     delete process.env.CODING_X_CURSOR_BIN;
   });
+
+  it('supports the current agent command and the legacy cursor-agent command without configuration', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x-cursor-bin-'));
+    const originalPath = process.env.PATH;
+    const originalOverride = process.env.CODING_X_CURSOR_BIN;
+    delete process.env.CODING_X_CURSOR_BIN;
+    try {
+      process.env.PATH = dir;
+      expect(resolveBinary('cursor')).toBe('agent');
+
+      const current = join(dir, 'agent');
+      writeFileSync(current, '#!/bin/sh\n');
+      chmodSync(current, 0o755);
+      expect(resolveBinary('cursor')).toBe('agent');
+
+      const legacy = join(dir, 'cursor-agent');
+      writeFileSync(legacy, '#!/bin/sh\n');
+      chmodSync(legacy, 0o755);
+      expect(resolveBinary('cursor')).toBe('cursor-agent');
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalOverride === undefined) delete process.env.CODING_X_CURSOR_BIN;
+      else process.env.CODING_X_CURSOR_BIN = originalOverride;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('runAgent', () => {
+  it('merges explicit coding-x context into the child environment', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-env-'));
+    const script = join(cwd, 'capture-env.mjs');
+    const output = join(cwd, 'env.json');
+    const originalBin = process.env.CODING_X_CLAUDE_BIN;
+    writeFileSync(script, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(output)}, JSON.stringify({
+        workspace: process.env.CODING_X_WORKSPACE,
+        projectRoot: process.env.CODING_X_PROJECT_ROOT,
+      }));
+    `);
+    process.env.CODING_X_CLAUDE_BIN = `node ${script}`;
+    try {
+      const result = await runAgent({
+        kind: 'claude',
+        prompt: '',
+        cwd,
+        timeoutMs: 5000,
+        env: {
+          CODING_X_WORKSPACE: '/tmp/custom workspace',
+          CODING_X_PROJECT_ROOT: '/tmp/project root',
+        },
+      });
+      expect(result).toMatchObject({ timedOut: false, exitCode: 0 });
+      expect(JSON.parse(readFileSync(output, 'utf8'))).toEqual({
+        workspace: '/tmp/custom workspace',
+        projectRoot: '/tmp/project root',
+      });
+    } finally {
+      if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+      else process.env.CODING_X_CLAUDE_BIN = originalBin;
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('resolves timedOut=false when the process exits in time', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} ok`;
     const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });

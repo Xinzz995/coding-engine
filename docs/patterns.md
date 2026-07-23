@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-07-22
+updated: 2026-07-23
 scope: root
 ---
 
@@ -40,6 +40,10 @@ scope: root
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。
 - 2026-07-20 引擎对 agent 的一切判定只消费机械信号：进程结局按超时标志与退出码三分（completed/timeout/error），产物变化按轮首/轮后内容字符串对比（不 parse）——agent 自己声明的「做完了」不可信，与机械门禁不可共谋同源（见 loop.ts `outcomeOf` 与 no-op 双无变化判定；ADR-009）。给判定加新维度时先自问是否仍是引擎自己观测的确定性事实。
 - 2026-07-20 给循环体新增「每轮必做」的收口逻辑（留痕、篡改检测、收敛判定）时，先枚举退出点全集——continue、break、快路径 return，以及循环自然耗尽这个隐式出口——再抽 helper 单源逐点接入；枚举必须在 plan 阶段完成，不能靠 review 逐个数（0.22.0 实证：终轮篡改检测五个点位分四批才收齐，每处都是审查抓漏；见 `tamperCheckBeforeExit` 四调用点+post-loop 收口、`convergedExit` 两出口单源）。
+- 2026-07-23 开发过程约束与最终机械结论必须分层：TDD skill 的 RED/GREEN 顺序只能形成可复核的 agent 声明；宿主 hook 只给提交前反馈；引擎必须在 Validator 前独立重跑冻结政策下的 coverageCheck，不能复用 hook 通过结论或从 Git 时间推断“先写测试”（ADR-017）。
+- 2026-07-23 把项目原生命令升级为安全门禁时，冻结的不能只有命令字符串：同时枚举并摘要保护阈值、排除、零测试、基线和 diff-coverage 委托文件，限制 realpath 在项目根内，再检查基线后生产路径新增的 ignore marker。摘要能发现常见政策漂移，但同权限工具链仍不防伪，文案不得越界（见 `tdd-gate.ts`、ADR-017）。
+- 2026-07-23 宿主 hook 读取外部 workspace 时必须与项目根成对绑定：只有绝对 `CODING_X_WORKSPACE` 搭配 canonical `CODING_X_PROJECT_ROOT` 且后者等于当前 Git 根才采用，否则回退 `<git-root>/.workspace`；禁止单独信任会跨项目遗留的 workspace 环境变量。
+- 2026-07-23 runner 的“插件发现”与“hook 实际调用”必须分层实测，不能由清单 schema 推断接线成功：Cursor Agent CLI `2026.07.20-8cc9c0b` 能通过插件目录发现能力，但提交前执行器实际读取项目根 `.cursor/hooks.json`；且 `failClosed` 下成功脚本必须输出原生明确放行 JSON，空 stdout 会被当作失败。对这种宿主差异使用显式、可逆的项目适配器，复制构建产物避免提交时依赖机器路径或联网，并保留引擎最终门禁（ADR-017）。
 
 ## 陷阱
 

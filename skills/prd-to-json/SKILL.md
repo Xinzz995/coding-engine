@@ -47,6 +47,18 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
   "branchName": "ralph/[feature-name-kebab-case]",
   "sourcePrd": "docs/prds/prd-[feature-name].md",
   "qualityChecks": ["npm run typecheck", "npm test"],
+  "tdd": {
+    "coverageCheck": "node scripts/tdd-coverage-gate.mjs",
+    "sourcePathspecs": [":(glob)src/**"],
+    "policyFiles": [
+      {
+        "path": "scripts/tdd-coverage-gate.mjs",
+        "sha256": "<64 位小写十六进制 SHA-256>"
+      }
+    ],
+    "baselineRef": "<完整 Git commit id>",
+    "forbiddenAddedPatterns": ["istanbul ignore", "c8 ignore"]
+  },
   "models": {
     "runner": "codex",
     "builder": { "low": "model-low", "medium": "model-medium", "high": "model-high" },
@@ -86,6 +98,74 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 - 廉价检查放前面（typecheck → lint → test）：fail-fast 下失败得更早
 - 把候选命令随转换对照表一并呈现，请用户确认
 - 提取不到可靠命令时省略该字段（门禁不启用），不要编造
+
+---
+
+## tdd：测试先行与可验证覆盖率（可选配置）
+
+stories 和普通 `qualityChecks` 定稿后，必须明确询问用户是否启用 TDD。用户不启用时完全
+省略 `tdd`；不能根据 PRD 中出现“测试”一词自动开启。启用时按下面顺序一次完成发现、
+确认和真实基线，不能只写一个看起来合理的命令：
+
+1. 确认这是新项目或存量项目。不能从年龄、文件数量或 Git 历史长度猜；把现有生产代码与
+   已有覆盖率政策的证据呈现给用户裁决。
+2. 从项目配置、测试脚本和覆盖率工具中提取真实候选，确认测试框架、覆盖率提供者、分支
+   覆盖率是否开启、零测试时是否返回非零，以及排除项从哪里读取。提取不到就停止；不得编造
+   `coverageCheck`，也不使用 AI 判断测试是否有意义来替代机械命令。
+3. 提议一组完整配置：
+   - `coverageCheck`：项目原生、可直接运行的完整命令；它必须自行保证工具缺失、零测试、
+     覆盖不足和总体回退时返回非零；
+   - `sourcePathspecs`：只覆盖生产代码的非空 Git pathspec，且与覆盖命令统计范围对齐；
+   - `policyFiles`：覆盖命令委托的阈值、排除、零测试、基线与差异覆盖脚本/配置；完全写在
+     `coverageCheck` 中时可以是空数组；
+   - `baselineRef`：`git rev-parse HEAD^{commit}` 得到的完整 commit id；
+   - `forbiddenAddedPatterns`：目标覆盖工具能关闭统计的行级忽略语法，按不区分大小写的
+     字面量列出。
+4. 把项目类型、完整命令、生产路径、受保护文件、完整基线和禁止标记合成一张表，请用户
+   **一次确认**。不能把阈值、排除或零测试策略拆给 agent 在运行时自行决定。
+5. 用户确认后、写入前，在项目根真实运行原样的 `coverageCheck`。同时核对输出和产物，
+   确认真正执行了至少一个测试、统计了分支覆盖率、阈值和排除符合已批准政策。命令仅返回
+   0 但没有测试，不能视为有效基线。
+6. 对每个 `policyFiles.path` 解析真实路径，确认仍在 Git 根内，再计算文件字节的 `sha256`；
+   摘要必须是 64 位小写十六进制。最后再次运行写入前的锁与 Git 隔离检查，再写入。
+
+默认政策：
+
+- 新项目：行覆盖率与分支覆盖率都不低于 90%，零测试失败。
+- 存量项目：总体行/分支覆盖率不低于启用基线，新增/改动可执行行覆盖率不低于 90%，
+  零测试失败。启用基线的数字与比较逻辑必须进入受保护政策文件。
+
+用户可以在启用前批准不同政策，但转换 skill 不得自行降低阈值、不得自行扩大排除，也不得
+允许零测试。运行中若需要改变 `coverageCheck`、阈值、排除、基线、生产路径、禁止标记或
+任一政策文件，停止当前运行并请用户批准后重新派生；不能只重算摘要让变化静默生效。
+
+`coverageCheck` 已经运行全量测试时，不要再把同一测试命令放进 `qualityChecks` 重复执行；
+后者保留 typecheck、lint 等普通检查。TDD 是项目级机械门禁，不替代每个 story 的行为 AC。
+
+若项目将使用 Cursor Agent，写入 TDD 配置后只提醒用户在项目根运行
+`npx coding-x hooks cursor install` 和 `npx coding-x hooks cursor status`。本 skill 不自动安装；
+升级 coding-x 后需重新运行 install 刷新，撤销时运行 `npx coding-x hooks cursor remove`。
+这些命令不修改 Git hooks，也不暂存或提交 `.cursor/` 文件。
+
+配置一旦出现，五个字段必须全部存在：
+
+```json
+"tdd": {
+  "coverageCheck": "node scripts/tdd-coverage-gate.mjs",
+  "sourcePathspecs": [":(glob)src/**"],
+  "policyFiles": [
+    {
+      "path": "scripts/tdd-coverage-gate.mjs",
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+  ],
+  "baselineRef": "0123456789abcdef0123456789abcdef01234567",
+  "forbiddenAddedPatterns": ["istanbul ignore", "c8 ignore"]
+}
+```
+
+首版 TDD 保护依赖 Git 基线；不在 Git worktree、没有可达 commit 或基线本身未通过时，不写
+`tdd`，向用户说明准确阻碍。不要降级成一份未验证配置。
 
 ---
 
@@ -334,7 +414,8 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
 8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
 9. **qualityChecks 提取**：按上方「qualityChecks」节从目标项目提取候选并请用户确认；提取不到可靠命令时省略该字段
-10. **models 路由（可选）**：只在 stories 定稿后按上方「models」节处理；用户不启用时省略整段及所有 story 难度字段
+10. **tdd 门禁（可选）**：只在用户明确启用、一次确认完整政策且真实基线通过后写入；否则省略整个字段
+11. **models 路由（可选）**：只在 stories 定稿后按上方「models」节处理；用户不启用时省略整段及所有 story 难度字段
 
 ### 转换时的增强规则
 
@@ -518,6 +599,9 @@ Add ability to mark tasks with different statuses.
    - runner 变化、任一模型被移出目录、目录读取失败，或用户明确要求重配 → 停止保留，重新走目录选择与五道选择题；目录失败时不得退回历史列表或会话内临时列表
    - story 内容无实质变化 → 保留原 `difficulty` 与 `difficultyReason`，包括用户事后修正
    - story 内容有实质变化 → 按固定规则重新评估；用户可明确要求全量重新评估
+    - 原 `tdd` 配置与本次仓库事实完全一致且政策文件摘要未变 → 原样保留；任何命令、路径、
+      阈值、排除、基线、禁止标记或摘要变化都必须重新走 TDD 一次确认与真实基线，不能静默
+      更新摘要
 3. 若 `state.json` 存在，先把旧 state 缺失的 `validated` 按同条 `passes` 理解、缺失的 `escalated` 按 `false` 理解，再按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
    - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
    - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 与 validated 置 `false`、retryCount 置 `0`、blocked 置 `false`、escalated 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）
@@ -551,6 +635,9 @@ Add ability to mark tasks with different statuses.
 - [ ] story 不含任何状态字段（passes/validated/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] qualityChecks 已配置时：写入前逐条真实跑一遍、确认当前基线全绿——命令不存在、命令写错、基线本来就红，都必须在这里（有人在场的派生环节）拦截，否则 builder 会在循环里白烧 5 轮到 blocked；基线绿同时保证循环中门禁失败必然是 builder 引入的
+- [ ] tdd 已配置时：用户明确选择启用并确认新项目或存量项目；`coverageCheck` 已真实运行且至少执行一个测试、统计分支覆盖率、按批准阈值返回；`sourcePathspecs` 与覆盖范围一致；完整 `baselineRef` 可达；每个政策文件在 Git 根内且 `sha256` 与当前字节匹配；禁止标记已按目标工具确认
+- [ ] tdd 已配置且将使用 Cursor Agent 时：已提醒用户显式运行 `npx coding-x hooks cursor install` 与 `npx coding-x hooks cursor status`；转换过程未自动安装
+- [ ] tdd 未配置时：整个字段已省略；没有留下半套或未经基线验证的配置
 - [ ] models 已配置时：runner 已确认；五个模型 ID 全部由用户从该 runner 的全局模型目录选择；每个 story 都有 low/medium/high 与含规则编号、仓库路径的非空理由
 - [ ] models 未配置时：所有 story 都没有 difficulty/difficultyReason，避免半套配置
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新

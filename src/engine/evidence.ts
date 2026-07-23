@@ -27,6 +27,21 @@ export type LoopValidationProtocolErrorCode = ValidationProtocolErrorCode
   | 'result-cleanup-failed'
   | 'agent-aborted';
 
+export type TddEvidenceFailureCode =
+  | 'invalid-config'
+  | 'project-root-unreadable'
+  | 'git-unavailable'
+  | 'git-root-mismatch'
+  | 'baseline-unreachable'
+  | 'policy-file-missing'
+  | 'policy-file-outside-root'
+  | 'policy-file-duplicate-target'
+  | 'policy-file-unreadable'
+  | 'policy-hash-mismatch'
+  | 'source-scan-failed'
+  | 'forbidden-pattern-added'
+  | 'coverage-check-failed';
+
 /**
  * evidence.jsonl 的记录 schema 单源（判别联合）。append-only、每行一条独立 JSON：
  * 坏行只损失自己（agent 写坏一行不毁全文件），行序即事件序。
@@ -87,6 +102,11 @@ export type EvidenceRecord =
       failedCommand?: string; exitCode?: number | null; timedOut?: boolean;
       /** 失败命令 stdout/stderr 合并输出的尾部；有界保存。 */
       diagnosticTail?: string }
+  | { type: 'tdd-gate'; source: 'engine'; at: string;
+      phase: 'preflight' | 'post-builder'; iteration: number; storyId: string | null;
+      ok: boolean; policyOk: boolean; commandRan: boolean; ms: number;
+      failureCode?: TddEvidenceFailureCode; failedCommand?: string;
+      exitCode?: number | null; timedOut?: boolean; diagnosticTail?: string }
   | { type: 'tamper'; source: 'engine'; at: string; iteration: number; archive: string | null }
   | { type: 'validation-claim'; source: 'validator'; at: string; iteration: number;
       requestId: string; storyId: string; acceptanceHash: string; gitHead: string | null;
@@ -186,6 +206,16 @@ function isValidationProtocolError(v: unknown): boolean {
   return isRec(v) && isValidationProtocolErrorCode(v.code) && isBoundedDiagnostic(v.diagnostic);
 }
 
+function isTddFailureCode(v: unknown): v is TddEvidenceFailureCode {
+  return v === 'invalid-config' || v === 'project-root-unreadable'
+    || v === 'git-unavailable' || v === 'git-root-mismatch'
+    || v === 'baseline-unreachable' || v === 'policy-file-missing'
+    || v === 'policy-file-outside-root' || v === 'policy-file-duplicate-target'
+    || v === 'policy-file-unreadable' || v === 'policy-hash-mismatch'
+    || v === 'source-scan-failed' || v === 'forbidden-pattern-added'
+    || v === 'coverage-check-failed';
+}
+
 function isValidationChecks(v: unknown): v is ValidationCheck[] {
   return Array.isArray(v) && v.every((check, index) => isRec(check)
     && check.acIndex === index + 1
@@ -242,6 +272,37 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (v.exitCode === undefined || v.exitCode === null || typeof v.exitCode === 'number')
         && (v.timedOut === undefined || typeof v.timedOut === 'boolean')
         && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
+    case 'tdd-gate': {
+      const base = v.source === 'engine'
+        && (v.phase === 'preflight' || v.phase === 'post-builder')
+        && Number.isSafeInteger(v.iteration) && (v.iteration as number) >= 0
+        && (typeof v.storyId === 'string' || v.storyId === null)
+        && typeof v.ok === 'boolean' && typeof v.policyOk === 'boolean'
+        && typeof v.commandRan === 'boolean'
+        && Number.isSafeInteger(v.ms) && (v.ms as number) >= 0
+        && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
+      if (!base) return false;
+      if (v.phase === 'preflight' && (v.iteration !== 0 || v.storyId !== null || v.commandRan !== false)) {
+        return false;
+      }
+      if (v.phase === 'post-builder' && (v.iteration === 0 || typeof v.storyId !== 'string')) {
+        return false;
+      }
+      if (v.ok) {
+        return v.policyOk === true
+          && (v.phase === 'preflight' ? v.commandRan === false : v.commandRan === true)
+          && v.failureCode === undefined && v.failedCommand === undefined
+          && v.exitCode === undefined && v.timedOut === undefined
+          && v.diagnosticTail === undefined;
+      }
+      return isTddFailureCode(v.failureCode)
+        && typeof v.failedCommand === 'string' && v.failedCommand.length > 0
+        && (v.exitCode === null || typeof v.exitCode === 'number')
+        && typeof v.timedOut === 'boolean'
+        && isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0
+        && !(v.policyOk === false && v.commandRan === true)
+        && !(v.phase === 'preflight' && v.policyOk === true);
+    }
     case 'tamper':
       return v.source === 'engine' && typeof v.iteration === 'number'
         && (typeof v.archive === 'string' || v.archive === null);

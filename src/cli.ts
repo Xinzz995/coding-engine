@@ -19,13 +19,18 @@ import {
   renderModelCatalogText,
   resolveGlobalConfigPath,
 } from './engine/model-catalog.js';
+import {
+  runCursorHookAction,
+  type CursorHookAction,
+} from './cursor-hooks.js';
 import * as dashboard from './dashboard/server.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config' | 'hooks';
   /** 全局帮助请求；先于任何子命令校验与副作用处理。 */
   help: boolean;
   configAction: 'path' | 'init' | 'validate' | null;
+  hooksAction: CursorHookAction | null;
   kind: AgentKind;
   /** 用户是否通过位置参数显式选择 runner；models.runner 自动选择依赖此信息。 */
   kindExplicit: boolean;
@@ -64,6 +69,8 @@ runner:
   report                         生成静态验证报告 report.html
   models [claude|codex|cursor]   查询全局模型目录
   config path|init|validate      查看、初始化或校验全局模型配置
+  hooks cursor install|status|remove
+                                 安装、检查或移除当前项目的 Cursor TDD 提交前检查
   help                           显示本帮助
 
 选项:
@@ -116,6 +123,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     : first === 'report' ? 'report'
     : first === 'models' ? 'models'
     : first === 'config' ? 'config'
+    : first === 'hooks' ? 'hooks'
     : 'run';
   let configAction: CliConfig['configAction'] = null;
   if (command === 'config') {
@@ -128,6 +136,20 @@ export function parseCliArgs(argv: string[]): CliConfig {
   }
   if (!help && command === 'config' && positionals.length > 2) {
     throw new Error(`❌ config ${configAction} 不接受额外位置参数`);
+  }
+  let hooksAction: CursorHookAction | null = null;
+  if (command === 'hooks') {
+    const host = positionals[1];
+    const rawAction = positionals[2];
+    if (host === 'cursor'
+        && (rawAction === 'install' || rawAction === 'status' || rawAction === 'remove')) {
+      hooksAction = rawAction;
+    } else if (!help) {
+      throw new Error('❌ hooks 子命令必须是 cursor install、cursor status 或 cursor remove');
+    }
+  }
+  if (!help && command === 'hooks' && positionals.length > 3) {
+    throw new Error(`❌ hooks cursor ${hooksAction} 不接受额外位置参数`);
   }
   const runnerPositional = command === 'models' ? positionals[1] : first;
   if (!help && command === 'models' && runnerPositional !== undefined
@@ -164,6 +186,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     command,
     help,
     configAction,
+    hooksAction,
     kind,
     kindExplicit,
     maxIterations: values['max-iter'] ? Number(values['max-iter']) : 50,
@@ -221,6 +244,23 @@ export async function main(argv: string[]): Promise<number> {
   if (cfg.help) {
     console.log(CLI_HELP);
     return 0;
+  }
+
+  if (cfg.command === 'hooks') {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const bundledCandidates = [
+      join(here, 'hooks', 'tdd-commit-check.mjs'),
+      join(here, '..', 'hooks', 'tdd-commit-check.mjs'),
+    ];
+    const bundle = bundledCandidates.find((candidate) => existsSync(candidate))
+      ?? bundledCandidates[0];
+    const hookResult = runCursorHookAction(cfg.hooksAction!, {
+      root: process.cwd(),
+      bundle,
+    });
+    if (hookResult.exitCode === 0) console.log(hookResult.message);
+    else console.error(hookResult.message);
+    return hookResult.exitCode;
   }
 
   if (cfg.command === 'repair') {

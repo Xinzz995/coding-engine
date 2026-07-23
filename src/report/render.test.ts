@@ -323,6 +323,38 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('防伪加固属后续评估'); // engine 记录区免责标注（A3，发现 5 裁决）
   });
 
+  it('TDD 配置与最终门禁历史明确区分政策完整性和覆盖命令', () => {
+    const input = data(ev([
+      {
+        type: 'tdd-gate', source: 'engine', at: '2026-07-23T06:00:00.000Z',
+        phase: 'preflight', iteration: 0, storyId: null,
+        ok: true, policyOk: true, commandRan: false, ms: 10,
+      },
+      {
+        type: 'tdd-gate', source: 'engine', at: '2026-07-23T06:10:00.000Z',
+        phase: 'post-builder', iteration: 1, storyId: 'US-001',
+        ok: false, policyOk: true, commandRan: true, ms: 500,
+        failureCode: 'coverage-check-failed', failedCommand: 'npm run coverage',
+        exitCode: 7, timedOut: false, diagnosticTail: 'branch 80% < 90%',
+      },
+    ]));
+    input.prd.tdd = {
+      coverageCheck: 'npm run coverage',
+      sourcePathspecs: [':(glob)src/**'],
+      policyFiles: [{ path: 'vitest.config.ts', sha256: 'a'.repeat(64) }],
+      baselineRef: 'b'.repeat(40),
+      forbiddenAddedPatterns: ['c8 ignore'],
+    };
+    const html = renderReportHtml(input);
+    expect(html).toContain('TDD 门禁：已启用');
+    expect(html).toContain('npm run coverage');
+    expect(html).toContain('TDD 门禁执行历史');
+    expect(html).toContain('启动预检');
+    expect(html).toContain('政策通过');
+    expect(html).toContain('覆盖命令未通过');
+    expect(html).toContain('branch 80% &lt; 90%');
+  });
+
   it('claim 按 acIndex（1 起）挂到对应 AC 并带 agent 声明标注与免责行', () => {
     const html = renderReportHtml(data(ev([
       { type: 'screenshot-claim', source: 'validator', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'validator-us-001-pass-1.png', acIndex: 1, note: '页面打开成功' },

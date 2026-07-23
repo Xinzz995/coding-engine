@@ -29,7 +29,7 @@ coding-x 同时包含两部分：
 | --- | --- | --- |
 | **coding-x（控制端）** | 本仓库提供的插件和 npm 引擎，负责安排步骤、启动 agent、保存状态 | 安装一次；通常不需要修改它的源码 |
 | **目标项目（目标端）** | 你真正想开发的网站、服务、App 或其他 Git 仓库 | commands、skills 和 `npx coding-x` 都应在这个项目根目录执行 |
-| **runner** | 真正执行 AI 任务的命令行工具：`claude`、`codex` 或 `cursor-agent` | 先安装并登录；coding-x 每轮调用它 |
+| **runner** | 真正执行 AI 任务的命令行工具：`claude`、`codex` 或 Cursor 的 `agent`（兼容旧名 `cursor-agent`） | 先安装并登录；coding-x 每轮调用它 |
 
 例如，你要给 `my-shop` 增加优惠券功能：coding-x 是控制工具，`my-shop` 是目标项目，Codex 可以是 runner。**不要为了使用 coding-x，把 `my-shop` 的需求和 `.workspace/` 写进 coding-x 源码仓库。**
 
@@ -125,6 +125,11 @@ coding-x 同时包含两部分：
    │   │ 失败 → 确定性打回 story、跳过本轮 Validator         │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
+   │   ┌── TDD 门禁（tdd，可选）────────────────────────────┐ │
+   │   │ 校验冻结政策，再独立运行项目 coverageCheck          │ │
+   │   │ 失败 → 确定性打回 story、跳过本轮 Validator         │ │
+   │   └────────────────────────────────────────────────────┘ │
+   │                          ↓                               │
    │   ┌── Validator（validator.md）────────────────────────┐ │
    │   │ 1. 接收引擎绑定的 story / AC hash / Git HEAD        │ │
    │   │ 2. 按 request 快照逐条核对 acceptanceCriteria       │ │
@@ -146,6 +151,7 @@ coding-x 同时包含两部分：
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。每次真实调用记录完整收口耗时与退出码，异常时另保留最近 2000 字符诊断，终端输出仍实时可见。
 - **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。门禁配置受快照保护：运行期改写 prd.json（含删改 `qualityChecks` / 验收标准）会被检测、恢复并存档，无法架空门禁与验收（ADR-007）。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
+- **TDD 门禁（可选）**：启用 `prd.json.tdd` 后，Builder 按 `tdd` skill 对每个公共行为做真实 RED→同命令 GREEN→绿色重构；宿主 hook 在 agent commit 前提前检查，引擎仍在 Validator 前独立校验 Git 基线、政策摘要、新增覆盖忽略标记并运行项目原生 `coverageCheck`。hook 通过不能跳过引擎重跑；覆盖率证明代码被执行，不证明断言有效或历史上一定先写测试（ADR-017）。
 - **可信目标绑定**：每轮 Validator 都收到一次性 request ID、精确 story、AC 快照/hash 和调用前 Git HEAD，必须提交版本化、逐 AC、自洽的结构化 claim。缺结果、旧结果、错 story/hash/commit、漏 AC、产物变化或改写 `state.json` 全部 fail closed，不签发凭证（ADR-015）。该协议消除正常控制流中的错目标/无结果假绿，但同权限 agent 仍能伪造观察，不能替代机械门禁和人审。
 - **workspace 写入避让与 Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 在任何变更前及首次真实写入前各用 `doctor` 检查工作区锁，发现引擎运行中或无法判定就保持零写入，且绝不删除 `engine.lock`；随后检查目录是否被忽略、是否已有文件进入 Git 索引。它不会擅自修改 `.gitignore` 或 Git 索引。锁检查是尽力避让，不替代引擎的机械互斥。
 - **状态所有权**：引擎与 agent 都在项目根目录运行，但写权限按角色收紧：builder 只写候选 `passes`/进度，Validator 只写本轮 result 与可选截图 claim，所有 Validator verdict 状态和 `validated`/`escalated` 由引擎独占。指令模板用 `{{WORKSPACE}}` 注入路径，validation request 由引擎逐轮追加，三种 runner 共用同一协议。
@@ -157,7 +163,7 @@ coding-x 同时包含两部分：
 ### 环境要求
 
 - **Node.js ≥ 18**
-- 已安装、已认证并可在终端调用 **`claude`**（Claude Code CLI）、**`codex`** 或 **`cursor-agent`**（取决于你用哪个 runner）
+- 已安装、已认证并可在终端调用 **`claude`**（Claude Code CLI）、**`codex`** 或 Cursor 的 **`agent`** / **`cursor-agent`**（取决于你用哪个 runner）
 
 插件和 runner 是两件事：**插件**让交互式 AI 知道怎样做需求对齐、PRD、review 等工作流；**runner**才是 `npx coding-x` 在自动循环中启动的 AI 命令行程序。只装其中一个不能代替另一个。
 
@@ -186,6 +192,10 @@ codex plugin add coding-x@coding-x-dev
 
 在新任务中可以直接说“使用 coding-x 的 prd-to-json skill 转换这个 PRD”或“使用 coding-x 的 priming 工作流理解项目”。若当前 Codex 版本把 command 兼容加载为 skill，不一定出现与 Claude Code 相同的斜杠名字，以自然语言点名工作流最稳妥。
 
+插件启用 TDD hook 时，Codex 会要求你审查并信任 hook 配置。先确认命令确实来自本仓库的
+`hooks/tdd-commit-check.mjs` 再授权；不信任就不要运行。hook 只做 agent commit 前的提前
+反馈，最终结论仍由 coding-x 引擎重跑。参见 [Codex hooks 官方说明](https://developers.openai.com/codex/hooks)。
+
 ### Cursor
 
 在 Cursor 的 Agent 对话中输入 `/add-plugin`，选择从 GitHub/仓库安装，并粘贴：
@@ -195,6 +205,24 @@ https://github.com/Xinzz995/coding-engine
 ```
 
 安装后重新加载 Cursor 窗口，在 Plugins/Skills 中确认 `coding-x` 已启用；然后可从斜杠菜单选择 command，或在对话中显式说出 skill/工作流名。若没有 `/add-plugin`，先更新到支持插件的 Cursor 版本。Cursor 的官方入口说明见 [Cursor 2.5 插件发布说明](https://cursor.com/changelog/2-5) 和 [Cursor Plugins 文档](https://cursor.com/docs/plugins)。
+
+**还需要单独安装 Cursor Agent CLI。** 只安装 Cursor 桌面应用不够；coding-x 的
+`cursor` runner 和真实 hook 验收都要求终端可调用独立 CLI。按当前官方安装页安装后先运行
+`agent --version` 并完成登录，再运行 `npx coding-x cursor`。coding-x 会自动兼容旧安装的
+`cursor-agent`；只有自定义安装路径时才需要设置 `CODING_X_CURSOR_BIN`。参见
+[Cursor CLI 安装说明](https://cursor.com/docs/cli/installation)。
+
+Cursor 插件继续提供 commands 和 skills；TDD 提交前检查需要在每个目标 Git 项目中显式安装：
+
+```bash
+npx coding-x hooks cursor install
+npx coding-x hooks cursor status
+```
+
+安装器只安全合并项目内的 `.cursor/hooks.json`，并复制一份离线可运行的检查脚本。它不改
+Git hooks、不暂存、不提交，也不会在 `npx coding-x cursor` 或 `prd-to-json` 时偷偷执行。
+升级 coding-x 后重新运行 install 刷新脚本；不再需要时运行
+`npx coding-x hooks cursor remove`。项目级 `.cursor/` 文件是否提交到 Git 由你决定。
 
 > 说明：三套工具共用**同一份** `skills/` 和 `commands/`，各自只多一个瘦清单指回它（详见下文「coding-x 源码目录说明」）。宿主对 command 的展示方式不同，但工作流内容不复制。引擎（`npx coding-x`）与插件安装分开；它会调用你在终端选择且已经登录的 runner。
 
@@ -220,6 +248,9 @@ https://github.com/Xinzz995/coding-engine
 npx coding-x doctor          # 先检查文档、门禁、模型配置和 workspace 隔离
 npx coding-x status          # 确认执行清单可读；未开始时显示全部待执行
 
+npx coding-x hooks cursor install  # 仅 Cursor + TDD：首次使用或 coding-x 升级后安装/刷新
+npx coding-x hooks cursor status   # 仅 Cursor + TDD：确认项目级检查完整
+
 npx coding-x                 # 默认用 claude
 npx coding-x codex           # 改用 codex
 npx coding-x cursor          # 改用 Cursor Agent
@@ -229,7 +260,9 @@ npx coding-x cursor          # 改用 Cursor Agent
 # http://localhost:7331/p    像素风视图
 ```
 
-`npx` 首次运行时可能询问是否下载 `coding-x`，这是 npm 的正常提示。模型路由是可选项；新手可以先不配置 `models`，直接使用所选 runner 的默认模型。
+`npx` 首次运行时可能询问是否下载 `coding-x`，这是 npm 的正常提示。模型路由和 TDD 都是
+可选项；新手可以先不配置 `models`。要启用 TDD，就在 `prd-to-json` 询问时确认项目类型、
+真实覆盖命令和政策，不能直接手写一条未经基线验证的命令。
 
 你可以用三个信号判断接入是否成功：交互式 AI 能按 `priming` 工作流输出项目概览；`npx coding-x --help` 能显示 CLI 用法；生成 `.workspace/prd.json` 后，`npx coding-x doctor` 没有硬错误。任何一项失败，都先按「常见情况与处理办法」排查，不要直接启动自动循环。
 
@@ -251,7 +284,7 @@ prd-generate ──────────────────────�
 prd-to-json ──────────────────────────────▶ .workspace/prd.json
                                               │  本地执行派生物，不进入 Git
                                               ▼
-npx coding-x ───────────────▶ Developer → 门禁 → Validator → 下一 story
+npx coding-x ───────────────▶ Developer → 普通门禁 → TDD 门禁 → Validator → 下一 story
                                               │
                                               ├─ state/progress/evidence/screenshots
                                               ├─ dashboard / status
@@ -273,6 +306,7 @@ npx coding-x ───────────────▶ Developer → 门�
 | 涉及数据库/schema、公开接口、状态机、权限、存量迁移 | 业务口径确认后执行 `technical-alignment` | 纯页面文案或局部逻辑通常可跳过 |
 | 需要一份别人拿到就能实施的技术路线 | `/planning <功能>` | 极小改动可跳过，但 PRD/AC 仍要清楚 |
 | 要进入自动执行 | `prd-generate` 生成正式 PRD，再用 `prd-to-json` 派生 | 不能只拿 align/tech/plan 直接启动引擎 |
+| 要用测试驱动开发 | 在 `prd-to-json` 中明确启用 TDD，确认公共行为、覆盖命令、政策与真实基线 | 不能把覆盖率当测试质量或先写测试的证明 |
 | 有 UI 验收 | 在 AC 中写清页面、操作、结果；环境有 `agent-browser` 时用它验证和截图 | 不能只写“页面正常”或只做 HTTP 冒烟 |
 | 引擎全部通过，准备合并 | `/review-loop`，人裁决全部发现 | 不建议因为 Validator 已通过而跳过人审 |
 | 功能已合并，需要更新长期知识 | `/compound-docs` | 没有可复用知识时允许零修改 |
@@ -319,7 +353,7 @@ coding-x 的信息分三层保存：
 
 | 产物 | 何时产生 | 谁写 / 谁读 | 用途 | 生命周期与去处 |
 | --- | --- | --- | --- | --- |
-| `prd.json` | `prd-to-json` 根据正式 PRD 生成 | skill 写；引擎/agent 读；运行期由引擎冻结保护 | 本轮可执行 story、AC、分支、门禁和可选模型路由 | 当前功能的执行需求；需求改变时从源 PRD 再派生，**不要直接改** |
+| `prd.json` | `prd-to-json` 根据正式 PRD 生成 | skill 写；引擎/agent 读；运行期由引擎冻结保护 | 本轮可执行 story、AC、分支、普通/TDD 门禁和可选模型路由 | 当前功能的执行需求；需求或 TDD 政策改变时从源 PRD 再派生，**不要直接改** |
 | `state.json` | 引擎首次运行自动创建；再派生时按 story ID 调整 | Builder 只写候选 `passes`；最终 verdict、重试、blocked、validated/escalated 由引擎控制 | 当前执行状态和人工仲裁 notes | 断点续跑依据；新功能切换时旧副本进 `.workspace/archive/` |
 | `progress.md` | `prd-to-json` 初始化/切换功能时重置；Builder 逐轮追加 | Builder 写；后续 Builder 和 `/compound-docs` 读 | 跨无记忆轮次传递实现进度、模式和陷阱 | 过程上下文，不是完成证据；随旧运行归档 |
 | `evidence.jsonl` | 引擎运行时逐行追加；agent 可登记截图 | 引擎与 agent 写；status/report 读 | 门禁、轮次、调用、验收 claim、协议裁决、截图索引 | append-only 过程索引；再派生会清理当前副本并归档旧副本 |
@@ -373,6 +407,7 @@ coding-x 的信息分三层保存：
    - 在写入前和真正写入前分别检查引擎锁；活锁或无法判定时保持零写入；
    - 检查 `.workspace/` 是否被 Git 忽略、是否已有运行文件被跟踪，异常时交给你决定，不擅自改 `.gitignore` 或 Git 索引；
    - 把模糊 AC 改成可执行断言、拆分过大 story、补闭环 story，并把最终 User Stories 回写仓库内源 PRD；
+   - 询问是否启用 TDD；启用时确认新项目/存量项目、真实覆盖命令、生产路径、政策文件、Git 基线与禁止标记，跑通至少一个真实测试和分支覆盖后才写入；
    - 在会话里展示“源 story → 执行 story → 变化”的对照表；
    - 对不同功能先归档上一轮 workspace；对同一功能的需求变化按稳定 story ID 再派生。
 7. **人工检查三个结果**：源 PRD 的变化、转换对照表、`npx coding-x doctor` 的结论。有异议就改源 PRD 并重新转换，不要直接改 JSON。
@@ -387,6 +422,18 @@ coding-x 的信息分三层保存：
   "branchName": "ralph/my-feature",
   "sourcePrd": "docs/prds/prd-my-feature.md",  // 意图真相源（源 PRD）路径，冲突时以它为准重新派生
   "qualityChecks": ["npm run typecheck", "npm test"],  // 机械门禁（可选）：每轮 builder 后引擎逐条执行，失败确定性打回
+  "tdd": {                                     // TDD 门禁整段可选；出现时五个字段必须完整
+    "coverageCheck": "node scripts/tdd-coverage-gate.mjs",
+    "sourcePathspecs": [":(glob)src/**"],       // 用户批准的生产代码 Git 范围
+    "policyFiles": [
+      {
+        "path": "scripts/tdd-coverage-gate.mjs",
+        "sha256": "<当前文件的 64 位小写 SHA-256>"
+      }
+    ],
+    "baselineRef": "<启用时的完整 Git commit id>",
+    "forbiddenAddedPatterns": ["istanbul ignore", "c8 ignore"]
+  },
   "models": {                                  // 模型路由整段可选；一旦启用必须完整
     "runner": "codex",                       // claude | codex | cursor，绑定单一 runner
     "builder": {
@@ -434,6 +481,34 @@ coding-x 的信息分三层保存：
 > **0.25.0 验收凭证迁移：** 新状态用 `validated` 区分“builder 声称完成”和“引擎已观察 Validator 正常完成”。旧 state 缺少该字段时，读取阶段按历史 `passes` 值兼容，不会把既有已完成 workspace 全量重验；新一轮自然写回后会补齐字段。显式的 `passes=true, validated=false` 会被视为中断留下的待验收状态并回写待复核。
 
 > **结构化验收协议：** 所有新 Validator 轮次都必须提交 `validation-result.json` v1；不再从 `progress.md` 猜 story，也不再直接改 `state.json`。旧 state/evidence 继续可读，但新轮次不会静默回退到“退出 0 + passes 未变”的旧判定。Git 不可用时 request 明示 `gitHead: null`，此时只有 request/story/AC 绑定，status/report 会显示 `unavailable`，不会伪装成完整产物绑定。
+
+#### 可选进阶：TDD
+
+TDD 的开发顺序由 `tdd` skill 指导：
+
+1. 一次只选一个公共可观察行为，先写聚焦测试；
+2. 真实运行并确认失败原因正是行为尚未实现；语法、依赖、路径或环境错误不算 RED；
+3. 写最小实现，用完全相同的聚焦命令取得 GREEN；
+4. 只在 GREEN 后重构，每步重跑；
+5. 全部行为完成后运行项目级 `coverageCheck`。
+
+`prd-to-json` 会让你一次确认完整政策，再真实跑基线。默认建议是：新项目行覆盖率和分支
+覆盖率都不低于 90%；存量项目总体行/分支不低于启用基线，新增或改动的可执行行不低于
+90%；两类都必须让零测试失败。项目可以采用其他政策，但必须在启用前由人明确批准。
+
+运行中不要直接降低阈值、扩大排除、允许零测试、重算政策摘要或新增覆盖忽略标记。确实
+需要变更时，先停止引擎，修改并验证项目政策，再由 `prd-to-json` 重新确认和派生。
+
+三个信任层不要混淆：
+
+- skill 约束过程，但 RED/GREEN 记录仍是 agent 声明；
+- Codex、Claude Code 由插件 hook 提前反馈；Cursor 由显式安装的项目级检查提前反馈。它们都
+  可能因非标准提交路径、宿主设置或缺失配置而未触发；
+- coding-x 引擎每轮独立重跑，才拥有当前 story 的机械裁决权。
+
+即使引擎通过，也只能说明受保护命令在当时返回成功。coverage 工具和仓库与 agent 同权限，
+不能防住恶意伪造；覆盖率也不能替代 Validator 按 AC 验证和最终人审。首版不使用 AI
+判断“测试真假”，后续如需加强应另行引入变异测试。
 
 #### 可选进阶：模型路由
 
@@ -489,6 +564,9 @@ npx coding-x config path        # 输出实际使用的全局配置绝对路径
 npx coding-x config init        # 排他创建 version 1 空模板（已存在时不覆盖）
 npx coding-x config validate    # 只读校验全局配置
 npx coding-x models codex --json  # 从全局配置列出声明给 Codex 的模型
+npx coding-x hooks cursor install # 安装或安全更新当前项目的 Cursor TDD 提交前检查
+npx coding-x hooks cursor status  # 只读检查 Cursor 项目配置、脚本和安装记录
+npx coding-x hooks cursor remove  # 只移除 coding-x 管理的 Cursor 项目内容
 npx coding-x --builder-model model-a --validator-model model-d  # 临时覆盖初始 builder / validator
 npx coding-x --escalation-model model-e  # 临时覆盖升级 builder 模型
 npx coding-x --no-open          # 不自动打开浏览器
@@ -550,6 +628,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `claude` / `codex` / `cursor` | — | 显式选择 runner；若 PRD 启用了模型路由，必须与 `models.runner` 一致。未显式指定时优先用 `models.runner`，否则默认 claude |
 | 位置参数 `config path\|init\|validate` | — | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁 |
 | 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
+| 位置参数 `hooks cursor install\|status\|remove` | — | 在当前 Git 项目安全安装、只读检查或卸载 Cursor TDD 提交前检查；只管理 `.cursor/` 中 coding-x 拥有的内容，不改 Git hooks、索引或提交。install/remove 成功与 status 健康返回 0；缺失、冲突或过期返回 1 |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
@@ -580,7 +659,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `2` | workspace 锁（`engine.lock`）被占用，本次 `run`/`repair` 直接拒绝（ADR-008） |
 | `3` | 全部 story 已收敛（`passes && validated`，或 `blocked`），但存在 `blocked` story 待人工处理 |
 
-`repair`/`doctor`/`status`/`report`/`models`/`config` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
+`repair`/`doctor`/`status`/`report`/`models`/`config`/`hooks` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
 
 ### 环境变量
 
@@ -589,7 +668,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `CODING_X_CONFIG` | 覆盖全局模型配置的完整文件路径；相对路径按当前目录解析，空白值按未设置处理 |
 | `CODING_X_CLAUDE_BIN` | 覆盖 `claude` 可执行文件路径 |
 | `CODING_X_CODEX_BIN` | 覆盖 `codex` 可执行文件路径 |
-| `CODING_X_CURSOR_BIN` | 覆盖 `cursor-agent` 可执行文件路径 |
+| `CODING_X_CURSOR_BIN` | 覆盖 Cursor `agent` / `cursor-agent` 可执行文件路径 |
 
 ---
 
@@ -620,6 +699,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `technical-alignment` | 业务已清楚，且涉及持久化/接口/状态机/权限/迁移等昂贵合同；说“`tech: ...`” | `docs/prds/tech-<feature>.md`：可验证技术合同和不可逆项 | 少数高代价、难回滚的技术选择；不会替人决定业务口径 | 一次性输入材料；与 align 一起交给 prd-generate，吸收后置 `superseded`；长期技术事实以后由 `/compound-docs` 沉淀 |
 | `prd-generate` | 要把清楚需求或 align/tech 材料变成正式需求；说“创建一个 PRD”并给路径 | `docs/prds/prd-<feature>.md`：Goals、Non-Goals、稳定 story ID、可验证 AC 等 | 无前置对齐稿时回答 3–5 个查证不了的关键问题；逐条审阅 story 和 AC | 正式**意图真相源**；初始 `active`，交给 prd-to-json；合并交付后 `done`，需求演进时改回 `active` |
 | `prd-to-json` | 正式 PRD 已确认、准备运行；说“将 `<PRD 路径>` 转成 prd.json” | 回写源 PRD 最终 User Stories；生成/更新 `.workspace/prd.json`、progress 和必要的归档/状态调整；输出转换对照表 | workspace 隔离异常、门禁命令、是否启用模型路由及模型选择、story/AC 增强差异 | 每次需求变更都从源 PRD 重跑；同功能按 ID 保留/重置状态，不同功能先归档旧 workspace；完成后先 `doctor` 再启动引擎 |
+| `tdd` | 用户要求 TDD、测试先行、红绿重构或用回归测试修复缺陷；coding-x 启用 TDD 时 Builder 自动引用 | 每个公共行为的真实 RED→同命令 GREEN→绿色重构过程，以及最终 coverageCheck 结局 | 交互模式确认公共接口、行为顺序和覆盖政策；coding-x 模式沿用已批准 AC；Cursor 项目检查需显式安装 | 开发行为能力，不另建 TDD 政策文件；宿主只提前反馈、引擎独立重跑，不能把过程记录称为证明 |
 | `agent-browser` | 需要真实浏览器导航、点击、填表、截图、数据提取或 UI 验收时 | 浏览器操作结果；引擎角色按规范可把最终截图放 `.workspace/screenshots/` 并登记 evidence | 登录、支付、删除等敏感操作仍需按任务授权；核对页面、动作和可观察结果 | 操作型能力，不生成长期需求文档；用完关闭会话。skill 说明不等于已安装二进制，引擎会用 `which agent-browser` 探测 PATH |
 
 不同宿主对“自动选择 skill”的体验可能不同；最稳妥的说法是“使用 `prd-to-json` 将这个文件转换……”。commands/skills 通常沿用当前会话；需要真正独立复核时，由人手动新开会话。
@@ -636,6 +716,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
 - **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证；超时会终止并确认整棵门禁进程树退出后才进入下一轮——LLM 验证链之下不可共谋、不可绕过的确定性防线。
+- **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 写入避让与 Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 双次检查活跃工作区锁、写前阻止静默污染，`doctor` 只读报告锁与 Git 隔离状态，不替用户删锁或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
 - **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
@@ -674,6 +755,11 @@ my-project/
 │   ├── review-*.md
 │   ├── report.html
 │   └── archive/
+├── .cursor/                          # 仅显式安装 Cursor TDD 检查后出现；是否进 Git 由使用者决定
+│   ├── hooks.json
+│   └── coding-x/
+│       ├── tdd-commit-check.mjs
+│       └── install.json
 └── <项目原有源码、测试和配置>
 ```
 
@@ -688,6 +774,10 @@ my-project/
 | 找不到 `/init-docs`、`/planning` 等命令 | 插件是否加载、当前 AI 工具是否支持 commands、是否在目标项目会话 | 重新加载插件或按宿主的插件方式指向 coding-x 仓库；不要在目标项目里复制一份 command 内容 |
 | `prd-to-json` 说 `.workspace/` 未忽略或已有文件被 Git 跟踪 | `npx coding-x doctor`、`.gitignore`、`git ls-files .workspace` | 先决定是否修正 Git 隔离；skill 不会自动改 `.gitignore` 或执行 `git rm --cached` |
 | `doctor` 发现 qualityChecks 基线失败 | 直接运行它列出的 typecheck/lint/test | 先修复项目原有失败或重新确认门禁，基线全绿后再跑引擎 |
+| `doctor` 报 TDD 配置非法、基线不可达或政策摘要变化 | `.workspace/prd.json` 的 `tdd`、对应政策文件、当前 Git 根 | 不要直接重算摘要；停止运行，由 `prd-to-json` 重新确认政策、跑真实基线并派生 |
+| agent 执行 `git commit` 被 TDD hook 阻断 | hook 的有限错误摘要、手工运行 `coverageCheck` | 修测试、实现或政策漂移后重跑；不要关闭 hook 规避。即使绕过，coding-x 引擎仍会独立打回 |
+| Cursor 没有提前检查，或 `hooks cursor status` 报缺失/过期 | 项目根的 `.cursor/hooks.json`、`.cursor/coding-x/`、status 输出 | 在 Git 项目根运行 `npx coding-x hooks cursor install`，升级 coding-x 后也重跑；若报冲突，先人工处理被修改或不合法的文件，不要强行覆盖 |
+| Cursor 插件已装但 `npx coding-x cursor` 找不到命令 | `agent --version`（旧安装可试 `cursor-agent --version`）、登录状态、`CODING_X_CURSOR_BIN` | 单独安装 Cursor Agent CLI；桌面应用不能替代。coding-x 自动识别两种命令名，自定义路径再设置环境变量 |
 | 报“找不到 prd.json” | `.workspace/prd.json` 是否存在、`--workspace` 是否一致 | 用 `prd-to-json` 从正式 PRD 生成；不要手工拼一个不完整 JSON |
 | 退出码 `2`，提示 `engine.lock` 被占用 | 是否已有 `coding-x` 或 `repair` 在运行 | 有活进程就等待/停止它；异常 stale 锁让下次引擎接管，不要把删锁当常规解决方案 |
 | `state.json` 或 `prd.json` JSON 损坏 | `status`/`report` 的保守警告 | 确认无活锁后运行 `npx coding-x repair`；repair 只修 JSON 结构，不会替你解决业务失败 |
@@ -723,6 +813,8 @@ my-project/
 | **Builder / Developer** | 实现单个 story 的角色；`passes=true` 只是它的候选声明 |
 | **Validator** | 独立逐条检查 AC 的角色；它提交 claim，最终状态仍由引擎裁决 |
 | **机械门禁** | 由程序直接执行的 typecheck/lint/test 命令，失败就打回，不依赖模型自述 |
+| **TDD 循环** | 对一个行为完成真实 RED、同命令 GREEN、再绿色重构；过程记录可复核但不是机器证明 |
+| **TDD 门禁** | 引擎在 Validator 前校验冻结政策并独立运行覆盖命令；宿主 hook 只是提前反馈 |
 | **workspace** | `.workspace/` 本地执行工作台，保存需求派生物、状态、证据和报告 |
 | **源 PRD** | `docs/prds/prd-*.md`，人维护的正式意图真相源；需求变化改这里 |
 | **blocked** | story 已达到失败上限或需要人工介入，引擎暂时跳过，等待人处理 |
@@ -743,7 +835,11 @@ coding-engine/
 │   ├── technical-alignment/SKILL.md
 │   ├── prd-generate/SKILL.md
 │   ├── prd-to-json/SKILL.md
+│   ├── tdd/SKILL.md
 │   └── agent-browser/SKILL.md
+├── hooks/                        # TDD 提交前检查的唯一脚本与 Codex/Claude 配置
+│   ├── tdd-commit-check.mjs
+│   └── hooks.json                # Codex / Claude Code
 ├── commands/                     # 唯一源：用户 /斜杠命令
 │   ├── priming.md
 │   ├── planning.md
@@ -764,8 +860,8 @@ coding-engine/
 ├── .claude-plugin/               # Claude Code 插件清单
 │   ├── plugin.json               #   插件元数据（commands/ skills/ 自动发现）
 │   └── marketplace.json          #   marketplace 元数据
-├── .cursor-plugin/plugin.json    # Cursor 瘦清单：{ skills: ./skills/, commands: ./commands/ }
-├── .codex-plugin/plugin.json     # Codex 瘦清单：同上
+├── .cursor-plugin/plugin.json    # Cursor 瘦清单：只发现唯一源 commands / skills
+├── .codex-plugin/plugin.json     # Codex 瘦清单
 ├── .agents/plugins/marketplace.json  # 通用 agent 清单：source 指向仓库根
 │
 ├── assets/                       # 引擎专用静态资产（构建时拷进 dist/，工具不读）
@@ -776,9 +872,11 @@ coding-engine/
 │       ├── dashboard.html        #   仪表盘普通视图
 │       └── dashboard-p.html      #   仪表盘像素风视图
 ├── dist/                         # npm run build 生成的可发布包；删后可重新构建，不手改
+│   └── hooks/tdd-commit-check.mjs # Cursor 安装器复制到目标项目的离线脚本
 │
 ├── src/                          # TypeScript 引擎源码
 │   ├── cli.ts                    #   命令行入口、参数解析
+│   ├── cursor-hooks.ts           #   Cursor 项目检查的安全安装、状态与卸载
 │   ├── engine/
 │   │   ├── loop.ts               #   主循环：Developer ⇄ Validator
 │   │   ├── agent.ts              #   runner 子进程、实时 tee、调用耗时/诊断与超时控制
@@ -793,6 +891,7 @@ coding-engine/
 │   │   ├── prd-guard.ts          #   运行期 PRD 快照、篡改存档与恢复
 │   │   ├── prd.ts                #   读取 prd.json（需求内容）
 │   │   ├── state.ts              #   state.json 读写、验收凭证、选 story、完成判定、合并视图
+│   │   ├── tdd-gate.ts           #   TDD 配置/政策完整性与项目覆盖命令门禁
 │   │   ├── validation-protocol.ts #   Validator request/result、目标绑定与严格解析
 │   │   ├── progress.ts           #   读取 progress.md
 │   │   └── repair.ts             #   jsonrepair 修复 prd.json / state.json
@@ -814,8 +913,8 @@ coding-engine/
 
 **两条资产链路：**
 
-- **面向工具**：`skills/`、`commands/` 是唯一源，各工具的瘦清单用相对路径 `./skills/` `./commands/` 指回它，随插件仓库分发。
-- **面向引擎**：`assets/instructions`、`assets/dashboard` 由 `npm run build`（tsup 的 `onSuccess` 钩子）拷进 `dist/instructions`、`dist/public`；引擎通过 `import.meta.url` 定位并读取。`package.json` 的 `files` 只发布 `dist`，两个 assets 目录不会单独发布，而是以构建后的副本包含在 `dist` 中。
+- **面向工具**：`skills/`、`commands/` 和共同 hook 脚本都是唯一源；Codex/Claude 从插件读取 hook，Cursor 插件只提供 commands/skills，项目检查由用户显式安装。
+- **面向引擎**：`assets/instructions`、`assets/dashboard` 和共同 hook 脚本由 `npm run build` 拷进 `dist/`；引擎读取指令与页面，Cursor 安装器从 `dist/hooks` 复制脚本。`package.json` 的 `files` 只发布 `dist`，源码资产不单独发布。
 
 `dist/` 是构建产物，发布 npm 包前由 `npm run build` 产生，可以删除后重建；`.coding-x-local/` 是维护 coding-x 时留在本机的 dogfood/设计过程材料，不是 npm 包内容，也不是目标项目的 `.workspace/`。普通使用者不需要创建或维护它。
 

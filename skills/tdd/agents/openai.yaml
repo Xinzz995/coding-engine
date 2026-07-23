@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test-Driven Development"
+  short_description: "以真实红绿循环驱动行为实现、缺陷修复和最终覆盖率验收"
+  default_prompt: "Use $tdd to implement this behavior through a verified red-green-refactor loop."

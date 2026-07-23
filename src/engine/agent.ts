@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { forceKillProcessTreeOnExit, terminateProcessTree } from './process-tree.js';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 
@@ -18,9 +20,32 @@ export function permissionWarning(kind: AgentKind): string {
   ].join('\n');
 }
 
+function executableOnPath(name: string): boolean {
+  const path = process.env.PATH ?? '';
+  const extensions = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')
+    : [''];
+  for (const dir of path.split(delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      try {
+        accessSync(join(dir, `${name}${extension}`), constants.X_OK);
+        return true;
+      } catch {
+        // Try the next PATH entry.
+      }
+    }
+  }
+  return false;
+}
+
 export function resolveBinary(kind: AgentKind): string {
   if (kind === 'codex') return process.env.CODING_X_CODEX_BIN ?? 'codex';
-  if (kind === 'cursor') return process.env.CODING_X_CURSOR_BIN ?? 'cursor-agent';
+  if (kind === 'cursor') {
+    if (process.env.CODING_X_CURSOR_BIN) return process.env.CODING_X_CURSOR_BIN;
+    // Cursor's install docs currently use `agent`; older installs expose
+    // `cursor-agent`. Prefer the unambiguous legacy name when both exist.
+    return executableOnPath('cursor-agent') ? 'cursor-agent' : 'agent';
+  }
   return process.env.CODING_X_CLAUDE_BIN ?? 'claude';
 }
 
@@ -50,6 +75,8 @@ export function runAgent(opts: {
   timeoutMs: number;
   /** 透传给 agent CLI 的 --model；undefined = 不传（用户 CLI 默认模型） */
   model?: string;
+  /** coding-x 运行上下文等显式子进程环境；其余环境原样继承。 */
+  env?: NodeJS.ProcessEnv;
 }): Promise<RunResult> {
   // buildAgentArgs()[0] may itself be "node /path mode" when overridden by an
   // env var in tests; split it so the stub receives its trailing args.
@@ -62,6 +89,7 @@ export function runAgent(opts: {
     const startedAt = Date.now();
     const child = spawn(cmd, args, {
       cwd: opts.cwd, stdio: ['inherit', 'pipe', 'pipe'], detached: process.platform !== 'win32',
+      env: { ...process.env, ...opts.env },
     });
     let outputTail = '';
     const keep = (chunk: Buffer | string) => {

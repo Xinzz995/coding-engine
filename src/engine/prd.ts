@@ -23,6 +23,25 @@ export interface ModelsConfig {
   escalation: string;
 }
 
+export interface TddPolicyFile {
+  /** 相对项目根的受保护政策文件；运行时会校验 realpath 与 SHA-256。 */
+  path: string;
+  sha256: string;
+}
+
+export interface TddConfig {
+  /** 项目提供的完整覆盖率门禁命令；必须自行保证零测试与阈值不达标时返回非零。 */
+  coverageCheck: string;
+  /** 用户批准的生产代码 Git pathspec；只在这些路径内扫描新增覆盖忽略标记。 */
+  sourcePathspecs: string[];
+  /** 阈值、排除项、零测试策略及命令委托脚本的受保护文件摘要。 */
+  policyFiles: TddPolicyFile[];
+  /** 启用 TDD 时冻结的完整 Git commit id。 */
+  baselineRef: string;
+  /** baselineRef 之后不得新增的覆盖忽略标记（按大小写不敏感字面匹配）。 */
+  forbiddenAddedPatterns: string[];
+}
+
 export interface Prd {
   project: string;
   branchName: string;
@@ -31,6 +50,8 @@ export interface Prd {
   sourcePrd?: string;
   /** 机械门禁命令（完整 shell 命令行，引擎逐条执行）；缺失或空数组=门禁不启用 */
   qualityChecks?: string[];
+  /** 可验证 TDD 政策；字段一旦出现即严格校验，非法时 fail closed。 */
+  tdd?: TddConfig;
   /** 模型路由；缺失时只使用 CLI 临时覆盖或 runner 默认模型。 */
   models?: ModelsConfig;
   userStories: Story[];

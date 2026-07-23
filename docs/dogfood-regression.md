@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-07-22
+updated: 2026-07-23
 scope: root
 
 ---
@@ -37,3 +37,6 @@ scope: root
 | 18 | prd-to-json 完成澄清、模型选择等只读准备后，在首次真实写入前再次运行 doctor；若锁结论变活跃、无法判定或与首次不同，停止且不写任何文件 | 0.25.4 TOCTOU 尽力收窄 | 首检后启动持锁引擎，再推进到写入点；核对第二次 doctor 被执行且 workspace 零变化 |
 | 19 | Validator 只验证 engine-bound request 指定的 story/AC/Git HEAD，并按 1..N 写 v1 result；缺结果、复用旧文件、错 story/hash/HEAD、漏 AC 或改写 state 任一场景都不得签发凭证 | ADR-015 可信目标绑定 | 正常 pass/fail 各跑一次，再依次注入 missing/stale/mismatch/state-mutation；对账 `validation-claim` 来源、iteration protocol/error、state 回写与 report 红旗 |
 | 20 | 真实 runner 的 provider/认证/网络异常（实证：Claude Code 402）必须保持 state 未通过、跳过 Validator、释放锁，并在 iteration/status/report 留下 outcome、退出码、调用收口耗时与有界原始诊断；成功调用不持久化 transcript | 2026-07-22 Claude/Codex 双 runner dogfood / ADR-016 | fake 402 自动回归；真实失败时对账终端、state、engine.lock、`builderInvocation`/`validatorInvocation`、status 与 report |
+| 21 | 启用 TDD 时，builder 对每个公共行为留下可复核的真实 RED→同命令 GREEN→绿色重构记录；环境错误不能冒充 RED，过程记录不得被报告成机器证明 | ADR-017 强化版 A | 真实 story 对账 builder 输出/progress 与聚焦测试结局；人工抽查一个错误 RED 场景会停止而不是继续实现 |
+| 22 | Codex/Claude 插件 hook 与显式安装的 Cursor 项目检查只在 agent commit 前提前运行 TDD 检查；失败阻断、成功放行，且不安装目标 Git hook、不写持久日志。Cursor 首次/升级安装幂等，卸载保留用户原配置；真实验收不得用桌面应用代替 | ADR-017 跨宿主适配 | 三种真实 payload 对账共同脚本；Codex/Claude 真实插件 smoke；用构建产物执行 `hooks cursor install/status/remove`，再由真实 Cursor Agent 验证失败时 Git 历史不变、成功时提交产生 |
+| 23 | 无论宿主 hook 是否触发或曾通过，引擎都在 qualityChecks 后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |

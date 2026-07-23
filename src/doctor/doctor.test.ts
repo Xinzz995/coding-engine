@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -559,6 +560,98 @@ describe('runDoctor quality gate config check', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(workspaceAbs, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runDoctor TDD policy check', () => {
+  function configureTdd(root: string, coverageCheck: string): {
+    policyPath: string;
+    markerPath: string;
+  } {
+    gitInit(root);
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    mkdirSync(join(root, 'src'), { recursive: true });
+    mkdirSync(join(root, '.workspace'), { recursive: true });
+    const markerPath = join(root, 'coverage-ran');
+    const policyPath = join(root, 'scripts', 'coverage.mjs');
+    writeFileSync(policyPath, `${coverageCheck}\n`);
+    writeFileSync(join(root, 'src', 'index.js'), 'export const value = 1;\n');
+    gitCommitAll(root, '2026-07-23');
+    const baselineRef = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+    }).trim();
+    const sha256 = createHash('sha256').update(readFileSync(policyPath)).digest('hex');
+    writeFileSync(join(root, '.workspace', 'prd.json'), JSON.stringify({
+      project: 'p', branchName: 'b', description: 'd', userStories: [],
+      tdd: {
+        coverageCheck: `node scripts/coverage.mjs ${markerPath}`,
+        sourcePathspecs: [':(glob)src/**'],
+        policyFiles: [{ path: 'scripts/coverage.mjs', sha256 }],
+        baselineRef,
+        forbiddenAddedPatterns: ['c8 ignore'],
+      },
+    }));
+    return { policyPath, markerPath };
+  }
+
+  it('reports disabled TDD as informational and non-failing', () => {
+    withProject({
+      'docs/a.md': FULL_FM,
+      '.workspace/prd.json': JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+      }),
+    }, (root) => {
+      const report = runDoctor(root);
+      expect(report.tdd).toMatchObject({ status: 'disabled', issues: [] });
+      expect(renderDoctorReport(report).exitCode).toBe(0);
+    });
+  });
+
+  it('validates policy integrity without running coverageCheck', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doctor-tdd-'));
+    try {
+      mkdirSync(join(root, 'docs'));
+      const { markerPath } = configureTdd(
+        root,
+        'import { writeFileSync } from "node:fs"; writeFileSync(process.argv[2], "ran");',
+      );
+      const report = runDoctor(root);
+      expect(report.tdd).toMatchObject({ status: 'ready', issues: [] });
+      expect(renderDoctorReport(report).text).toContain('未运行覆盖率命令');
+      expect(renderDoctorReport(report).exitCode).toBe(0);
+      expect(() => readFileSync(markerPath)).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails doctor for malformed config and changed policy hash', () => {
+    withProject({
+      'docs/a.md': FULL_FM,
+      '.workspace/prd.json': JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+        tdd: { coverageCheck: '' },
+      }),
+    }, (root) => {
+      const report = runDoctor(root);
+      expect(report.tdd.status).toBe('invalid');
+      expect(report.tdd.issues).toHaveLength(1);
+      expect(renderDoctorReport(report).exitCode).toBe(1);
+    });
+
+    const root = mkdtempSync(join(tmpdir(), 'doctor-tdd-'));
+    try {
+      mkdirSync(join(root, 'docs'));
+      const { policyPath } = configureTdd(root, 'process.exit(0);');
+      writeFileSync(policyPath, 'process.exit(1);\n');
+      const report = runDoctor(root);
+      expect(report.tdd.status).toBe('policy-error');
+      expect(report.tdd.issues[0]?.message).toContain('摘要变化');
+      expect(renderDoctorReport(report).exitCode).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

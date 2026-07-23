@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-22
+updated: 2026-07-23
 scope: root
 ---
 
@@ -49,6 +49,18 @@ validation request → Validator claim → engine protocol verdict/receipt 的 r
 **假绿**
 系统显示 story 通过，但实际上未完成指定 AC 或没有验证指定产物。正常控制流中的无结果、错目标、旧结果由结构化验收协议关闭；同权限 agent 伪造观察、共谋或敷衍验证仍需机械门禁与 review-loop 独立复核。
 禁用：误报通过、虚假通过
+
+**TDD 循环**
+针对一个公共可观察行为完成的 RED→GREEN→重构：先运行聚焦测试并确认它因待实现行为缺失而失败，再用同一命令确认最小实现通过，最后只在绿色状态重构。过程记录是 agent 声明，不是历史顺序证明。
+禁用：先补测试（无法表达真实 RED）、测试覆盖流程
+
+**TDD 门禁**
+启用 `prd.json.tdd` 后，引擎在普通门禁之后、Validator 之前执行的项目级机械检查：先验证冻结的 Git 基线、政策摘要与新增覆盖忽略标记，再真实运行 coverageCheck。Codex/Claude 插件 hook 与 Cursor 显式安装的项目检查只是提前反馈，不属于最终 TDD 门禁。
+禁用：TDD 证明、测试质量门禁
+
+**覆盖率政策面**
+决定 coverageCheck 结论的命令、阈值、排除、零测试策略、差异覆盖基线与委托脚本/配置的集合；派生时由用户批准，运行中受 PRD 快照与政策文件摘要保护。覆盖率只证明代码被执行，不证明断言有效。
+禁用：覆盖率证明、测试有效性政策
 
 **人审包**
 /review-loop 产出的审查交付物：红旗区（如有）+ 三层（改动导读、发现清单、风险聚焦），落盘 `.workspace/review-*.md` 供裁决回填（四态：已修/接受/推迟/驳回）；人审的加速器，不是替代品。
@@ -173,6 +185,7 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 - 难度档位决定初始路由；首次有效失败置升级状态，后续 builder 走 escalation，与 retryCount 独立
 - 全局模型目录限定显式模型策略可引用的 ID；项目 PRD 保存五项具体映射；某轮实际传给 runner 的模型只记录进证据索引
 - runner-default 不构成显式模型策略，因此无需全局模型目录；目录声明与 provider 是否接受模型是两个独立事实
+- TDD skill 约束每个行为的开发顺序；Codex/Claude 插件 hook 与 Cursor 项目检查提前反馈；引擎 TDD 门禁独立重跑并裁决；Validator 仍只按 AC 验证行为
 
 ## 已解决的歧义
 
