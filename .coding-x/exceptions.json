@@ -108,11 +108,11 @@
     {
       "id": "delivery-2026-07-24-copilot-provider-migration",
       "commitSha": "ca52f09389ebcde914c48dd0c41663510d0b70aa",
-      "reason": "GitHub 已公告 Models 将于 2026-07-30 完全退役，PR #39 又证明 0.30.10 的旧 provider 在同一 head 上无法稳定完成三个独立评审轴，继续重试不能恢复门禁。仅允许在 828 项全量测试、类型检查、静态检查、构建、文档健康、CLI 冒烟、高危依赖审计、受限真实 Copilot 调用和恶意输入隔离探针全部通过后，异常交付精确功能提交 ca52f09389ebcde914c48dd0c41663510d0b70aa 并发布 0.31.0。规则必须立即恢复；发布后 coding-engine 固定版本 PR、结构治理、安全修复、外部 Python 升级与全部异常关闭必须由 0.31.0 正常规则完整通过。",
+      "reason": "GitHub 已公告 Models 将于 2026-07-30 完全退役，PR #39 又证明 0.30.10 的旧 provider 在同一 head 上无法稳定完成三个独立评审轴，继续重试不能恢复门禁。迁移 PR #40 的项目检查、四平台 CI 与 CodeQL 全部通过；默认分支固定的 0.30.9 在调用模型前把三个 AI 轴都以超过八个无损分片上限判为 review-input-too-large，没有产生可被忽略的 finding。仅允许在 828 项全量测试、类型检查、静态检查、构建、文档健康、CLI 冒烟、高危依赖审计、受限真实 Copilot 调用和恶意输入隔离探针全部通过后，异常交付精确功能提交 ca52f09389ebcde914c48dd0c41663510d0b70aa 并发布 0.31.0。规则必须立即恢复；发布后 coding-engine 固定版本 PR、结构治理、安全修复、外部 Python 升级与全部异常关闭必须由 0.31.0 正常规则完整通过。",
       "owner": "Xinzz995",
       "expiresAt": "2026-07-27T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
-      "auditUrl": "https://github.com/Xinzz995/coding-engine/pull/39"
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30122647808"
     }
   ]
 }
