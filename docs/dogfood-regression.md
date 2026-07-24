@@ -47,3 +47,4 @@ scope: root
 | 28 | `quality doctor --remote` 对权限不足、ruleset 停用、检查来源替换、审核人数漂移、发布引用缺失或异常过期均返回 unverifiable/failed；配置 API 成功但回读不一致也不能通过 | ADR-018 / 0.30.2 | 临时仓库逐项破坏规则后回读，确认诊断和退出码，再恢复并复验 |
 | 29 | 至少一个非 Node 多模块仓库使用自己的项目命令完成失败→修复→新提交重评→合并的真实 PR 闭环；其质量契约不出现 npm、Vitest、TypeScript 项目假设 | ADR-018 / 0.30.2 | 外部 dogfood 仓库的契约、PR check 历史、合并提交和 ruleset 对账 |
 | 30 | GitHub Models 单次输入超限时完整 diff 不被截断，source 无损拆成不超过八片；每片都有效才合并，重复 finding 保留最高严重度，任一片失败或继续超限都阻断 | ADR-018 / 0.30.2 | mock 413 后核对逐片调用与聚合；真实含多份来源的 PR 核对 Check Run 和模型调用日志 |
+| 31 | 发布只接受 branch ruleset 绑定的 GitHub App 所产生的最新成功检查；同名伪造无效。缺检查时仅有效祖先异常记录可进入带 warning 的异常发布，停用规则、过期/关闭/无关记录仍阻断 | ADR-018 / 0.30.2 | verifier 单测覆盖正常、伪造、有效异常、过期、关闭、非祖先和 ruleset 停用；真实发布日志对账 |

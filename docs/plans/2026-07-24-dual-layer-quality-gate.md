@@ -81,7 +81,9 @@ scope: root
 - 增加只检查不改写的 lint；升级 Vitest 3.2.6 并锁定安全 Vite；全量修复由新检查发现的问题。
 - 扩展 CI：Linux Node 22 完整检查、Node 18 兼容、macOS/Windows 关键测试/构建、依赖审计、
   CodeQL、Dependabot。
-- 发布 workflow 验证 tag commit 位于 origin/main 且相同提交的质量 checks 已通过。
+- 发布 workflow 验证 tag commit 位于 origin/main、branch/tag ruleset 启用，并按 ruleset 的
+  GitHub App 来源核对关联 PR head；仅允许受 Git 管理且位于发布历史上的有效紧急交付记录
+  显式进入异常发布。
 - 提交 coding-engine contract；self-host workflow 延至 bootstrap 版本发布后的独立 PR。
 - `loop.ts`/巨型测试拆分另开结构治理 PR，不与门禁产品实现混改。
 

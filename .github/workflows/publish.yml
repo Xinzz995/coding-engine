@@ -104,26 +104,37 @@ jobs:
           DELIVERY_HEAD="$(cat "$RUNNER_TEMP/delivery-head.txt")"
           gh api "repos/${GITHUB_REPOSITORY}/commits/${DELIVERY_HEAD}/check-runs?per_page=100" \
             > "$RUNNER_TEMP/check-runs.json"
+          gh api "repos/${GITHUB_REPOSITORY}/rulesets?includes_parents=false&per_page=100" \
+            > "$RUNNER_TEMP/rulesets.json"
           node --input-type=module <<'NODE'
-          import { readFileSync } from 'node:fs';
-          const contract = JSON.parse(readFileSync('.coding-x/quality.json', 'utf8'));
-          const payload = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/check-runs.json', 'utf8'));
-          const runs = Array.isArray(payload.check_runs) ? payload.check_runs : [];
-          const missing = [];
-          for (const name of contract.github.requiredChecks) {
-            const matches = runs.filter((run) => run.name === name);
-            const latest = matches.sort((a, b) =>
-              String(b.completed_at ?? '').localeCompare(String(a.completed_at ?? '')))[0];
-            if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') {
-              missing.push(name);
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const rulesets = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/rulesets.json', 'utf8'));
+          for (const [name, destination] of [
+            ['coding-x quality gate', 'branch-ruleset-id.txt'],
+            ['coding-x release refs', 'release-ruleset-id.txt'],
+          ]) {
+            const matches = Array.isArray(rulesets) ? rulesets.filter((item) => item?.name === name) : [];
+            if (matches.length !== 1 || !Number.isInteger(matches[0]?.id)) {
+              console.error(`::error::发布时必须恰好存在一个 ${name}，实际 ${matches.length}`);
+              process.exit(1);
             }
+            writeFileSync(process.env.RUNNER_TEMP + '/' + destination, String(matches[0].id));
           }
-          if (missing.length > 0) {
-            console.error(`::error::发布提交缺少通过的交付检查：${missing.join('、')}`);
-            process.exit(1);
-          }
-          console.log('发布提交的交付检查完整通过');
           NODE
+          BRANCH_RULESET_ID="$(cat "$RUNNER_TEMP/branch-ruleset-id.txt")"
+          RELEASE_RULESET_ID="$(cat "$RUNNER_TEMP/release-ruleset-id.txt")"
+          gh api "repos/${GITHUB_REPOSITORY}/rulesets/${BRANCH_RULESET_ID}" \
+            > "$RUNNER_TEMP/branch-ruleset.json"
+          gh api "repos/${GITHUB_REPOSITORY}/rulesets/${RELEASE_RULESET_ID}" \
+            > "$RUNNER_TEMP/release-ruleset.json"
+          node build/verify-release-delivery.mjs \
+            .coding-x/quality.json \
+            .coding-x/exceptions.json \
+            "$RUNNER_TEMP/associated-prs.json" \
+            "$RUNNER_TEMP/check-runs.json" \
+            "$RUNNER_TEMP/branch-ruleset.json" \
+            "$RUNNER_TEMP/release-ruleset.json" \
+            "$GITHUB_SHA"
 
       # 允许 tag workflow 安全重跑：版本已存在时必须证明它就是当前 tag 的产物，
       # 不能把同版本的其他提交静默当成成功。
