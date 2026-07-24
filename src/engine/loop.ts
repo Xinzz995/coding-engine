@@ -13,7 +13,7 @@ import {
 } from './state.js';
 import {
   runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback,
-  abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES, applyValidatorFailure,
+  abortDesc, applyValidatorFailure,
   applyValidatorSuccess,
 } from './gate.js';
 import { resolveBuilderModel, resolveValidatorModel } from './models.js';
@@ -36,6 +36,9 @@ import {
   type ValidationRequest,
 } from './validation-protocol.js';
 import { checkTddPolicy, readTddConfig, runTddGate, type TddConfig } from './tdd-gate.js';
+import { readLoopInstruction, renderInstruction } from './loop-instructions.js';
+
+export { renderInstruction } from './loop-instructions.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -71,39 +74,6 @@ export interface LoopConfig {
 
 function waitForSigint(): Promise<void> {
   return new Promise((resolve) => process.once('SIGINT', () => resolve()));
-}
-
-function readInstruction(dir: string, file: string): string | null {
-  try {
-    return readFileSync(join(dir, file), 'utf-8');
-  } catch {
-    return null;
-  }
-}
-
-// Instruction files use the {{WORKSPACE}} placeholder instead of a hardcoded
-// '.workspace/' prefix so a custom --workspace path reaches the agent. The
-// agent runs at the project root, and cfg.workspace is resolved the same way
-// the engine resolves it (relative to the project root, or absolute), so the
-// agent and engine always share the same prd.json / state.json / progress.md.
-const TDD_WORKFLOW_INSTRUCTION = [
-  '',
-  '本轮已启用 TDD。读取并遵循已安装的 `tdd` skill；本 story 的 acceptanceCriteria 已获用户批准，',
-  '把它们作为行为清单逐项完成真实 RED→GREEN→重构。若 acceptanceCriteria 不足以确定公共行为、',
-  '与源码事实冲突或需要新增覆盖排除，使用 [需要人工核实] 并将 story 置 blocked，不自行补意图。',
-  '',
-].join('\n');
-
-export function renderInstruction(
-  text: string,
-  workspace: string,
-  tddEnabled = false,
-): string {
-  return text
-    .replaceAll('{{WORKSPACE}}', workspace)
-    .replaceAll('{{MAX_RETRIES}}', String(MAX_RETRIES))
-    .replaceAll('{{ARBITRATION_PREFIXES}}', ARBITRATION_PREFIXES.join('、'))
-    .replaceAll('{{TDD_WORKFLOW}}', tddEnabled ? TDD_WORKFLOW_INSTRUCTION : '');
 }
 
 // 运行期读取执行状态；缺失/损坏时按全部未开始处理（绝不覆盖原文件，交给 repair）。
@@ -142,8 +112,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   const prdPath = join(cfg.workspace, 'prd.json');
   const statePath = join(cfg.workspace, 'state.json');
   const guard = createPrdGuard(prdPath);
-  const builderRaw = readInstruction(cfg.instructionsDir, 'builder.md');
-  const validatorRaw = readInstruction(cfg.instructionsDir, 'validator.md');
+  const builderRaw = readLoopInstruction(cfg.instructionsDir, 'builder.md');
+  const validatorRaw = readLoopInstruction(cfg.instructionsDir, 'validator.md');
 
   let server: ReturnType<typeof dashboard.start> | null = null;
   try {
