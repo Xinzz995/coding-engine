@@ -39,8 +39,10 @@ coding-x 在每个模型调用中：
 2. 把可信 system prompt 写成仅有 `tools: []` 的临时 custom agent；
 3. 把 PR 意图、来源与 diff 仅作为 user data 传入；
 4. 禁用所有工具、内建 MCP、项目/用户指令、远程会话、远程导出和自动更新；
-5. 解析有界 JSONL，只接受一个无工具请求的最终回复、成功 result 和一致的实际模型；
-6. 超时、进程异常、版本不符、输出畸形、工具请求或模型身份矛盾均 fail closed。
+5. 解析有界 JSONL，只接受一个无工具请求的最终回复、成功 result，以及与该次路由事件一致的
+   实际模型；
+6. 每次调用最长等待五分钟；超时、进程异常、版本不符、输出畸形、工具请求或单次调用中的模型
+   身份矛盾均 fail closed。
 
 workflow 不签出 PR head，也不运行 PR 代码。Copilot 使用同一个最小权限 `GITHUB_TOKEN`；
 不再读取 `CODING_X_MODEL_TOKEN`。Check Run 与 GitHub API 仍由 coding-x 绑定精确 PR head。
@@ -63,6 +65,8 @@ workflow 不签出 PR head，也不运行 PR 代码。Copilot 使用同一个最
 
 - 新工作流需要 `copilot-requests: write`，不再需要 `models: read` 或模型 secret。
 - Copilot 账户或组织政策未启用、额度不足、CLI 版本漂移时，门禁会明确阻断。
-- `auto` 的实际模型可能随 GitHub 路由变化，因此 receipt 必须保留每次运行的真实模型身份；
-  若同一评审轴中模型身份不一致，该轴不可验证。
+- `auto` 的实际模型可能随 GitHub 路由变化，甚至同一评审轴的不同无损分片也可能选中不同模型；
+  receipt 必须按稳定顺序保留所有真实模型身份。只有单次调用内的路由事件与最终回复身份矛盾时
+  才不可验证。
+- provider 未返回用量时不得以 `0` 代替；该次调用仍然阻断，receipt 省略未知用量。
 - provider 迁移是面向用户的门禁合同变更，发布 minor 版本 0.31.0。

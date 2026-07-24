@@ -30,6 +30,7 @@ import {
 import {
   evaluateReviewModelResult,
   validateReviewOutputGrounding,
+  validateReviewOutputSemantics,
 } from './review.js';
 import { runReadOnlyReviewAgent } from './review-agent.js';
 import type {
@@ -359,6 +360,22 @@ export async function runLocalQualityReview(opts: {
         model: opts.model,
         code: 'model-output-invalid',
         message: model.error,
+        durationMs: model.durationMs,
+      });
+    }
+    const semanticsError = validateReviewOutputSemantics(model.output);
+    if (semanticsError) {
+      return errorReceipt({
+        workspace: opts.workspace,
+        now,
+        axis,
+        repository: contractRead.contract.github.repository,
+        baseSha: diff.baseSha,
+        headSha: diff.headSha,
+        contractSha256: contractRead.sha256,
+        model: opts.model,
+        code: 'model-output-invalid',
+        message: semanticsError,
         durationMs: model.durationMs,
       });
     }

@@ -27,7 +27,7 @@ const OUTPUT_KEYS = new Set(['summary', 'findings']);
 const SEVERITIES = new Set<FindingSeverity>(['critical', 'high', 'medium', 'low']);
 const MAX_FINDINGS = 50;
 const MAX_FIELD_CHARS = 8_000;
-const DEFAULT_MODEL_TIMEOUT_MS = 120_000;
+const DEFAULT_MODEL_TIMEOUT_MS = 300_000;
 
 export const reviewResponseSchema = {
   type: 'json_schema',

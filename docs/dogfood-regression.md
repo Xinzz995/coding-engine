@@ -51,4 +51,4 @@ scope: root
 | 32 | Deep 触发时只读取工程标准与 diff，不重复载入 Spec 来源或重新裁决产品范围；大项目仍在八片预算内 fail closed | ADR-018 / 0.30.8 | 远端来源调用测试明确断言 base SHA 只读取 standards；coding-engine 真实高风险 PR 的 Deep Check Run |
 | 33 | Spec 目录只作为可信允许范围：PR 明确关联及直接修改的规格会进入 prompt，无关历史规格不读取；自包含声明、越界路径、缺失文件和缺少声明分别得到确定结果 | ADR-018 / 0.30.8 | intent 路径解析、远端 API 调用和本地 reviewer prompt 回归；真实结构治理 PR 的 Spec Check Run |
 | 34 | 发布只接受 branch ruleset 绑定的 GitHub App 所产生的最新成功检查；同名伪造无效。缺检查时仅有效祖先异常记录可进入带 warning 的异常发布，停用规则、过期/关闭/无关记录仍阻断 | ADR-018 / 0.30.4 | verifier 单测覆盖正常、伪造、有效异常、过期、关闭、非祖先和 ruleset 停用；真实发布日志对账 |
-| 35 | Copilot 远端评审只加载默认分支可信指令；PR 内容无法启用工具、读取环境秘密或覆盖评审角色；CLI 版本、实际模型和调用用量进入当前 head 回执，版本漂移、工具请求、路由身份冲突或进程异常均为 unverifiable | ADR-019 / 0.31.0 | 固定版本 adapter 单元测试；恶意 prompt 真实探针；coding-engine 与非 Node 下游正常 PR 的三轴 Check Run |
+| 35 | Copilot 远端评审只加载默认分支可信指令；PR 内容无法启用工具、读取环境秘密或覆盖评审角色；CLI 版本、每次调用的实际模型和真实调用用量进入当前 head 回执，跨分片 auto 路由可以不同但必须完整留证，缺失用量不得伪造为零；版本漂移、单次路由身份冲突、工具请求、五分钟超时或进程异常均为 unverifiable | ADR-019 / 0.31.1 | 固定版本 adapter 单元测试；恶意 prompt 真实探针；coding-engine 与非 Node 下游正常 PR 的三轴 Check Run |
