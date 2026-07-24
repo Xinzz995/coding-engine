@@ -14,6 +14,10 @@ const OUTPUT_KEYS = new Set(['summary', 'findings']);
 const SEVERITIES = new Set<FindingSeverity>(['critical', 'high', 'medium', 'low']);
 const MAX_FINDINGS = 50;
 const MAX_FIELD_CHARS = 8_000;
+const DEFAULT_MODEL_TIMEOUT_MS = 120_000;
+const DEFAULT_MODEL_MAX_ATTEMPTS = 5;
+const MAX_MODEL_RETRY_DELAY_MS = 30_000;
+const MODEL_RETRY_BASE_DELAY_MS = 2_000;
 
 export const reviewResponseSchema = {
   type: 'json_schema',
@@ -155,6 +159,46 @@ export type GitHubModelResult =
       reason: ModelFailureReason;
     };
 
+function retryAfterMs(value: string | null, nowMs: number): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - nowMs) : null;
+}
+
+function modelRetryDelayMs(
+  response: Response,
+  attempt: number,
+  nowMs: number,
+  random: () => number,
+): number {
+  const providerDelay = retryAfterMs(response.headers.get('retry-after'), nowMs);
+  const fallback = MODEL_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1));
+  const base = Math.min(providerDelay ?? fallback, MAX_MODEL_RETRY_DELAY_MS);
+  const jitter = Math.floor(Math.max(0, Math.min(1, random())) * 500);
+  return Math.min(base + jitter, MAX_MODEL_RETRY_DELAY_MS);
+}
+
+function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason ?? new Error('aborted'));
+      return;
+    }
+    const complete = () => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    };
+    const timer = setTimeout(complete, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error('aborted'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 export async function callGitHubModel(opts: {
   token: string;
   model: string;
@@ -163,67 +207,106 @@ export async function callGitHubModel(opts: {
   axis: ReviewAxis;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  maxAttempts?: number;
+  sleepImpl?: (ms: number, signal: AbortSignal) => Promise<void>;
+  nowImpl?: () => number;
+  randomImpl?: () => number;
 }): Promise<GitHubModelResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_MODEL_TIMEOUT_MS;
+  const requestedAttempts = opts.maxAttempts ?? DEFAULT_MODEL_MAX_ATTEMPTS;
+  const maxAttempts = Number.isInteger(requestedAttempts) && requestedAttempts > 0
+    ? Math.min(8, requestedAttempts)
+    : DEFAULT_MODEL_MAX_ATTEMPTS;
+  const sleepImpl = opts.sleepImpl ?? sleepWithAbort;
+  const nowImpl = opts.nowImpl ?? Date.now;
+  const randomImpl = opts.randomImpl ?? Math.random;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 120_000);
+  const deadline = nowImpl() + timeoutMs;
+  const timer = setTimeout(
+    () => controller.abort(new Error(`GitHub Models 调用超过 ${timeoutMs} 毫秒总时限`)),
+    timeoutMs,
+  );
   try {
-    const response = await fetchImpl('https://models.github.ai/inference/chat/completions', {
-      method: 'POST',
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${opts.token}`,
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2026-03-10',
-      },
-      body: JSON.stringify({
-        model: opts.model,
-        messages: [
-          { role: 'system', content: opts.systemPrompt },
-          { role: 'user', content: opts.userPrompt },
-        ],
-        temperature: 0,
-        max_tokens: 4_000,
-        response_format: reviewResponseSchema,
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const response = await fetchImpl('https://models.github.ai/inference/chat/completions', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${opts.token}`,
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2026-03-10',
+        },
+        body: JSON.stringify({
+          model: opts.model,
+          messages: [
+            { role: 'system', content: opts.systemPrompt },
+            { role: 'user', content: opts.userPrompt },
+          ],
+          temperature: 0,
+          max_tokens: 4_000,
+          response_format: reviewResponseSchema,
+        }),
+        signal: controller.signal,
+      });
+      if (response.ok) {
+        const envelope = await response.json() as GitHubModelsResponse;
+        const content = envelope.choices?.[0]?.message?.content;
+        if (typeof content !== 'string') {
+          return {
+            status: 'invalid',
+            output: null,
+            error: 'GitHub Models 响应缺少文本 content',
+            reason: 'invalid-output',
+          };
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(content);
+        } catch {
+          return {
+            status: 'invalid',
+            output: null,
+            error: 'GitHub Models content 不是 JSON',
+            reason: 'invalid-output',
+          };
+        }
+        const normalized = normalizeReviewModelOutput(parsed, opts.axis);
+        return normalized.status === 'valid'
+          ? normalized
+          : { ...normalized, reason: 'invalid-output' };
+      }
       const diagnostic = (await response.text()).slice(0, 1000);
+      if (response.status === 429 && attempt < maxAttempts) {
+        const delayMs = modelRetryDelayMs(response, attempt, nowImpl(), randomImpl);
+        if (nowImpl() + delayMs >= deadline) {
+          return {
+            status: 'invalid',
+            output: null,
+            error: `GitHub Models HTTP 429：重试等待将超过 ${timeoutMs} 毫秒总时限`,
+            reason: 'provider-error',
+          };
+        }
+        await sleepImpl(delayMs, controller.signal);
+        continue;
+      }
       return {
         status: 'invalid',
         output: null,
-        error: `GitHub Models HTTP ${response.status}${diagnostic ? `：${diagnostic}` : ''}`,
+        error: `GitHub Models HTTP ${response.status}${diagnostic ? `：${diagnostic}` : ''}${
+          response.status === 429 && attempt > 1 ? `（${attempt} 次尝试后）` : ''
+        }`,
         reason: response.status === 413 && diagnostic.includes('tokens_limit_reached')
           ? 'input-too-large'
           : 'provider-error',
       };
     }
-    const envelope = await response.json() as GitHubModelsResponse;
-    const content = envelope.choices?.[0]?.message?.content;
-    if (typeof content !== 'string') {
-      return {
-        status: 'invalid',
-        output: null,
-        error: 'GitHub Models 响应缺少文本 content',
-        reason: 'invalid-output',
-      };
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      return {
-        status: 'invalid',
-        output: null,
-        error: 'GitHub Models content 不是 JSON',
-        reason: 'invalid-output',
-      };
-    }
-    const normalized = normalizeReviewModelOutput(parsed, opts.axis);
-    return normalized.status === 'valid'
-      ? normalized
-      : { ...normalized, reason: 'invalid-output' };
+    return {
+      status: 'invalid',
+      output: null,
+      error: 'GitHub Models 重试状态异常',
+      reason: 'provider-error',
+    };
   } catch (error) {
     return {
       status: 'invalid',
