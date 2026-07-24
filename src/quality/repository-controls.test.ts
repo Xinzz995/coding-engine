@@ -61,6 +61,14 @@ describe('coding-engine delivery controls', () => {
     expect(dependabot.match(/interval:\s+["']?weekly["']?/g)?.length).toBe(2);
   });
 
+  it('builds the CLI before running the path-filtered documentation check', () => {
+    const contract = JSON.parse(rootFile('.coding-x/quality.json')) as {
+      checks: Array<{ id: string; command: string }>;
+    };
+    expect(contract.checks.find((check) => check.id === 'docs')?.command)
+      .toBe('npm run build && node dist/cli.js doctor');
+  });
+
   it('pins the review stack versions used by the Node 18-compatible release', () => {
     const pkg = JSON.parse(rootFile('package.json')) as {
       dependencies: Record<string, string>;

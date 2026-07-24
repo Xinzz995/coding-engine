@@ -82,7 +82,7 @@ scope: root
     "repository": "owner/repo",
     "defaultBranch": "main",
     "releaseRefs": ["refs/tags/v*"],
-    "codingXVersion": "0.30.3",
+    "codingXVersion": "0.30.4",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",
@@ -250,8 +250,10 @@ HTTP 成功。
 6. v0.30.2 的发布校验因默认 Actions 身份无法完整读取 ruleset 而安全失败，标签保留且不移动；
 7. 发布工作流改用显式管理只读凭据，并以受 Git 管理的未关闭异常记录发布 0.30.3，日志标记
    异常而非伪造检查成功；
-8. 0.30.3 必须完整裁决后续真实 PR，成功后关闭异常；
-9. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
+8. v0.30.3 首次真实自托管 PR 暴露模型请求和干净检出两项兼容问题，PR 保持阻断且不合并；
+9. 两项修复通过真实 provider 与干净检出复验后发布 0.30.4，由 0.30.4 完整裁决后续真实 PR，
+   成功后关闭异常；
+10. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
 依赖审计；CI 另跑 Node 18/22 与 Linux/macOS/Windows 兼容矩阵。发布工作流验证 tag 提交位于

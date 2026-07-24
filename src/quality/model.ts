@@ -184,7 +184,6 @@ export async function callGitHubModel(opts: {
         ],
         temperature: 0,
         max_tokens: 4_000,
-        tool_choice: 'none',
         response_format: reviewResponseSchema,
       }),
       signal: controller.signal,

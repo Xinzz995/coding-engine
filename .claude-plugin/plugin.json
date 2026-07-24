@@ -1,6 +1,6 @@
 {
   "name": "coding-x",
-  "version": "0.30.3",
+  "version": "0.30.4",
   "description": "Ralph auto-coding workflow: PRD-driven deterministic Developer→Validator loop — skills, commands and the coding-x engine (`npx coding-x`).",
   "author": { "name": "Xinzz" }
 }
