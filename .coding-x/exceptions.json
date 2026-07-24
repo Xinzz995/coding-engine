@@ -9,7 +9,8 @@
       "owner": "Xinzz995",
       "expiresAt": "2026-07-25T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
-      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30094331734"
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30094331734",
+      "resolvedAt": "2026-07-24T13:49:40Z"
     },
     {
       "id": "delivery-2026-07-24-bootstrap-model-budget",
@@ -18,7 +19,8 @@
       "owner": "Xinzz995",
       "expiresAt": "2026-07-25T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
-      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30095745594"
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30095745594",
+      "resolvedAt": "2026-07-24T13:49:40Z"
     },
     {
       "id": "delivery-2026-07-24-bootstrap-ruleset-readback",
@@ -27,7 +29,8 @@
       "owner": "Xinzz995",
       "expiresAt": "2026-07-25T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
-      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30096590460"
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30096590460",
+      "resolvedAt": "2026-07-24T13:49:40Z"
     },
     {
       "id": "delivery-2026-07-24-bootstrap-first-self-host",
@@ -36,7 +39,8 @@
       "owner": "Xinzz995",
       "expiresAt": "2026-07-25T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
-      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30097413961"
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30097413961",
+      "resolvedAt": "2026-07-24T13:49:40Z"
     }
   ]
 }

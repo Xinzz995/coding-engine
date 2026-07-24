@@ -103,6 +103,16 @@ scope: root
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
 
+## coding-engine 自托管证据
+
+- v0.30.4 的 npm `gitHead`、GitHub Release 和 annotated tag 剥离提交一致，均为
+  `fa82b711d18158237b3b54d23e585ea52e16a80f`。
+- PR #20 的首个 head 在 GitHub Models 临时限流时保持不可合并，重试后才恢复全绿。
+- PR #20 追加提交后，旧 head 的成功结果不再满足规则；新 head
+  `9f59544246d56565f50ceea1a73d31031f2a1b41` 重新取得四项质量检查和四平台 CI 的成功结果。
+- PR #20 在 branch ruleset 持续启用、无绕过主体的状态下正常合并为
+  `d43904a9a98f08d3d61b8d59cf1c42f3cc1dc927`，未使用启动例外。
+
 ## 交付边界
 
 - 本次授权包含实现、提交、推送、PR、GitHub 规则配置和为自托管所需的正式发布。
