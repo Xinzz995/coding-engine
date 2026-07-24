@@ -113,6 +113,15 @@
       "expiresAt": "2026-07-27T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30122647808"
+    },
+    {
+      "id": "delivery-2026-07-25-copilot-receipt-stability",
+      "commitSha": "f0b0f36bdb8434827a4094639f99ed83ca06ee57",
+      "reason": "0.31.0 的首次正常自托管 PR #41 已证明安全隔离与真实 Copilot 调用可运行，但三个独立评审轴均因 adapter 边界而 unverifiable：Spec 与 Deep 在 120 秒上限刚到时被终止，Standards 的两个无损分片被 auto 路由到不同实际模型后又被错误视为身份矛盾；三轴都没有产生 finding。该 PR 的项目检查、四平台 CI 与 CodeQL 全部通过。仅允许在 830 项全量测试、类型检查、静态检查、构建、文档健康、CLI 冒烟和高危依赖审计通过后，异常交付精确修复提交 f0b0f36bdb8434827a4094639f99ed83ca06ee57 并发布 0.31.1；修复把单次上限提高到五分钟、完整记录跨分片实际模型，并在 provider 未返回用量时省略未知值而不是伪造为零。规则必须立即恢复；0.31.1 发布后 coding-engine 与外部 Python 的正常三轴 PR 闭环、结构治理、安全修复和全部异常关闭不得再使用绕过。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-28T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30123218687"
     }
   ]
 }
