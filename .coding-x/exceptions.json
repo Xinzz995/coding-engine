@@ -59,6 +59,15 @@
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30106341886"
+    },
+    {
+      "id": "delivery-2026-07-24-model-queue-restoration",
+      "commitSha": "ebbcf065096b00b14e6136bce0994bc5703a7cba",
+      "reason": "0.30.8 的三个依赖 job 共用 queue:max，PR #28 与 #29 分别复现 Deep 或 Standards 在没有运行中模型任务时永久排队；PR #30 旧规则又把符合验收标准的正面确认生成 26 条阻断 finding，Standards 与 Deep 则以 review-input-too-large 保持 unverifiable。仅在 803 项测试、项目原生检查、四平台 CI、工作流模板同构和单一仓库队列合同全部通过后，异常合并队列恢复提交。规则恢复后，证据原文核验、coding-engine 结构治理 PR 和外部非 Node PR 必须全部由正常规则通过，才关闭记录。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30109488571"
     }
   ]
 }
