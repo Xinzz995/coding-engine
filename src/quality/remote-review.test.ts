@@ -63,7 +63,7 @@ function setup(): { root: string; baseSha: string; eventPath: string } {
     pull_request: {
       number: 1,
       title: 'Feature',
-      body: `## 意图\nReturn true.\n## 验收标准\nReturns true.\n## 非目标\nNo IO.\n## 验证方式\nUnit test.`,
+      body: `## 意图\nReturn true.\n## 验收标准\nReturns true.\n## 非目标\nNo IO.\n## 验证方式\nUnit test.\n## 关联规格\n- docs/specs/feature.md`,
       base: { ref: 'main', sha: baseSha },
       head: { sha: 'b'.repeat(40) },
     },
@@ -77,7 +77,7 @@ function client(baseSha: string, body?: string): Partial<GitHubClient> {
     getPullIdentity: vi.fn(async () => ({
       number: 1,
       title: 'Feature',
-      body: body ?? `## 意图\nReturn true.\n## 验收标准\nReturns true.\n## 非目标\nNo IO.\n## 验证方式\nUnit test.`,
+      body: body ?? `## 意图\nReturn true.\n## 验收标准\nReturns true.\n## 非目标\nNo IO.\n## 验证方式\nUnit test.\n## 关联规格\n- docs/specs/feature.md`,
       baseRef: 'main',
       baseSha,
       headSha: 'b'.repeat(40),
@@ -87,7 +87,12 @@ function client(baseSha: string, body?: string): Partial<GitHubClient> {
       filename: 'src.py', status: 'modified', additions: 1, deletions: 0,
       patch: '+def result(): return True',
     }]),
-    getTreePaths: vi.fn(async () => ['AGENTS.md', 'docs/specs/feature.md', 'src.py']),
+    getTreePaths: vi.fn(async () => [
+      'AGENTS.md',
+      'docs/specs/feature.md',
+      'docs/specs/unrelated.md',
+      'src.py',
+    ]),
     getTextFile: vi.fn(async (path: string) =>
       path === 'AGENTS.md' ? '# Rules\nHandle errors.' : '# Feature\nMust return true.'),
     createCheckRun: vi.fn(async () => ({ id: 1, url: 'https://github.com/check/1' })),
@@ -143,6 +148,85 @@ describe('remote review axis', () => {
     expect(modelCall).toHaveBeenCalledWith(expect.objectContaining({
       token: 'model-only-token',
     }));
+    const specReads = (api.getTextFile as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => call[0].startsWith('docs/specs/'))
+      .map((call) => call[0]);
+    expect(specReads).toEqual(['docs/specs/feature.md']);
+  });
+
+  it('uses an explicitly self-contained PR Spec without loading the allowed directory', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const body = `## 意图\nReturn true.\n## 验收标准\nReturns true.\n## 非目标\nNo IO.\n## 验证方式\nUnit test.\n## 关联规格\n本 PR 意图即完整 Spec`;
+    const api = client(baseSha, body);
+    const modelCall = vi.fn(async () => ({
+      status: 'valid' as const,
+      output: { summary: 'self-contained intent matches', findings: [] },
+      error: null,
+    }));
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'spec',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(result.receipt.status).toBe('passed');
+    expect((api.getTextFile as ReturnType<typeof vi.fn>).mock.calls
+      .some((call) => call[0].startsWith('docs/specs/'))).toBe(false);
+  });
+
+  it('automatically includes a changed Spec even when the PR intent is self-contained', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const body = `## 意图\nClarify behavior.\n## 验收标准\nSpec is precise.\n## 非目标\nNo code change.\n## 验证方式\nReview the diff.\n## 关联规格\nself-contained`;
+    const api = client(baseSha, body);
+    (api.getPullDiff as ReturnType<typeof vi.fn>).mockResolvedValue(
+      'diff --git a/docs/specs/feature.md b/docs/specs/feature.md\n+Must return true.',
+    );
+    (api.getPullFiles as ReturnType<typeof vi.fn>).mockResolvedValue([{
+      filename: 'docs/specs/feature.md',
+      status: 'modified',
+      additions: 1,
+      deletions: 0,
+      patch: '+Must return true.',
+    }]);
+    const modelCall = vi.fn(async () => ({
+      status: 'valid' as const,
+      output: { summary: 'changed Spec matches', findings: [] },
+      error: null,
+    }));
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'spec',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(result.receipt.status).toBe('passed');
+    expect((api.getTextFile as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => call[0] === 'docs/specs/feature.md')).toHaveLength(2);
+  });
+
+  it('fails closed when a declared Spec is outside the contract allowlist', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const body = `## 意图\nReturn true.\n## 验收标准\nReturns true.\n## 非目标\nNo IO.\n## 验证方式\nUnit test.\n## 关联规格\nREADME.md`;
+    const api = client(baseSha, body);
+    const modelCall = vi.fn();
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'spec',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(result.receipt.status).toBe('unverifiable');
+    expect(result.receipt.errors[0]).toMatchObject({ code: 'review-source-invalid' });
+    expect(modelCall).not.toHaveBeenCalled();
   });
 
   it('reviews every lossless shard and keeps the most severe duplicate result', async () => {
@@ -304,6 +388,41 @@ describe('remote review axis', () => {
     });
     expect(result.receipt).toMatchObject({ status: 'passed', deepRequired: false });
     expect(modelCall).not.toHaveBeenCalled();
+  });
+
+  it('keeps deep review isolated from Spec sources already reviewed by the Spec axis', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    (api.getPullDiff as ReturnType<typeof vi.fn>).mockResolvedValue(
+      'diff --git a/.coding-x/quality.json b/.coding-x/quality.json\n+{"changed":true}',
+    );
+    (api.getPullFiles as ReturnType<typeof vi.fn>).mockResolvedValue([{
+      filename: '.coding-x/quality.json',
+      status: 'modified',
+      additions: 1,
+      deletions: 0,
+      patch: '+{"changed":true}',
+    }]);
+    const modelCall = vi.fn(async () => ({
+      status: 'valid' as const,
+      output: { summary: 'structure remains clear', findings: [] },
+      error: null,
+    }));
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'deep',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(result.receipt).toMatchObject({ status: 'passed', deepRequired: true });
+    const trustedSourceReads = (api.getTextFile as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => call[1] === baseSha)
+      .map((call) => call[0]);
+    expect(trustedSourceReads).toEqual(['AGENTS.md']);
+    expect(trustedSourceReads).not.toContain('docs/specs/feature.md');
   });
 
   it('refuses stale event identity before publishing a success', async () => {

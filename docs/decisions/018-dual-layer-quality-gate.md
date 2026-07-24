@@ -62,7 +62,12 @@ Check Run 或仓库读取权限。0.30.6 对 429 遵守 provider 的 `Retry-Afte
 且默认 GPT-4.1 所属高限流档的免费日额度只有 50 次。0.30.7 改用已真实验证结构化输出的
 GPT-4.1 mini 作为低限流档默认值，在请求前按完整 prompt 选择 source/diff 分片，在分片间
 节流，并通过 GitHub 原生 job 并发组及 `queue: max` 将全仓模型任务串行；该方案不引入中央
-队列、守护进程或静默降级。
+队列、守护进程或静默降级。随后结构治理预演发现 Deep 同时载入 Spec 与 Standards 会重复
+消费已经由 Spec 轴裁决的产品来源，并让高风险改动稳定超出八片；真实升级 PR 进一步证明，
+把 `specSources` 目录下全部历史规格送入每个 PR 也不是可扩展的来源合同。0.30.8 将来源所有权
+收紧为：Spec 只读取 PR 明确关联及本次直接修改的规格，`specSources` 只定义可信允许范围；
+Standards 与 Deep 读取工程标准，Deep 不再重新裁决产品范围。没有独立规格时，作者必须明确
+声明 PR 的意图、验收标准和非目标就是完整 Spec，不能静默省略。
 
 发布检查不能只按名称相信同名 Check Run：发布时重新读取启用中的 branch/tag ruleset，以
 ruleset 绑定的 GitHub App ID 核对关联 PR head 的最新结果。正常路径要求全部成功；只有受

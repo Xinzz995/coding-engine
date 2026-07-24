@@ -119,7 +119,7 @@
     "releaseRefs": [
       "refs/tags/v*"
     ],
-    "codingXVersion": "0.30.7",
+    "codingXVersion": "0.30.8",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",

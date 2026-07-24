@@ -620,7 +620,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 ### 第 4 步：审查与 PR 门禁
 
-循环全部 story 通过后，运行 `/review-loop`。它会准备四段式意图并调用
+循环全部 story 通过后，运行 `/review-loop`。它会准备五段式意图（含明确的关联规格声明）并调用
 `coding-x quality review`，在彼此隔离的只读上下文中分别检查：
 
 1. **Spec**：改动是否符合意图、验收标准和非目标。
@@ -728,7 +728,7 @@ GitHub Models 单次输入超限时，coding-x 保留完整 diff，只把评审�
 | `/priming` | 新会话开始、AI 不了解项目时；无需参数 | Git 文件/状态/近期提交、README/AGENTS/docs、配置和关键源码 | 只在当前对话输出项目概览，默认不落盘、不改代码 | 会话级临时上下文；换会话可重跑，完成后继续需求对齐或任务处理 |
 | `/init-docs` | 一个仓库第一次建立 AI 知识入口时 | 项目形态、配置、目录、技术栈；monorepo 候选需人确认 | 创建缺失文档；确认项目检查和来源后调用 `quality init` 建立受管交付门禁 | 新项目默认入口；远端 bootstrap 与 doctor 回读完成前保持 unverifiable |
 | `/planning <功能描述>` | 编码前需要完整技术路线时；输入可为原始需求或 align/tech 对齐稿 | 项目文档、相关代码/测试、官方资料和黄金原则 | `docs/plans/<feature>.md`，含任务顺序、风险、验证命令和原则对照；不写代码 | 初始 `active`；供人/agent 实施和 review 定位，合并后置 `done`，可显式归档；不替代正式 PRD |
-| `/review-loop` | 引擎循环结束、创建 PR 前 | 当前提交 diff、四段式意图、受 Git 管理的质量契约与来源 | 调用统一 `quality review`；输出 `.workspace/quality/` 本地反馈，不改业务代码 | 三轴各用只读上下文；新提交使旧结果失效；最终仍由 GitHub PR 独立重跑并阻断 |
+| `/review-loop` | 引擎循环结束、创建 PR 前 | 当前提交 diff、五段式意图（含关联规格声明）、受 Git 管理的质量契约与来源 | 调用统一 `quality review`；输出 `.workspace/quality/` 本地反馈，不改业务代码 | 三轴各用只读上下文；新提交使旧结果失效；最终仍由 GitHub PR 独立重跑并阻断 |
 | `/compound-docs` | 功能分支/引擎轮次收口，推荐合并后、推送前 | 当前代码（最高事实）、Git、progress、PRD 范围和 active 文档 | 只修改文档：沉淀、增量熵 GC、状态收尾、取舍账本；物理归档需明确授权 | 默认只处理本轮；“全量 GC”才全库审计；完成后长期知识继续 active，任务文档可 done/superseded → archive |
 
 ### Skills（按语境使用）
@@ -834,7 +834,7 @@ my-project/
 | 报“找不到 prd.json” | `.workspace/prd.json` 是否存在、`--workspace` 是否一致 | 用 `prd-to-json` 从正式 PRD 生成；不要手工拼一个不完整 JSON |
 | 启动时提示缺少质量契约 | 根目录 `.coding-x/quality.json` 与 `quality init` 预览 | 先确认项目原生检查、Spec/标准来源并完成初始化；不要用空命令绕过 |
 | `quality init/doctor --remote` 返回 unverifiable | GitHub token 权限、默认分支是否已有 Actions Check Run、ruleset 回读错误 | 先提交受管 workflow 并触发一次 Actions，再重跑远端配置；权限不足或漂移不能当作通过 |
-| PR 的 Spec/工程标准/深度检查失败 | 对应 Check Run 的 finding、PR 四段意图、当前 head | 修复或补齐资料后提交新 head，让三轴全部重跑；不要复制旧报告或创建同名文本标记 |
+| PR 的 Spec/工程标准/深度检查失败 | 对应 Check Run 的 finding、PR 五段意图与关联规格、当前 head | 修复或补齐资料后提交新 head，让三轴全部重跑；不要复制旧报告或创建同名文本标记 |
 | 退出码 `2`，提示 `engine.lock` 被占用 | 是否已有 `coding-x` 或 `repair` 在运行 | 有活进程就等待/停止它；异常 stale 锁让下次引擎接管，不要把删锁当常规解决方案 |
 | `state.json` 或 `prd.json` JSON 损坏 | `status`/`report` 的保守警告 | 确认无活锁后运行 `npx coding-x repair`；repair 只修 JSON 结构，不会替你解决业务失败 |
 | 退出码 `1`：达到最大轮次或 stall 熔断 | `npx coding-x status`、终端异常尾部、`report.html` 时间线 | 区分代码失败、runner 认证/网络、超时和空转；处理根因后重跑，已有有效状态会续跑 |
