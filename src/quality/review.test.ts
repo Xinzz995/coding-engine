@@ -102,6 +102,7 @@ describe('review result evaluation', () => {
     expect(validateReviewOutputGrounding(groundedOutput('return allowAllUsers();'), {
       diff: '+return allowAllUsers();',
       sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+      diffByFile: new Map([['src/x.ts', '+return allowAllUsers();']]),
     })).toBeNull();
   });
 
@@ -109,6 +110,7 @@ describe('review result evaluation', () => {
     expect(validateReviewOutputGrounding(groundedOutput('return allowAllUsers();'), {
       diff: '+return authorizeCaller();',
       sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+      diffByFile: new Map([['src/x.ts', '+return authorizeCaller();']]),
     })).toContain('逐字原文');
   });
 
@@ -118,6 +120,7 @@ describe('review result evaluation', () => {
       {
         diff: '+return authorizeCaller();',
         sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+        diffByFile: new Map([['src/x.ts', '+return authorizeCaller();']]),
       },
     )).toContain('对应文件');
   });
@@ -145,6 +148,7 @@ describe('review result evaluation', () => {
     expect(validateReviewOutputGrounding(groundedOutput('+'), {
       diff: '+return authorizeCaller();',
       sources: [],
+      diffByFile: new Map([['src/x.ts', '+return authorizeCaller();']]),
     })).toContain('至少需要 12');
   });
 });
