@@ -641,8 +641,18 @@ export async function runGitHubReviewAxis(opts: {
   const modelOutputs: ReviewModelOutput[] = [];
   let reviewError: QualityError | null = null;
   let modelCallCount = 0;
-  let premiumRequests = 0;
+  let premiumRequests: number | undefined = 0;
   const observedModels = new Set<string>();
+  const updateReceiptModel = () => {
+    const models = [...observedModels].sort();
+    if (models.length === 0) {
+      receiptModel = `${contract.review.provider}:${contract.review.model}`;
+    } else if (models.length === 1) {
+      receiptModel = `${contract.review.provider}:${models[0]}`;
+    } else {
+      receiptModel = `${contract.review.provider}:${contract.review.model}[${models.join(',')}]`;
+    }
+  };
   const invokeModel = async (
     prompts: { system: string; user: string },
     systemPrompt = prompts.system,
@@ -658,18 +668,14 @@ export async function runGitHubReviewAxis(opts: {
         userPrompt: prompts.user,
         axis: opts.axis,
       });
-      premiumRequests += result.premiumRequests ?? 0;
+      if (result.premiumRequests === undefined) {
+        premiumRequests = undefined;
+      } else if (premiumRequests !== undefined) {
+        premiumRequests += result.premiumRequests;
+      }
       if (result.model) {
         observedModels.add(result.model);
-        receiptModel = `${contract.review.provider}:${result.model}`;
-      }
-      if (observedModels.size > 1) {
-        return {
-          status: 'invalid',
-          output: null,
-          error: `同一评审轴使用了不一致的实际模型：${[...observedModels].sort().join('、')}`,
-          reason: 'invalid-output',
-        };
+        updateReceiptModel();
       }
       return result;
     } catch (error) {
@@ -898,7 +904,7 @@ export async function runGitHubReviewAxis(opts: {
     axis: opts.axis,
     model: receiptModel,
     modelCalls: modelCallCount,
-    premiumRequests,
+    ...(premiumRequests === undefined ? {} : { premiumRequests }),
     ...(opts.axis === 'deep'
       ? { deepRequired: risk.required, deepReasons: risk.reasons }
       : {}),

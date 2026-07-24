@@ -658,7 +658,7 @@ describe('remote review axis', () => {
     expect(result.receipt.reviewSummary).toBe('corrected schema');
   });
 
-  it('fails closed when auto routing changes model within one review axis', async () => {
+  it('records every actual model when auto routing changes model within one review axis', async () => {
     const { root, baseSha, eventPath } = setup();
     const api = client(baseSha);
     const modelCall = vi.fn()
@@ -688,15 +688,34 @@ describe('remote review axis', () => {
     });
     expect(modelCall).toHaveBeenCalledTimes(2);
     expect(result.receipt).toMatchObject({
-      status: 'unverifiable',
-      model: 'github-copilot:claude-haiku-4.5',
+      status: 'passed',
+      model: 'github-copilot:auto[claude-haiku-4.5,gpt-5-mini]',
       modelCalls: 2,
       premiumRequests: 0.5,
-      errors: [{
-        code: 'model-output-invalid',
-        message: expect.stringContaining('不一致的实际模型'),
-      }],
+      errors: [],
     });
+  });
+
+  it('does not invent provider usage when a model call has no usage receipt', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'standards',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall: vi.fn(async () => ({
+        status: 'invalid' as const,
+        output: null,
+        error: 'provider timed out',
+        reason: 'provider-error' as const,
+      })),
+    });
+    expect(result.receipt.status).toBe('unverifiable');
+    expect(result.receipt.modelCalls).toBe(1);
+    expect(result.receipt).not.toHaveProperty('premiumRequests');
   });
 
   it('rejects a finding with fabricated evidence even when its file is in scope', async () => {

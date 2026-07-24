@@ -192,10 +192,10 @@ describe('isolated Copilot CLI invocation', () => {
   it('pins the CLI, loads only the trusted agent, strips inherited secrets and disables tools', async () => {
     vi.stubEnv('CODING_X_ADMIN_TOKEN', 'must-not-leak');
     vi.stubEnv('NODE_OPTIONS', '--require=/tmp/untrusted.js');
-    const invocations: Array<{ args: string[]; cwd: string }> = [];
+    const invocations: Array<{ args: string[]; cwd: string; timeoutMs: number }> = [];
     let trustedRoot = '';
     const runImpl: CopilotProcessRunner = vi.fn(async (_command, args, opts) => {
-      invocations.push({ args, cwd: opts.cwd });
+      invocations.push({ args, cwd: opts.cwd, timeoutMs: opts.timeoutMs });
       if (args[0] === '--version') {
         return processResult({ stdout: 'GitHub Copilot CLI 1.0.74.\n' });
       }
@@ -223,6 +223,7 @@ describe('isolated Copilot CLI invocation', () => {
     });
     expect(result.status).toBe('valid');
     expect(invocations).toHaveLength(2);
+    expect(invocations[1].timeoutMs).toBe(300_000);
     expect(invocations[1].args).toEqual(expect.arrayContaining([
       '--agent=coding-x-review',
       '--available-tools=',
