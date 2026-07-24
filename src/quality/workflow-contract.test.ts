@@ -35,8 +35,12 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow).toContain('--axis spec');
     expect(workflow).toContain('--axis standards');
     expect(workflow).toContain('--axis deep');
-    expect(workflow).toMatch(/standards-review:\n\s+if: always\(\).*\n\s+needs: \[spec-review\]/);
-    expect(workflow).toMatch(/deep-review:\n\s+if: always\(\).*\n\s+needs: \[standards-review\]/);
+    expect(workflow).toMatch(
+      /standards-review:\r?\n\s+if: always\(\).*\r?\n\s+needs: \[spec-review\]/,
+    );
+    expect(workflow).toMatch(
+      /deep-review:\r?\n\s+if: always\(\).*\r?\n\s+needs: \[standards-review\]/,
+    );
     expect(workflow.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/g)?.length).toBe(4);
     expect(workflow.match(/CODING_X_MODEL_TOKEN: \$\{\{ secrets\.CODING_X_MODEL_TOKEN \}\}/g)?.length)
       .toBe(3);
