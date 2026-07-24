@@ -352,11 +352,52 @@ async function verifyCopilotVersion(opts: {
   return null;
 }
 
-function exactJsonFromAssistant(content: string): string | null {
-  const trimmed = content.trim();
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) return trimmed;
-  const fenced = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i.exec(trimmed);
-  return fenced?.[1]?.trim() ?? null;
+function singleJsonObjectFromAssistant(content: string): string | null {
+  const candidates: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    if (depth === 0) {
+      if (char === '{') {
+        start = index;
+        depth = 1;
+        inString = false;
+        escaped = false;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const candidate = content.slice(start, index + 1);
+        try {
+          JSON.parse(candidate);
+          candidates.push(candidate);
+        } catch {
+          // Keep scanning; prose can contain brace-delimited text that is not JSON.
+        }
+        start = -1;
+      }
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : null;
 }
 
 interface CopilotJsonEvent {
@@ -402,11 +443,11 @@ export function parseCopilotJsonl(
     }
     if (event.type === 'result') results.push(event);
   }
-  if (assistantMessages.length !== 1 || results.length !== 1) {
+  if (assistantMessages.length === 0 || results.length !== 1) {
     return {
       status: 'invalid',
       output: null,
-      error: 'Copilot CLI 必须且只能返回一个最终回复与一个 result',
+      error: 'Copilot CLI 必须返回至少一个最终回复与且仅一个 result',
       reason: 'invalid-output',
     };
   }
@@ -418,10 +459,13 @@ export function parseCopilotJsonl(
     && usage.premiumRequests >= 0
     ? usage.premiumRequests
     : null;
-  const message = assistantMessages[0];
-  const actualModel = typeof message.model === 'string' && message.model.trim() !== ''
-    ? message.model
-    : null;
+  const safeModels = new Set(
+    assistantMessages
+      .map((message) => message.model)
+      .filter((model): model is string =>
+        typeof model === 'string' && MODEL_ID_PATTERN.test(model)),
+  );
+  const actualModel = safeModels.size === 1 ? [...safeModels][0] : null;
   if (premiumRequests === null) {
     return {
       status: 'invalid',
@@ -441,11 +485,12 @@ export function parseCopilotJsonl(
       premiumRequests,
     };
   }
-  if (!actualModel || !MODEL_ID_PATTERN.test(actualModel)) {
+  if (!actualModel || assistantMessages.some((message) =>
+    typeof message.model !== 'string' || !MODEL_ID_PATTERN.test(message.model))) {
     return {
       status: 'invalid',
       output: null,
-      error: 'Copilot CLI 最终回复缺少安全、可识别的实际模型身份',
+      error: 'Copilot CLI 最终回复缺少唯一、安全、可识别的实际模型身份',
       reason: 'invalid-output',
       premiumRequests,
     };
@@ -471,7 +516,8 @@ export function parseCopilotJsonl(
       premiumRequests,
     };
   }
-  if (!Array.isArray(message.toolRequests) || message.toolRequests.length !== 0) {
+  if (assistantMessages.some((message) =>
+    !Array.isArray(message.toolRequests) || message.toolRequests.length !== 0)) {
     return {
       status: 'invalid',
       output: null,
@@ -481,7 +527,7 @@ export function parseCopilotJsonl(
       premiumRequests,
     };
   }
-  if (typeof message.content !== 'string') {
+  if (assistantMessages.some((message) => typeof message.content !== 'string')) {
     return {
       status: 'invalid',
       output: null,
@@ -491,12 +537,14 @@ export function parseCopilotJsonl(
       premiumRequests,
     };
   }
-  const json = exactJsonFromAssistant(message.content);
+  const json = singleJsonObjectFromAssistant(
+    assistantMessages.map((message) => message.content as string).join('\n'),
+  );
   if (!json) {
     return {
       status: 'invalid',
       output: null,
-      error: 'Copilot CLI content 不是单个 JSON 对象',
+      error: 'Copilot CLI 最终回复中没有且仅有一个可解析 JSON 对象',
       reason: 'invalid-output',
       model: actualModel,
       premiumRequests,

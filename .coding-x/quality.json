@@ -121,7 +121,7 @@
     "releaseRefs": [
       "refs/tags/v*"
     ],
-    "codingXVersion": "0.31.1",
+    "codingXVersion": "0.31.2",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",

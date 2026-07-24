@@ -222,9 +222,10 @@ system prompt 写成 `tools: []` 的 custom agent；PR diff、来源和意图仅
 调用禁用全部工具、内建 MCP、项目/用户指令、远程会话、远程导出和自动更新。
 
 Copilot CLI 与 coding-x 都固定完整版本。adapter 先核对 CLI 版本，再有界解析 JSONL：只接受
-一个无工具请求的最终回复、成功 result，以及与该次 auto 路由事件一致的实际模型；代码围栏只
-可包裹单个 JSON 对象。单次调用最长等待五分钟；超时、输出过大、事件损坏、工具请求、单次
-调用中的模型身份冲突、额度不足或组织政策禁用均为 `unverifiable`。`model: "auto"` 的全部
+同一实际模型的无工具回复、成功 result，以及回复内容中唯一一个可解析 JSON 对象；provider
+可以附加说明或代码围栏，但多个 JSON 对象仍视为歧义。单次调用最长等待五分钟；超时、输出
+过大、事件损坏、工具请求、单次调用中的模型身份冲突、额度不足或组织政策禁用均为
+`unverifiable`。`model: "auto"` 的全部
 真实模型和 premium request 用量写入 receipt；同一轴多个分片可以由 provider 路由到不同模型，
 但必须稳定列出所有实际身份。provider 未返回用量时不得以零代替。
 
