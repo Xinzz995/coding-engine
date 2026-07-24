@@ -171,6 +171,7 @@ export async function runGitHubReviewAxis(opts: {
   eventPath: string;
   axis: ReviewAxis;
   token: string;
+  modelToken?: string;
   client?: GitHubClient;
   modelCall?: ModelCall;
   now?: Date;
@@ -500,7 +501,7 @@ export async function runGitHubReviewAxis(opts: {
     let modelResult: Awaited<ReturnType<ModelCall>>;
     try {
       modelResult = await modelCall({
-        token: opts.token,
+        token: opts.modelToken ?? opts.token,
         model: contract.review.model,
         systemPrompt: prompts.system,
         userPrompt: prompts.user,
