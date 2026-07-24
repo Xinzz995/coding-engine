@@ -102,6 +102,16 @@ scope: root
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
 
+## 已取得的远端证据
+
+- GitHub 默认分支 ruleset `coding-x quality gate` 与标签 ruleset `coding-x release refs` 已启用；
+  默认分支必需检查绑定 GitHub Actions，直接推送 `main` 已被远端拒绝。
+- v0.30.2 在上传 npm 和创建 Release 前因 ruleset 回读权限不足而安全失败，失败标签保留且
+  未移动；全过程记录在 #13。
+- v0.30.3 发布任务完成，npm `gitHead`、GitHub Release 和 annotated tag 剥离提交均为
+  `0f20aab7cd88f4f79ff89c99c63efa0ff82be7d2`。
+- 下一项证据是由已发布 0.30.3 裁决本 PR，并在追加提交后证明旧 head 结果不会被复用。
+
 ## 交付边界
 
 - 本次授权包含实现、提交、推送、PR、GitHub 规则配置和为自托管所需的正式发布。
