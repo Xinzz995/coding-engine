@@ -86,6 +86,15 @@
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30111473911"
+    },
+    {
+      "id": "delivery-2026-07-24-review-correction-bootstrap",
+      "commitSha": "0e1c833784e704e21dc6a4f87ae1030cff610f9f",
+      "reason": "0.30.9 无法可信审查纠正自身误报所需的证据与语义校验：PR #37 两轮 Spec 均通过，项目检查与四平台 CI 全部通过；第二轮 Standards 把“符合规范、无需修改”写成 high finding，Deep 把五条“符合预期、无需修改”的正向确认写成 finding，随后旧版又因这些逐字补丁证据省略行前缀而返回 unverifiable。人工使用同一提交、默认分支规则、分片和模型逐项复现，确认没有真实代码修改要求。仅允许合并精确功能提交；规则恢复并发布 0.30.10 后，后续本地接入、远端纠正重审、结构治理和异常记录关闭必须由正常规则完整通过。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30116450737"
     }
   ]
 }
