@@ -7,6 +7,7 @@ import {
   evaluateReviewModelResult,
   renderReviewCheck,
   validateReviewOutputGrounding,
+  validateReviewOutputSemantics,
 } from './review.js';
 import type { QualityContractV1, ReviewModelOutput } from './types.js';
 
@@ -104,6 +105,53 @@ describe('review result evaluation', () => {
       sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
       diffByFile: new Map([['src/x.ts', '+return allowAllUsers();']]),
     })).toBeNull();
+  });
+
+  it('accepts a contiguous same-file code excerpt with unified-diff prefixes removed', () => {
+    const evidence = [
+      'readFileSync.mockImplementation(() => {',
+      "  throw Object.assign(new Error('missing'), { code: 'ENOENT' });",
+      '});',
+    ].join('\n');
+    const patch = [
+      '@@ -1,2 +1,5 @@',
+      '+readFileSync.mockImplementation(() => {',
+      "+  throw Object.assign(new Error('missing'), { code: 'ENOENT' });",
+      '+});',
+    ].join('\n');
+    expect(validateReviewOutputGrounding(groundedOutput(evidence), {
+      diff: `diff --git a/src/x.ts b/src/x.ts\n${patch}`,
+      sources: [],
+      diffByFile: new Map([['src/x.ts', patch]]),
+    })).toBeNull();
+  });
+
+  it('does not join evidence across separate diff hunks after removing prefixes', () => {
+    const evidence = [
+      'const endOfFirstHunk = true;',
+      'const startOfSecondHunk = true;',
+    ].join('\n');
+    const patch = [
+      '@@ -1,1 +1,1 @@',
+      '+const endOfFirstHunk = true;',
+      '@@ -100,1 +100,1 @@',
+      '+const startOfSecondHunk = true;',
+    ].join('\n');
+    expect(validateReviewOutputGrounding(groundedOutput(evidence), {
+      diff: `diff --git a/src/x.ts b/src/x.ts\n${patch}`,
+      sources: [],
+      diffByFile: new Map([['src/x.ts', patch]]),
+    })).toContain('逐字原文');
+  });
+
+  it('rejects a positive confirmation whose recommendation explicitly requires no change', () => {
+    const output = groundedOutput('return allowAllUsers();');
+    output.findings[0].recommendation = '测试覆盖符合要求，无需修改。';
+    expect(validateReviewOutputSemantics(output)).toContain('无需修改');
+    output.findings[0].recommendation = 'No code changes are required.';
+    expect(validateReviewOutputSemantics(output)).toContain('无需修改');
+    output.findings[0].recommendation = '无需修改核心逻辑，只需新增边界测试。';
+    expect(validateReviewOutputSemantics(output)).toBeNull();
   });
 
   it('rejects fabricated evidence even when the finding path is otherwise in scope', () => {

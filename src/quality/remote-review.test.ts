@@ -478,6 +478,9 @@ describe('remote review axis', () => {
   it('turns a thrown model call into a retained unverifiable check', async () => {
     const { root, baseSha, eventPath } = setup();
     const api = client(baseSha);
+    const modelCall = vi.fn(async () => {
+      throw new Error('provider unavailable');
+    });
     const result = await runGitHubReviewAxis({
       root,
       workspace: join(root, '.workspace'),
@@ -485,10 +488,9 @@ describe('remote review axis', () => {
       axis: 'standards',
       token: 'token',
       client: api as GitHubClient,
-      modelCall: vi.fn(async () => {
-        throw new Error('provider unavailable');
-      }),
+      modelCall,
     });
+    expect(modelCall).toHaveBeenCalledTimes(1);
     expect(result.receipt.status).toBe('unverifiable');
     expect(result.receipt.errors[0]).toMatchObject({ code: 'model-output-invalid' });
     expect(result.receipt.errors[0].message).toContain('provider unavailable');
@@ -572,9 +574,34 @@ describe('remote review axis', () => {
     expect(result.receipt.errors[0]).toMatchObject({ code: 'model-output-invalid' });
   });
 
-  it('rejects a finding with fabricated evidence even when its file is in scope', async () => {
+  it('retries one positive confirmation and uses only the corrected complete output', async () => {
     const { root, baseSha, eventPath } = setup();
     const api = client(baseSha);
+    const modelCall = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'valid' as const,
+        output: {
+          summary: 'implementation is already correct',
+          findings: [{
+            id: 'standards:src-py:1:positive',
+            axis: 'standards' as const,
+            severity: 'medium' as const,
+            file: 'src.py',
+            line: 1,
+            title: '测试已经覆盖正确实现',
+            evidence: 'def result(): return True',
+            source: 'general engineering baseline',
+            impact: 'none',
+            recommendation: '符合要求，无需修改。',
+          }],
+        },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        status: 'valid' as const,
+        output: { summary: 'corrected complete review', findings: [] },
+        error: null,
+      });
     const result = await runGitHubReviewAxis({
       root,
       workspace: join(root, '.workspace'),
@@ -582,26 +609,77 @@ describe('remote review axis', () => {
       axis: 'standards',
       token: 'token',
       client: api as GitHubClient,
-      modelCall: vi.fn(async () => ({
-        status: 'valid' as const,
-        output: {
-          summary: 'fabricated evidence',
-          findings: [{
-            id: 'standards:src-py:1:x',
-            axis: 'standards' as const,
-            severity: 'high' as const,
-            file: 'src.py',
-            line: 1,
-            title: 'invented implementation',
-            evidence: '+def result(): return False',
-            source: 'general engineering baseline',
-            impact: 'would return the wrong result',
-            recommendation: 'return the promised result',
-          }],
-        },
-        error: null,
-      })),
+      modelCall,
     });
+    expect(modelCall).toHaveBeenCalledTimes(2);
+    expect(modelCall.mock.calls[1][0].systemPrompt).toContain('调用方机械拒绝');
+    expect(modelCall.mock.calls[1][0].systemPrompt).toContain('无需修改');
+    expect(result.receipt.status).toBe('passed');
+    expect(result.receipt.reviewSummary).toBe('corrected complete review');
+    expect(result.receipt.findings).toEqual([]);
+  });
+
+  it('retries one schema-invalid model output but not a provider failure', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    const modelCall = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'invalid' as const,
+        output: null,
+        error: '模型输出 findings 字段非法',
+        reason: 'invalid-output' as const,
+      })
+      .mockResolvedValueOnce({
+        status: 'valid' as const,
+        output: { summary: 'corrected schema', findings: [] },
+        error: null,
+      });
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'standards',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(modelCall).toHaveBeenCalledTimes(2);
+    expect(result.receipt.status).toBe('passed');
+    expect(result.receipt.reviewSummary).toBe('corrected schema');
+  });
+
+  it('rejects a finding with fabricated evidence even when its file is in scope', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    const modelCall = vi.fn(async () => ({
+      status: 'valid' as const,
+      output: {
+        summary: 'fabricated evidence',
+        findings: [{
+          id: 'standards:src-py:1:x',
+          axis: 'standards' as const,
+          severity: 'high' as const,
+          file: 'src.py',
+          line: 1,
+          title: 'invented implementation',
+          evidence: '+def result(): return False',
+          source: 'general engineering baseline',
+          impact: 'would return the wrong result',
+          recommendation: 'return the promised result',
+        }],
+      },
+      error: null,
+    }));
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'standards',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(modelCall).toHaveBeenCalledTimes(2);
     expect(result.receipt.status).toBe('unverifiable');
     expect(result.receipt.errors[0]).toMatchObject({
       code: 'model-output-invalid',

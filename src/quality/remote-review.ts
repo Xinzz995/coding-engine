@@ -24,6 +24,7 @@ import {
   evaluateReviewModelResult,
   renderReviewCheck,
   validateReviewOutputGrounding,
+  validateReviewOutputSemantics,
 } from './review.js';
 import type {
   QualityError,
@@ -44,6 +45,36 @@ const MODEL_SHARD_LIMIT = 8;
 const MODEL_PROMPT_TOKEN_BUDGET = 7_000;
 const MODEL_CALL_PACE_MS = 6_500;
 const AGGREGATE_FINDING_LIMIT = 50;
+
+function correctionSystemPrompt(system: string, reason: string): string {
+  return [
+    system,
+    '调用方机械拒绝了上一份输出。下面的拒绝原因由调用方生成，不来自仓库数据：',
+    reason,
+    '请从头重审同一份用户数据并返回一份完整 JSON；不得沿用上一份 summary 或 findings。',
+    '如果上一份 finding 只是正向确认、测试覆盖说明或明确表示无需修改，请删除该 finding，'
+      + '只在 summary 中陈述正向结论。若保留真实缺陷，evidence 必须逐字摘录当前分片中'
+      + ' finding.file 对应的 source 或 diff；引用 diff 代码时可省略每行补丁控制前缀。',
+  ].join('\n\n');
+}
+
+function correctionReasonForOutput(
+  output: ReviewModelOutput,
+  shard: ReviewPromptShard,
+  diffByFile: ReadonlyMap<string, string>,
+): string | null {
+  if (validateReviewOutputSemantics(output)) {
+    return '上一份 finding 实际表示无需修改或无需行动，不能作为缺陷。';
+  }
+  if (validateReviewOutputGrounding(output, {
+    diff: shard.diff,
+    sources: shard.sources,
+    diffByFile,
+  })) {
+    return '上一份 finding 的 evidence 不是当前分片中对应文件的逐字原文。';
+  }
+  return null;
+}
 
 export type ModelCall = (opts: {
   token: string;
@@ -597,6 +628,29 @@ export async function runGitHubReviewAxis(opts: {
   const modelOutputs: ReviewModelOutput[] = [];
   let reviewError: QualityError | null = null;
   let modelCallCount = 0;
+  const invokeModel = async (
+    prompts: { system: string; user: string },
+    systemPrompt = prompts.system,
+  ): Promise<Awaited<ReturnType<ModelCall>>> => {
+    if (modelCallCount > 0 && modelPaceMs > 0) await modelPause(modelPaceMs);
+    modelCallCount += 1;
+    try {
+      return await modelCall({
+        token: opts.modelToken ?? opts.token,
+        model: contract.review.model,
+        systemPrompt,
+        userPrompt: prompts.user,
+        axis: opts.axis,
+      });
+    } catch (error) {
+      return {
+        status: 'invalid',
+        output: null,
+        error: `模型调用异常：${error instanceof Error ? error.message : String(error)}`,
+        reason: 'provider-error',
+      };
+    }
+  };
   while (pending.length > 0) {
     const shard = pending.shift()!;
     const prompts = promptForShard(shard);
@@ -604,33 +658,27 @@ export async function runGitHubReviewAxis(opts: {
       reviewError = { code: 'review-input-too-large', message: prompts.error };
       break;
     }
-    if (modelCallCount > 0 && modelPaceMs > 0) await modelPause(modelPaceMs);
-    modelCallCount += 1;
-    let modelResult: Awaited<ReturnType<ModelCall>>;
-    try {
-      modelResult = await modelCall({
-        token: opts.modelToken ?? opts.token,
-        model: contract.review.model,
-        systemPrompt: prompts.system,
-        userPrompt: prompts.user,
-        axis: opts.axis,
-      });
-    } catch (error) {
-      modelResult = {
-        status: 'invalid',
-        output: null,
-        error: `模型调用异常：${error instanceof Error ? error.message : String(error)}`,
-        reason: 'provider-error',
-      };
+    let modelResult = await invokeModel(prompts);
+    const initialOutputError = modelResult.status === 'valid'
+      ? correctionReasonForOutput(modelResult.output, shard, diffByFile)
+      : modelResult.reason === 'invalid-output'
+        ? '上一份输出不符合要求的 JSON 结构。'
+        : null;
+    if (initialOutputError) {
+      modelResult = await invokeModel(
+        prompts,
+        correctionSystemPrompt(prompts.system, initialOutputError),
+      );
     }
     if (modelResult.status === 'valid') {
-      const groundingError = validateReviewOutputGrounding(modelResult.output, {
-        diff: shard.diff,
-        sources: shard.sources,
-        diffByFile,
-      });
-      if (groundingError) {
-        reviewError = { code: 'model-output-invalid', message: groundingError };
+      const outputError = validateReviewOutputSemantics(modelResult.output)
+        ?? validateReviewOutputGrounding(modelResult.output, {
+          diff: shard.diff,
+          sources: shard.sources,
+          diffByFile,
+        });
+      if (outputError) {
+        reviewError = { code: 'model-output-invalid', message: outputError };
         break;
       }
       modelOutputs.push(modelResult.output);
