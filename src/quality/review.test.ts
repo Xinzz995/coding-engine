@@ -6,6 +6,7 @@ import {
   collectLocalReviewSources,
   evaluateReviewModelResult,
   renderReviewCheck,
+  validateReviewOutputGrounding,
 } from './review.js';
 import type { QualityContractV1, ReviewModelOutput } from './types.js';
 
@@ -32,6 +33,24 @@ function contract(): QualityContractV1 {
     },
     exceptionPolicy: { deferrableSeverities: ['medium'] },
     exceptionsFile: '.coding-x/exceptions.json',
+  };
+}
+
+function groundedOutput(evidence: string): ReviewModelOutput {
+  return {
+    summary: 'one issue',
+    findings: [{
+      id: 'standards:x:1:a',
+      axis: 'standards',
+      severity: 'high',
+      file: 'src/x.ts',
+      line: 1,
+      title: 'wrong branch',
+      evidence,
+      source: 'AGENTS.md',
+      impact: 'bypasses authorization',
+      recommendation: 'check the caller role',
+    }],
   };
 }
 
@@ -77,6 +96,37 @@ describe('review result evaluation', () => {
     expect(rendered.title).toContain('无法验证');
     expect(rendered.summary).toContain('bbbbbbbbbbbb');
     expect(rendered.text).toContain('intent-missing');
+  });
+
+  it('accepts a finding only when its evidence is a verbatim excerpt from the visible input', () => {
+    expect(validateReviewOutputGrounding(groundedOutput('return allowAllUsers();'), {
+      diff: '+return allowAllUsers();',
+      sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+    })).toBeNull();
+  });
+
+  it('rejects fabricated evidence even when the finding path is otherwise in scope', () => {
+    expect(validateReviewOutputGrounding(groundedOutput('return allowAllUsers();'), {
+      diff: '+return authorizeCaller();',
+      sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+    })).toContain('逐字原文');
+  });
+
+  it('does not borrow evidence from an unrelated source file', () => {
+    expect(validateReviewOutputGrounding(
+      groundedOutput('Every caller must be authorized.'),
+      {
+        diff: '+return authorizeCaller();',
+        sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+      },
+    )).toContain('对应文件');
+  });
+
+  it('rejects trivial excerpts that cannot substantiate a finding', () => {
+    expect(validateReviewOutputGrounding(groundedOutput('+'), {
+      diff: '+return authorizeCaller();',
+      sources: [],
+    })).toContain('至少需要 12');
   });
 });
 

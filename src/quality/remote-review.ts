@@ -23,6 +23,7 @@ import { callGitHubModel, type ModelFailureReason } from './model.js';
 import {
   evaluateReviewModelResult,
   renderReviewCheck,
+  validateReviewOutputGrounding,
 } from './review.js';
 import type {
   QualityError,
@@ -622,6 +623,14 @@ export async function runGitHubReviewAxis(opts: {
       };
     }
     if (modelResult.status === 'valid') {
+      const groundingError = validateReviewOutputGrounding(modelResult.output, {
+        diff: shard.diff,
+        sources: shard.sources,
+      });
+      if (groundingError) {
+        reviewError = { code: 'model-output-invalid', message: groundingError };
+        break;
+      }
       modelOutputs.push(modelResult.output);
       continue;
     }

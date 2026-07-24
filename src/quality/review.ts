@@ -17,6 +17,7 @@ import type { ReviewSource } from './prompts.js';
 const SOURCE_FILE_LIMIT = 128 * 1024;
 const SOURCE_TOTAL_LIMIT = 500 * 1024;
 const SOURCE_COUNT_LIMIT = 100;
+const MIN_EVIDENCE_CHARS = 12;
 
 function isWithin(root: string, path: string): boolean {
   const rel = relative(root, path);
@@ -58,6 +59,24 @@ export function collectLocalReviewSources(root: string, selectors: string[]): Re
   }
   if (sources.length === 0) throw new Error('评审来源中没有可读文本文件');
   return sources;
+}
+
+export function validateReviewOutputGrounding(
+  output: ReviewModelOutput,
+  visible: { diff: string; sources: ReviewSource[] },
+): string | null {
+  for (const finding of output.findings) {
+    const evidence = finding.evidence.trim();
+    if (evidence.length < MIN_EVIDENCE_CHARS) {
+      return `finding 证据至少需要 ${MIN_EVIDENCE_CHARS} 个字符：${finding.file}`;
+    }
+    const source = visible.sources.find((candidate) => candidate.path === finding.file);
+    if (!visible.diff.includes(evidence)
+      && !source?.content.includes(evidence)) {
+      return `finding 证据不是当前评审输入中对应文件的逐字原文：${finding.file}`;
+    }
+  }
+  return null;
 }
 
 export function evaluateReviewModelResult(
