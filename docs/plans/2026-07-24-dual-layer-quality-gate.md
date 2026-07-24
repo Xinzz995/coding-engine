@@ -96,6 +96,20 @@ scope: root
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
 
+## 已完成的 bootstrap 证据
+
+- 实现 PR [#5](https://github.com/Xinzz995/coding-engine/pull/5) 通过 Linux、macOS、
+  Windows 与 Node 18/22 检查后合并，`coding-x@0.30.0` 的 npm `gitHead`、注解 tag 和
+  GitHub Release 均绑定合并提交 `d94f66683043fdc3c8792a8ead77baeb0b0e7805`。
+- 自托管预演发现同名源码仓库的 npm 命令解析冲突；修复 PR
+  [#10](https://github.com/Xinzz995/coding-engine/pull/10) 通过同一矩阵后发布 0.30.1，
+  三个发布事实均绑定提交 `20b953691ff3067f02bad46271e9a311f88400b9`。
+- 自托管 PR [#11](https://github.com/Xinzz995/coding-engine/pull/11) 只加入由 npm 上
+  `coding-x@0.30.1` 生成的受管工作流和 PR 模板，并通过过渡 CI。
+- GitHub 已启用 branch ruleset `19686258` 和 tag ruleset `19686256`；0.30.1 的
+  `quality doctor --remote` 回读全部通过。独立临时 clone 向 `main` 推送空提交时收到
+  `GH013`，明确列出“必须通过 PR”和 8 项 required checks，远端没有产生新提交。
+
 ## 交付边界
 
 - 本次授权包含实现、提交、推送、PR、GitHub 规则配置和为自托管所需的正式发布。
