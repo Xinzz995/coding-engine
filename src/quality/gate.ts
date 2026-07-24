@@ -183,6 +183,12 @@ export async function runProjectQualityGate(opts: {
     opts.root,
     opts.timeoutMs,
     changedFiles,
+    {
+      BASE_SHA: opts.baseSha,
+      HEAD_SHA: opts.headSha,
+      CODING_X_BASE_SHA: opts.baseSha,
+      CODING_X_HEAD_SHA: opts.headSha,
+    },
   );
   const receipt: QualityReceipt = {
     version: 1,

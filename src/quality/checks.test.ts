@@ -46,6 +46,15 @@ describe('project quality checks', () => {
     expect(result.results[0]).toMatchObject({ id: 'test', status: 'passed', exitCode: 0 });
   });
 
+  it('passes exact commit identity to project commands', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'quality-check-env-'));
+    mkdirSync(join(root, 'src'));
+    const result = await runProjectChecks([
+      check(`${process.execPath} -e "process.exit(process.env.BASE_SHA === 'base' && process.env.HEAD_SHA === 'head' ? 0 : 9)"`),
+    ], root, 5_000, undefined, { BASE_SHA: 'base', HEAD_SHA: 'head' });
+    expect(result.status).toBe('passed');
+  });
+
   it('fails on a nonzero command and stops before later checks', async () => {
     const root = mkdtempSync(join(tmpdir(), 'quality-check-fail-'));
     mkdirSync(join(root, 'src'));

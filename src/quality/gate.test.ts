@@ -10,7 +10,7 @@ function git(root: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 }
 
-function setup(command = 'node -e "process.exit(0)"'): {
+function setup(command = `node -e "process.exit(/^[0-9a-f]{40}$/.test(process.env.BASE_SHA ?? '') && /^[0-9a-f]{40}$/.test(process.env.HEAD_SHA ?? '') && process.env.CODING_X_BASE_SHA === process.env.BASE_SHA && process.env.CODING_X_HEAD_SHA === process.env.HEAD_SHA ? 0 : 9)"`): {
   root: string;
   baseSha: string;
   headSha: string;

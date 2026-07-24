@@ -44,6 +44,7 @@ export async function runProjectChecks(
   root: string,
   timeoutMs = GATE_TIMEOUT_MS,
   changedFiles?: string[],
+  env?: NodeJS.ProcessEnv,
 ): Promise<ProjectChecksResult> {
   const started = Date.now();
   const results: ProjectCheckResult[] = [];
@@ -82,7 +83,7 @@ export async function runProjectChecks(
     const checkStarted = Date.now();
     let failure;
     try {
-      failure = await runGateCommand(check.command, cwd, timeoutMs);
+      failure = await runGateCommand(check.command, cwd, timeoutMs, env);
     } catch (error) {
       results.push({
         id: check.id,

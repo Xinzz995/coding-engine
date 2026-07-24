@@ -81,12 +81,14 @@ export function runGateCommand(
   command: string,
   cwd: string,
   timeoutMs: number = GATE_TIMEOUT_MS,
+  env?: NodeJS.ProcessEnv,
 ): Promise<GateFailure | null> {
   return new Promise((resolve, reject) => {
     // shell 语义：qualityChecks 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`）。
     // patterns.md 的「不经 shell」约定针对代码拼接固定命令+变量参数的场景，不适用于此。
     const child = spawn(command, {
       cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'],
+      ...(env ? { env: { ...process.env, ...env } } : {}),
       // detached: 命令自成进程组——shell:true 下 child.kill 只达 shell 本身，
       // 超时必须对整组发信号，否则挂起的孙进程（npm 包裹的测试进程等）会泄漏
       detached: process.platform !== 'win32',
