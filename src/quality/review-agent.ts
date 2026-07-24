@@ -199,10 +199,16 @@ export async function runReadOnlyReviewAgent(opts: {
       return { status: 'invalid', output: null, error: '只读 reviewer 超时', durationMs };
     }
     if (result.exitCode !== 0) {
+      const diagnostics = [
+        result.stdout.trim() === '' ? null : `stdout 尾部：${result.stdout.slice(-1000)}`,
+        result.stderr.trim() === '' ? null : `stderr 尾部：${result.stderr.slice(-1000)}`,
+      ].filter((item): item is string => item !== null);
       return {
         status: 'invalid',
         output: null,
-        error: `只读 reviewer 退出 ${result.exitCode ?? 'unavailable'}：${result.stderr.slice(-1000)}`,
+        error: `只读 reviewer 退出 ${result.exitCode ?? 'unavailable'}${
+          diagnostics.length === 0 ? '（无诊断输出）' : `：${diagnostics.join('；')}`
+        }`,
         durationMs,
       };
     }

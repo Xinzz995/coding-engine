@@ -134,5 +134,6 @@ describe('local quality review', () => {
     expect(result.receipts[2].errors[0]).toMatchObject({
       code: 'review-interrupted',
     });
+    expect(result.receipts[0].durationMs).toBe(1);
   });
 });

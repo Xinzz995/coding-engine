@@ -71,6 +71,7 @@ function errorReceipt(opts: {
   model?: string;
   code: string;
   message: string;
+  durationMs?: number;
 }): QualityReceipt {
   return {
     version: 1,
@@ -87,7 +88,7 @@ function errorReceipt(opts: {
     findings: [],
     exceptions: [],
     errors: [{ code: opts.code, message: opts.message }],
-    durationMs: 0,
+    durationMs: opts.durationMs ?? 0,
   };
 }
 
@@ -337,6 +338,7 @@ export async function runLocalQualityReview(opts: {
         model: opts.model,
         code: 'model-output-invalid',
         message: model.error,
+        durationMs: model.durationMs,
       });
     }
     const changedFileSet = new Set([
