@@ -306,6 +306,41 @@ describe('remote review axis', () => {
     expect(modelCall).not.toHaveBeenCalled();
   });
 
+  it('keeps deep review isolated from Spec sources already reviewed by the Spec axis', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    (api.getPullDiff as ReturnType<typeof vi.fn>).mockResolvedValue(
+      'diff --git a/.coding-x/quality.json b/.coding-x/quality.json\n+{"changed":true}',
+    );
+    (api.getPullFiles as ReturnType<typeof vi.fn>).mockResolvedValue([{
+      filename: '.coding-x/quality.json',
+      status: 'modified',
+      additions: 1,
+      deletions: 0,
+      patch: '+{"changed":true}',
+    }]);
+    const modelCall = vi.fn(async () => ({
+      status: 'valid' as const,
+      output: { summary: 'structure remains clear', findings: [] },
+      error: null,
+    }));
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'deep',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(result.receipt).toMatchObject({ status: 'passed', deepRequired: true });
+    const trustedSourceReads = (api.getTextFile as ReturnType<typeof vi.fn>).mock.calls
+      .filter((call) => call[1] === baseSha)
+      .map((call) => call[0]);
+    expect(trustedSourceReads).toEqual(['AGENTS.md']);
+    expect(trustedSourceReads).not.toContain('docs/specs/feature.md');
+  });
+
   it('refuses stale event identity before publishing a success', async () => {
     const { root, baseSha, eventPath } = setup();
     const api = client(baseSha);

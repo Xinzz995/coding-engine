@@ -455,9 +455,7 @@ export async function runGitHubReviewAxis(opts: {
 
   const selectors = opts.axis === 'spec'
     ? contract.review.specSources
-    : opts.axis === 'standards'
-      ? contract.review.standardsSources
-      : [...new Set([...contract.review.specSources, ...contract.review.standardsSources])];
+    : contract.review.standardsSources;
   const sourceRef = opts.axis === 'spec' ? event.headSha : event.baseSha;
   let sources: ReviewSource[];
   try {

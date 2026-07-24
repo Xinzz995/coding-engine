@@ -111,6 +111,8 @@ scope: root
   多个 Dependabot PR 同时消费共享额度；
 - v0.30.7 把默认模型切到已验证严格结构化输出的低限流档，在请求前按完整 prompt 有界分片，
   分片间节流，并用 GitHub 原生 `queue: max` job 队列把仓库内所有模型评审串行；
+- v0.30.8 修正 Deep 重复读取 Spec 与 Standards 的来源所有权：Spec 来源只由 Spec 轴消费，
+  Deep 只读取工程标准与 diff，既保持三轴独立，也避免高风险改动因重复上下文稳定超过八片；
 - 结构治理和外部下游闭环必须在该版本发布并由旧版本完成 bootstrap 后继续，不能把本地
   provider probe 当成远端门禁证明。
 
