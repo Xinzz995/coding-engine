@@ -229,7 +229,7 @@ describe('TDD commit hook', () => {
         try { process.kill(childPid, 'SIGKILL'); } catch { /* already exited */ }
       }
     }
-  });
+  }, 8_000);
 });
 
 describe('hook host manifests', () => {

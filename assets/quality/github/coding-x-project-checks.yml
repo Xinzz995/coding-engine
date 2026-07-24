@@ -1,0 +1,61 @@
+# Managed by coding-x quality init. Do not edit by hand.
+name: coding-x project checks
+
+on:
+  workflow_call:
+    inputs:
+      coding-x-version:
+        required: true
+        type: string
+      base-sha:
+        required: true
+        type: string
+      head-sha:
+        required: true
+        type: string
+      pull-request-number:
+        required: true
+        type: number
+
+jobs:
+  run:
+    name: run untrusted project commands
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trusted base contract without persisted credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.base-sha }}
+          path: _coding_x_base
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out the pull request head without persisted credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ inputs.pull-request-number }}/head
+          path: _coding_x_head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+
+      - name: Run project-native checks from the trusted base contract
+        working-directory: _coding_x_head
+        env:
+          CODING_X_VERSION: ${{ inputs.coding-x-version }}
+          BASE_SHA: ${{ inputs.base-sha }}
+          HEAD_SHA: ${{ inputs.head-sha }}
+        run: >-
+          npx --yes "coding-x@${CODING_X_VERSION}" quality gate
+          --checks
+          --contract-file "$GITHUB_WORKSPACE/_coding_x_base/.coding-x/quality.json"
+          --base-sha "$BASE_SHA"
+          --head-sha "$HEAD_SHA"
+          --json

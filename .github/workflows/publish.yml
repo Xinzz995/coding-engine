@@ -12,19 +12,29 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # 创建 GitHub Release 需要
+      checks: read # 核验对应 PR head 的交付检查
+      pull-requests: read # 找到生成发布提交的已合并 PR
       id-token: write # 供 npm provenance 使用
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0 # 需要完整历史 + tags 才能按提交生成 Release 说明
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Verify the tagged commit comes from main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::tag 提交 $GITHUB_SHA 不在 origin/main 历史中"
+            exit 1
+          fi
 
       # 防呆：tag 必须与 package.json 及三个插件清单的 version 一致，否则中止
       # （0.6.0–0.7.1 期间插件清单曾漂移在 0.5.1——发版只 bump package.json 的教训）
@@ -45,11 +55,75 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Lint
+        run: npm run lint
+
       - name: Test
         run: npm test
 
       - name: Build
         run: npm run build
+
+      - name: Built CLI smoke
+        run: |
+          node dist/cli.js --help
+          node dist/cli.js doctor
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      # 0.30.0 是显式 bootstrap：它先发布门禁能力，随后仓库才用固定的 0.30.0 自托管。
+      # 从受管 workflow 已进入 tag 的版本开始，发布提交必须已取得契约列出的全部 required checks。
+      - name: Verify delivery checks for self-hosted releases
+        if: hashFiles('.github/workflows/coding-x-review.yml') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls?per_page=100" \
+            -H "Accept: application/vnd.github+json" \
+            > "$RUNNER_TEMP/associated-prs.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const contract = JSON.parse(readFileSync('.coding-x/quality.json', 'utf8'));
+          const prs = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/associated-prs.json', 'utf8'));
+          const matches = Array.isArray(prs) ? prs.filter((pr) =>
+            pr?.merged_at
+            && pr?.base?.ref === contract.github.defaultBranch
+            && pr?.merge_commit_sha === process.env.GITHUB_SHA
+            && typeof pr?.head?.sha === 'string') : [];
+          if (matches.length !== 1) {
+            console.error(`::error::发布提交必须对应默认分支上恰好一个合并结果，实际 ${matches.length}`);
+            process.exit(1);
+          }
+          writeFileSync(
+            process.env.RUNNER_TEMP + '/delivery-head.txt',
+            matches[0].head.sha,
+          );
+          console.log(`发布提交对应 PR #${matches[0].number} head ${matches[0].head.sha}`);
+          NODE
+          DELIVERY_HEAD="$(cat "$RUNNER_TEMP/delivery-head.txt")"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${DELIVERY_HEAD}/check-runs?per_page=100" \
+            > "$RUNNER_TEMP/check-runs.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const contract = JSON.parse(readFileSync('.coding-x/quality.json', 'utf8'));
+          const payload = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/check-runs.json', 'utf8'));
+          const runs = Array.isArray(payload.check_runs) ? payload.check_runs : [];
+          const missing = [];
+          for (const name of contract.github.requiredChecks) {
+            const matches = runs.filter((run) => run.name === name);
+            const latest = matches.sort((a, b) =>
+              String(b.completed_at ?? '').localeCompare(String(a.completed_at ?? '')))[0];
+            if (!latest || latest.status !== 'completed' || latest.conclusion !== 'success') {
+              missing.push(name);
+            }
+          }
+          if (missing.length > 0) {
+            console.error(`::error::发布提交缺少通过的交付检查：${missing.join('、')}`);
+            process.exit(1);
+          }
+          console.log('发布提交的交付检查完整通过');
+          NODE
 
       # 允许 tag workflow 安全重跑：版本已存在时必须证明它就是当前 tag 的产物，
       # 不能把同版本的其他提交静默当成成功。
@@ -89,7 +163,6 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # npm 发布成功后创建 GitHub Release：用「上一个 tag 到本 tag」之间的提交作为说明
-      # （本仓库直接提交到 main、无 PR，所以 --generate-notes 只会给出空白链接）
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

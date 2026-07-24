@@ -620,6 +620,7 @@ Add ability to mark tasks with different statuses.
 
 在编写 prd.json 之前，验证：
 
+- [ ] Git 根已有受 Git 管理且有效的 `.coding-x/quality.json` 与异常文件；缺失时停止并提示先运行 `npx coding-x quality init`，不能让后续 `run` 静默降级
 - [ ] 已运行 `npx coding-x doctor --workspace .workspace`；未发现“引擎运行中”，且真正写入前再次运行的结论仍可判定、未变化；未删除 `engine.lock`
 - [ ] `.workspace/` 已通过 Git 隔离检查；若已跟踪或未忽略，已取得用户明确选择，且未自动修改 `.gitignore` 或执行 `git rm --cached`
 - [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json、evidence.jsonl、validation-result.json、prd.tampered-*.json）

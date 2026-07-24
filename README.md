@@ -42,6 +42,7 @@ coding-x 同时包含两部分：
 | **你（人）** | 说明目标、确认业务/技术取舍、审阅转换差异、处理 blocked、裁决 review、决定合并/发布 | 不必逐轮提醒 AI 下一步做什么 |
 | **交互式 AI 工具** | 执行 command/skill，和你一起生成文档、转换 PRD、审查和收口 | 不自动获得最终产品裁决权 |
 | **coding-x 引擎** | 选 story、启动角色、执行机械门禁、控制重试/超时、签发验收状态、记录证据 | 不替人修改需求，也不替人批准破坏性动作 |
+| **coding-x 质量门禁** | 运行项目原生命令、三轴评审、绑定最新提交，并配置/回读 GitHub 规则 | 不把本地反馈当交付凭证，不自动合并或批准例外 |
 | **Developer / Builder** | 一次只实现一个 story，运行检查，提交该 story，再声明候选完成 | 不能给自己签发最终验收凭证 |
 | **Validator** | 针对引擎绑定的 story 和验收标准逐条复核，提交结构化结果 | 不修代码、不改需求、不直接改最终状态 |
 
@@ -49,7 +50,7 @@ coding-x 同时包含两部分：
 
 - commands 和 skills 通常在你当前打开的 AI 会话中执行，不会因为名字里有 `loop` 就自动新开会话。`/priming` 建立的理解也主要服务于当前会话。
 - 引擎中的每次 Developer 和 Validator 调用都是新的 headless runner 进程，不能依赖上轮聊天记忆；它们通过 Git、`AGENTS.md`、`docs/` 和 `.workspace/` 接力。
-- `/review-loop` 的“独立审查”指重新取证、不采信 Developer/Validator 自述，不等于自动隔离上下文。要降低自审偏差，可以手动新开一个仍指向同一项目目录和分支的会话再运行它。
+- `/review-loop` 现在调用统一的 `quality review` 核心；Spec、工程标准和深度结构评审分别启动只读上下文。它仍只是本地反馈，GitHub 会对 PR 最新提交重新运行。
 
 > **下文命令名的写法：** 为了让三种宿主共用一份说明，本文把命令逻辑名简写成 `/priming`、`/planning` 等。Claude Code 安装插件后的实际名字带命名空间，例如 `/coding-x:priming`；Cursor 以斜杠菜单实际显示的名字为准；Codex 可直接说“使用 coding-x 的 priming 工作流”。如果宿主没有显示裸命令，不要机械输入不存在的 `/priming`，安装和验证方法见「安装」。
 
@@ -62,7 +63,7 @@ coding-x 同时包含两部分：
 1. **准备目标项目。** 确认它是你信任的 Git 仓库，重要内容已经提交或备份，当前没有不明来源的改动。
 2. **安装插件和一个 runner。** Node.js 需要 ≥18；Claude Code、Codex 或 Cursor Agent 至少安装并登录一个。详细命令见「安装」。
 3. **进入目标项目根目录。** 后面的对话和终端命令都在这里进行，而不是在 coding-x 插件源码目录中进行。
-4. **第一次接入时运行 `/init-docs`。** 它只补缺失文件，不覆盖已有文档；然后人工确认生成的黄金原则和架构占位。
+4. **第一次接入时运行 `/init-docs`。** 它只补缺失文档；确认黄金原则、项目检查和来源后，再由 `coding-x quality init` 生成质量契约与 GitHub 门禁。远端规则回读通过前，不算交付就绪。
 5. **让当前会话理解项目。** 运行 `/priming`。它不改代码，只输出当前项目概览。
 6. **整理需求。** 需求很乱时说 `align: <你的需求>`；涉及数据库、公开接口、状态机、权限或迁移时，再说 `tech: <功能或对齐稿>`。需求已经清楚可以跳过对应步骤。
 7. **规划和生成正式 PRD。** 推荐先运行 `/planning <功能描述或对齐稿>`，再说“基于这些材料创建一个 PRD”。逐项确认 AI 提出、且无法从项目中查证的业务问题。
@@ -70,10 +71,11 @@ coding-x 同时包含两部分：
 9. **先体检，再启动。** 运行 `npx coding-x doctor`。初次使用建议保留 `qualityChecks`，模型路由则可以先不启用，直接使用 runner 默认模型。
 10. **运行引擎。** 例如 `npx coding-x codex`。浏览器会打开仪表盘；终端也会持续显示当前 story、阶段和实际模型。
 11. **观察和处理异常。** 随时运行 `npx coding-x status`；需要完整证据时打开 `.workspace/report.html`。退出码 3 或 story 显示 blocked 时，先看 `state.json` 的 notes 和报告，再做人工裁决。
-12. **合并前审查。** 运行 `/review-loop`，逐条给出“已修/接受/推迟/驳回”裁决。它不会自动修复；要修的项需要你明确授权。
-13. **合并和收口。** 所有发现闭环、检查重新通过后，由人决定合并。随后可运行 `/compound-docs`，把仍然成立的经验沉淀到长期文档；物理归档只有在你明确授权时才发生。
+12. **合并前审查。** 运行 `/review-loop` 获取本地三轴反馈。它不会自动修复，也不会生成远端通过凭证；需要产品判断的问题仍由你裁决。
+13. **提交 PR 并通过远端门禁。** 项目检查、Spec、工程标准和按风险触发的深度评审必须全部绑定最新提交通过；模型不可用、资料不足或规则漂移都会阻断。
+14. **合并和收口。** 门禁通过后由人决定合并。随后可运行 `/compound-docs`；物理归档只有在你明确授权时才发生。
 
-最短可用路线是：**已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop`**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
+最短可用路线是：**`quality init` → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop` → GitHub PR 门禁**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件。
 
 ### 首次运行前的安全红线
 
@@ -278,6 +280,9 @@ npx coding-x cursor          # 改用 Cursor Agent
    └─ /planning（推荐、可选）─────────────▶ docs/plans/*.md
    │
    ▼
+quality init ───────────────▶ .coding-x/quality.json + GitHub 受管工作流/规则
+                                              │
+                                              ▼
 prd-generate ─────────────────────────────▶ docs/prds/prd-*.md
                                               │  正式意图真相源，进入 Git
                                               ▼
@@ -290,7 +295,9 @@ npx coding-x ───────────────▶ Developer → 普�
                                               ├─ dashboard / status
                                               └─ report.html
                                               ▼
-/review-loop ───────────────▶ review-*.md + 人工四态裁决
+/review-loop ───────────────▶ .workspace/quality/ 本地三轴反馈
+                                              ▼
+GitHub PR ──────────────────▶ 最新提交的四项必需检查
                                               ▼
 人决定合并 ─────────────────▶ /compound-docs（可选沉淀/显式归档）
 ```
@@ -301,25 +308,26 @@ npx coding-x ───────────────▶ Developer → 普�
 
 | 你的情况 | 应该做什么 | 可以跳过什么 |
 | --- | --- | --- |
-| 第一次把 coding-x 接入某仓库 | `/init-docs`，人工确认黄金原则，再 `/priming` | 以后文档齐全时无需重复初始化 |
+| 第一次把 coding-x 接入某仓库 | `/init-docs`，确认后执行 `quality init` 与远端 bootstrap，再 `/priming` | 质量契约和远端规则均健康后无需重复初始化 |
 | 需求是口述、聊天记录、bug 和改版混在一起 | `scenario-alignment` | 需求边界已经清楚时可跳过 |
 | 涉及数据库/schema、公开接口、状态机、权限、存量迁移 | 业务口径确认后执行 `technical-alignment` | 纯页面文案或局部逻辑通常可跳过 |
 | 需要一份别人拿到就能实施的技术路线 | `/planning <功能>` | 极小改动可跳过，但 PRD/AC 仍要清楚 |
 | 要进入自动执行 | `prd-generate` 生成正式 PRD，再用 `prd-to-json` 派生 | 不能只拿 align/tech/plan 直接启动引擎 |
 | 要用测试驱动开发 | 在 `prd-to-json` 中明确启用 TDD，确认公共行为、覆盖命令、政策与真实基线 | 不能把覆盖率当测试质量或先写测试的证明 |
 | 有 UI 验收 | 在 AC 中写清页面、操作、结果；环境有 `agent-browser` 时用它验证和截图 | 不能只写“页面正常”或只做 HTTP 冒烟 |
-| 引擎全部通过，准备合并 | `/review-loop`，人裁决全部发现 | 不建议因为 Validator 已通过而跳过人审 |
+| 引擎全部通过，准备合并 | `/review-loop` 获取本地反馈，再创建 PR 等待四项远端检查 | 不能因为本地反馈或 Validator 已通过而跳过远端门禁 |
 | 功能已合并，需要更新长期知识 | `/compound-docs` | 没有可复用知识时允许零修改 |
 
 ---
 
 ## 文档与运行产物的完整流转
 
-coding-x 的信息分三层保存：
+coding-x 的信息分四层保存：
 
 1. **`docs/` 与 `AGENTS.md`：长期、可评审、应进入 Git。** 它们告诉人和未来 agent“项目现在是什么、这次想做什么”。
 2. **`.workspace/`：当前执行的本地工作台，默认应被 Git 忽略。** 它保存机器状态、过程证据和报告，可以断点续跑，但不应混入产品提交。
-3. **全局配置：跨项目复用。** 默认在 `~/.config/coding-x/config.json`，只保存允许使用的模型 ID。
+3. **`.coding-x/` 与 `.github/`：受 Git 管理的质量政策和交付控制。** 它们定义项目原生命令、评审来源、异常记录和 GitHub 工作流。
+4. **全局配置：跨项目复用。** 默认在 `~/.config/coding-x/config.json`，只保存允许使用的模型 ID。
 
 ### 长期项目文档：来源、去处和生命周期
 
@@ -359,13 +367,13 @@ coding-x 的信息分三层保存：
 | `evidence.jsonl` | 引擎运行时逐行追加；agent 可登记截图 | 引擎与 agent 写；status/report 读 | 门禁、轮次、调用、验收 claim、协议裁决、截图索引 | append-only 过程索引；再派生会清理当前副本并归档旧副本 |
 | `validation-result.json` | 每次 Validator 调用临时生成 | Validator 写；引擎读取后删除 | 单轮结构化验收 IPC | **瞬时文件**；不作为长期状态，也不归档 |
 | `screenshots/` | UI 的最终 Builder/Validator 验证时产生 | agent 写；report 读 | 可视化验收工件 | 与本轮 workspace 一起保留/归档；分享报告时要连同该目录 |
-| `report.html` | 每次循环结束自动生成；`coding-x report` 可重建 | 引擎/CLI 写；人读 | 汇总 story、AC、状态、证据、截图、review 和红旗 | 可重复生成的阅读视图；不是新的真相源 |
-| `review-*.md` | `/review-loop` 运行时产生 | 审查 agent 写初稿和裁决回填；人裁决；report 读 | 合并前改动导读、发现、风险和 resolution | 所有发现回填后才闭环；旧运行切换时归档 |
+| `report.html` | 每次循环结束自动生成；`coding-x report` 可重建 | 引擎/CLI 写；人读 | 汇总实现状态、证据、截图、本地反馈和红旗，并单列交付状态 | 可重复生成的阅读视图；不能证明 GitHub PR 已通过 |
+| `quality/receipts.jsonl`、`quality/review-latest.md` | `quality review/gate/doctor` 本地运行时产生 | coding-x 写；status/report/人读 | 最新提交绑定的本地三轴反馈与诊断 | workspace 可写，只用于提前反馈；共享交付记录在 GitHub Check/PR 历史 |
 | `engine.lock` | `run` 或 `repair` 开始时原子创建 | 引擎独占 | 防止两个写者同时改同一 workspace | 正常退出删除；异常遗留由下次运行判定并接管，不要习惯性手删 |
 | `prd.tampered-*.json` | 引擎发现运行期 PRD 被修改时产生 | 引擎写；review/report/人读 | 保存被检测到的篡改版本，当前 PRD 会按启动快照恢复 | 红旗取证；切换功能时随旧运行归档并清出当前根目录 |
 | `archive/<日期-功能>/` | 新功能覆盖旧 workspace，或同功能需求再派生之前 | `prd-to-json` 创建 | 保存旧运行/旧 AC 对应的本地状态和证据 | **本地运行档案**；与 Git 内 `docs/archive/` 完全不同，可按保留策略人工清理 |
 
-`.workspace/` 不是缓存目录：`report.html` 可以重建，但 `state.json`、progress、review、截图和历史证据可能没有其他副本。不要像删除 `dist/` 那样随手删除整个 workspace；要换功能时让 `prd-to-json` 按规则先归档。
+`.workspace/` 不是缓存目录：`report.html` 可以重建，但 `state.json`、progress、截图和历史反馈可能没有其他副本。不要像删除 `dist/` 那样随手删除整个 workspace；也不要把其中任何文件称作共享交付凭证。
 
 ### 全局模型目录
 
@@ -377,8 +385,8 @@ coding-x 的信息分三层保存：
 2. `prd-to-json` 把仓库内源 PRD 的相对路径写进 `prd.json.sourcePrd`，并把增强/拆分后的最终 stories 回写源 PRD，同时展示转换对照表。
 3. `state.json` 用同一个 story ID 保存执行状态；引擎给 Validator 的 request 还绑定 AC 快照/hash、一次性 request ID 和调用前 Git HEAD。
 4. Developer 默认每个 story 单独提交；`evidence.jsonl` 分别记录 `source=validator` 的声明和 `source=engine` 的机械观察/协议裁决。
-5. `/review-loop` 的 `[已修]` resolution 引用修复提交哈希；AC 本身有缺口时还必须引用源 PRD 回补提交。
-6. `report.html` 把上述材料汇总成阅读页面。它方便检查，但不把 agent 可写的记录伪装成不可篡改证明；最终仍要结合当前代码、Git 和人工审查。
+5. `/review-loop` 的本地 receipt 绑定当前提交；修复产生新提交后旧结果失效。AC 本身有缺口时，还必须先回补源 PRD，再让 GitHub 对新提交重跑。
+6. `report.html` 把上述材料汇总成阅读页面。它方便检查，但不把 agent 可写的记录伪装成不可篡改证明；最终交付结论以 GitHub PR 最新提交的必需检查为准。
 
 ### 需求变更时只改哪里
 
@@ -541,7 +549,19 @@ TDD 的开发顺序由 `tdd` skill 指导：
 
 ### 第 2 步：运行引擎
 
-先确认终端当前目录是目标项目根目录，然后运行：
+先确认终端当前目录是目标项目根目录。新项目第一次接入时，先确认候选命令、Spec 和工程标准，
+再建立质量契约与远端规则：
+
+```bash
+npx coding-x quality init
+npx coding-x quality doctor --remote
+```
+
+首次运行通常会先生成文件并返回 `unverifiable`：把这些文件经 PR 合并到默认分支后，再运行一次
+`quality init`，它回读确认可信工作流已经存在，才会启用远端规则，避免先锁住仓库却没有检查可跑。初始化还会在保留现有内容的前提下补齐 `.workspace/` 的 Git 忽略规则；`quality doctor` 会确认这条规则已经纳入版本管理，且没有本地反馈误入索引。
+定时远端巡检优先读取仓库 secret `CODING_X_ADMIN_TOKEN`；没有具备 ruleset 只读权限的凭据时会
+明确失败，不把 GitHub 的权限不足当成健康。只有本地文件、工作流和 GitHub 真实规则都核验通过，
+项目才进入可交付状态。随后运行引擎：
 
 ```bash
 npx coding-x doctor
@@ -567,6 +587,9 @@ npx coding-x models codex --json  # 从全局配置列出声明给 Codex 的模�
 npx coding-x hooks cursor install # 安装或安全更新当前项目的 Cursor TDD 提交前检查
 npx coding-x hooks cursor status  # 只读检查 Cursor 项目配置、脚本和安装记录
 npx coding-x hooks cursor remove  # 只移除 coding-x 管理的 Cursor 项目内容
+npx coding-x quality init          # 预览并确认质量契约、GitHub 工作流和远端 ruleset
+npx coding-x quality review codex  # 在本地对当前提交运行隔离的三轴只读评审
+npx coding-x quality doctor --remote # 回读本地契约、工作流和 GitHub 真实规则
 npx coding-x --builder-model model-a --validator-model model-d  # 临时覆盖初始 builder / validator
 npx coding-x --escalation-model model-e  # 临时覆盖升级 builder 模型
 npx coding-x --no-open          # 不自动打开浏览器
@@ -591,24 +614,26 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **需要逐条 AC、截图、门禁、调用和红旗证据**：打开 `.workspace/report.html`；review 回填后运行 `npx coding-x report` 刷新。
 - **不要只看 `passes=true`**：story 真正有效通过必须同时满足 `blocked=false`、`passes=true` 和 `validated=true`。
 
-### 第 4 步：审查合并（建议）
+### 第 4 步：审查与 PR 门禁
 
-循环全部 story 通过后（引擎会提示），先别急着合并：在 Claude Code 等工具中运行 `/review-loop`。为了降低同一 agent 自审偏差，可以手动开一个仍连接同一目录/分支的新会话；命令本身不会自动新开上下文。
+循环全部 story 通过后，运行 `/review-loop`。它会准备四段式意图并调用
+`coding-x quality review`，在彼此隔离的只读上下文中分别检查：
 
-它重新读取分支 diff、PRD/AC、项目原则并运行质量检查，产出人审包（红旗区如有 + 三层），同时落盘 `.workspace/review-*.md`：
+1. **Spec**：改动是否符合意图、验收标准和非目标。
+2. **工程标准**：正确性、安全、边界、测试质量和维护成本。
+3. **深度结构**：只在公开接口、状态、并发、安全、发布、跨模块、大改动或超大文件等风险
+   出现时运行。
 
-1. **改动导读**：每个 story 改了什么，数据怎么流。
-2. **发现清单**：正确性与过度工程问题，每条标为“需人裁决 / 机械修 / 仅提示”。
-3. **风险聚焦**：建议人重点细看的 2–4 个位置。
+本地结果写入 `.workspace/quality/`，只用于提前反馈。修复产生新提交后，旧结果失效，必须重跑。
+`critical/high` 不能延期；只有质量契约明确列出的严重度可延期，默认仅 `medium`。
+`.coding-x/exceptions.json` 中的责任人、原因、期限和后续事项必须完整且未过期。管理员紧急
+绕过远端规则时，还必须记录提交、审计链接和后续事项；未关闭记录始终显示为“异常交付”，
+不会伪装成正常通过。
 
-发现问题后，`/review-loop` 不修改业务代码，而是等待人处理：
-
-- `[已修]`：人明确授权后修复、跑检查并提交，再把提交哈希回填；如果是 AC 缺失/错误，还要回补源 PRD 并按需再派生。
-- `[接受]`：发现成立但决定不修，写理由。
-- `[推迟]`：写明后续 issue、计划或版本去向。
-- `[驳回]`：写反证，说明为什么是误报。
-
-所有发现都有 resolution 才算闭环。修过代码后应重新运行目标检查；影响面较大时建议再跑一次最终 diff 审查。随后运行 `npx coding-x report` 刷新人审区，由人决定是否合并——命令不会自动合并、推送或发布。
+真正的合并控制发生在 GitHub PR：可信默认分支工作流会对最新 head 独立重跑项目检查、Spec、
+工程标准和深度评审。缺 Spec、模型不可用、输出损坏、提交变化或规则漂移都显示为
+`unverifiable` 并阻断。AI 任务只通过 API 读取 PR 数据，不签出或执行 PR 代码；项目命令在
+没有模型、写权限或持久化凭据的隔离 job 中运行。命令不会自动合并、发布或替人批准例外。
 
 ### 第 5 步：收口沉淀（可选）
 
@@ -629,11 +654,15 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `config path\|init\|validate` | — | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁 |
 | 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
 | 位置参数 `hooks cursor install\|status\|remove` | — | 在当前 Git 项目安全安装、只读检查或卸载 Cursor TDD 提交前检查；只管理 `.cursor/` 中 coding-x 拥有的内容，不改 Git hooks、索引或提交。install/remove 成功与 status 健康返回 0；缺失、冲突或过期返回 1 |
+| 位置参数 `quality init` | — | 发现并展示候选项目命令与来源；确认后生成 `.coding-x/`、PR 模板和受管工作流，并确保 `.workspace/` 被受 Git 管理的规则忽略。默认分支回读到同一受管版本后，第二阶段才配置 GitHub ruleset 并回读；`--local-only` 明确不配置远端，结果为 unverifiable |
+| 位置参数 `quality review [runner]` | — | 需要 `--intent-file`；对已提交且干净的当前 head 运行本地 Spec、工程标准和风险触发的深度评审。只写 workspace 反馈 |
+| 位置参数 `quality gate` | — | GitHub 无交互入口；`--checks` 运行可信 base 契约中的项目命令，`--axis` 运行一条远端评审，结果绑定精确 base/head |
+| 位置参数 `quality doctor` | — | 检查契约、异常记录和受管文件；加 `--remote` 后回读仓库身份、规则集、required checks、检查来源和人员审核数 |
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
 | 位置参数 `status` | — | 终端速览 story 状态/重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`；退出码 0=全通过 / 1=未全通过或 state 损坏 / 2=无可读工作区 |
-| 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story+AC、门禁、分源 Validator claim/engine 裁决、截图、review、篡改红旗）；循环结束也从冻结 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏 / 2=无可读工作区 |
+| 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态实现验证报告（story+AC、门禁、分源 Validator claim/engine 裁决、截图、本地质量反馈、篡改红旗），并明确不证明 GitHub 交付就绪；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
 | `--val-timeout <分钟>` | `60` | 单轮验证阶段超时（分钟） |
@@ -646,7 +675,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `--port <n>` | `7331` | 仪表盘端口 |
 | `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：active 区文件的 git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期，`docs/archive/` 冷档案不参与 |
-| `--json` | 关闭 | `status`：输出 story 状态、配置/实际路由（含调用 outcome/duration/exit/异常诊断）与最近结构化验收；`models`：输出 `available` 或 `error` 的单个 JSON 对象 |
+| `--json` | 关闭 | `status`/`models`/所有 `quality` 命令输出单个 JSON 对象；质量状态只有 passed、failed、unverifiable |
 
 ### 退出码
 
@@ -659,7 +688,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `2` | workspace 锁（`engine.lock`）被占用，本次 `run`/`repair` 直接拒绝（ADR-008） |
 | `3` | 全部 story 已收敛（`passes && validated`，或 `blocked`），但存在 `blocked` story 待人工处理 |
 
-`repair`/`doctor`/`status`/`report`/`models`/`config`/`hooks` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
+`quality` 命令统一使用 0=passed、1=failed、2=unverifiable；其他子命令的语义见上方参数表。
 
 ### 环境变量
 
@@ -686,9 +715,9 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 命令 | 何时使用 / 输入 | 会读取什么 | 会产出或修改什么 | 生命周期与下一步 |
 | --- | --- | --- | --- | --- |
 | `/priming` | 新会话开始、AI 不了解项目时；无需参数 | Git 文件/状态/近期提交、README/AGENTS/docs、配置和关键源码 | 只在当前对话输出项目概览，默认不落盘、不改代码 | 会话级临时上下文；换会话可重跑，完成后继续需求对齐或任务处理 |
-| `/init-docs` | 一个仓库第一次建立 AI 知识入口时 | 项目形态、配置、目录、技术栈；monorepo 候选需人确认 | 只创建缺失的 `AGENTS.md`、`CLAUDE.md` 和 docs 骨架；已有文件不覆盖 | 基线初始化；可幂等重跑补缺，之后人工确认黄金原则/占位并由 `/compound-docs` 持续维护 |
+| `/init-docs` | 一个仓库第一次建立 AI 知识入口时 | 项目形态、配置、目录、技术栈；monorepo 候选需人确认 | 创建缺失文档；确认项目检查和来源后调用 `quality init` 建立受管交付门禁 | 新项目默认入口；远端 bootstrap 与 doctor 回读完成前保持 unverifiable |
 | `/planning <功能描述>` | 编码前需要完整技术路线时；输入可为原始需求或 align/tech 对齐稿 | 项目文档、相关代码/测试、官方资料和黄金原则 | `docs/plans/<feature>.md`，含任务顺序、风险、验证命令和原则对照；不写代码 | 初始 `active`；供人/agent 实施和 review 定位，合并后置 `done`，可显式归档；不替代正式 PRD |
-| `/review-loop` | 引擎循环结束、合并默认分支前 | 当前分支 diff、PRD/AC、state/progress（仅背景）、AGENTS/黄金原则，并独立运行质量检查 | 对话人审包 + `.workspace/review-*.md`；除留痕外不改业务代码/文档 | 同一会话执行，不自动开新上下文；发现等人四态裁决，修复需另行授权；全部 resolution 后闭环，再由人决定合并 |
+| `/review-loop` | 引擎循环结束、创建 PR 前 | 当前提交 diff、四段式意图、受 Git 管理的质量契约与来源 | 调用统一 `quality review`；输出 `.workspace/quality/` 本地反馈，不改业务代码 | 三轴各用只读上下文；新提交使旧结果失效；最终仍由 GitHub PR 独立重跑并阻断 |
 | `/compound-docs` | 功能分支/引擎轮次收口，推荐合并后、推送前 | 当前代码（最高事实）、Git、progress、PRD 范围和 active 文档 | 只修改文档：沉淀、增量熵 GC、状态收尾、取舍账本；物理归档需明确授权 | 默认只处理本轮；“全量 GC”才全库审计；完成后长期知识继续 active，任务文档可 done/superseded → archive |
 
 ### Skills（按语境使用）
@@ -710,6 +739,8 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 ### 引擎（`npx coding-x`）
 
+- **双层质量门禁**：`.coding-x/quality.json` 用项目自己的命令描述检查，不要求下游采用 npm、TypeScript 或 Vitest；GitHub PR 对最新提交独立运行项目检查、Spec、工程标准和风险触发的深度结构评审，规则缺失或无法验证时 fail closed。
+- **远端规则配置与漂移检查**：`quality init` 先确认默认分支已有同一受管版本，再应用并回读 GitHub ruleset；要求 PR、最新检查、对话解决、禁止强推/删除，并绑定 GitHub Actions 来源。`quality doctor --remote` 定期发现规则关闭、替换、异常交付未关闭或延期过期；管理员权限仍是平台边界。
 - **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
 - **引擎验收凭证 + 可信目标绑定**：`passes=true` 只是 builder 候选；引擎向 Validator 注入 request ID/story/AC hash/Git HEAD，严格消费逐 AC claim，确认 schema、绑定、产物和 state 不变式后才写 verdict 或签发 `validated=true`（ADR-013、015）。
 - **Agent 调用凭证**：每次真实 Builder/Validator 子进程都记录 outcome、退出码与调用收口耗时；异常 stdout/stderr 尾部有界进入 evidence/status/report，成功 transcript 不落盘。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
@@ -719,7 +750,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 写入避让与 Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 双次检查活跃工作区锁、写前阻止静默污染，`doctor` 只读报告锁与 Git 隔离状态，不替用户删锁或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
-- **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
+- **完成判定分层**：全部 story 有效通过只代表“实现已验证”；交付就绪必须另看 GitHub PR 最新提交的必需检查。无 blocked 的引擎循环仍退出 0，存在 blocked 退出 3。
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。
@@ -746,13 +777,24 @@ my-project/
 │   ├── plans/
 │   ├── prds/
 │   └── archive/                      # 只有首次真实物理归档后才出现
+├── .coding-x/                        # 受 Git 管理的质量政策
+│   ├── quality.json                  # 项目命令、评审来源、风险触发器和远端要求
+│   └── exceptions.json               # 普通延期与带提交/审计链接的异常交付记录
+├── .github/                          # 受 Git 管理的 GitHub 门禁
+│   ├── workflows/
+│   │   ├── coding-x-review.yml
+│   │   ├── coding-x-project-checks.yml
+│   │   └── coding-x-doctor.yml
+│   └── pull_request_template.md
 ├── .workspace/                       # 当前/历史运行状态，默认不进 Git
 │   ├── prd.json
 │   ├── state.json
 │   ├── progress.md
 │   ├── evidence.jsonl
 │   ├── screenshots/
-│   ├── review-*.md
+│   ├── quality/
+│   │   ├── receipts.jsonl
+│   │   └── review-latest.md
 │   ├── report.html
 │   └── archive/
 ├── .cursor/                          # 仅显式安装 Cursor TDD 检查后出现；是否进 Git 由使用者决定
@@ -779,6 +821,9 @@ my-project/
 | Cursor 没有提前检查，或 `hooks cursor status` 报缺失/过期 | 项目根的 `.cursor/hooks.json`、`.cursor/coding-x/`、status 输出 | 在 Git 项目根运行 `npx coding-x hooks cursor install`，升级 coding-x 后也重跑；若报冲突，先人工处理被修改或不合法的文件，不要强行覆盖 |
 | Cursor 插件已装但 `npx coding-x cursor` 找不到命令 | `agent --version`（旧安装可试 `cursor-agent --version`）、登录状态、`CODING_X_CURSOR_BIN` | 单独安装 Cursor Agent CLI；桌面应用不能替代。coding-x 自动识别两种命令名，自定义路径再设置环境变量 |
 | 报“找不到 prd.json” | `.workspace/prd.json` 是否存在、`--workspace` 是否一致 | 用 `prd-to-json` 从正式 PRD 生成；不要手工拼一个不完整 JSON |
+| 启动时提示缺少质量契约 | 根目录 `.coding-x/quality.json` 与 `quality init` 预览 | 先确认项目原生检查、Spec/标准来源并完成初始化；不要用空命令绕过 |
+| `quality init/doctor --remote` 返回 unverifiable | GitHub token 权限、默认分支是否已有 Actions Check Run、ruleset 回读错误 | 先提交受管 workflow 并触发一次 Actions，再重跑远端配置；权限不足或漂移不能当作通过 |
+| PR 的 Spec/工程标准/深度检查失败 | 对应 Check Run 的 finding、PR 四段意图、当前 head | 修复或补齐资料后提交新 head，让三轴全部重跑；不要复制旧报告或创建同名文本标记 |
 | 退出码 `2`，提示 `engine.lock` 被占用 | 是否已有 `coding-x` 或 `repair` 在运行 | 有活进程就等待/停止它；异常 stale 锁让下次引擎接管，不要把删锁当常规解决方案 |
 | `state.json` 或 `prd.json` JSON 损坏 | `status`/`report` 的保守警告 | 确认无活锁后运行 `npx coding-x repair`；repair 只修 JSON 结构，不会替你解决业务失败 |
 | 退出码 `1`：达到最大轮次或 stall 熔断 | `npx coding-x status`、终端异常尾部、`report.html` 时间线 | 区分代码失败、runner 认证/网络、超时和空转；处理根因后重跑，已有有效状态会续跑 |
@@ -786,9 +831,9 @@ my-project/
 | 运行中途需求改变 | 源 `docs/prds/prd-*.md` | 先停止引擎；修改源 PRD 并重新转换。AC 变化的 story 会重验，旧证据会先归档 |
 | UI story 没有浏览器证据 | PATH 中是否有 `agent-browser`、`.workspace/screenshots/`、报告截图对账 | 安装/提供浏览器工具后真实操作；AC 要写明 URL、动作、期望结果，不能只写“页面正常” |
 | 仪表盘端口 7331 被占用 | 终端端口错误 | 使用 `npx coding-x --port 7332`；离线 dashboard 也可带同一参数 |
-| `/review-loop` 已回填，但报告还显示旧内容 | `.workspace/report.html` 的生成时间 | 运行 `npx coding-x report` 刷新；报告不会监听 review 文件实时更新 |
+| `/review-loop` 后报告仍显示旧反馈 | `.workspace/report.html` 的生成时间、`.workspace/quality/` 最新 receipt | 运行 `npx coding-x report` 刷新；这仍不是 GitHub 交付通过凭证 |
 | 要开始另一个功能 | 新旧 `branchName`、旧 `progress.md` | 重新执行 `prd-to-json`；它会把旧运行复制进 `.workspace/archive/`，再清理会污染新轮的状态/证据 |
-| 所有 story 已通过 | `status`、report、当前 Git diff | 仍先做 `/review-loop` 和人工 diff 审查；通过不等于自动授权合并、推送或发布 |
+| 所有 story 已通过 | `status`、report、当前 Git diff | 这只代表实现已验证；先做本地反馈，再让 PR 最新提交通过四项远端门禁 |
 
 ### 不要这样做
 
@@ -797,7 +842,8 @@ my-project/
 - 不要提交 `.workspace/`；它含本地状态、诊断、截图，可能还有敏感信息。
 - 不要把 `.workspace/` 当纯缓存整目录删除；需要换任务时先按规则归档。
 - 不要只看 Builder 的提交说明、`progress.md` 或 `passes=true` 就认定完成。
-- 不要让同一个 review finding 既没有修复，也没有接受/推迟/驳回记录。
+- 不要复用旧 head 的 review；任何新提交都会让旧结论失效。
+- 不要用 PR 文本、评论或本地报告冒充 required check。
 - 不要让 `AGENTS.md` 变成长手册；它是入口，细节应放进 `docs/`。
 
 ---

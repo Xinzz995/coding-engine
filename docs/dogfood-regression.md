@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-07-23
+updated: 2026-07-24
 scope: root
 
 ---
@@ -24,10 +24,10 @@ scope: root
 | 5 | builder 在有意识简化处留 `// 取舍: <当前上限>，<升级触发条件>`；compound-docs 收账产出账本（非空或「无取舍债务」） | 0.8.0 约定 / 0.12.1 首次触发 | `grep -rn "取舍:"` 与收口账本对照 |
 | 6 | 打回链路中 notes 保全仲裁标签行（`[需求冲突]`、`[需要人工核实]`）不丢失 | 0.4.0 仲裁约定 / 0.18.1 扩前缀族 | 触发过打回的 story 检查 notes |
 | 7 | 配置 `qualityChecks` 时：builder 后 validator 前逐条执行，失败确定性打回（notes 带 `[门禁失败-第N次]`）且该轮跳过 validator | 0.14.0（引擎单测已覆盖，此处验真实 agent 链路） | 制造一次门禁失败，观察打回路径 |
-| 8 | /review-loop 人审包含 scope 越权核对节（AC 之外改动的反向清单） | 0.13.0 | 审查包结构检查 |
+| 8 | /review-loop 调用统一 quality review 核心，Spec 与工程标准各自检查 scope 越权且不互相抵消；本地结果明确标成非交付凭证 | 0.13.0 / 0.30.0 | 对账三个独立 receipt、当前 head 绑定和报告免责边界 |
 | 9 | /compound-docs 沉淀中改写/删除既有条目时，交付说明附规则变更清单（旧表述 → 新表述 + 当前代码依据） | 0.14.4 | 收口交付说明检查（无改写则不适用） |
 | 10 | /compound-docs 收口交付说明含「状态变更清单」节（有变更列明细，无变更写「无状态变更」），任务型文档按证据表判定收尾 | 0.15.0 | 收口交付说明检查 |
-| 11 | 循环结束（完成或跑满）workspace 根自动生成验证报告 report.html：标明 PRD 来自引擎启动快照，结果横幅与 state 一致、story 卡片截图与 screenshots/ 对账、存在 prd.tampered-* 时红旗区必亮、review-*.md 收录进人审留痕区且带免责标注；state 损坏时红色“状态不可验证”且绝无通过 badge | 0.19.0 / 0.25.4 | 打开 report.html 与工件对账；损坏 state 后手动 report 应写诊断报告并退出 1 |
+| 11 | 循环结束（完成或跑满）workspace 根自动生成验证报告 report.html：标明 PRD 来自引擎启动快照，结果横幅与 state 一致、story 卡片截图与 screenshots/ 对账、存在 prd.tampered-* 时红旗区必亮、本地质量反馈带“不是共享交付凭证”标注；state 损坏时红色“状态不可验证”且绝无通过 badge | 0.19.0 / 0.25.4 / 0.30.0 | 打开 report.html 与工件对账；损坏 state 后手动 report 应写诊断报告并退出 1 |
 | 12 | 证据索引真实链路：evidence.jsonl 含三类 engine 记录且时间线可重建（iteration 记录每轮一条（时间线零空洞），异常轮带 outcome/noop/gateRejected/abortRollback 标注可直读还原）；builder/validator 按指令登记 screenshot-claim（grep acIndex 分布核对输入质量：整数、1 起、无越界泛滥）；报告 AC 对账区与门禁执行历史真实渲染 | 0.20.0（终审风险②③④固化）；0.22.0 还原链重构 | 真实跑后逐类 grep evidence.jsonl + 打开 report.html 对账 |
 | 13 | 启用按难度模型路由时，真实 builder/validator 分别命中 story 档位与 validator 映射；启动摘要、evidence、status JSON 与 report 时间线里的模型 ID 和 route source 四处一致 | 0.23.0 / 0.24.0 | 对账控制台、iteration 记录、`status --json.recentActual` 与 report 时间线 |
 | 14 | builder 原样保留 `validated`/`escalated`；Validator 不修改任何 state 字段，只提交结构化 claim；只有引擎接受 passed claim 后签发 `validated=true`，status/report 才显示全绿 | 0.25.0–0.25.1 / ADR-015 收紧 | builder 后候选态、Validator 前后 state、最终 state、iteration.validationReceipt、status/report 对账 |
@@ -40,3 +40,9 @@ scope: root
 | 21 | 启用 TDD 时，builder 对每个公共行为留下可复核的真实 RED→同命令 GREEN→绿色重构记录；环境错误不能冒充 RED，过程记录不得被报告成机器证明 | ADR-017 强化版 A | 真实 story 对账 builder 输出/progress 与聚焦测试结局；人工抽查一个错误 RED 场景会停止而不是继续实现 |
 | 22 | Codex/Claude 插件 hook 与显式安装的 Cursor 项目检查只在 agent commit 前提前运行 TDD 检查；失败阻断、成功放行，且不安装目标 Git hook、不写持久日志。Cursor 首次/升级安装幂等，卸载保留用户原配置；真实验收不得用桌面应用代替 | ADR-017 跨宿主适配 | 三种真实 payload 对账共同脚本；Codex/Claude 真实插件 smoke；用构建产物执行 `hooks cursor install/status/remove`，再由真实 Cursor Agent 验证失败时 Git 历史不变、成功时提交产生 |
 | 23 | 无论宿主 hook 是否触发或曾通过，引擎都在 qualityChecks 后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |
+| 24 | 直接推送默认分支被 GitHub 拒绝；PR 最新提交缺 Spec、项目检查失败、模型不可用或格式损坏时，至少一个必需检查为 failed/unverifiable 且无法合并 | ADR-018 / 0.30.0 | 在临时分支尝试直推；真实 PR 依次制造四类失败并检查 ruleset 合并状态 |
+| 25 | Spec、工程标准和深度结构三个 Check Run 分开发布；普通文档改动的深度轴为可解释的 passed/not-applicable，高风险目录、公开接口、状态、并发、发布或超大文件改动会真实运行深度评审 | ADR-018 / 0.30.0 | 一次低风险 PR 与一次 loop.ts/超大测试治理 PR 对账三个 Check Run 及触发理由 |
+| 26 | PR 新提交后旧 head 的所有结果失效；修改 `.coding-x/` 或受管 workflow 的 PR 仍由默认分支旧契约和旧工作流裁决，不能用同一 PR 放宽自己的检查 | ADR-018 / 0.30.0 | 在 PR 追加提交并比较 check run head；门禁变更 PR 对账 base contract SHA |
+| 27 | 远端 AI job 不签出、不运行 PR 代码且无写仓库内容权限；项目命令 job 没有模型权限、写权限、用户 secrets 或持久 Git 凭据 | ADR-018 / 0.30.0 | 检查默认分支 workflow；恶意下游 PR 尝试读 secret/写仓库，确认失败且敏感值未出现在日志 |
+| 28 | `quality doctor --remote` 对权限不足、ruleset 停用、检查来源替换、审核人数漂移、发布引用缺失或异常过期均返回 unverifiable/failed；配置 API 成功但回读不一致也不能通过 | ADR-018 / 0.30.0 | 临时仓库逐项破坏规则后回读，确认诊断和退出码，再恢复并复验 |
+| 29 | 至少一个非 Node 多模块仓库使用自己的项目命令完成失败→修复→新提交重评→合并的真实 PR 闭环；其质量契约不出现 npm、Vitest、TypeScript 项目假设 | ADR-018 / 0.30.0 | 外部 dogfood 仓库的契约、PR check 历史、合并提交和 ruleset 对账 |

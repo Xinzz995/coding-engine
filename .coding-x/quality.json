@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "checks": [
+    {
+      "id": "install",
+      "command": "npm ci",
+      "cwd": ".",
+      "paths": [
+        "."
+      ]
+    },
+    {
+      "id": "lint",
+      "command": "npm run lint",
+      "cwd": ".",
+      "paths": [
+        "src/",
+        "build/",
+        "hooks/",
+        "eslint.config.js",
+        "tsup.config.ts"
+      ]
+    },
+    {
+      "id": "typecheck",
+      "command": "npm run typecheck",
+      "cwd": ".",
+      "paths": [
+        "src/",
+        "tsconfig.json"
+      ]
+    },
+    {
+      "id": "test",
+      "command": "npm test",
+      "cwd": ".",
+      "paths": [
+        "src/",
+        "build/",
+        "hooks/"
+      ]
+    },
+    {
+      "id": "build",
+      "command": "npm run build",
+      "cwd": ".",
+      "paths": [
+        "src/",
+        "assets/",
+        "hooks/",
+        "tsup.config.ts"
+      ]
+    },
+    {
+      "id": "docs",
+      "command": "node dist/cli.js doctor",
+      "cwd": ".",
+      "paths": [
+        "AGENTS.md",
+        "README.md",
+        "docs/"
+      ]
+    },
+    {
+      "id": "cli-smoke",
+      "command": "node dist/cli.js --help",
+      "cwd": ".",
+      "paths": [
+        "src/cli.ts",
+        "dist/"
+      ]
+    },
+    {
+      "id": "diff",
+      "command": "git diff --check \"$BASE_SHA\" \"$HEAD_SHA\"",
+      "cwd": ".",
+      "paths": [
+        "."
+      ]
+    },
+    {
+      "id": "audit",
+      "command": "npm audit --audit-level=high",
+      "cwd": ".",
+      "paths": [
+        "package.json",
+        "package-lock.json"
+      ]
+    }
+  ],
+  "review": {
+    "model": "openai/gpt-4.1",
+    "specSources": [
+      "docs/specs/",
+      "docs/prds/"
+    ],
+    "standardsSources": [
+      "AGENTS.md",
+      "docs/golden-principles.md",
+      "docs/patterns.md",
+      "docs/prompt-writing.md"
+    ],
+    "deepReview": {
+      "highRiskPaths": [
+        ".coding-x/",
+        ".github/",
+        "src/engine/",
+        "src/quality/",
+        "build/sync-plugin-versions.mjs",
+        "tsup.config.ts"
+      ],
+      "changedProductionLines": 400,
+      "largeFileLines": 900
+    }
+  },
+  "github": {
+    "repository": "Xinzz995/coding-engine",
+    "defaultBranch": "main",
+    "releaseRefs": [
+      "refs/tags/v*"
+    ],
+    "codingXVersion": "0.30.0",
+    "requiredChecks": [
+      "coding-x / project-checks",
+      "coding-x / spec-review",
+      "coding-x / standards-review",
+      "coding-x / deep-review",
+      "ci / primary",
+      "ci / node-18-linux",
+      "ci / node-22-macos",
+      "ci / node-22-windows"
+    ]
+  },
+  "exceptionPolicy": {
+    "deferrableSeverities": [
+      "medium"
+    ]
+  },
+  "exceptionsFile": ".coding-x/exceptions.json"
+}

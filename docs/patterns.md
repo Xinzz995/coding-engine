@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-07-23
+updated: 2026-07-24
 scope: root
 ---
 
@@ -44,6 +44,11 @@ scope: root
 - 2026-07-23 把项目原生命令升级为安全门禁时，冻结的不能只有命令字符串：同时枚举并摘要保护阈值、排除、零测试、基线和 diff-coverage 委托文件，限制 realpath 在项目根内，再检查基线后生产路径新增的 ignore marker。摘要能发现常见政策漂移，但同权限工具链仍不防伪，文案不得越界（见 `tdd-gate.ts`、ADR-017）。
 - 2026-07-23 宿主 hook 读取外部 workspace 时必须与项目根成对绑定：只有绝对 `CODING_X_WORKSPACE` 搭配 canonical `CODING_X_PROJECT_ROOT` 且后者等于当前 Git 根才采用，否则回退 `<git-root>/.workspace`；禁止单独信任会跨项目遗留的 workspace 环境变量。
 - 2026-07-23 runner 的“插件发现”与“hook 实际调用”必须分层实测，不能由清单 schema 推断接线成功：Cursor Agent CLI `2026.07.20-8cc9c0b` 能通过插件目录发现能力，但提交前执行器实际读取项目根 `.cursor/hooks.json`；且 `failClosed` 下成功脚本必须输出原生明确放行 JSON，空 stdout 会被当作失败。对这种宿主差异使用显式、可逆的项目适配器，复制构建产物避免提交时依赖机器路径或联网，并保留引擎最终门禁（ADR-017）。
+- 2026-07-24 PR 会修改质量契约或工作流时，裁决政策必须来自默认分支 base，PR head 只作为待检查的数据；项目命令可在无敏感权限、无持久 Git 凭据的隔离 job 中执行 head，AI job 只通过 API 读取 diff/文件且绝不签出或运行 head。两类任务不能因复用方便合并到同一权限域（ADR-018）。
+- 2026-07-24 远端质量结论必须同时绑定 repository、PR、base SHA、head SHA、契约来源和评审轮次；任意新提交都重跑所有适用轴。可复制的 PR 文本、本地 receipt、同名 commit status 或旧 head 的成功结果均不能当作最新提交通过。
+- 2026-07-24 外部调用只有三态：完整证据为 passed，明确问题为 failed，资料/凭据/权限/模型/格式/提交身份任一不可核验为 unverifiable；异常不得吞掉后返回“跳过”或“默认通过”。需要人判断的问题继续阻断，自动确认参数不能替人作产品裁决。
+- 2026-07-24 项目原生检查必须由受 Git 管理的契约显式声明命令、工作目录和适用路径；coding-x 可以发现候选，但写入前必须让人确认。下游只依赖 Git 与能用退出状态表达结论的命令，禁止把 coding-engine 的 npm/Vitest/TypeScript 约定推广成跨项目合同。
+- 2026-07-24 GitHub ruleset 是真实合并控制，CLI 写文件和本地 review 都不是；配置后必须回读语义而非只相信写 API 成功。管理员仍能删除规则，所以定时 doctor 要检查启用状态、所需检查及应用来源、协作者对应的审核人数、发布引用和异常期限，漂移即失败。
 
 ## 陷阱
 
