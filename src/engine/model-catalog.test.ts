@@ -31,7 +31,8 @@ afterEach(() => {
 
 describe('resolveGlobalConfigPath', () => {
   it('defaults to ~/.config/coding-x/config.json', () => {
-    expect(resolveGlobalConfigPath({}, '/home/example')).toBe('/home/example/.config/coding-x/config.json');
+    expect(resolveGlobalConfigPath({}, '/home/example'))
+      .toBe(join('/home/example', '.config', 'coding-x', 'config.json'));
   });
 
   it('lets CODING_X_CONFIG override the default and resolves relative paths', () => {
@@ -43,7 +44,7 @@ describe('resolveGlobalConfigPath', () => {
 
   it('ignores a blank override', () => {
     expect(resolveGlobalConfigPath({ CODING_X_CONFIG: '   ' }, '/home/example'))
-      .toBe('/home/example/.config/coding-x/config.json');
+      .toBe(join('/home/example', '.config', 'coding-x', 'config.json'));
   });
 });
 

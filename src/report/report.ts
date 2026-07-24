@@ -6,6 +6,8 @@ import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import { readProgress } from '../engine/progress.js';
 import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
 import { renderReportHtml } from './render.js';
+import { readQualityReceipts } from '../quality/receipt.js';
+import type { QualityReceipt } from '../quality/types.js';
 
 export interface ScreenshotEntry {
   filename: string;
@@ -27,11 +29,14 @@ export interface ReportData {
   /** state.json 存在但解析失败——报告内警示 */
   stateCorrupted: boolean;
   progress: string;
+  /** 兼容 0.29 及以前的 workspace 根 review-*.md；同样只算本地反馈。 */
   reviews: { filename: string; content: string }[];
   tamperedArchives: string[];
   screenshots: ScreenshotEntry[];
   /** evidence.jsonl 结构化证据（缺失=空记录零跳过） */
   evidence: { records: EvidenceRecord[]; skippedLines: number };
+  /** 本地 workspace 反馈；不能作为 GitHub 交付通过凭证。 */
+  qualityFeedback?: { receipts: QualityReceipt[]; skippedLines: number };
 }
 
 export type ReportSource =
@@ -103,6 +108,7 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
       tamperedArchives: rootFiles.filter((n) => /^prd\.tampered-.*\.json$/.test(n)).sort(),
       screenshots: listFiles(join(workspace, 'screenshots')).sort().map((f) => parseScreenshotEntry(f, storyIds)),
       evidence: readEvidence(workspace),
+      qualityFeedback: readQualityReceipts(workspace),
     },
   };
 }

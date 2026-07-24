@@ -123,7 +123,7 @@ const convergedExit = (prd: Prd, state: RunState): number => {
     console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
     return 3;
   }
-  console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
+  console.log('\n✅ 实现已验证：全部 story 通过。交付尚未就绪；可先运行 /review-loop（复用 quality review）获取本地反馈，再提交 PR 让最新提交通过远端质量门禁；合并后运行 /compound-docs 收口。');
   return 0;
 };
 

@@ -408,15 +408,31 @@ function renderUnattributed(shots: ScreenshotEntry[], orphanClaims: ScreenshotCl
 
 function renderReviews(reviews: ReportData['reviews']): string {
   if (reviews.length === 0) {
-    return '<section class="card"><h2>人审留痕</h2><p class="placeholder">尚无人审包——循环结束后运行 /review-loop，再跑 <code>coding-x report</code> 刷新本报告。</p></section>';
+    return '<section class="card"><h2>本地评审反馈</h2><p class="placeholder">尚无本地评审反馈。可运行 <code>coding-x quality review</code> 提前发现问题；远端仍会独立重跑。</p></section>';
   }
-  // 免责标注：.workspace/ 是 agent 可写目录，report.html 本身也是渲染产物——
-  // 留痕内容的真实性以 git 提交历史中的 review-*.md 为准，报告只负责展示
-  const disclaimer = '<p class="placeholder">留痕真实性以 git 提交的 review-*.md 为准（.workspace/ 属 agent 可写目录）。</p>';
+  const disclaimer = '<p class="placeholder">这些文件位于 agent 可写的 workspace，只是本地反馈；共享交付记录以 GitHub PR 对最新提交生成的必需检查为准。</p>';
   const sections = reviews.map((r) =>
-    `<section class="card review"><h2>人审留痕：${text(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
+    `<section class="card review"><h2>本地评审反馈：${text(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
   ).join('\n');
   return disclaimer + sections;
+}
+
+function renderDeliveryStatus(data: ReportData): string {
+  const feedback = data.qualityFeedback ?? { receipts: [], skippedLines: 0 };
+  const latest = feedback.receipts.at(-1);
+  const local = latest
+    ? `<div class="meta-line">最近本地质量反馈：${text(latest.kind)}${latest.axis ? `/${text(latest.axis)}` : ''} = ${text(latest.status)}</div>`
+    : '<div class="meta-line">最近本地质量反馈：无</div>';
+  const skipped = feedback.skippedLines > 0
+    ? `<div class="meta-line warn">⚠️ 本地质量反馈有 ${feedback.skippedLines} 行无法解析</div>`
+    : '';
+  return `<section class="card">
+<h2>交付就绪</h2>
+<div class="banner blocked">不可由本报告证明</div>
+<p>本报告证明的是实现循环状态。是否可以合并，必须查看 GitHub PR 最新提交上的项目检查、Spec、工程标准和深度评审四项必需检查。</p>
+${local}${skipped}
+<p class="placeholder">workspace 内容可被本地进程修改，不是共享交付凭证。</p>
+</section>`;
 }
 
 function renderProgressSection(progress: string): string {
@@ -554,9 +570,10 @@ ${renderTddConfig(data)}
 ${renderGateHistory(data.evidence.records)}
 ${renderTddHistory(data.evidence.records)}
 ${renderModels(data)}
-<div class="meta-line">统计：${stories.length} story · ${data.screenshots.length} 个截图工件 · ${data.reviews.length} 份人审留痕</div>
+<div class="meta-line">统计：${stories.length} story · ${data.screenshots.length} 个截图工件 · ${data.reviews.length} 份旧格式本地反馈</div>
 </header>
 ${renderRedFlags(data.tamperedArchives, data.evidence.records)}
+${renderDeliveryStatus(data)}
 <h2 class="section-title">story 证据</h2>
 ${claimDisclaimer}
 ${cards}

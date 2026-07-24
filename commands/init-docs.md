@@ -137,7 +137,28 @@ status 约定：`active`（意图生效中/待实施）/ `done`（本轮意图�
 - 根 `AGENTS.md` 已存在且是旧版百科全书式（特征：含「项目结构」「代码模式」「测试」等完整章节正文，而非文档索引表）→ **不动原文件**，输出一份「建议手动合并」的差异说明：哪些章节建议下沉到 `docs/` 哪个文件、哪些内容保留为目录/硬约束。
 - 只补缺失的文件/目录。
 
-## 阶段 5：输出报告
+## 阶段 5：初始化质量门禁
+
+docs 骨架和黄金原则确认后，必须运行 `npx coding-x quality init`。这是新项目接入 coding-x 的
+默认步骤，不允许因为项目不是 Node/TypeScript 就跳过：
+
+1. 展示 CLI 发现的项目原生检查、Spec 来源、工程标准来源、默认分支、受管文件和远端规则
+   预览。
+2. 检查命令、工作目录、适用路径、Spec/标准来源均由用户确认；探测结果只是候选，不能静默
+   写入。
+3. 用户确认后再重跑并传 `--yes` 应用；需要多模块工作目录时，用重复 `--check` 的 JSON
+   对象明确提供。
+4. 首次运行先生成本地文件；把它们合并进默认分支后再运行一次，只有回读确认默认分支持有
+   同一契约和固定版本工作流时才允许启用 ruleset。任一步未通过都写 `unverifiable`，不得把
+   仅生成本地文件说成已经具备交付门禁。
+5. 其他托管平台首版只报告不支持；不降级成“本地检查等于强门禁”。
+
+已有质量契约时执行 `npx coding-x quality doctor --remote`，不覆盖已有契约。远端 bootstrap
+需要先把受管 workflow 提交到默认分支并产生一次 GitHub Actions Check Run，之后才能将所需
+检查绑定到可信应用来源；这个过渡状态必须在报告中明示。定时 doctor 需要仓库 secret
+`CODING_X_ADMIN_TOKEN` 提供 ruleset 只读权限；凭据缺失时保持 unverifiable。
+
+## 阶段 6：输出报告
 
 ```markdown
 ## docs/ 知识库已初始化
@@ -160,5 +181,7 @@ status 约定：`active`（意图生效中/待实施）/ `done`（本轮意图�
 1. 审阅 `docs/golden-principles.md` 中标注「待人工确认」的条目
 2. 补充 `docs/architecture.md` 中残留的 `{…}` 占位
 3. 让 AGENTS.md 保持 ≤100 行：新增内容优先下沉 docs/，索引表加一行即可
-{如 CLAUDE.md 因已存在被跳过：4. 在你的 CLAUDE.md 顶部加一行 `@AGENTS.md`，桥接知识库入口}
+4. 提交并推送质量契约与受管 workflow；完成 GitHub bootstrap 后运行
+   `npx coding-x quality doctor --remote`
+{如 CLAUDE.md 因已存在被跳过：5. 在你的 CLAUDE.md 顶部加一行 `@AGENTS.md`，桥接知识库入口}
 ```

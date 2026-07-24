@@ -12,6 +12,8 @@ import {
   type LoopValidationProtocolErrorCode,
 } from '../engine/evidence.js';
 import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
+import { readQualityReceipts } from '../quality/receipt.js';
+import type { QualityReceipt } from '../quality/types.js';
 
 export interface RecentModelRoute {
   model: string | null;
@@ -48,6 +50,10 @@ export type StatusReport =
       recentValidation: Record<string, StoryRecentValidation>;
       evidenceSkippedLines: number;
       evidenceUnavailable: boolean;
+      qualityFeedback: {
+        receipts: QualityReceipt[];
+        skippedLines: number;
+      };
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
       stateCorrupted: boolean;
     };
@@ -120,6 +126,15 @@ export function collectStatus(workspace: string): StatusReport {
   } catch {
     evidenceUnavailable = true;
   }
+  let qualityFeedback: { receipts: QualityReceipt[]; skippedLines: number } = {
+    receipts: [],
+    skippedLines: 0,
+  };
+  try {
+    qualityFeedback = readQualityReceipts(workspace);
+  } catch {
+    qualityFeedback = { receipts: [], skippedLines: 1 };
+  }
   return {
     status: 'ok',
     prd,
@@ -131,6 +146,7 @@ export function collectStatus(workspace: string): StatusReport {
     recentValidation: recentValidationOf(evidence.records),
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
+    qualityFeedback,
     stateCorrupted,
   };
 }
@@ -169,7 +185,8 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   const { total, passed, blocked } = summarize(stories);
   const lines: string[] = [
     `📋 ${prd.project}（分支 ${prd.branchName}）`,
-    `   story 通过 ${passed}/${total}${blocked > 0 ? `，阻塞 ${blocked}` : ''}`,
+    `   实现验证：story 通过 ${passed}/${total}${blocked > 0 ? `，阻塞 ${blocked}` : ''}`,
+    '   交付就绪：不可由本地 workspace 证明；以最新提交上的 GitHub PR 必需检查为准',
     '',
   ];
   if (report.modelRouting.status === 'enabled') {
@@ -238,6 +255,16 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     lines.push(`⚠️ evidence.jsonl 有 ${report.evidenceSkippedLines} 行无法解析已跳过`);
   }
   if (report.evidenceUnavailable) lines.push('⚠️ evidence.jsonl 当前不可读，最近实际路由可能不完整');
+  if (report.qualityFeedback.receipts.length > 0) {
+    const latest = report.qualityFeedback.receipts.at(-1)!;
+    lines.push(
+      `ℹ️ 最近本地质量反馈：${latest.kind}${latest.axis ? `/${latest.axis}` : ''}=${latest.status}`
+      + '（不是共享交付凭证）',
+    );
+  }
+  if (report.qualityFeedback.skippedLines > 0) {
+    lines.push(`⚠️ 本地质量反馈有 ${report.qualityFeedback.skippedLines} 行无法解析`);
+  }
   // 空 story 列表不算全绿：status 的退出码用作 CI 门禁，对退化的 prd.json 必须保守
   if (total === 0) {
     lines.push('', '⚠️ prd.json 中没有任何 story');
@@ -285,6 +312,18 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
     evidence: {
       skippedLines: report.evidenceSkippedLines,
       unavailable: report.evidenceUnavailable,
+    },
+    implementationStatus: !report.stateCorrupted
+      && summary.total > 0
+      && summary.passed === summary.total
+      ? 'passed'
+      : 'not-passed',
+    deliveryStatus: 'unverifiable',
+    deliveryReason: '本地 workspace 不证明 GitHub PR 最新提交上的必需检查',
+    localQualityFeedback: {
+      latest: report.qualityFeedback.receipts.at(-1) ?? null,
+      skippedLines: report.qualityFeedback.skippedLines,
+      trustedDeliveryEvidence: false,
     },
     summary,
   };

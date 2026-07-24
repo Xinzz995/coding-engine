@@ -1,7 +1,7 @@
 ---
 title: 架构地图
 status: active
-updated: 2026-07-23
+updated: 2026-07-24
 scope: root
 ---
 
@@ -18,7 +18,11 @@ scope: root
 
 | 模块 | 路径 | 职责 |
 |---|---|---|
-| CLI 入口 | `src/cli.ts`、`src/cursor-hooks.ts` | 参数解析、启动循环/仪表盘，提供模型/全局配置与 Cursor 项目检查安装、状态、卸载入口；Cursor 安装器只在 Git 根安全管理 `.cursor/` 中归属明确的内容；`help`/`-h`/`--help` 在子命令校验与任何 workspace/runner 副作用前统一短路 |
+| CLI 入口 | `src/cli.ts`、`src/cursor-hooks.ts` | 参数解析、启动循环/仪表盘，提供模型/全局配置、质量门禁与 Cursor 项目检查安装、状态、卸载入口；Cursor 安装器只在 Git 根安全管理 `.cursor/` 中归属明确的内容；`help`/`-h`/`--help` 在子命令校验与任何 workspace/runner 副作用前统一短路 |
+| 质量契约与执行 | `src/quality/contract.ts`、`checks.ts`、`gate.ts`、`receipt.ts` | 严格读取受 Git 管理的 `.coding-x/quality.json` 与异常记录；按工作目录和适用路径执行项目原生命令；普通延期服从契约允许的严重度，未关闭紧急绕过始终显示异常交付；统一产出绑定 base/head、规则来源、轮次和三态结论的结构化 receipt |
+| 三轴评审 | `src/quality/review*.ts`、`risk.ts`、`prompts.ts`、`model.ts` | Spec 与工程标准用隔离上下文独立评审；风险触发时追加深度结构评审；只消费可信来源和 PR 数据，严格解析模型结果，缺资料、调用异常、格式错误或提交变化均返回 unverifiable |
+| 质量入口 | `src/quality/cli.ts`、`init.ts`、`doctor.ts` | `quality init/review/gate/doctor` 的单源编排；初始化先展示候选并要求确认，再原子写受管文件、配置 GitHub 规则并回读；doctor 同时检查本地政策、异常期限、工作流与远端规则漂移 |
+| GitHub 适配器 | `src/quality/github.ts`、`remote-review.ts`、`assets/quality/github/` | 读取仓库、PR、diff、文件与 check run；创建绑定精确 head 的 Check Run；配置默认分支和发布引用 ruleset；受管工作流把无凭据的 PR 代码执行与有模型权限但不签出 PR 代码的 AI 评审隔离 |
 | 主循环 | `src/engine/loop.ts` | Developer ⇄ Validator 迭代；agent 结局机械三分与异常轮处理（no-op 检测、stall 熔断、终轮篡改收口）；按 qualityChecks→TDD 门禁→Validator 排序；生成 Validator 精确目标、消费结构化 claim 后写 verdict/签发凭证；每个真实子进程调用附加调用凭证；完成判定与收敛出口（ADR-009、013、015、016、017） |
 | Agent 进程 | `src/engine/agent.ts` | 拉起 claude/codex/cursor headless 子进程、模型参数与超时控制；stdout/stderr 实时 tee 并滚动保留有界尾部，正常路径等 pipe 关闭再返回 duration/exit/output，超时路径计入整棵进程树终止等待 |
 | 进程树终止 | `src/engine/process-tree.ts` | agent 与机械门禁共享的跨平台超时收口：POSIX 进程组 SIGTERM→SIGKILL 并确认退出；Windows 等待 `taskkill /T /F`，调用方只在整棵树停止后继续写 workspace |
@@ -46,7 +50,7 @@ scope: root
 
 ## 分层与依赖方向
 
-cli → engine（loop → agent / prd / state / progress / tdd-gate / models / model-preflight / model-catalog / repair）；cli 另调用独立的 cursor-hooks 项目适配器。agent 与 gate 共同依赖 process-tree 的终止单源，tdd-gate 复用 gate 的命令 runner。report 模块被 cli 与 loop 调用，反向只读 engine 的 prd/state/progress/tdd-gate 与 gate 的仲裁判定，loop 另把 guard 快照注入自动报告——与 dashboard 同为消费端。loop 启停 dashboard 并推送迭代状态，dashboard 反向只读 `engine/prd.ts`、`engine/state.ts`、`engine/progress.ts` 取数据供 API 使用——两者是双向数据耦合，而非单向依赖。`assets/` 与共同 hook 脚本构建时拷进 `dist/`；引擎经 `import.meta.url` 读取资产，Cursor 适配器读取 `dist/hooks` 后复制到目标项目。`templates/`、`skills/`、`commands/` 与 Codex/Claude hook 配置只随插件仓库分发。
+cli → engine（loop → agent / prd / state / progress / tdd-gate / models / model-preflight / model-catalog / repair）；cli 另调用独立的 quality 与 cursor-hooks 项目适配器。quality 的 contract/risk/receipt 是纯核心，review/checks/gate 组合本地执行，init/doctor 经 github 适配器接触远端。agent 与 engine gate 共同依赖 process-tree 的终止单源，tdd-gate 复用 engine gate 的命令 runner；PR 项目检查复用 quality checks，但不复用本地 review 结论。report 模块被 cli 与 loop 调用，反向只读 engine 的 prd/state/progress/tdd-gate、gate 的仲裁判定和 quality 的本地反馈，loop 另把 guard 快照注入自动报告——与 dashboard 同为消费端。loop 启停 dashboard 并推送迭代状态，dashboard 反向只读 `engine/prd.ts`、`engine/state.ts`、`engine/progress.ts` 取数据供 API 使用——两者是双向数据耦合，而非单向依赖。`assets/`、质量 prompt/工作流与共同 hook 脚本构建时拷进 `dist/`；引擎经 `import.meta.url` 读取资产，Cursor 适配器读取 `dist/hooks` 后复制到目标项目。`templates/`、`skills/`、`commands/` 与 Codex/Claude hook 配置只随插件仓库分发。
 
 ## 数据流
 
@@ -57,6 +61,10 @@ cli → engine（loop → agent / prd / state / progress / tdd-gate / models / m
 workspace 是运行边界：progress 记录学习，evidence 追加普通/TDD 门禁、轮次、篡改、Validator claim、调用凭证、截图等事件；Agent stdout/stderr 实时 tee，异常时只留最近 2000 字符，成功 transcript 不落盘。引擎把绝对项目根和实际 workspace 注入 agent，宿主 hook 只在二者与当前 Git 根配对时使用外部 workspace。`validation-result.json` 只作为单轮瞬时 IPC，调用前清旧、消费后删除，崩溃残留由新 request ID 拒绝。report 从需求、状态与分源证据派生静态报告；`engine.lock` 让 run/repair 单写，关键覆盖写走原子替换。PRD guard 冻结运行期需求并恢复篡改；自动报告沿用该冻结快照，手动报告才读磁盘。state 缺失可迁移 legacy，存在但损坏则所有展示面统一 fail-closed 为未验证（ADR-007、008、014、015、016、017）。
 
 全局模型目录声明 runner 可选择的 ID，项目 `prd.json.models` 保存 runner 与五项映射；preflight 只在显式模型策略可能被调用时检查目录成员，loop 再按 difficulty、escalated 与 CLI 覆盖解析本轮模型，并把实际命中写入 evidence。目录是静态允许清单，不证明 provider、认证、配额或网络实时可用；runner-default 与已收敛 workspace 跳过目录（ADR-011、012）。
+
+质量交付另有一条与 story 验收正交的数据流：受 Git 管理的契约定义项目命令、Spec/工程标准来源、风险触发器、默认分支与所需检查；本地 `quality review` 只把当前提交的提前反馈写入 workspace。PR 到达 GitHub 后，默认分支上的旧工作流与旧契约负责裁决：无敏感权限的 job 签出 PR head 并运行项目命令；有 `models: read` 与 `checks: write` 的 job 不签出、不运行 PR 代码，只通过 API 读取 diff 和内容并分别发布 Spec、工程标准、深度结构 Check Run。每项结论同时绑定 PR、base SHA、head SHA、契约来源和评审轮次；任何新提交、资料缺失或异常都使旧结论失效或变为 unverifiable（ADR-018）。
+
+远端规则是最终合并控制面：默认分支 ruleset 要求 PR、分支最新、对话解决、禁止强推/删除，并把所需检查绑定 GitHub Actions 应用来源；发布 ruleset 保护 `v*`。首次初始化只有在默认分支已回读到同一契约和固定版本受管工作流后才激活规则。管理员仍可修改平台规则，因此 `quality doctor --remote` 回读实际 ruleset、检查来源、协作者人数和异常期限，漂移时失败；紧急绕过必须进入受管异常记录且在关闭前保持异常状态。质量契约或工作流自身被 PR 修改时，仍由默认分支旧版本裁决，不能在同一 PR 中改弱规则并批准自己。
 
 ## 测试
 

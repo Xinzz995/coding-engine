@@ -116,7 +116,7 @@ function resolveGitRoot(cwd: string): string {
   if (git.error || git.status !== 0 || !git.stdout.trim()) {
     throw new Error('当前目录不在可用的 Git worktree 中');
   }
-  return realpathSync(git.stdout.trim());
+  return realpathSync.native(git.stdout.trim());
 }
 
 function pathsFor(root: string): TargetPaths {

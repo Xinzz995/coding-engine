@@ -281,7 +281,7 @@ function scanUntracked(
     let real: string;
     let content: string;
     try {
-      real = realpathSync(resolve(root, relPath));
+      real = realpathSync.native(resolve(root, relPath));
       if (!isInside(root, real)) {
         return fail('source-scan-failed', `未跟踪生产文件越出项目根：${relPath}`);
       }
@@ -312,7 +312,7 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
   const started = Date.now();
   let root: string;
   try {
-    root = realpathSync(projectRoot);
+    root = realpathSync.native(projectRoot);
   } catch (err) {
     return {
       ok: false,
@@ -332,24 +332,26 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
       ms: Date.now() - started,
     };
   }
-  let gitRoot: string;
-  try {
-    gitRoot = realpathSync(top.stdout.trim());
-  } catch (err) {
+  const prefix = runGit(root, ['rev-parse', '--show-prefix']);
+  if (!prefix.ok) {
     return {
       ok: false,
       failure: fail(
         'git-unavailable',
-        `Git 根不可读：${err instanceof Error ? err.message : String(err)}`,
+        `无法确认当前目录是否为 Git 根：${prefix.diagnostic}`,
         'git rev-parse',
+        prefix.exitCode,
       ),
       ms: Date.now() - started,
     };
   }
-  if (gitRoot !== root) {
+  if (prefix.stdout.trim() !== '') {
     return {
       ok: false,
-      failure: fail('git-root-mismatch', `coding-x 必须从 Git 根启动；当前 ${root}，Git 根 ${gitRoot}`),
+      failure: fail(
+        'git-root-mismatch',
+        `coding-x 必须从 Git 根启动；当前 ${root}，Git 根 ${top.stdout.trim()}`,
+      ),
       ms: Date.now() - started,
     };
   }
@@ -380,7 +382,7 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
     }
     let real: string;
     try {
-      real = realpathSync(lexical);
+      real = realpathSync.native(lexical);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code === 'ENOENT'
         ? 'policy-file-missing'

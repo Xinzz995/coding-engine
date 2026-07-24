@@ -204,16 +204,24 @@ describe('renderReportHtml', () => {
     expect(html).toContain('ADR-007');
   });
 
-  it('review 留痕：无 → 占位指引；有 → 渲染 md 内容并附留痕真实性免责标注', () => {
-    expect(renderReportHtml(data())).toContain('尚无人审包');
+  it('本地 review：无 → 占位指引；有 → 渲染内容并明确不是共享交付凭证', () => {
+    expect(renderReportHtml(data())).toContain('尚无本地评审反馈');
     const html = renderReportHtml(data({
       reviews: [{ filename: 'review-2026-07-08.md', content: '## 层 2 发现清单\n- 发现 A' }],
     }));
     expect(html).toContain('review-2026-07-08.md');
     expect(html).toContain('<h5>层 2 发现清单</h5>');
     expect(html).toContain('<li>发现 A</li>');
-    expect(html).not.toContain('尚无人审包');
-    expect(html).toContain('留痕真实性');
+    expect(html).not.toContain('尚无本地评审反馈');
+    expect(html).toContain('共享交付记录以 GitHub PR');
+    expect(html).toContain('workspace 内容可被本地进程修改');
+  });
+
+  it('separates an all-passed implementation report from GitHub delivery readiness', () => {
+    const html = renderReportHtml(data());
+    expect(html).toContain('<h2>交付就绪</h2>');
+    expect(html).toContain('不可由本报告证明');
+    expect(html).toContain('GitHub PR 最新提交');
   });
 
   it('progress 折叠附录：空则整节省略，有则在 details 内', () => {

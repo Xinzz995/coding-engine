@@ -81,12 +81,17 @@ export function runGateCommand(
   command: string,
   cwd: string,
   timeoutMs: number = GATE_TIMEOUT_MS,
+  options: {
+    env?: NodeJS.ProcessEnv;
+    stdout?: 'stdout' | 'stderr' | 'silent';
+  } = {},
 ): Promise<GateFailure | null> {
   return new Promise((resolve, reject) => {
     // shell 语义：qualityChecks 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`）。
     // patterns.md 的「不经 shell」约定针对代码拼接固定命令+变量参数的场景，不适用于此。
     const child = spawn(command, {
       cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'],
+      ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
       // detached: 命令自成进程组——shell:true 下 child.kill 只达 shell 本身，
       // 超时必须对整组发信号，否则挂起的孙进程（npm 包裹的测试进程等）会泄漏
       detached: process.platform !== 'win32',
@@ -96,7 +101,11 @@ export function runGateCommand(
       tail = (tail + String(chunk)).slice(-EVIDENCE_DIAGNOSTIC_CHARS);
     };
     // tee：实时转发保证无人值守时进度可见，同时滚动缓冲尾部供打回 notes 用
-    child.stdout.on('data', (c: Buffer) => { process.stdout.write(c); keep(c); });
+    child.stdout.on('data', (c: Buffer) => {
+      if (options.stdout === 'stderr') process.stderr.write(c);
+      else if (options.stdout !== 'silent') process.stdout.write(c);
+      keep(c);
+    });
     child.stderr.on('data', (c: Buffer) => { process.stderr.write(c); keep(c); });
     let settled = false;
     let terminating = false;

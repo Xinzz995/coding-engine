@@ -24,13 +24,21 @@ import {
   type CursorHookAction,
 } from './cursor-hooks.js';
 import * as dashboard from './dashboard/server.js';
+import {
+  runQualityCli,
+  type QualityAction,
+} from './quality/cli.js';
+import type { ReviewAxis } from './quality/types.js';
+import { readQualityContract } from './quality/contract.js';
+import { resolveGitRoot } from './quality/git.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config' | 'hooks';
+  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config' | 'hooks' | 'quality';
   /** 全局帮助请求；先于任何子命令校验与副作用处理。 */
   help: boolean;
   configAction: 'path' | 'init' | 'validate' | null;
   hooksAction: CursorHookAction | null;
+  qualityAction: QualityAction | null;
   kind: AgentKind;
   /** 用户是否通过位置参数显式选择 runner；models.runner 自动选择依赖此信息。 */
   kindExplicit: boolean;
@@ -47,6 +55,26 @@ export interface CliConfig {
   staleDays: number;
   json: boolean;
   stallLimit: number;
+  qualityYes: boolean;
+  qualityLocalOnly: boolean;
+  qualityRemote: boolean;
+  qualityChecks: boolean;
+  qualityAxis: ReviewAxis | undefined;
+  qualityEventPath: string | undefined;
+  qualityContractRef: string | undefined;
+  qualityContractFile: string | undefined;
+  qualityBaseSha: string | undefined;
+  qualityHeadSha: string | undefined;
+  qualityPublishProjectCheck: string | undefined;
+  qualityIntentFile: string | undefined;
+  qualityBaseRef: string | undefined;
+  qualityModel: string | undefined;
+  qualityRepository: string | undefined;
+  qualityDefaultBranch: string | undefined;
+  qualityInitChecks: string[];
+  qualitySpecSources: string[];
+  qualityStandardsSources: string[];
+  qualityReleaseRefs: string[];
 }
 
 export const CLI_HELP = `coding-x — Ralph 自动化编码 harness
@@ -71,6 +99,10 @@ runner:
   config path|init|validate      查看、初始化或校验全局模型配置
   hooks cursor install|status|remove
                                  安装、检查或移除当前项目的 Cursor TDD 提交前检查
+  quality init                   建立质量契约、GitHub 工作流和远端规则
+  quality review [runner]        运行只读的本地三轴评审
+  quality gate                  在 GitHub PR 中运行无交互质量门禁
+  quality doctor                检查本地契约与远端规则漂移
   help                           显示本帮助
 
 选项:
@@ -87,6 +119,25 @@ runner:
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（status/models）
+  --yes                          quality init：确认应用预览中的变更
+  --local-only                   quality init：只写项目文件，不配置远端
+  --remote                       quality doctor：同时回读 GitHub 规则
+  --intent-file <path>           quality review：四段式意图文件
+  --base-ref <ref>               quality review：比较基线
+  --checks                       quality gate：运行项目原生命令
+  --axis <spec|standards|deep>   quality gate：运行一条远端评审轴
+  --event-path <path>            quality gate：GitHub 事件文件
+  --contract-ref <sha>           quality gate：可信契约提交
+  --contract-file <path>         quality gate：可信契约文件
+  --base-sha/--head-sha <sha>    quality gate：精确提交身份
+  --publish-project-check <状态>  quality gate：发布隔离检查结果
+  --check <json>                 quality init：显式项目检查（可重复）
+  --spec-source <path>           quality init：Spec 来源（可重复）
+  --standards-source <path>      quality init：工程规范来源（可重复）
+  --repository <owner/repo>      quality init：GitHub 仓库
+  --default-branch <name>        quality init：默认分支
+  --release-ref <pattern>        quality init：受保护发布引用（如 refs/tags/v*，可重复）
+  --model <id>                   quality init/review：评审模型
   -h, --help                     显示本帮助并退出
 
 更多说明: https://github.com/Xinzz995/coding-engine#readme`;
@@ -109,6 +160,26 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'stale-days': { type: 'string' },
       json: { type: 'boolean' },
       'stall-limit': { type: 'string' },
+      yes: { type: 'boolean' },
+      'local-only': { type: 'boolean' },
+      remote: { type: 'boolean' },
+      checks: { type: 'boolean' },
+      axis: { type: 'string' },
+      'event-path': { type: 'string' },
+      'contract-ref': { type: 'string' },
+      'contract-file': { type: 'string' },
+      'base-sha': { type: 'string' },
+      'head-sha': { type: 'string' },
+      'publish-project-check': { type: 'string' },
+      'intent-file': { type: 'string' },
+      'base-ref': { type: 'string' },
+      model: { type: 'string' },
+      repository: { type: 'string' },
+      'default-branch': { type: 'string' },
+      check: { type: 'string', multiple: true },
+      'spec-source': { type: 'string', multiple: true },
+      'standards-source': { type: 'string', multiple: true },
+      'release-ref': { type: 'string', multiple: true },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -124,6 +195,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     : first === 'models' ? 'models'
     : first === 'config' ? 'config'
     : first === 'hooks' ? 'hooks'
+    : first === 'quality' ? 'quality'
     : 'run';
   let configAction: CliConfig['configAction'] = null;
   if (command === 'config') {
@@ -151,7 +223,30 @@ export function parseCliArgs(argv: string[]): CliConfig {
   if (!help && command === 'hooks' && positionals.length > 3) {
     throw new Error(`❌ hooks cursor ${hooksAction} 不接受额外位置参数`);
   }
-  const runnerPositional = command === 'models' ? positionals[1] : first;
+  let qualityAction: QualityAction | null = null;
+  if (command === 'quality') {
+    const rawAction = positionals[1];
+    if (rawAction === 'init' || rawAction === 'review'
+      || rawAction === 'gate' || rawAction === 'doctor') {
+      qualityAction = rawAction;
+    } else if (!help) {
+      throw new Error('❌ quality 子命令必须是 init、review、gate 或 doctor');
+    }
+    const allowedPositionals = qualityAction === 'review' ? 3 : 2;
+    if (!help && positionals.length > allowedPositionals) {
+      throw new Error(`❌ quality ${qualityAction} 不接受额外位置参数`);
+    }
+    const reviewRunner = positionals[2];
+    if (!help && qualityAction === 'review' && reviewRunner !== undefined
+      && reviewRunner !== 'claude' && reviewRunner !== 'codex' && reviewRunner !== 'cursor') {
+      throw new Error(`❌ quality review runner 必须是 claude、codex 或 cursor，收到「${reviewRunner}」`);
+    }
+  }
+  const runnerPositional = command === 'models'
+    ? positionals[1]
+    : command === 'quality' && qualityAction === 'review'
+      ? positionals[2]
+      : first;
   if (!help && command === 'models' && runnerPositional !== undefined
     && runnerPositional !== 'claude' && runnerPositional !== 'codex' && runnerPositional !== 'cursor') {
     throw new Error(`❌ models runner 必须是 claude、codex 或 cursor，收到「${runnerPositional}」`);
@@ -161,6 +256,14 @@ export function parseCliArgs(argv: string[]): CliConfig {
   }
   const kind: AgentKind = runnerPositional === 'codex' ? 'codex' : runnerPositional === 'cursor' ? 'cursor' : 'claude';
   const kindExplicit = runnerPositional === 'claude' || runnerPositional === 'codex' || runnerPositional === 'cursor';
+  let qualityAxis: ReviewAxis | undefined;
+  if (values.axis !== undefined) {
+    if (values.axis !== 'spec' && values.axis !== 'standards' && values.axis !== 'deep') {
+      if (!help) throw new Error('❌ --axis 必须是 spec、standards 或 deep');
+    } else {
+      qualityAxis = values.axis;
+    }
+  }
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
 
   let staleDays = 30;
@@ -187,6 +290,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     help,
     configAction,
     hooksAction,
+    qualityAction,
     kind,
     kindExplicit,
     maxIterations: values['max-iter'] ? Number(values['max-iter']) : 50,
@@ -202,11 +306,56 @@ export function parseCliArgs(argv: string[]): CliConfig {
     staleDays,
     json: values.json ?? false,
     stallLimit,
+    qualityYes: values.yes ?? false,
+    qualityLocalOnly: values['local-only'] ?? false,
+    qualityRemote: values.remote ?? false,
+    qualityChecks: values.checks ?? false,
+    qualityAxis,
+    qualityEventPath: values['event-path'],
+    qualityContractRef: values['contract-ref'],
+    qualityContractFile: values['contract-file'],
+    qualityBaseSha: values['base-sha'],
+    qualityHeadSha: values['head-sha'],
+    qualityPublishProjectCheck: values['publish-project-check'],
+    qualityIntentFile: values['intent-file'],
+    qualityBaseRef: values['base-ref'],
+    qualityModel: values.model,
+    qualityRepository: values.repository,
+    qualityDefaultBranch: values['default-branch'],
+    qualityInitChecks: values.check ?? [],
+    qualitySpecSources: values['spec-source'] ?? [],
+    qualityStandardsSources: values['standards-source'] ?? [],
+    qualityReleaseRefs: values['release-ref'] ?? [],
   };
 }
 
 export function permissionWarning(kind: AgentKind): string {
   return agentPermissionWarning(kind);
+}
+
+export function validateRunQualityPreflight(cwd: string): {
+  status: 'valid' | 'invalid';
+  message: string;
+} {
+  let root: string;
+  try {
+    root = resolveGitRoot(cwd);
+  } catch (error) {
+    return {
+      status: 'invalid',
+      message: `无法定位 Git 项目：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const contract = readQualityContract(root);
+  if (contract.status === 'valid') {
+    return { status: 'valid', message: `质量契约有效：${contract.path}` };
+  }
+  return {
+    status: 'invalid',
+    message: contract.status === 'missing'
+      ? `缺少 ${contract.path}；请先运行 coding-x quality init`
+      : `质量契约无效：${contract.errors.join('；')}`,
+  };
 }
 
 /**
@@ -244,6 +393,37 @@ export async function main(argv: string[]): Promise<number> {
   if (cfg.help) {
     console.log(CLI_HELP);
     return 0;
+  }
+
+  if (cfg.command === 'quality') {
+    return runQualityCli({
+      action: cfg.qualityAction!,
+      workspace: cfg.workspace,
+      json: cfg.json,
+      yes: cfg.qualityYes,
+      localOnly: cfg.qualityLocalOnly,
+      remote: cfg.qualityRemote,
+      checks: cfg.qualityChecks,
+      ...(cfg.qualityAxis ? { axis: cfg.qualityAxis } : {}),
+      ...(cfg.qualityEventPath ? { eventPath: cfg.qualityEventPath } : {}),
+      ...(cfg.qualityContractRef ? { contractRef: cfg.qualityContractRef } : {}),
+      ...(cfg.qualityContractFile ? { contractFile: cfg.qualityContractFile } : {}),
+      ...(cfg.qualityBaseSha ? { baseSha: cfg.qualityBaseSha } : {}),
+      ...(cfg.qualityHeadSha ? { headSha: cfg.qualityHeadSha } : {}),
+      ...(cfg.qualityPublishProjectCheck !== undefined
+        ? { publishProjectCheck: cfg.qualityPublishProjectCheck }
+        : {}),
+      ...(cfg.qualityIntentFile ? { intentFile: cfg.qualityIntentFile } : {}),
+      ...(cfg.qualityBaseRef ? { baseRef: cfg.qualityBaseRef } : {}),
+      kind: cfg.kind,
+      ...(cfg.qualityModel ? { model: cfg.qualityModel } : {}),
+      ...(cfg.qualityRepository ? { repository: cfg.qualityRepository } : {}),
+      ...(cfg.qualityDefaultBranch ? { defaultBranch: cfg.qualityDefaultBranch } : {}),
+      initChecks: cfg.qualityInitChecks,
+      specSources: cfg.qualitySpecSources,
+      standardsSources: cfg.qualityStandardsSources,
+      releaseRefs: cfg.qualityReleaseRefs,
+    });
   }
 
   if (cfg.command === 'hooks') {
@@ -386,6 +566,12 @@ export async function main(argv: string[]): Promise<number> {
 
   if (cfg.command === 'dashboard') {
     return runDashboard({ workspace: cfg.workspace, port: cfg.port, openBrowser: cfg.openBrowser });
+  }
+
+  const qualityPreflight = validateRunQualityPreflight(process.cwd());
+  if (qualityPreflight.status === 'invalid') {
+    console.error(`❌ ${qualityPreflight.message}`);
+    return 2;
   }
 
   const instructionsDir = join(dirname(fileURLToPath(import.meta.url)), 'instructions');

@@ -138,6 +138,29 @@ describe('collectStatus', () => {
 });
 
 describe('renderStatusReport', () => {
+  it('separates implementation verification from delivery readiness', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({
+        'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false },
+        'US-002': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false },
+        'US-003': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false },
+      }));
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report);
+      expect(human.text).toContain('实现验证');
+      expect(human.text).toContain('交付就绪');
+      expect(human.text).toContain('不可由本地 workspace 证明');
+      const machine = JSON.parse(renderStatusJson(report).text);
+      expect(machine.implementationStatus).toBe('passed');
+      expect(machine.deliveryStatus).toBe('unverifiable');
+      expect(machine.localQualityFeedback.trustedDeliveryEvidence).toBe(false);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it('suggests prd-to-json and exits 2 for a missing workspace', () => {
     const { text, exitCode } = renderStatusReport({ status: 'missing', workspace: '.workspace' });
     expect(text).toContain('prd-to-json');

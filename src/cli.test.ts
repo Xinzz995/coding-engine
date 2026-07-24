@@ -3,7 +3,15 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
+import {
+  parseCliArgs,
+  permissionWarning,
+  runDashboard,
+  isDirectInvocation,
+  main,
+  validateRunQualityPreflight,
+} from './cli.js';
+import { execFileSync } from 'node:child_process';
 
 afterEach(() => {
   delete process.env.CODING_X_CODEX_BIN;
@@ -111,6 +119,41 @@ describe('parseCliArgs', () => {
     expect(() => parseCliArgs(['hooks', 'cursor', 'unknown'])).toThrow('hooks 子命令');
     expect(() => parseCliArgs(['hooks', 'cursor', 'install', 'extra'])).toThrow('额外位置参数');
   });
+  it('recognizes quality subcommands, review runner and repeated init sources', () => {
+    const init = parseCliArgs([
+      'quality', 'init', '--yes', '--local-only',
+      '--spec-source', 'docs/specs/',
+      '--spec-source', 'docs/prds/',
+      '--standards-source', 'AGENTS.md',
+      '--release-ref', 'refs/tags/v*',
+    ]);
+    expect(init.command).toBe('quality');
+    expect(init.qualityAction).toBe('init');
+    expect(init.qualityYes).toBe(true);
+    expect(init.qualityLocalOnly).toBe(true);
+    expect(init.qualitySpecSources).toEqual(['docs/specs/', 'docs/prds/']);
+    expect(init.qualityStandardsSources).toEqual(['AGENTS.md']);
+    expect(init.qualityReleaseRefs).toEqual(['refs/tags/v*']);
+
+    const review = parseCliArgs([
+      'quality', 'review', 'codex',
+      '--intent-file', '/tmp/intent.md',
+      '--base-ref', 'main',
+    ]);
+    expect(review.qualityAction).toBe('review');
+    expect(review.kind).toBe('codex');
+    expect(review.kindExplicit).toBe(true);
+    expect(review.qualityIntentFile).toBe('/tmp/intent.md');
+
+    const gate = parseCliArgs([
+      'quality', 'gate', '--axis', 'deep', '--event-path', '/tmp/event.json',
+    ]);
+    expect(gate.qualityAction).toBe('gate');
+    expect(gate.qualityAxis).toBe('deep');
+    expect(() => parseCliArgs(['quality', 'unknown'])).toThrow('quality 子命令');
+    expect(() => parseCliArgs(['quality', 'gate', '--axis', 'unknown'])).toThrow('--axis');
+    expect(() => parseCliArgs(['quality', 'doctor', 'extra'])).toThrow('额外位置参数');
+  });
   it('passes --workspace through to the report subcommand', () => {
     expect(parseCliArgs(['report', '--workspace', 'ws-x']).workspace).toBe('ws-x');
   });
@@ -184,6 +227,20 @@ describe('parseCliArgs', () => {
   });
 });
 
+describe('run quality preflight', () => {
+  it('fails closed and points to quality init when a Git project has no contract', () => {
+    const root = mkdtempSync(join(tmpdir(), 'cli-quality-preflight-'));
+    try {
+      execFileSync('git', ['init', '-q'], { cwd: root });
+      const result = validateRunQualityPreflight(root);
+      expect(result.status).toBe('invalid');
+      expect(result.message).toContain('quality init');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('main — help', () => {
   it.each([
     ['--help'],
@@ -212,9 +269,11 @@ describe('main — help', () => {
       for (const token of [
         'claude', 'codex', 'cursor',
         'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config', 'hooks cursor',
+        'quality init', 'quality review', 'quality gate', 'quality doctor',
         '--max-iter', '--dev-timeout', '--val-timeout', '--builder-model',
         '--validator-model', '--escalation-model', '--workspace', '--no-open',
         '--keep-open', '--port', '--stall-limit', '--stale-days', '--json',
+        '--intent-file', '--checks', '--axis', '--remote', '--local-only', '--yes',
         '--help', '-h',
       ]) {
         expect(output, `help 缺少 ${token}`).toContain(token);
