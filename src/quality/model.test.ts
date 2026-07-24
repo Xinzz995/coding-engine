@@ -70,7 +70,6 @@ describe('review model output', () => {
   });
 
   it.each([
-    ['HTTP error', new Response('rate limited', { status: 429 })],
     ['bad envelope', new Response(JSON.stringify({ choices: [] }), { status: 200 })],
     ['bad JSON', new Response(JSON.stringify({ choices: [{ message: { content: 'not-json' } }] }), { status: 200 })],
   ])('fails closed on %s', async (_name, response) => {
@@ -83,6 +82,79 @@ describe('review model output', () => {
       fetchImpl: vi.fn(async () => response) as unknown as typeof fetch,
     });
     expect(result.status).toBe('invalid');
+  });
+
+  it('honors Retry-After and recovers from a transient rate limit', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(new Response('rate limited', {
+        status: 429,
+        headers: { 'Retry-After': '6' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{
+          message: {
+            content: JSON.stringify({ summary: 'recovered', findings: [] }),
+          },
+        }],
+      }), { status: 200 }));
+    const sleepImpl = vi.fn(async () => {});
+    const result = await callGitHubModel({
+      token: 'token',
+      model: 'openai/gpt-4.1',
+      systemPrompt: 'system',
+      userPrompt: 'user',
+      axis: 'spec',
+      fetchImpl: fetchImpl as typeof fetch,
+      sleepImpl,
+      randomImpl: () => 0,
+    });
+    expect(result).toMatchObject({
+      status: 'valid',
+      output: { summary: 'recovered', findings: [] },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(sleepImpl).toHaveBeenCalledWith(6_000, expect.any(AbortSignal));
+  });
+
+  it('keeps a persistent rate limit unverifiable after a bounded number of attempts', async () => {
+    const fetchImpl = vi.fn(async () => new Response('rate limited', {
+      status: 429,
+      headers: { 'Retry-After': '0' },
+    }));
+    const sleepImpl = vi.fn(async () => {});
+    const result = await callGitHubModel({
+      token: 'token',
+      model: 'openai/gpt-4.1',
+      systemPrompt: 'system',
+      userPrompt: 'user',
+      axis: 'spec',
+      fetchImpl: fetchImpl as typeof fetch,
+      maxAttempts: 3,
+      sleepImpl,
+      randomImpl: () => 0,
+    });
+    expect(result).toMatchObject({
+      status: 'invalid',
+      reason: 'provider-error',
+      error: expect.stringContaining('3 次尝试后'),
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(sleepImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry non-rate-limit provider failures', async () => {
+    const fetchImpl = vi.fn(async () => new Response('forbidden', { status: 403 }));
+    const result = await callGitHubModel({
+      token: 'token',
+      model: 'openai/gpt-4.1',
+      systemPrompt: 'system',
+      userPrompt: 'user',
+      axis: 'spec',
+      fetchImpl: fetchImpl as typeof fetch,
+      sleepImpl: vi.fn(async () => {}),
+    });
+    expect(result).toMatchObject({ status: 'invalid', reason: 'provider-error' });
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it('classifies the GitHub Models free-tier input limit for lossless sharding', async () => {

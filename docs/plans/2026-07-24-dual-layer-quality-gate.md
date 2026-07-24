@@ -54,7 +54,8 @@ scope: root
 - 建立 Spec、Standards、Deep 三份短 prompt 与共同 JSON schema；仓库文本标成不可信数据。
 - 实现 GitHub Models adapter 与本地只读 agent adapter；结构、大小、head/policy 逐项校验。
 - 远端输入遵守 GitHub 免费额度：输出上限 4000，完整 diff 不截断；source 超限时最多无损
-  拆成八片，逐片有效后机械合并并保留重复 finding 的最高严重度。
+  拆成八片；优先拆分较大的 diff 或 source，逐片有效后机械合并并保留重复 finding 的最高
+  严重度。瞬时 429 按服务端等待提示有限重试，三轴依次调度；耗尽后仍保持不可验证。
 - local review 并行独立运行 Spec/Standards，风险要求时再运行 Deep；不合并或重新排序 finding。
 
 ## Task 3：quality CLI 与展示

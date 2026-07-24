@@ -62,6 +62,20 @@ describe('review prompt boundaries', () => {
     }
   });
 
+  it('splits the larger diff instead of repeatedly duplicating it', () => {
+    const source = 'short rule';
+    const diff = 'diff --git a/a.ts b/a.ts\n' + '+changed line\n'.repeat(20);
+    const split = splitReviewPromptShard({
+      sources: [{ path: 'AGENTS.md', content: source }],
+      diff,
+      fragmented: false,
+    });
+    expect(split).not.toBeNull();
+    if (!split) return;
+    expect(split.map((item) => item.diff).join('')).toBe(diff);
+    expect(split.every((item) => item.sources[0].content === source)).toBe(true);
+  });
+
   it('fails closed when the diff exceeds the bounded model input', () => {
     const result = buildReviewPrompts('spec', {
       ...input(),

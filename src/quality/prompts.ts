@@ -140,11 +140,28 @@ function splitSources(sources: ReviewSource[]): [ReviewSource[], ReviewSource[]]
 export function splitReviewPromptShard(
   shard: ReviewPromptShard,
 ): [ReviewPromptShard, ReviewPromptShard] | null {
+  const sourcesLength = sourceChars(shard.sources);
+  const splitDiff = sourcesLength < shard.diff.length ? splitText(shard.diff) : null;
+  if (splitDiff) {
+    return splitDiff.map((diff) => ({
+      sources: shard.sources,
+      diff,
+      fragmented: true,
+    })) as [ReviewPromptShard, ReviewPromptShard];
+  }
   const split = splitSources(shard.sources);
-  return split
-    ? split.map((sources) => ({
+  if (split) {
+    return split.map((sources) => ({
         sources,
         diff: shard.diff,
+        fragmented: true,
+      })) as [ReviewPromptShard, ReviewPromptShard];
+  }
+  const fallbackDiff = splitText(shard.diff);
+  return fallbackDiff
+    ? fallbackDiff.map((diff) => ({
+        sources: shard.sources,
+        diff,
         fragmented: true,
       })) as [ReviewPromptShard, ReviewPromptShard]
     : null;
