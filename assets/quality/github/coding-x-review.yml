@@ -83,7 +83,8 @@ jobs:
           --json
 
   standards-review:
-    if: github.event.pull_request.draft == false
+    if: always() && github.event.pull_request.draft == false
+    needs: [spec-review]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -114,7 +115,8 @@ jobs:
           --json
 
   deep-review:
-    if: github.event.pull_request.draft == false
+    if: always() && github.event.pull_request.draft == false
+    needs: [standards-review]
     runs-on: ubuntu-latest
     permissions:
       contents: read

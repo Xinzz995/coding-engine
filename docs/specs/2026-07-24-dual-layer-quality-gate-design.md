@@ -261,8 +261,10 @@ HTTP 成功。
    成功后关闭异常；
 10. 后续结构治理 PR 的仓库自动 token 用尽免费 Models 周期额度，三轴均保持
     `unverifiable`；#23 记录恢复过程，0.30.5 将 GitHub API token 与专用模型 token 隔离，
-    不以重试或例外把不可用伪装成通过；
-11. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
+    不以例外把不可用伪装成通过；
+11. 0.30.6 对 429 按 `Retry-After` 在两分钟内最多尝试五次，并将三轴依次调度；重试耗尽仍
+    为 `unverifiable`，不改变三态语义；
+12. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
 依赖审计；CI 另跑 Node 18/22 与 Linux/macOS/Windows 兼容矩阵。发布工作流验证 tag 提交位于

@@ -105,19 +105,6 @@ function defaultPublicDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'public');
 }
 
-// Node binds the listening socket asynchronously: server.address() is null until
-// the 'listening' event fires on the next tick. Tests read address().port
-// synchronously right after start() returns, so we resolve the actual port up
-// front. For an explicit port we use it directly; for port 0 (ephemeral) we draw
-// a random port from the IANA ephemeral range ourselves to keep address()
-// synchronous (the OS would otherwise assign one only after listen completes).
-function ephemeralPort(): number {
-  const base = 49152;
-  const span = 65535 - base + 1;
-  const r = (Math.floor(Math.random() * span) + (process.pid & 0x7fff)) % span;
-  return base + r;
-}
-
 /**
  * Pure mapping from platform → the shell command that opens a URL in the user's
  * default browser. Exported so tests can assert behavior without spawning.
@@ -134,11 +121,10 @@ export function start(opts: {
   port?: number;
   publicDir?: string;
   openBrowser?: boolean;
-}): { close(): void; address(): { port: number } } {
+}): { close(): void; address(): { port: number }; ready: Promise<void> } {
   configureWorkspace(opts.workspace, opts.maxIterations);
   const publicDir = opts.publicDir ?? defaultPublicDir();
-  const requestedPort = opts.port ?? 7331;
-  const port = requestedPort === 0 ? ephemeralPort() : requestedPort;
+  const port = opts.port ?? 7331;
 
   const serveHtml = (res: import('node:http').ServerResponse, file: string) => {
     try {
@@ -174,30 +160,45 @@ export function start(opts: {
     console.error(`dashboard server error: ${(err as Error).message}`);
   });
 
+  const ready = new Promise<void>((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+  // Most engine callers do not need to wait for the dashboard. Mark the shared
+  // promise handled while still returning it to consumers that require readiness.
+  void ready.catch(() => {});
   server.listen(port, '127.0.0.1');
 
-  const url = `http://localhost:${port}`;
-  console.log(`🖥️  Dashboard: ${url}`);
-  // Restore the original Python harness behavior: pop the dashboard open in the
-  // user's default browser unless explicitly suppressed (opts.openBrowser === false).
-  // The opener is best-effort — a missing `open`/`xdg-open` must never crash the harness.
-  if (opts.openBrowser !== false) {
-    try {
-      const { cmd, args } = browserOpenCommand(process.platform, url);
-      const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
-      // spawn reports a missing binary (ENOENT — e.g. no `xdg-open` on a headless
-      // box) as an asynchronous 'error' event, which the surrounding try/catch
-      // does NOT catch. With no 'error' listener Node throws an uncaught
-      // exception and crashes the harness — so swallow it here.
-      child.on('error', () => { /* opener missing or failed — non-fatal */ });
-      child.unref();
-    } catch {
-      // swallow — browser launch failures are non-fatal
+  void ready.then(() => {
+    const bound = server.address();
+    const actualPort = typeof bound === 'object' && bound ? bound.port : port;
+    const url = `http://localhost:${actualPort}`;
+    console.log(`🖥️  Dashboard: ${url}`);
+    // Restore the original Python harness behavior: pop the dashboard open in the
+    // user's default browser unless explicitly suppressed (opts.openBrowser === false).
+    // The opener is best-effort — a missing `open`/`xdg-open` must never crash the harness.
+    if (opts.openBrowser !== false) {
+      try {
+        const { cmd, args } = browserOpenCommand(process.platform, url);
+        const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+        // spawn reports a missing binary (ENOENT — e.g. no `xdg-open` on a headless
+        // box) as an asynchronous 'error' event, which the surrounding try/catch
+        // does NOT catch. With no 'error' listener Node throws an uncaught
+        // exception and crashes the harness — so swallow it here.
+        child.on('error', () => { /* opener missing or failed — non-fatal */ });
+        child.unref();
+      } catch {
+        // swallow — browser launch failures are non-fatal
+      }
     }
-  }
+  }, () => {});
 
   return {
     close: () => server.close(),
-    address: () => ({ port }),
+    address: () => {
+      const bound = server.address();
+      return { port: typeof bound === 'object' && bound ? bound.port : port };
+    },
+    ready,
   };
 }
