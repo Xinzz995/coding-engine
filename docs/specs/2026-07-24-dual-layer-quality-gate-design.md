@@ -232,7 +232,9 @@ Copilot CLI 与 coding-x 都固定完整版本。adapter 先核对 CLI 版本，
 Check Run；不同 PR 的这个单一 job 再用 GitHub 原生 `queue: max` 并发组串行。不能让三个
 有依赖关系的 job 同时加入同一队列，否则已完成轴可能留下后续轴永久等待。单轴分片保持顺序
 调用；Copilot 没有可写入契约的稳定每分钟间隔，因此不伪造固定节流值，provider 拒绝时直接
-`unverifiable`。新 head 由外层 PR 并发组取消旧运行。该队列只协调当前仓库。
+`unverifiable`。AI job 只在隔离的项目命令 job 成功后进入模型队列，避免已经确定不能交付的
+提交继续占用评审容量；两个 job 仍使用不同权限和工作区。新 head 由外层 PR 并发组取消旧运行。
+该队列只协调当前仓库。
 
 Copilot 额度仍不是无限容量保证。额度或政策不可用时，对应 Check Run 为 failure，结论
 `unverifiable`；不以旧 Models、个人 secret 或本地报告静默降级。

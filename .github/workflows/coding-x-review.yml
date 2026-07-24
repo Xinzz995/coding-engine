@@ -52,7 +52,8 @@ jobs:
           --json
 
   ai-reviews:
-    if: github.event.pull_request.draft == false
+    if: needs.project-checks.result == 'success' && github.event.pull_request.draft == false
+    needs: [project-checks]
     runs-on: ubuntu-latest
     concurrency:
       group: coding-x-model-${{ github.repository_id }}
