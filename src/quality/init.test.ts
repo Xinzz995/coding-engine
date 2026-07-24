@@ -95,7 +95,7 @@ describe('quality init', () => {
     contract.github.codingXVersion = '0.29.0';
     writeFileSync(path, `${JSON.stringify(contract, null, 2)}\n`);
     const upgraded = buildQualityInitPlan(root);
-    expect(upgraded.contract.github.codingXVersion).toBe('0.30.8');
+    expect(upgraded.contract.github.codingXVersion).toBe('0.30.9');
     expect(upgraded.files.find((file) => file.path === '.coding-x/quality.json')?.action)
       .toBe('update');
     expect(() => buildQualityInitPlan(root, { model: 'other/model' }))
