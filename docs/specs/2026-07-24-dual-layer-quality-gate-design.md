@@ -157,6 +157,11 @@ source 或拆分 PR。provider 仍返回 413 时可在剩余片数内继续无�
 - 标题、具体证据、违反的来源；
 - 真实影响与建议处理。
 
+finding 只表示需要修改或正式延期的缺陷，正向确认只能进入 summary。每条 evidence 必须是模型
+当前分片中 `finding.file` 对应 diff 或 source 至少 12 个字符的逐字连续摘录；本地与远端
+adapter 都机械回查。改写、虚构、过短、跨文件或跨分片引用使该轴 `unverifiable`，不能作为
+失败 finding 进入门禁。
+
 严重度为 `critical | high | medium | low`：
 
 - critical/high：阻断，不能由普通延期放行；
@@ -208,9 +213,10 @@ receipt 以 JSONL 追加到 workspace；GitHub 通过 Check Run 保存共享结�
 自动 token。两个 token 在 adapter 边界分开传递，模型 token 不用于仓库 API。AI job 仍只运行
 默认分支固定版本，不签出 PR head，因此 secret 不会交给 PR 代码。
 
-同一仓库的三轴与不同 PR 模型 job 使用 GitHub 原生并发组排成一个保留等待项的串行队列；
-单轴内部的分片调用再按低于 provider 每分钟上限的节奏发送。新 head 仍会通过外层 PR 并发组
-取消自己的旧运行，不会拿旧结果占据当前门禁。该队列只协调当前仓库，不是中央服务。
+每个 PR 只创建一个模型队列 job，在该 job 内依次运行 Spec、Standards、Deep 并分别发布
+Check Run；不同 PR 的这个单一 job 再用 GitHub 原生 `queue: max` 并发组串行。不能让三个
+有依赖关系的 job 同时加入同一队列，否则已完成轴可能留下后续轴永久等待。单轴分片仍按低于
+provider 每分钟上限的节奏发送；新 head 由外层 PR 并发组取消旧运行。该队列只协调当前仓库。
 
 GitHub 免费 Models 同时受请求频率和整周期用量约束，官方定位仍是原型；强门禁需要为
 `CODING_X_MODEL_TOKEN` 配置有可用额度的专用凭据，或明确接受自动 token 额度耗尽即阻断。
@@ -305,6 +311,7 @@ main，branch/tag ruleset 仍启用，并按 ruleset 的 GitHub App 来源核对
 | PR 五段意图或关联规格声明缺失 | Spec unverifiable，不调用模型 |
 | 关联规格越界、不在契约范围或 head 不存在 | Spec unverifiable，不调用模型 |
 | 模型/API/结构化输出失败 | 对应轴 unverifiable |
+| finding 证据非当前分片对应文件逐字原文或不足 12 字符 | 对应轴 unverifiable |
 | 模型输入超限 | source/diff 无损分片覆盖完整评审空间；任一片失败或超过八片则 unverifiable |
 | critical/high finding | failed |
 | medium finding 无有效例外 | failed |

@@ -23,6 +23,7 @@ import { callGitHubModel, type ModelFailureReason } from './model.js';
 import {
   evaluateReviewModelResult,
   renderReviewCheck,
+  validateReviewOutputGrounding,
 } from './review.js';
 import type {
   QualityError,
@@ -515,6 +516,7 @@ export async function runGitHubReviewAxis(opts: {
     });
   const modelPaceMs = opts.modelPaceMs ?? MODEL_CALL_PACE_MS;
   const changedFiles = files.map((file) => file.filename);
+  const diffByFile = new Map(files.map((file) => [file.filename, file.patch ?? '']));
   const initialShard: ReviewPromptShard = { sources, diff, fragmented: false };
   const initialPrompts = buildReviewPrompts(opts.axis, {
     repository: event.repository,
@@ -622,6 +624,15 @@ export async function runGitHubReviewAxis(opts: {
       };
     }
     if (modelResult.status === 'valid') {
+      const groundingError = validateReviewOutputGrounding(modelResult.output, {
+        diff: shard.diff,
+        sources: shard.sources,
+        diffByFile,
+      });
+      if (groundingError) {
+        reviewError = { code: 'model-output-invalid', message: groundingError };
+        break;
+      }
       modelOutputs.push(modelResult.output);
       continue;
     }

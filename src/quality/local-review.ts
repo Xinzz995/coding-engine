@@ -9,6 +9,7 @@ import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import { readQualityContract, readQualityExceptions } from './contract.js';
 import {
   collectGitDiff,
+  collectGitDiffByFile,
   gitText,
   readTextAtRef,
   trackedPathsAtRef,
@@ -26,7 +27,10 @@ import {
   buildReviewPrompts,
   type ReviewSource,
 } from './prompts.js';
-import { evaluateReviewModelResult } from './review.js';
+import {
+  evaluateReviewModelResult,
+  validateReviewOutputGrounding,
+} from './review.js';
 import { runReadOnlyReviewAgent } from './review-agent.js';
 import type {
   QualityReceipt,
@@ -200,6 +204,7 @@ export async function runLocalQualityReview(opts: {
   }
   const intentRead = parseReviewIntent(readFileSync(opts.intentPath, 'utf8'));
   const diff = collectGitDiff(opts.root, opts.baseRef);
+  const diffByFile = collectGitDiffByFile(opts.root, diff);
   const risk = assessDeepReviewRisk(diff, contractRead.contract.review.deepReview, (path) => {
     try {
       const content = readTextAtRef(opts.root, diff.headSha, path, 2 * 1024 * 1024);
@@ -354,6 +359,26 @@ export async function runLocalQualityReview(opts: {
         model: opts.model,
         code: 'model-output-invalid',
         message: model.error,
+        durationMs: model.durationMs,
+      });
+    }
+    const groundingError = validateReviewOutputGrounding(model.output, {
+      diff: diff.diff,
+      sources,
+      diffByFile,
+    });
+    if (groundingError) {
+      return errorReceipt({
+        workspace: opts.workspace,
+        now,
+        axis,
+        repository: contractRead.contract.github.repository,
+        baseSha: diff.baseSha,
+        headSha: diff.headSha,
+        contractSha256: contractRead.sha256,
+        model: opts.model,
+        code: 'model-output-invalid',
+        message: groundingError,
         durationMs: model.durationMs,
       });
     }

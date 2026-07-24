@@ -7,6 +7,16 @@ function asset(name: string): string {
 }
 
 describe('managed GitHub workflow trust boundaries', () => {
+  it('keeps the coding-engine dogfood workflow structurally identical to the managed asset', () => {
+    const live = readFileSync(
+      join(process.cwd(), '.github', 'workflows', 'coding-x-review.yml'),
+      'utf8',
+    );
+    const version = /coding-x-version: "([^"]+)"/.exec(live)?.[1];
+    expect(version).toBeTruthy();
+    expect(asset('coding-x-review.yml').replaceAll('{{CODING_X_VERSION}}', version!)).toBe(live);
+  });
+
   it('executes PR code without persisted credentials, model access or check-write permission', () => {
     const workflow = asset('coding-x-project-checks.yml');
     expect(workflow).toContain('persist-credentials: false');
@@ -27,7 +37,7 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow).toContain('pull_request_target:');
     expect(workflow).toContain('group: coding-x-quality-${{ github.event.pull_request.number }}');
     expect(workflow.match(/ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/g)?.length)
-      .toBeGreaterThanOrEqual(4);
+      .toBe(2);
     expect(workflow).not.toContain('ref: ${{ github.event.pull_request.head.sha }}');
     expect(workflow).not.toContain('secrets: inherit');
     expect(workflow).toContain('models: read');
@@ -36,14 +46,15 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow).toContain('--axis standards');
     expect(workflow).toContain('--axis deep');
     expect(workflow.match(/group: coding-x-model-\$\{\{ github\.repository_id \}\}/g)?.length)
-      .toBe(3);
-    expect(workflow.match(/queue: max/g)?.length).toBe(3);
-    expect(workflow).toMatch(
-      /standards-review:\r?\n\s+if: always\(\).*\r?\n\s+needs: \[spec-review\]/,
-    );
-    expect(workflow).toMatch(
-      /deep-review:\r?\n\s+if: always\(\).*\r?\n\s+needs: \[standards-review\]/,
-    );
+      .toBe(1);
+    expect(workflow.match(/queue: max/g)?.length).toBe(1);
+    expect(workflow).toContain('ai-reviews:');
+    expect(workflow).not.toContain('standards-review:');
+    expect(workflow).not.toContain('deep-review:');
+    expect(workflow.match(/continue-on-error: true/g)?.length).toBe(3);
+    expect(workflow).toContain('steps.spec.outcome');
+    expect(workflow).toContain('steps.standards.outcome');
+    expect(workflow).toContain('steps.deep.outcome');
     expect(workflow.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/g)?.length).toBe(4);
     expect(workflow.match(/CODING_X_MODEL_TOKEN: \$\{\{ secrets\.CODING_X_MODEL_TOKEN \}\}/g)?.length)
       .toBe(3);

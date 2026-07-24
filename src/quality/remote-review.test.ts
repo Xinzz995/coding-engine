@@ -114,7 +114,7 @@ describe('remote review axis', () => {
           file: 'src.py',
           line: 1,
           title: 'minor note',
-          evidence: 'concrete evidence',
+          evidence: '+def result(): return True',
           source: 'AC 1',
           impact: 'small maintenance cost',
           recommendation: 'consider later',
@@ -247,10 +247,10 @@ describe('remote review axis', () => {
             id: 'spec:src-py:1:duplicate',
             axis: 'spec' as const,
             severity: 'low' as const,
-            file: 'src.py',
+            file: 'docs/specs/feature.md',
             line: 1,
             title: 'minor note',
-            evidence: 'same evidence',
+            evidence: 'Must return true.',
             source: 'acceptance criteria',
             impact: 'small',
             recommendation: 'consider later',
@@ -266,10 +266,10 @@ describe('remote review axis', () => {
             id: 'spec:src-py:1:duplicate',
             axis: 'spec' as const,
             severity: 'high' as const,
-            file: 'src.py',
+            file: 'docs/specs/feature.md',
             line: 1,
             title: 'minor note',
-            evidence: 'same evidence',
+            evidence: 'Must return true.',
             source: 'acceptance criteria',
             impact: 'breaks the promised behavior',
             recommendation: 'fix before merging',
@@ -570,5 +570,42 @@ describe('remote review axis', () => {
     });
     expect(result.receipt.status).toBe('unverifiable');
     expect(result.receipt.errors[0]).toMatchObject({ code: 'model-output-invalid' });
+  });
+
+  it('rejects a finding with fabricated evidence even when its file is in scope', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'standards',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall: vi.fn(async () => ({
+        status: 'valid' as const,
+        output: {
+          summary: 'fabricated evidence',
+          findings: [{
+            id: 'standards:src-py:1:x',
+            axis: 'standards' as const,
+            severity: 'high' as const,
+            file: 'src.py',
+            line: 1,
+            title: 'invented implementation',
+            evidence: '+def result(): return False',
+            source: 'general engineering baseline',
+            impact: 'would return the wrong result',
+            recommendation: 'return the promised result',
+          }],
+        },
+        error: null,
+      })),
+    });
+    expect(result.receipt.status).toBe('unverifiable');
+    expect(result.receipt.errors[0]).toMatchObject({
+      code: 'model-output-invalid',
+      message: expect.stringContaining('逐字原文'),
+    });
   });
 });

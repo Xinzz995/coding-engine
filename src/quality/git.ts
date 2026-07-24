@@ -111,6 +111,20 @@ export function collectGitDiff(root: string, baseRef: string, headRef = 'HEAD'):
   };
 }
 
+export function collectGitDiffByFile(
+  root: string,
+  bundle: Pick<GitDiffBundle, 'baseSha' | 'headSha' | 'changedFiles'>,
+): Map<string, string> {
+  const range = `${bundle.baseSha}...${bundle.headSha}`;
+  return new Map(bundle.changedFiles.map((path) => [
+    path,
+    gitText(root, [
+      'diff', '--no-ext-diff', '--no-color', '--find-renames', '--unified=40',
+      range, '--', path,
+    ]),
+  ]));
+}
+
 export function trackedPathsAtRef(root: string, ref: string, sources: string[]): string[] {
   const paths = gitText(root, ['ls-tree', '-r', '--name-only', ref, '--', ...sources]);
   return paths === '' ? [] : [...new Set(paths.split('\n'))].sort();

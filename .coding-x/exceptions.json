@@ -59,6 +59,33 @@
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30106341886"
+    },
+    {
+      "id": "delivery-2026-07-24-model-queue-restoration",
+      "commitSha": "ebbcf065096b00b14e6136bce0994bc5703a7cba",
+      "reason": "0.30.8 的三个依赖 job 共用 queue:max，PR #28 与 #29 分别复现 Deep 或 Standards 在没有运行中模型任务时永久排队；PR #30 旧规则又把符合验收标准的正面确认生成 26 条阻断 finding，Standards 与 Deep 则以 review-input-too-large 保持 unverifiable。仅在 803 项测试、项目原生检查、四平台 CI、工作流模板同构和单一仓库队列合同全部通过后，异常合并队列恢复提交。规则恢复后，证据原文核验、coding-engine 结构治理 PR 和外部非 Node PR 必须全部由正常规则通过，才关闭记录。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30109488571"
+    },
+    {
+      "id": "delivery-2026-07-24-review-evidence-grounding",
+      "commitSha": "4c20f5fcea92b8d43c46e78786da2878c15789f6",
+      "reason": "0.30.8 正在修复的缺陷使它无法可信审查证据核验修复自身：PR #29 最新提交的 Spec 通过，但 Standards 把 26 条正向确认、Deep 把 8 条已实现要求生成阻断 finding，并错误声称实际已使用的逐文件差异未使用。仅在人工逐项核对这些输出、补齐跨文件证据隔离、809 项测试、项目原生检查、四平台 CI、类型检查、静态检查、构建、CLI 冒烟和高危依赖审计全部通过后异常合并。发布修复版本后，coding-engine 结构治理 PR 与外部非 Node PR 必须由正常规则完整通过，才关闭记录。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30110551369"
+    },
+    {
+      "id": "delivery-2026-07-24-review-evidence-release",
+      "commitSha": "cc33924a9262a50dd1c42c9215f39c5d50d1eff8",
+      "reason": "0.30.9 发布 PR #31 必须由正在被替换的 0.30.8 裁决：Spec 把 19 条正向确认和测试中的故意坏样例误写成阻断 finding；Standards 与 Deep 没有产生 finding，但因旧分片上限返回 review-input-too-large。仅在人工逐项核对输出、811 项测试、项目原生检查、四平台 CI、类型检查、静态检查、构建、文档健康、CLI 冒烟和高危依赖审计全部通过后执行最后一次版本启动合并。0.30.9 发布并固定到工作流后，coding-engine 结构治理 PR 与外部非 Node PR 必须由正常规则完整通过，才关闭记录。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30111473911"
     }
   ]
 }

@@ -14,7 +14,7 @@ jobs:
     if: github.event.pull_request.draft == false
     uses: ./.github/workflows/coding-x-project-checks.yml
     with:
-      coding-x-version: "0.30.8"
+      coding-x-version: "0.30.9"
       base-sha: ${{ github.event.pull_request.base.sha }}
       head-sha: ${{ github.event.pull_request.head.sha }}
       pull-request-number: ${{ github.event.pull_request.number }}
@@ -45,13 +45,13 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.8"
+          --package="coding-x@0.30.9"
           -- coding-x quality gate
           --publish-project-check "$PROJECT_JOB_RESULT"
           --event-path "$GITHUB_EVENT_PATH"
           --json
 
-  spec-review:
+  ai-reviews:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     concurrency:
@@ -73,84 +73,61 @@ jobs:
           node-version: 22
 
       - name: Review Spec against the exact pull request head
+        id: spec
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.8"
+          --package="coding-x@0.30.9"
           -- coding-x quality gate
           --axis spec
           --event-path "$GITHUB_EVENT_PATH"
           --json
 
-  standards-review:
-    if: always() && github.event.pull_request.draft == false
-    needs: [spec-review]
-    runs-on: ubuntu-latest
-    concurrency:
-      group: coding-x-model-${{ github.repository_id }}
-      queue: max
-    permissions:
-      contents: read
-      pull-requests: read
-      checks: write
-      models: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
-
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 22
-
       - name: Review engineering standards against the exact pull request head
+        id: standards
+        if: always()
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.8"
+          --package="coding-x@0.30.9"
           -- coding-x quality gate
           --axis standards
           --event-path "$GITHUB_EVENT_PATH"
           --json
 
-  deep-review:
-    if: always() && github.event.pull_request.draft == false
-    needs: [standards-review]
-    runs-on: ubuntu-latest
-    concurrency:
-      group: coding-x-model-${{ github.repository_id }}
-      queue: max
-    permissions:
-      contents: read
-      pull-requests: read
-      checks: write
-      models: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
-
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 22
-
       - name: Run risk-triggered structural review
+        id: deep
+        if: always()
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.8"
+          --package="coding-x@0.30.9"
           -- coding-x quality gate
           --axis deep
           --event-path "$GITHUB_EVENT_PATH"
           --json
+
+      - name: Fail when any independent review axis did not pass
+        if: always()
+        env:
+          SPEC_OUTCOME: ${{ steps.spec.outcome }}
+          STANDARDS_OUTCOME: ${{ steps.standards.outcome }}
+          DEEP_OUTCOME: ${{ steps.deep.outcome }}
+        run: |
+          for outcome in "$SPEC_OUTCOME" "$STANDARDS_OUTCOME" "$DEEP_OUTCOME"; do
+            if [[ "$outcome" != "success" ]]; then
+              exit 1
+            fi
+          done

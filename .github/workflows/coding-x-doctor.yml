@@ -28,7 +28,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.8"
+          --package="coding-x@0.30.9"
           -- coding-x quality doctor
           --remote
           --json

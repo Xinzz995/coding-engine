@@ -6,6 +6,7 @@ import {
   collectLocalReviewSources,
   evaluateReviewModelResult,
   renderReviewCheck,
+  validateReviewOutputGrounding,
 } from './review.js';
 import type { QualityContractV1, ReviewModelOutput } from './types.js';
 
@@ -32,6 +33,24 @@ function contract(): QualityContractV1 {
     },
     exceptionPolicy: { deferrableSeverities: ['medium'] },
     exceptionsFile: '.coding-x/exceptions.json',
+  };
+}
+
+function groundedOutput(evidence: string): ReviewModelOutput {
+  return {
+    summary: 'one issue',
+    findings: [{
+      id: 'standards:x:1:a',
+      axis: 'standards',
+      severity: 'high',
+      file: 'src/x.ts',
+      line: 1,
+      title: 'wrong branch',
+      evidence,
+      source: 'AGENTS.md',
+      impact: 'bypasses authorization',
+      recommendation: 'check the caller role',
+    }],
   };
 }
 
@@ -77,6 +96,60 @@ describe('review result evaluation', () => {
     expect(rendered.title).toContain('无法验证');
     expect(rendered.summary).toContain('bbbbbbbbbbbb');
     expect(rendered.text).toContain('intent-missing');
+  });
+
+  it('accepts a finding only when its evidence is a verbatim excerpt from the visible input', () => {
+    expect(validateReviewOutputGrounding(groundedOutput('return allowAllUsers();'), {
+      diff: '+return allowAllUsers();',
+      sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+      diffByFile: new Map([['src/x.ts', '+return allowAllUsers();']]),
+    })).toBeNull();
+  });
+
+  it('rejects fabricated evidence even when the finding path is otherwise in scope', () => {
+    expect(validateReviewOutputGrounding(groundedOutput('return allowAllUsers();'), {
+      diff: '+return authorizeCaller();',
+      sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+      diffByFile: new Map([['src/x.ts', '+return authorizeCaller();']]),
+    })).toContain('逐字原文');
+  });
+
+  it('does not borrow evidence from an unrelated source file', () => {
+    expect(validateReviewOutputGrounding(
+      groundedOutput('Every caller must be authorized.'),
+      {
+        diff: '+return authorizeCaller();',
+        sources: [{ path: 'AGENTS.md', content: 'Every caller must be authorized.' }],
+        diffByFile: new Map([['src/x.ts', '+return authorizeCaller();']]),
+      },
+    )).toContain('对应文件');
+  });
+
+  it('does not attribute evidence from another changed file to the finding path', () => {
+    expect(validateReviewOutputGrounding(
+      groundedOutput('return allowAllUsers();'),
+      {
+        diff: [
+          'diff --git a/src/x.ts b/src/x.ts',
+          '+return authorizeCaller();',
+          'diff --git a/src/y.ts b/src/y.ts',
+          '+return allowAllUsers();',
+        ].join('\n'),
+        sources: [],
+        diffByFile: new Map([
+          ['src/x.ts', '+return authorizeCaller();'],
+          ['src/y.ts', '+return allowAllUsers();'],
+        ]),
+      },
+    )).toContain('对应文件');
+  });
+
+  it('rejects trivial excerpts that cannot substantiate a finding', () => {
+    expect(validateReviewOutputGrounding(groundedOutput('+'), {
+      diff: '+return authorizeCaller();',
+      sources: [],
+      diffByFile: new Map([['src/x.ts', '+return authorizeCaller();']]),
+    })).toContain('至少需要 12');
   });
 });
 
