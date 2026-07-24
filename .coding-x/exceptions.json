@@ -77,6 +77,15 @@
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30110551369"
+    },
+    {
+      "id": "delivery-2026-07-24-review-evidence-release",
+      "commitSha": "cc33924a9262a50dd1c42c9215f39c5d50d1eff8",
+      "reason": "0.30.9 发布 PR #31 必须由正在被替换的 0.30.8 裁决：Spec 把 19 条正向确认和测试中的故意坏样例误写成阻断 finding；Standards 与 Deep 没有产生 finding，但因旧分片上限返回 review-input-too-large。仅在人工逐项核对输出、811 项测试、项目原生检查、四平台 CI、类型检查、静态检查、构建、文档健康、CLI 冒烟和高危依赖审计全部通过后执行最后一次版本启动合并。0.30.9 发布并固定到工作流后，coding-engine 结构治理 PR 与外部非 Node PR 必须由正常规则完整通过，才关闭记录。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30111473911"
     }
   ]
 }
