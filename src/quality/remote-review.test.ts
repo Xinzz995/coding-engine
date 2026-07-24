@@ -98,32 +98,34 @@ describe('remote review axis', () => {
   it('publishes a passed exact-head spec check from structured model output', async () => {
     const { root, baseSha, eventPath } = setup();
     const api = client(baseSha);
+    const modelCall = vi.fn(async () => ({
+      status: 'valid' as const,
+      output: {
+        summary: 'matches',
+        findings: [{
+          id: 'spec:src-py:1:abc',
+          axis: 'spec' as const,
+          severity: 'low' as const,
+          file: 'src.py',
+          line: 1,
+          title: 'minor note',
+          evidence: 'concrete evidence',
+          source: 'AC 1',
+          impact: 'small maintenance cost',
+          recommendation: 'consider later',
+        }],
+      },
+      error: null,
+    }));
     const result = await runGitHubReviewAxis({
       root,
       workspace: join(root, '.workspace'),
       eventPath,
       axis: 'spec',
-      token: 'token',
+      token: 'github-api-token',
+      modelToken: 'model-only-token',
       client: api as GitHubClient,
-      modelCall: vi.fn(async () => ({
-        status: 'valid',
-        output: {
-          summary: 'matches',
-          findings: [{
-            id: 'spec:src-py:1:abc',
-            axis: 'spec',
-            severity: 'low',
-            file: 'src.py',
-            line: 1,
-            title: 'minor note',
-            evidence: 'concrete evidence',
-            source: 'AC 1',
-            impact: 'small maintenance cost',
-            recommendation: 'consider later',
-          }],
-        },
-        error: null,
-      })) as ModelCall,
+      modelCall: modelCall as ModelCall,
       now: new Date('2026-07-24T00:00:00Z'),
     });
     expect(result.receipt.status).toBe('passed');
@@ -137,6 +139,9 @@ describe('remote review axis', () => {
       name: 'coding-x / spec-review',
       headSha: 'b'.repeat(40),
       status: 'passed',
+    }));
+    expect(modelCall).toHaveBeenCalledWith(expect.objectContaining({
+      token: 'model-only-token',
     }));
   });
 

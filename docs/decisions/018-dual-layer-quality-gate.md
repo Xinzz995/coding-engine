@@ -27,7 +27,9 @@ coding-x 已能在 Developer 后独立运行项目门禁并让 Validator 对 sto
 
 GitHub 是首个远端 adapter。项目命令在无敏感权限的 PR workflow 运行；AI 评审在默认分支
 `pull_request_target` workflow 运行，通过 API 读取 PR 数据，不签出或执行 PR 代码，并用
-GitHub Models 的 `models: read` 权限取得结构化结论。对应 Check Run 明确绑定 PR head。
+GitHub Models 取得结构化结论。仓库 API 与 Check Run 只使用自动 `GITHUB_TOKEN`；模型调用
+可使用独立的 `CODING_X_MODEL_TOKEN`，且该 token 不进入 GitHub API client。对应 Check Run
+明确绑定 PR head。
 GitHub 免费调用额度当前限制每次 8000 个输入 token 和 4000 个输出 token；adapter 将输出上限
 固定为 4000。输入超限时保留完整 diff，只把可信来源无损拆成最多八个隔离片段，逐片有效后
 才合并 finding；任一片段失败、需要更多片段或仅完整 diff 已超限时均为 `unverifiable`，
@@ -51,7 +53,10 @@ npm 包或 GitHub Release；失败标签保留用于审计，发布改用显式�
 0.30.3 发布后的首次正常 PR 又暴露两项真实兼容问题：GitHub Models 拒绝无工具声明时多余
 的工具选择参数，coding-engine 文档检查依赖按路径被跳过的构建产物。该 PR 被完整阻断且
 未合并；修复在真实模型调用与无构建产物的干净检出中复验后发布 0.30.4。0.30.4 必须完整
-裁决后续真实 PR，成功后关闭异常。此后门禁版本升级始终由旧版本审查。
+裁决后续真实 PR，成功后关闭异常。后续结构治理 PR 又证明仓库自动 token 的免费 Models
+整周期额度会耗尽：三轴按既有语义全部阻断，串行复跑也不能恢复，而同一模型的个人 token
+仍可调用。#23 记录有界恢复；0.30.5 将模型凭据与仓库凭据隔离，避免为了增加模型容量而扩大
+Check Run 或仓库读取权限。此后门禁版本升级始终由旧版本审查。
 
 发布检查不能只按名称相信同名 Check Run：发布时重新读取启用中的 branch/tag ruleset，以
 ruleset 绑定的 GitHub App ID 核对关联 PR head 的最新结果。正常路径要求全部成功；只有受
@@ -64,7 +69,8 @@ Actions 日志留下 warning。规则停用、来源不符、例外过期或不�
 - GitHub workflow 和 ruleset 能约束正常协作流程，但仓库管理员仍能删除规则。定时 doctor
   负责发现漂移，不能把管理员权限包装成密码学不可绕过。
 - GitHub Models 是 provider adapter；模型 ID、token 和 API 形状不进入核心三态与 receipt
-  语义。
+  语义。免费额度不构成生产容量保证；额度不足仍是 `unverifiable`，不能通过自动重试或例外
+  改写成正常通过。
 - 同权限的项目测试工具仍可能被恶意代码伪造；coding-x 证明的是受保护工作流观察到的命令
   结局，不证明工具链绝对可信。
 
