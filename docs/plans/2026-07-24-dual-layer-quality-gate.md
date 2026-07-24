@@ -116,6 +116,9 @@ scope: root
 - v0.30.8 修正 Deep 重复读取 Spec 与 Standards 的来源所有权，并把 `specSources` 从“全部
   载入”改成可信允许范围：Spec 只读 PR 明确关联与直接改动的规格，Deep 只读取工程标准与
   diff，既保持三轴独立，也避免无关历史规格稳定耗尽八片；
+- 真实运行连续复现 Standards/Deep 在没有运行中模型任务时永久排队：三个相互依赖的 job
+  共用一个 `queue: max` 组会留下悬挂任务。改为一个队列 job 内顺序跑三轴，三条 Check Run
+  和三态仍独立，仓库级队列只持有一个等待单元；
 - 结构治理和外部下游闭环必须在该版本发布并由旧版本完成 bootstrap 后继续，不能把本地
   provider probe 当成远端门禁证明。
 
