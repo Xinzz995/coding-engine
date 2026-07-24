@@ -35,19 +35,19 @@ const MANAGED_FILES: Array<{
 }> = [
   {
     source: 'github/coding-x-project-checks.yml',
-    path: join('.github', 'workflows', 'coding-x-project-checks.yml'),
+    path: '.github/workflows/coding-x-project-checks.yml',
   },
   {
     source: 'github/coding-x-review.yml',
-    path: join('.github', 'workflows', 'coding-x-review.yml'),
+    path: '.github/workflows/coding-x-review.yml',
   },
   {
     source: 'github/coding-x-doctor.yml',
-    path: join('.github', 'workflows', 'coding-x-doctor.yml'),
+    path: '.github/workflows/coding-x-doctor.yml',
   },
   {
     source: 'github/pull_request_template.md',
-    path: join('.github', 'pull_request_template.md'),
+    path: '.github/pull_request_template.md',
   },
 ];
 

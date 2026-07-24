@@ -45,19 +45,19 @@ const MANAGED_ASSETS: Array<{
 }> = [
   {
     source: 'github/coding-x-project-checks.yml',
-    destination: join('.github', 'workflows', 'coding-x-project-checks.yml'),
+    destination: '.github/workflows/coding-x-project-checks.yml',
   },
   {
     source: 'github/coding-x-review.yml',
-    destination: join('.github', 'workflows', 'coding-x-review.yml'),
+    destination: '.github/workflows/coding-x-review.yml',
   },
   {
     source: 'github/coding-x-doctor.yml',
-    destination: join('.github', 'workflows', 'coding-x-doctor.yml'),
+    destination: '.github/workflows/coding-x-doctor.yml',
   },
   {
     source: 'github/pull_request_template.md',
-    destination: join('.github', 'pull_request_template.md'),
+    destination: '.github/pull_request_template.md',
   },
 ];
 
@@ -299,7 +299,7 @@ function generatedContract(
     exceptionPolicy: {
       deferrableSeverities: ['medium'],
     },
-    exceptionsFile: join('.coding-x', 'exceptions.json'),
+    exceptionsFile: '.coding-x/exceptions.json',
   };
   const parsed = parseQualityContract(value, root);
   if (parsed.status === 'invalid') {

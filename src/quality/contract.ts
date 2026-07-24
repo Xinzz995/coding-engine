@@ -27,8 +27,10 @@ import type {
   ReviewPolicy,
 } from './types.js';
 
-export const QUALITY_CONTRACT_PATH = join('.coding-x', 'quality.json');
-export const DEFAULT_EXCEPTIONS_PATH = join('.coding-x', 'exceptions.json');
+// 这些值既是项目相对路径，也是 Git/GitHub API 中的路径；统一使用 `/`，
+// 本地文件系统入口再用 join/resolve 解释，不能在 Windows 上泄漏 `\`。
+export const QUALITY_CONTRACT_PATH = '.coding-x/quality.json';
+export const DEFAULT_EXCEPTIONS_PATH = '.coding-x/exceptions.json';
 const ROOT_KEYS = new Set([
   'version', 'checks', 'review', 'github', 'exceptionPolicy', 'exceptionsFile',
 ]);
