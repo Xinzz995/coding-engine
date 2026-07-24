@@ -225,4 +225,43 @@ describe('local quality review', () => {
       message: expect.stringContaining('对应文件'),
     });
   });
+
+  it('rejects a positive confirmation instead of reporting it as a local finding', async () => {
+    const { root, intentPath } = setup();
+    const agentCall = vi.fn(async ({ axis }: { axis: string }) => ({
+      status: 'valid' as const,
+      output: axis === 'spec'
+        ? { summary: 'clear', findings: [] }
+        : {
+            summary: 'already correct',
+            findings: [{
+              id: 'standards:app-py:1:positive',
+              axis: 'standards' as const,
+              severity: 'medium' as const,
+              file: 'app.py',
+              line: 1,
+              title: '行为已经被覆盖',
+              evidence: 'def value(): return 2',
+              source: 'general engineering baseline',
+              impact: 'none',
+              recommendation: '符合要求，无需修改。',
+            }],
+          },
+      error: null,
+      durationMs: 1,
+    }));
+    const result = await runLocalQualityReview({
+      root,
+      workspace: join(root, '.workspace'),
+      baseRef: 'main',
+      intentPath,
+      kind: 'codex',
+      agentCall,
+    });
+    expect(result.status).toBe('unverifiable');
+    expect(result.receipts[1].errors[0]).toMatchObject({
+      code: 'model-output-invalid',
+      message: expect.stringContaining('无需修改'),
+    });
+  });
 });
