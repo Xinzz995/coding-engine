@@ -122,6 +122,15 @@
       "expiresAt": "2026-07-28T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30123218687"
+    },
+    {
+      "id": "delivery-2026-07-25-copilot-jsonl-normalization",
+      "commitSha": "2561125017cbce5a71c2dd15b1dfd573d38f8190",
+      "reason": "0.31.1 首次正常审查 PR #42 的前一提交时，真实 Copilot 调用分别返回了带说明文字的结构化内容和同一模型的多条 assistant.message；旧 adapter 将它们判为 invalid-output，三个独立轴均无 finding。精确修复提交 2561125017cbce5a71c2dd15b1dfd573d38f8190 加入唯一 JSON 提取、同模型多消息校验、任意消息工具请求阻断和项目检查先行顺序，但默认分支旧版又因该自举 PR 的完整输入超过八个无损分片而在调用模型前将三轴保持 unverifiable。最新审计 run 30125423488 的项目原生命令通过，同一 head 的四平台 CI、CodeQL、832 项测试、类型检查、静态检查、构建、文档健康、CLI 冒烟、差异检查和高危依赖审计均通过。仅允许公开异常交付该精确功能提交并发布 0.31.2；规则必须立即恢复。0.31.2 发布后的 coding-engine 与外部 Python 正常三轴 PR、结构治理、安全修复和全部异常关闭不得再使用绕过，本记录不能充当正常门禁证明。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-29T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30125423488"
     }
   ]
 }
