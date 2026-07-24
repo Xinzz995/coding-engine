@@ -108,6 +108,7 @@ export async function runReadOnlyReviewAgent(opts: {
       stderr: string;
       overflow: boolean;
       interrupted: NodeJS.Signals | null;
+      interruptionDiagnostic: string | null;
     }>((resolve) => {
       const child = spawn(command, args, {
         cwd: opts.cwd,
@@ -119,6 +120,7 @@ export async function runReadOnlyReviewAgent(opts: {
       let overflow = false;
       let settled = false;
       let terminating = false;
+      let interruptionDiagnostic: string | null = null;
       const collect = (current: string, chunk: Buffer): string => {
         const next = current + chunk.toString();
         if (Buffer.byteLength(next) > MAX_OUTPUT_BYTES) {
@@ -137,10 +139,9 @@ export async function runReadOnlyReviewAgent(opts: {
         void terminateProcessTree(child).then(
           () => finish(false, null, signal),
           (error) => {
-            stderr = collect(
-              stderr,
-              Buffer.from(`中断后清理 reviewer 失败：${error instanceof Error ? error.message : String(error)}`),
-            );
+            interruptionDiagnostic = `清理 reviewer 失败：${
+              error instanceof Error ? error.message : String(error)
+            }`;
             finish(false, null, signal);
           },
         );
@@ -160,7 +161,15 @@ export async function runReadOnlyReviewAgent(opts: {
         process.removeListener('exit', killOnExit);
         process.removeListener('SIGINT', onSigint);
         process.removeListener('SIGTERM', onSigterm);
-        resolve({ timedOut, exitCode, stdout, stderr, overflow, interrupted });
+        resolve({
+          timedOut,
+          exitCode,
+          stdout,
+          stderr,
+          overflow,
+          interrupted,
+          interruptionDiagnostic,
+        });
       };
       const timer = setTimeout(() => {
         if (settled || terminating) return;
@@ -180,7 +189,9 @@ export async function runReadOnlyReviewAgent(opts: {
       return {
         status: 'invalid',
         output: null,
-        error: `只读 reviewer 被 ${result.interrupted} 中断${result.stderr === '' ? '' : `：${result.stderr.slice(-1000)}`}`,
+        error: `只读 reviewer 被 ${result.interrupted} 中断${
+          result.interruptionDiagnostic === null ? '' : `；${result.interruptionDiagnostic}`
+        }`,
         durationMs,
       };
     }
@@ -205,9 +216,18 @@ export async function runReadOnlyReviewAgent(opts: {
       // Codex writes outputPath; Claude/Cursor return stdout.
     }
     const parsed = parseAgentText(raw, opts.axis);
-    return parsed.status === 'valid'
-      ? { ...parsed, durationMs }
-      : { ...parsed, durationMs };
+    if (parsed.status === 'valid') return { ...parsed, durationMs };
+    const diagnostics = [
+      parsed.error,
+      raw.trim() === '' ? 'stdout 为空' : `stdout 尾部：${raw.slice(-1000)}`,
+      result.stderr.trim() === '' ? null : `stderr 尾部：${result.stderr.slice(-1000)}`,
+    ].filter((item): item is string => item !== null);
+    return {
+      status: 'invalid',
+      output: null,
+      error: diagnostics.join('；'),
+      durationMs,
+    };
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
