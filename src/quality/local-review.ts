@@ -13,7 +13,10 @@ import {
   readTextAtRef,
   trackedPathsAtRef,
 } from './git.js';
-import { parseReviewIntent } from './intent.js';
+import {
+  parseReviewIntent,
+  selectReviewSpecPaths,
+} from './intent.js';
 import { assessDeepReviewRisk } from './risk.js';
 import {
   appendQualityReceipt,
@@ -49,6 +52,16 @@ function sourcePaths(root: string, ref: string, selectors: string[]): string[] {
 
 function sourcesAtRef(root: string, ref: string, selectors: string[]): ReviewSource[] {
   const paths = sourcePaths(root, ref, selectors);
+  return sourcesAtPaths(root, ref, paths, false);
+}
+
+function sourcesAtPaths(
+  root: string,
+  ref: string,
+  paths: string[],
+  allowEmpty: boolean,
+): ReviewSource[] {
+  if (paths.length === 0 && allowEmpty) return [];
   if (paths.length === 0) throw new Error('没有找到评审来源');
   if (paths.length > 100) throw new Error('评审来源文件超过 100 个');
   let total = 0;
@@ -252,19 +265,21 @@ export async function runLocalQualityReview(opts: {
     }
     const selectors = axis === 'spec'
       ? contractRead.contract.review.specSources
-      : axis === 'standards'
-        ? contractRead.contract.review.standardsSources
-        : [...new Set([
-            ...contractRead.contract.review.specSources,
-            ...contractRead.contract.review.standardsSources,
-          ])];
+      : contractRead.contract.review.standardsSources;
     let sources: ReviewSource[];
     try {
-      sources = sourcesAtRef(
-        opts.root,
-        axis === 'spec' ? diff.headSha : diff.baseSha,
-        selectors,
-      );
+      if (axis === 'spec') {
+        if (intentRead.status !== 'valid') throw new Error('意图文件没有可用的关联规格声明');
+        const available = sourcePaths(opts.root, diff.headSha, selectors);
+        const selected = selectReviewSpecPaths(
+          intentRead.specification,
+          available,
+          diff.changedFiles,
+        );
+        sources = sourcesAtPaths(opts.root, diff.headSha, selected, true);
+      } else {
+        sources = sourcesAtRef(opts.root, diff.baseSha, selectors);
+      }
     } catch (error) {
       return errorReceipt({
         workspace: opts.workspace,

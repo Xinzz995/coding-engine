@@ -48,4 +48,6 @@ scope: root
 | 29 | 至少一个非 Node 多模块仓库使用自己的项目命令完成失败→修复→新提交重评→合并的真实 PR 闭环；其质量契约不出现 npm、Vitest、TypeScript 项目假设 | ADR-018 / 0.30.4 | 外部 dogfood 仓库的契约、PR check 历史、合并提交和 ruleset 对账 |
 | 30 | GitHub Models 单次输入超限时 source/diff 均不截断，首次请求前按完整 prompt 拆成不超过八个无损片段并覆盖完整评审空间；每片都有效才合并，重复 finding 保留最高严重度，任一片失败或继续超限都阻断 | ADR-018 / 0.30.7 | prompt 预算与 source/diff 双向分片测试；mock 413 后核对逐片调用与聚合；真实含多份来源的 PR 核对 Check Run 和模型调用日志 |
 | 31 | 多个 PR 同时触发 AI 时，全仓模型 job 进入保留等待项的串行队列，单轴分片调用继续节流；新 head 取消自己的旧运行但不让其他 PR 的待审任务静默消失 | ADR-018 / 0.30.7 | workflow 合同测试；同时触发人工与 Dependabot PR，核对 job 排队、最新 SHA Check Run 和无 429 风暴 |
+| 32 | Deep 触发时只读取工程标准与 diff，不重复载入 Spec 来源或重新裁决产品范围；大项目仍在八片预算内 fail closed | ADR-018 / 0.30.8 | 远端来源调用测试明确断言 base SHA 只读取 standards；coding-engine 真实高风险 PR 的 Deep Check Run |
+| 33 | Spec 目录只作为可信允许范围：PR 明确关联及直接修改的规格会进入 prompt，无关历史规格不读取；自包含声明、越界路径、缺失文件和缺少声明分别得到确定结果 | ADR-018 / 0.30.8 | intent 路径解析、远端 API 调用和本地 reviewer prompt 回归；真实结构治理 PR 的 Spec Check Run |
 | 31 | 发布只接受 branch ruleset 绑定的 GitHub App 所产生的最新成功检查；同名伪造无效。缺检查时仅有效祖先异常记录可进入带 warning 的异常发布，停用规则、过期/关闭/无关记录仍阻断 | ADR-018 / 0.30.4 | verifier 单测覆盖正常、伪造、有效异常、过期、关闭、非祖先和 ruleset 停用；真实发布日志对账 |

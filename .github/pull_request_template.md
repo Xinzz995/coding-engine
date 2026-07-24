@@ -1,4 +1,4 @@
-<!-- Managed by coding-x@0.30.7 quality init. -->
+<!-- Managed by coding-x@0.30.8 quality init. -->
 
 ## 意图
 
@@ -15,3 +15,12 @@
 ## 验证方式
 
 <!-- 列出实际运行的命令、场景或人工证据。 -->
+
+## 关联规格
+
+<!--
+每行填写一个质量契约允许范围内的项目文件路径，例如：
+- docs/specs/login.md
+若本 PR 的意图、验收标准和非目标就是完整 Spec，请明确写：
+本 PR 意图即完整 Spec
+-->

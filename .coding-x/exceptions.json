@@ -50,6 +50,15 @@
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30104147150"
+    },
+    {
+      "id": "delivery-2026-07-24-review-source-restoration",
+      "commitSha": "f1673d4d41a845aa24bb5d8659daa407bddbf6f6",
+      "reason": "0.30.7 把 specSources 目录下全部历史规格送入每个 PR，并让 Deep 重复载入 Spec 与工程标准；PR #27 最新功能提交的三个旧版本 AI 轴因此在调用模型前都以 review-input-too-large 保持 unverifiable。仅在 802 项测试、项目原生检查、四平台 CI、关联规格允许范围、自包含声明、非法来源阻断和本地/远端来源隔离回归全部通过后，异常交付 0.30.8。规则恢复后必须由 0.30.8 正常审完 coding-engine 结构治理 PR 和外部非 Node PR 才能关闭记录。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30106341886"
     }
   ]
 }
