@@ -28,6 +28,15 @@
       "expiresAt": "2026-07-25T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30096590460"
+    },
+    {
+      "id": "delivery-2026-07-24-bootstrap-first-self-host",
+      "commitSha": "0f20aab7cd88f4f79ff89c99c63efa0ff82be7d2",
+      "reason": "v0.30.3 首次正常自托管 PR 被正确阻断：GitHub Models 拒绝未声明 tools 时多余的 tool_choice，coding-engine 文档检查又依赖按路径被跳过的构建产物；失败 PR 不合并，仅在真实模型调用和干净检出复验后发布 0.30.4。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-25T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30097413961"
     }
   ]
 }

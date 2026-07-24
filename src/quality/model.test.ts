@@ -40,10 +40,11 @@ describe('review model output', () => {
     expect(normalizeReviewModelOutput(input, 'spec').status).toBe('invalid');
   });
 
-  it('calls GitHub Models without tools and validates JSON content', async () => {
+  it('calls GitHub Models with structured output and no tool declarations', async () => {
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
       const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      expect(payload.tool_choice).toBe('none');
+      expect(payload).not.toHaveProperty('tool_choice');
+      expect(payload).not.toHaveProperty('tools');
       expect(payload.max_tokens).toBe(4_000);
       expect(payload.response_format).toEqual(reviewResponseSchema);
       expect(String(init?.headers && (init.headers as Record<string, string>).Authorization))
