@@ -16,7 +16,9 @@ function contract(): QualityContractV1 {
     version: 1,
     checks: [{ id: 'test', command: 'true', cwd: '.', paths: ['src/'] }],
     review: {
-      model: 'openai/gpt-4.1',
+      provider: 'github-copilot',
+      model: 'auto',
+      copilotCliVersion: '1.0.74',
       specSources: ['docs/specs/'],
       standardsSources: ['AGENTS.md'],
       deepReview: {
@@ -88,7 +90,7 @@ describe('review result evaluation', () => {
       headSha: 'b'.repeat(40),
       contractSha256: 'c'.repeat(64),
       axis: 'spec',
-      model: 'openai/gpt-4.1',
+      model: 'github-copilot:auto',
       findings: [],
       exceptions: [],
       errors: [{ code: 'intent-missing', message: '缺少验收标准' }],
@@ -97,6 +99,8 @@ describe('review result evaluation', () => {
     expect(rendered.title).toContain('无法验证');
     expect(rendered.summary).toContain('bbbbbbbbbbbb');
     expect(rendered.text).toContain('intent-missing');
+    expect(rendered.text).toContain('调用次数: 未记录');
+    expect(rendered.text).not.toContain('Premium requests: 0');
   });
 
   it('accepts a finding only when its evidence is a verbatim excerpt from the visible input', () => {

@@ -89,7 +89,9 @@
     }
   ],
   "review": {
-    "model": "openai/gpt-4.1-mini",
+    "provider": "github-copilot",
+    "model": "auto",
+    "copilotCliVersion": "1.0.74",
     "specSources": [
       "docs/specs/",
       "docs/prds/"
@@ -119,7 +121,7 @@
     "releaseRefs": [
       "refs/tags/v*"
     ],
-    "codingXVersion": "0.30.9",
+    "codingXVersion": "0.31.0",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",

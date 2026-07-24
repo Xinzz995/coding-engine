@@ -183,6 +183,11 @@ export function renderReviewCheck(receipt: QualityReceipt): {
   const modelSummary = receipt.reviewSummary
     ? `## 评审摘要\n\n${receipt.reviewSummary}\n\n`
     : '';
+  const provider = receipt.model
+    ? `## Provider receipt\n\n- 模型: \`${receipt.model}\`\n`
+      + `- 调用次数: ${receipt.modelCalls ?? '未记录'}\n`
+      + `- Premium requests: ${receipt.premiumRequests ?? '未记录'}\n\n`
+    : '';
   const errors = receipt.errors.length === 0
     ? ''
     : `\n\n## 无法验证原因\n${receipt.errors.map((error) =>
@@ -195,6 +200,6 @@ export function renderReviewCheck(receipt: QualityReceipt): {
   return {
     title,
     summary,
-    text: `## ${axis} review\n\n${modelSummary}${findings}${errors}${deep}`,
+    text: `## ${axis} review\n\n${provider}${modelSummary}${findings}${errors}${deep}`,
   };
 }

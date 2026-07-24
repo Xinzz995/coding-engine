@@ -62,7 +62,7 @@ workspace 是运行边界：progress 记录学习，evidence 追加普通/TDD �
 
 全局模型目录声明 runner 可选择的 ID，项目 `prd.json.models` 保存 runner 与五项映射；preflight 只在显式模型策略可能被调用时检查目录成员，loop 再按 difficulty、escalated 与 CLI 覆盖解析本轮模型，并把实际命中写入 evidence。目录是静态允许清单，不证明 provider、认证、配额或网络实时可用；runner-default 与已收敛 workspace 跳过目录（ADR-011、012）。
 
-质量交付另有一条与 story 验收正交的数据流：受 Git 管理的契约定义项目命令、Spec/工程标准来源、风险触发器、默认分支与所需检查；本地 `quality review` 只把当前提交的提前反馈写入 workspace。PR 到达 GitHub 后，默认分支上的旧工作流与旧契约负责裁决：无敏感权限的 job 签出 PR head 并运行项目命令；有 `models: read` 与 `checks: write` 的 job 不签出、不运行 PR 代码，只通过 API 读取 diff 和内容并分别发布 Spec、工程标准、深度结构 Check Run。每项结论同时绑定 PR、base SHA、head SHA、契约来源和评审轮次；任何新提交、资料缺失或异常都使旧结论失效或变为 unverifiable（ADR-018）。
+质量交付另有一条与 story 验收正交的数据流：受 Git 管理的契约定义项目命令、Spec/工程标准来源、风险触发器、默认分支与所需检查；本地 `quality review` 只把当前提交的提前反馈写入 workspace。PR 到达 GitHub 后，默认分支上的旧工作流与旧契约负责裁决：无敏感权限的 job 签出 PR head 并运行项目命令；有 `copilot-requests: write` 与 `checks: write` 的 job 不签出、不运行 PR 代码，只通过 API 读取 diff 和内容。每个模型调用在独立临时 Git 根中加载无工具的可信评审角色，PR 内容只作为不可信数据，并分别发布 Spec、工程标准、深度结构 Check Run。每项结论同时绑定 PR、base SHA、head SHA、契约来源、实际模型、调用用量和评审轮次；任何新提交、资料缺失、CLI 版本漂移或异常都使旧结论失效或变为 unverifiable（ADR-018、019）。
 
 远端规则是最终合并控制面：默认分支 ruleset 要求 PR、分支最新、对话解决、禁止强推/删除，并把所需检查绑定 GitHub Actions 应用来源；发布 ruleset 保护 `v*`。首次初始化只有在默认分支已回读到同一契约和固定版本受管工作流后才激活规则。管理员仍可修改平台规则，因此 `quality doctor --remote` 回读实际 ruleset、检查来源、协作者人数和异常期限，漂移时失败；紧急绕过必须进入受管异常记录且在关闭前保持异常状态。质量契约或工作流自身被 PR 修改时，仍由默认分支旧版本裁决，不能在同一 PR 中改弱规则并批准自己。
 

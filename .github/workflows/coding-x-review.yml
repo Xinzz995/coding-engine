@@ -14,7 +14,7 @@ jobs:
     if: github.event.pull_request.draft == false
     uses: ./.github/workflows/coding-x-project-checks.yml
     with:
-      coding-x-version: "0.30.9"
+      coding-x-version: "0.31.0"
       base-sha: ${{ github.event.pull_request.base.sha }}
       head-sha: ${{ github.event.pull_request.head.sha }}
       pull-request-number: ${{ github.event.pull_request.number }}
@@ -45,7 +45,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.9"
+          --package="coding-x@0.31.0"
           -- coding-x quality gate
           --publish-project-check "$PROJECT_JOB_RESULT"
           --event-path "$GITHUB_EVENT_PATH"
@@ -61,7 +61,7 @@ jobs:
       contents: read
       pull-requests: read
       checks: write
-      models: read
+      copilot-requests: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -77,11 +77,11 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.9"
+          --package="coding-x@0.31.0"
+          --package="@github/copilot@1.0.74"
           -- coding-x quality gate
           --axis spec
           --event-path "$GITHUB_EVENT_PATH"
@@ -93,11 +93,11 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.9"
+          --package="coding-x@0.31.0"
+          --package="@github/copilot@1.0.74"
           -- coding-x quality gate
           --axis standards
           --event-path "$GITHUB_EVENT_PATH"
@@ -109,11 +109,11 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.9"
+          --package="coding-x@0.31.0"
+          --package="@github/copilot@1.0.74"
           -- coding-x quality gate
           --axis deep
           --event-path "$GITHUB_EVENT_PATH"

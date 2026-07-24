@@ -13,8 +13,12 @@ describe('managed GitHub workflow trust boundaries', () => {
       'utf8',
     );
     const version = /coding-x-version: "([^"]+)"/.exec(live)?.[1];
+    const copilotVersion = /@github\/copilot@([^"]+)"/.exec(live)?.[1];
     expect(version).toBeTruthy();
-    expect(asset('coding-x-review.yml').replaceAll('{{CODING_X_VERSION}}', version!)).toBe(live);
+    expect(copilotVersion).toBeTruthy();
+    expect(asset('coding-x-review.yml')
+      .replaceAll('{{CODING_X_VERSION}}', version!)
+      .replaceAll('{{COPILOT_CLI_VERSION}}', copilotVersion!)).toBe(live);
   });
 
   it('executes PR code without persisted credentials, model access or check-write permission', () => {
@@ -27,6 +31,7 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow.match(/fetch-depth: 0/g)?.length).toBe(2);
     expect(workflow).toContain('--contract-file "$GITHUB_WORKSPACE/_coding_x_base/.coding-x/quality.json"');
     expect(workflow).not.toContain('models: read');
+    expect(workflow).not.toContain('copilot-requests: write');
     expect(workflow).not.toContain('checks: write');
     expect(workflow).not.toContain('secrets: inherit');
     expect(workflow).not.toContain('GITHUB_TOKEN:');
@@ -40,7 +45,8 @@ describe('managed GitHub workflow trust boundaries', () => {
       .toBe(2);
     expect(workflow).not.toContain('ref: ${{ github.event.pull_request.head.sha }}');
     expect(workflow).not.toContain('secrets: inherit');
-    expect(workflow).toContain('models: read');
+    expect(workflow).not.toContain('models: read');
+    expect(workflow).toContain('copilot-requests: write');
     expect(workflow).toContain('checks: write');
     expect(workflow).toContain('--axis spec');
     expect(workflow).toContain('--axis standards');
@@ -56,7 +62,8 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow).toContain('steps.standards.outcome');
     expect(workflow).toContain('steps.deep.outcome');
     expect(workflow.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/g)?.length).toBe(4);
-    expect(workflow.match(/CODING_X_MODEL_TOKEN: \$\{\{ secrets\.CODING_X_MODEL_TOKEN \}\}/g)?.length)
+    expect(workflow).not.toContain('CODING_X_MODEL_TOKEN');
+    expect(workflow.match(/--package="@github\/copilot@\{\{COPILOT_CLI_VERSION\}\}"/g)?.length)
       .toBe(3);
   });
 
@@ -78,6 +85,8 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(projectChecks).toContain('--package="coding-x@${CODING_X_VERSION}"');
     expect(projectChecks).toContain('coding-x-version:');
     expect(asset('coding-x-review.yml')).toContain('coding-x-version: "{{CODING_X_VERSION}}"');
+    expect(asset('coding-x-review.yml'))
+      .toContain('--package="@github/copilot@{{COPILOT_CLI_VERSION}}"');
   });
 
   it('pins third-party actions to immutable commits', () => {

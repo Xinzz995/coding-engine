@@ -559,10 +559,10 @@ npx coding-x quality doctor --remote
 
 首次运行通常会先生成文件并返回 `unverifiable`：把这些文件经 PR 合并到默认分支后，再运行一次
 `quality init`，它回读确认可信工作流已经存在，才会启用远端规则，避免先锁住仓库却没有检查可跑。初始化还会在保留现有内容的前提下补齐 `.workspace/` 的 Git 忽略规则；`quality doctor` 会确认这条规则已经纳入版本管理，且没有本地反馈误入索引。
-生产门禁应在仓库中配置 secret `CODING_X_MODEL_TOKEN`，值为可调用 GitHub Models 且有足够
-额度的专用令牌；`gh secret set CODING_X_MODEL_TOKEN` 会安全提示输入。没有该 secret 时会
-退回 Actions 自动 token，但免费额度耗尽后评审会按 `unverifiable` 阻断，不能作为稳定容量保证。
-模型令牌只交给默认分支上的可信评审代码，不用于仓库读取或发布检查，也不会交给 PR 代码。
+0.31.0 起远端评审使用固定版本的 GitHub Copilot CLI 和 Actions 内建凭据，不需要保存模型
+secret。个人仓库需要账号可使用 Copilot CLI；组织仓库还要允许 Actions 使用 Copilot，并由
+工作流授予 `copilot-requests: write`。权限、政策或额度不可用时会按 `unverifiable` 阻断。
+0.30.x 已有契约不会被静默迁移，应先审阅并显式补齐 provider、模型和 Copilot CLI 固定版本。
 定时远端巡检优先读取仓库 secret `CODING_X_ADMIN_TOKEN`；没有具备 ruleset 只读权限的凭据时会
 明确失败，不把 GitHub 的权限不足当成健康。只有本地文件、工作流和 GitHub 真实规则都核验通过，
 项目才进入可交付状态。随后运行引擎：
@@ -640,10 +640,10 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 工程标准和深度评审。缺 Spec、模型不可用、输出损坏、提交变化或规则漂移都显示为
 `unverifiable` 并阻断。AI 任务只通过 API 读取 PR 数据，不签出或执行 PR 代码；项目命令在
 没有模型、写权限或持久化凭据的隔离 job 中运行。命令不会自动合并、发布或替人批准例外。
-GitHub Models 单次输入超限时，coding-x 保留完整 diff，只把评审来源无损拆成最多八片；
+远端单次输入超限时，coding-x 保留完整 diff，只把评审来源无损拆成最多八片；
 每片都有效才合并结论。超过这一边界会要求缩小来源或拆分 PR，不会截断证据后放行。
-免费 Models 还有整周期总额度；硬门禁应使用有容量保障的 `CODING_X_MODEL_TOKEN`，额度不足
-仍会诚实阻断。
+每次调用都运行在没有工具和仓库工作区的临时评审角色中，结果记录实际模型、调用次数和用量；
+额度不足、CLI 版本漂移或输出身份矛盾都会诚实阻断。
 
 ### 第 5 步：收口沉淀（可选）
 
@@ -705,7 +705,6 @@ GitHub Models 单次输入超限时，coding-x 保留完整 diff，只把评审�
 | 变量 | 说明 |
 | --- | --- |
 | `CODING_X_CONFIG` | 覆盖全局模型配置的完整文件路径；相对路径按当前目录解析，空白值按未设置处理 |
-| `CODING_X_MODEL_TOKEN` | 远端质量评审专用的 GitHub Models token；只用于模型请求，不替代 `GITHUB_TOKEN` 的仓库 API/Check Run 权限 |
 | `CODING_X_CLAUDE_BIN` | 覆盖 `claude` 可执行文件路径 |
 | `CODING_X_CODEX_BIN` | 覆盖 `codex` 可执行文件路径 |
 | `CODING_X_CURSOR_BIN` | 覆盖 Cursor `agent` / `cursor-agent` 可执行文件路径 |

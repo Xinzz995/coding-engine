@@ -134,7 +134,11 @@ export async function runQualityDoctor(opts: {
   });
   for (const { source, path } of MANAGED_FILES) {
     const absolute = join(opts.root, path);
-    const expected = readManagedQualityAsset(source, contract.github.codingXVersion);
+    const expected = readManagedQualityAsset(
+      source,
+      contract.github.codingXVersion,
+      contract.review.copilotCliVersion,
+    );
     const current = existsSync(absolute) ? readFileSync(absolute, 'utf8') : null;
     checks.push({
       id: `managed-file:${path}`,

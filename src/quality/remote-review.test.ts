@@ -29,7 +29,9 @@ function setup(): { root: string; baseSha: string; eventPath: string } {
     version: 1,
     checks: [{ id: 'test', command: 'python -m unittest', cwd: '.', paths: ['src.py'] }],
     review: {
-      model: 'openai/gpt-4.1',
+      provider: 'github-copilot',
+      model: 'auto',
+      copilotCliVersion: '1.0.74',
       specSources: ['docs/specs/'],
       standardsSources: ['AGENTS.md'],
       deepReview: {
@@ -42,7 +44,7 @@ function setup(): { root: string; baseSha: string; eventPath: string } {
       repository: 'owner/repo',
       defaultBranch: 'main',
       releaseRefs: [],
-      codingXVersion: '0.30.0',
+      codingXVersion: '0.31.0',
       requiredChecks: [
         'coding-x / project-checks',
         'coding-x / spec-review',
@@ -121,6 +123,8 @@ describe('remote review axis', () => {
         }],
       },
       error: null,
+      model: 'gpt-5-mini',
+      premiumRequests: 0.33,
     }));
     const result = await runGitHubReviewAxis({
       root,
@@ -128,7 +132,6 @@ describe('remote review axis', () => {
       eventPath,
       axis: 'spec',
       token: 'github-api-token',
-      modelToken: 'model-only-token',
       client: api as GitHubClient,
       modelCall: modelCall as ModelCall,
       now: new Date('2026-07-24T00:00:00Z'),
@@ -136,6 +139,11 @@ describe('remote review axis', () => {
     expect(result.receipt.status).toBe('passed');
     expect(result.receipt.headSha).toBe('b'.repeat(40));
     expect(result.receipt.reviewSummary).toBe('matches');
+    expect(result.receipt).toMatchObject({
+      model: 'github-copilot:gpt-5-mini',
+      modelCalls: 1,
+      premiumRequests: 0.33,
+    });
     expect(result.receipt.findings[0]).toMatchObject({
       headSha: 'b'.repeat(40),
       round: 1,
@@ -146,7 +154,9 @@ describe('remote review axis', () => {
       status: 'passed',
     }));
     expect(modelCall).toHaveBeenCalledWith(expect.objectContaining({
-      token: 'model-only-token',
+      token: 'github-api-token',
+      model: 'auto',
+      cliVersion: '1.0.74',
     }));
     const specReads = (api.getTextFile as ReturnType<typeof vi.fn>).mock.calls
       .filter((call) => call[0].startsWith('docs/specs/'))
@@ -236,7 +246,7 @@ describe('remote review axis', () => {
       .mockResolvedValueOnce({
         status: 'invalid' as const,
         output: null,
-        error: 'GitHub Models HTTP 413: tokens_limit_reached',
+        error: 'provider input exceeded',
         reason: 'input-too-large' as const,
       })
       .mockResolvedValueOnce({
@@ -333,7 +343,7 @@ describe('remote review axis', () => {
     const modelCall = vi.fn(async () => ({
       status: 'invalid' as const,
       output: null,
-      error: 'GitHub Models HTTP 413: tokens_limit_reached',
+      error: 'provider input exceeded',
       reason: 'input-too-large' as const,
     }));
     const result = await runGitHubReviewAxis({
@@ -646,6 +656,47 @@ describe('remote review axis', () => {
     expect(modelCall).toHaveBeenCalledTimes(2);
     expect(result.receipt.status).toBe('passed');
     expect(result.receipt.reviewSummary).toBe('corrected schema');
+  });
+
+  it('fails closed when auto routing changes model within one review axis', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    const modelCall = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'invalid' as const,
+        output: null,
+        error: 'schema invalid',
+        reason: 'invalid-output' as const,
+        model: 'gpt-5-mini',
+        premiumRequests: 0.2,
+      })
+      .mockResolvedValueOnce({
+        status: 'valid' as const,
+        output: { summary: 'corrected schema', findings: [] },
+        error: null,
+        model: 'claude-haiku-4.5',
+        premiumRequests: 0.3,
+      });
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'standards',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(modelCall).toHaveBeenCalledTimes(2);
+    expect(result.receipt).toMatchObject({
+      status: 'unverifiable',
+      model: 'github-copilot:claude-haiku-4.5',
+      modelCalls: 2,
+      premiumRequests: 0.5,
+      errors: [{
+        code: 'model-output-invalid',
+        message: expect.stringContaining('不一致的实际模型'),
+      }],
+    });
   });
 
   it('rejects a finding with fabricated evidence even when its file is in scope', async () => {

@@ -74,6 +74,12 @@ function isReceipt(value: unknown): value is QualityReceipt {
     && (item.status === 'passed' || item.status === 'failed' || item.status === 'unverifiable')
     && typeof item.at === 'string'
     && (item.reviewSummary === undefined || typeof item.reviewSummary === 'string')
+    && (item.modelCalls === undefined
+      || (Number.isInteger(item.modelCalls) && item.modelCalls >= 0))
+    && (item.premiumRequests === undefined
+      || (typeof item.premiumRequests === 'number'
+        && Number.isFinite(item.premiumRequests)
+        && item.premiumRequests >= 0))
     && Array.isArray(item.findings) && item.findings.every(isFinding)
     && Array.isArray(item.exceptions)
     && Array.isArray(item.errors)

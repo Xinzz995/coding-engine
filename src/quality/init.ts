@@ -9,6 +9,7 @@ import { dirname, join } from 'node:path';
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import {
   currentPackageVersion,
+  DEFAULT_COPILOT_CLI_VERSION,
   readManagedQualityAsset,
   type ManagedQualityAsset,
 } from './assets.js';
@@ -270,7 +271,9 @@ function generatedContract(
     version: 1,
     checks,
     review: {
-      model: overrides.model ?? 'openai/gpt-4.1-mini',
+      provider: 'github-copilot',
+      model: overrides.model ?? 'auto',
+      copilotCliVersion: DEFAULT_COPILOT_CLI_VERSION,
       specSources,
       standardsSources,
       deepReview: {
@@ -311,7 +314,9 @@ function generatedContract(
 function priorManagedVersion(source: ManagedQualityAsset, content: string): string | null {
   const match = /coding-x@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(content);
   if (!match) return null;
-  return readManagedQualityAsset(source, match[1]) === content ? match[1] : null;
+  const copilotVersion = /@github\/copilot@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/.exec(content)?.[1]
+    ?? DEFAULT_COPILOT_CLI_VERSION;
+  return readManagedQualityAsset(source, match[1], copilotVersion) === content ? match[1] : null;
 }
 
 function plannedFile(
@@ -423,7 +428,11 @@ export function buildQualityInitPlan(
     plannedFile(
       root,
       destination,
-      readManagedQualityAsset(source, contract.github.codingXVersion),
+      readManagedQualityAsset(
+        source,
+        contract.github.codingXVersion,
+        contract.review.copilotCliVersion,
+      ),
       source,
     ));
   return {
@@ -439,6 +448,7 @@ export function renderQualityInitPreview(plan: QualityInitPlan, localOnly: boole
     `项目：${plan.contract.github.repository}`,
     `默认分支：${plan.contract.github.defaultBranch}`,
     `coding-x 固定版本：${plan.contract.github.codingXVersion}`,
+    `AI provider：${plan.contract.review.provider}（model=${plan.contract.review.model}，Copilot CLI=${plan.contract.review.copilotCliVersion}）`,
     '项目检查：',
     ...plan.contract.checks.map((check) => `  - ${check.id}: (${check.cwd}) ${check.command}`),
     '评审来源：',
@@ -535,7 +545,11 @@ async function verifyRemoteManagedBase(
         ref,
         512 * 1024,
       );
-      const expected = readManagedQualityAsset(source, contract.github.codingXVersion);
+      const expected = readManagedQualityAsset(
+        source,
+        contract.github.codingXVersion,
+        contract.review.copilotCliVersion,
+      );
       if (actual !== expected) errors.push(`默认分支受管文件漂移：${destination}`);
     } catch (error) {
       errors.push(
