@@ -68,6 +68,9 @@ GPT-4.1 mini 作为低限流档默认值，在请求前按完整 prompt 选择 s
 收紧为：Spec 只读取 PR 明确关联及本次直接修改的规格，`specSources` 只定义可信允许范围；
 Standards 与 Deep 读取工程标准，Deep 不再重新裁决产品范围。没有独立规格时，作者必须明确
 声明 PR 的意图、验收标准和非目标就是完整 Spec，不能静默省略。
+后续运行又连续复现 Standards 或 Deep 在仓库没有运行中模型任务时永久排队。根因是三个有
+依赖关系的 job 都加入同一个 `queue: max` 组；改为一个仓库队列 job 内顺序执行三轴，仍分别
+发布三条 Check Run，并在任一轴未通过时让汇总 job 失败。
 
 发布检查不能只按名称相信同名 Check Run：发布时重新读取启用中的 branch/tag ruleset，以
 ruleset 绑定的 GitHub App ID 核对关联 PR head 的最新结果。正常路径要求全部成功；只有受
