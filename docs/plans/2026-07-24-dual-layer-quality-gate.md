@@ -53,9 +53,10 @@ scope: root
   retry 状态。
 - 建立 Spec、Standards、Deep 三份短 prompt 与共同 JSON schema；仓库文本标成不可信数据。
 - 实现 GitHub Models adapter 与本地只读 agent adapter；结构、大小、head/policy 逐项校验。
-- 远端输入遵守 GitHub 免费额度：输出上限 4000，完整 diff 不截断；source 超限时最多无损
-  拆成八片；优先拆分较大的 diff 或 source，逐片有效后机械合并并保留重复 finding 的最高
-  严重度。瞬时 429 按服务端等待提示有限重试，三轴依次调度；耗尽后仍保持不可验证。
+- 远端输入遵守 GitHub 免费额度：输出上限 4000，source/diff 均不截断；首个请求前按完整
+  prompt 预算，最多八个无损片段共同覆盖完整评审空间，逐片有效后机械合并并保留重复
+  finding 的最高严重度。瞬时 429 按服务端等待提示有限重试，单轴调用节流；全仓模型 job
+  通过 GitHub 原生保留队列串行，耗尽后仍保持不可验证。
 - local review 并行独立运行 Spec/Standards，风险要求时再运行 Deep；不合并或重新排序 finding。
 
 ## Task 3：quality CLI 与展示
@@ -103,6 +104,15 @@ scope: root
 6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.4 配置规则；
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
+
+后续真实运行补充：
+
+- v0.30.5 的专用模型凭据解决了身份额度隔离，但 0.30.6 的单 PR 重试与三轴串行仍挡不住
+  多个 Dependabot PR 同时消费共享额度；
+- v0.30.7 把默认模型切到已验证严格结构化输出的低限流档，在请求前按完整 prompt 有界分片，
+  分片间节流，并用 GitHub 原生 `queue: max` job 队列把仓库内所有模型评审串行；
+- 结构治理和外部下游闭环必须在该版本发布并由旧版本完成 bootstrap 后继续，不能把本地
+  provider probe 当成远端门禁证明。
 
 ## coding-engine 自托管证据
 

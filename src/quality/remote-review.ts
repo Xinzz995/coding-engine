@@ -9,6 +9,8 @@ import { parseReviewIntent, type ReviewIntent } from './intent.js';
 import { assessDeepReviewRisk } from './risk.js';
 import {
   buildReviewPrompts,
+  estimateReviewPromptTokens,
+  preSplitReviewPromptShard,
   splitReviewPromptShard,
   type ReviewPromptShard,
   type ReviewSource,
@@ -34,6 +36,8 @@ const SOURCE_COUNT_LIMIT = 100;
 const SOURCE_TOTAL_LIMIT = 500 * 1024;
 const SOURCE_FILE_LIMIT = 128 * 1024;
 const MODEL_SHARD_LIMIT = 8;
+const MODEL_PROMPT_TOKEN_BUDGET = 7_000;
+const MODEL_CALL_PACE_MS = 6_500;
 const AGGREGATE_FINDING_LIMIT = 50;
 
 export type ModelCall = (opts: {
@@ -174,6 +178,8 @@ export async function runGitHubReviewAxis(opts: {
   modelToken?: string;
   client?: GitHubClient;
   modelCall?: ModelCall;
+  modelPause?: (ms: number) => Promise<void>;
+  modelPaceMs?: number;
   now?: Date;
 }): Promise<{ receipt: QualityReceipt; check: { id: number; url: string | null } | null }> {
   const started = Date.now();
@@ -475,29 +481,101 @@ export async function runGitHubReviewAxis(opts: {
     return { receipt, check: await publish(client, receipt) };
   }
   const modelCall = opts.modelCall ?? callGitHubModel;
+  const modelPause = opts.modelPause
+    ?? (opts.modelCall ? async () => {} : async (ms: number) => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    });
+  const modelPaceMs = opts.modelPaceMs ?? MODEL_CALL_PACE_MS;
   const changedFiles = files.map((file) => file.filename);
-  const pending: ReviewPromptShard[] = [{ sources, diff, fragmented: false }];
-  const modelOutputs: ReviewModelOutput[] = [];
-  let reviewError: QualityError | null = null;
-  while (pending.length > 0) {
-    const shard = pending.shift()!;
-    const prompts = buildReviewPrompts(opts.axis, {
+  const initialShard: ReviewPromptShard = { sources, diff, fragmented: false };
+  const initialPrompts = buildReviewPrompts(opts.axis, {
+    repository: event.repository,
+    baseSha: event.baseSha,
+    headSha: event.headSha,
+    contractSha256: contractRead.sha256,
+    intent,
+    changedFiles,
+    diff,
+    sources,
+    allSourcePaths: sources.map((source) => source.path),
+    deepReasons: risk.reasons,
+    fragmented: false,
+  });
+  if (initialPrompts.status === 'invalid') {
+    const receipt = receiptWithError({
+      workspace: opts.workspace,
+      axis: opts.axis,
+      now,
       repository: event.repository,
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      intent,
-      changedFiles,
-      diff: shard.diff,
-      sources: shard.sources,
-      allSourcePaths: sources.map((source) => source.path),
-      deepReasons: risk.reasons,
-      fragmented: shard.fragmented,
+      model: contract.review.model,
+      deepRequired: opts.axis === 'deep' ? risk.required : undefined,
+      deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
+      error: { code: 'review-input-too-large', message: initialPrompts.error },
+      started,
     });
+    appendQualityReceipt(opts.workspace, receipt);
+    return { receipt, check: await publish(client, receipt) };
+  }
+  const promptForShard = (shard: ReviewPromptShard) => buildReviewPrompts(opts.axis, {
+    repository: event.repository,
+    baseSha: event.baseSha,
+    headSha: event.headSha,
+    contractSha256: contractRead.sha256,
+    intent,
+    changedFiles,
+    diff: shard.diff,
+    sources: shard.sources,
+    allSourcePaths: sources.map((source) => source.path),
+    deepReasons: risk.reasons,
+    fragmented: shard.fragmented,
+  });
+  const prepared = preSplitReviewPromptShard(initialShard, {
+    maxShards: MODEL_SHARD_LIMIT,
+    maxWeight: MODEL_PROMPT_TOKEN_BUDGET,
+    weight: (shard) => {
+      const prompts = promptForShard(shard);
+      return prompts.status === 'valid'
+        ? estimateReviewPromptTokens(prompts.system, prompts.user)
+        : Number.POSITIVE_INFINITY;
+    },
+  });
+  if (!prepared.withinBudget) {
+    const receipt = receiptWithError({
+      workspace: opts.workspace,
+      axis: opts.axis,
+      now,
+      repository: event.repository,
+      baseSha: event.baseSha,
+      headSha: event.headSha,
+      contractSha256: contractRead.sha256,
+      model: contract.review.model,
+      deepRequired: opts.axis === 'deep' ? risk.required : undefined,
+      deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
+      error: {
+        code: 'review-input-too-large',
+        message: `完整输入需要多于 ${MODEL_SHARD_LIMIT} 个无损分片；请缩小评审来源或拆分 PR`,
+      },
+      started,
+    });
+    appendQualityReceipt(opts.workspace, receipt);
+    return { receipt, check: await publish(client, receipt) };
+  }
+  const pending = [...prepared.shards];
+  const modelOutputs: ReviewModelOutput[] = [];
+  let reviewError: QualityError | null = null;
+  let modelCallCount = 0;
+  while (pending.length > 0) {
+    const shard = pending.shift()!;
+    const prompts = promptForShard(shard);
     if (prompts.status === 'invalid') {
       reviewError = { code: 'review-input-too-large', message: prompts.error };
       break;
     }
+    if (modelCallCount > 0 && modelPaceMs > 0) await modelPause(modelPaceMs);
+    modelCallCount += 1;
     let modelResult: Awaited<ReturnType<ModelCall>>;
     try {
       modelResult = await modelCall({

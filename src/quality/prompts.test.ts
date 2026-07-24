@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildReviewPrompts,
+  estimateReviewPromptTokens,
+  preSplitReviewPromptShard,
   splitReviewPromptShard,
 } from './prompts.js';
 
@@ -74,6 +76,90 @@ describe('review prompt boundaries', () => {
     if (!split) return;
     expect(split.map((item) => item.diff).join('')).toBe(diff);
     expect(split.every((item) => item.sources[0].content === source)).toBe(true);
+  });
+
+  it('budgets non-ASCII policy text more conservatively than ASCII code', () => {
+    expect(estimateReviewPromptTokens('a'.repeat(300), '')).toBeCloseTo(101, 0);
+    expect(estimateReviewPromptTokens('规'.repeat(300), '')).toBeCloseTo(301, 0);
+  });
+
+  it('pre-splits policy sources without dropping text or multiplying the diff', () => {
+    const source = 'first\nsecond\nthird\nfourth\nfifth\nsixth\neighth';
+    const diff = 'diff --git a/a.ts b/a.ts\n+changed';
+    const prepared = preSplitReviewPromptShard({
+      sources: [{ path: 'AGENTS.md', content: source }],
+      diff,
+      fragmented: false,
+    }, {
+      maxShards: 4,
+      maxWeight: 14,
+      weight: (shard) =>
+        shard.sources.reduce((sum, item) => sum + item.content.length, 0),
+    });
+    const { shards } = prepared;
+    expect(prepared.withinBudget).toBe(true);
+    expect(shards).toHaveLength(4);
+    expect(shards.map((item) => item.sources[0].content).join('')).toBe(source);
+    expect(shards.every((item) => item.diff === diff && item.fragmented)).toBe(true);
+  });
+
+  it('balances multiple policy files at the closest file boundary', () => {
+    const prepared = preSplitReviewPromptShard({
+      sources: [
+        { path: 'short-a.md', content: 'a'.repeat(10) },
+        { path: 'large-a.md', content: 'b'.repeat(90) },
+        { path: 'large-b.md', content: 'c'.repeat(90) },
+        { path: 'short-b.md', content: 'd'.repeat(10) },
+      ],
+      diff: '',
+      fragmented: false,
+    }, {
+      maxShards: 2,
+      maxWeight: 100,
+      weight: (shard) =>
+        shard.sources.reduce((sum, item) => sum + item.content.length, 0),
+    });
+    expect(prepared.withinBudget).toBe(true);
+    expect(prepared.shards.map((shard) =>
+      shard.sources.reduce((sum, item) => sum + item.content.length, 0)))
+      .toEqual([100, 100]);
+  });
+
+  it('partitions both policy and diff when both dominate the prompt budget', () => {
+    const source = 'policy\n'.repeat(200);
+    const diff = '+code\n'.repeat(200);
+    const prepared = preSplitReviewPromptShard({
+      sources: [{ path: 'AGENTS.md', content: source }],
+      diff,
+      fragmented: false,
+    }, {
+      maxShards: 8,
+      maxWeight: 1_400,
+      weight: (shard) =>
+        shard.sources.reduce((sum, item) => sum + item.content.length, 0)
+        + shard.diff.length,
+    });
+    expect(prepared.withinBudget).toBe(true);
+    expect(prepared.shards).toHaveLength(4);
+    expect(prepared.shards.every((item) => item.diff.length < diff.length)).toBe(true);
+    expect(prepared.shards.every((item) => item.sources[0].content.length < source.length))
+      .toBe(true);
+  });
+
+  it('reports when bounded lossless sharding cannot meet the prompt budget', () => {
+    const prepared = preSplitReviewPromptShard({
+      sources: [{ path: 'AGENTS.md', content: 'policy'.repeat(500) }],
+      diff: '+code'.repeat(500),
+      fragmented: false,
+    }, {
+      maxShards: 2,
+      maxWeight: 100,
+      weight: (shard) =>
+        shard.sources.reduce((sum, item) => sum + item.content.length, 0)
+        + shard.diff.length,
+    });
+    expect(prepared.withinBudget).toBe(false);
+    expect(prepared.shards).toHaveLength(2);
   });
 
   it('fails closed when the diff exceeds the bounded model input', () => {

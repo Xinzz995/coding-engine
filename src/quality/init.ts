@@ -270,7 +270,7 @@ function generatedContract(
     version: 1,
     checks,
     review: {
-      model: overrides.model ?? 'openai/gpt-4.1',
+      model: overrides.model ?? 'openai/gpt-4.1-mini',
       specSources,
       standardsSources,
       deepReview: {

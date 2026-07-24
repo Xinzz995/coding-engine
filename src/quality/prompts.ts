@@ -32,6 +32,27 @@ export interface ReviewPromptShard {
   fragmented: boolean;
 }
 
+export interface ReviewPromptShardBudget {
+  maxShards: number;
+  maxWeight: number;
+  weight: (shard: ReviewPromptShard) => number;
+}
+
+/**
+ * Conservative dependency-free estimate for GitHub Models input budgeting.
+ * ASCII-heavy code averages several characters per token, while CJK and other
+ * non-ASCII text is commonly close to one code point per token.
+ */
+export function estimateReviewPromptTokens(system: string, user: string): number {
+  let ascii = 0;
+  let nonAscii = 0;
+  for (const char of `${system}\n${user}`) {
+    if (char.codePointAt(0)! <= 0x7f) ascii += 1;
+    else nonAscii += 1;
+  }
+  return Math.ceil((ascii / 3) + nonAscii);
+}
+
 function assetPath(name: string): string {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -125,11 +146,43 @@ function splitSources(sources: ReviewSource[]): [ReviewSource[], ReviewSource[]]
   let total = 0;
   let splitAt = 1;
   for (let index = 0; index < sources.length - 1; index += 1) {
-    total += sources[index].content.length;
+    const next = total + sources[index].content.length;
+    if (next >= target) {
+      const before = Math.max(1, index);
+      const after = index + 1;
+      splitAt = Math.abs(target - total) < Math.abs(next - target)
+        ? before
+        : after;
+      break;
+    }
+    total = next;
     splitAt = index + 1;
-    if (total >= target) break;
   }
   return [sources.slice(0, splitAt), sources.slice(splitAt)];
+}
+
+function splitReviewPromptShardBy(
+  shard: ReviewPromptShard,
+  dimension: 'sources' | 'diff',
+): [ReviewPromptShard, ReviewPromptShard] | null {
+  if (dimension === 'diff') {
+    const split = splitText(shard.diff);
+    return split
+      ? split.map((diff) => ({
+          sources: shard.sources,
+          diff,
+          fragmented: true,
+        })) as [ReviewPromptShard, ReviewPromptShard]
+      : null;
+  }
+  const split = splitSources(shard.sources);
+  return split
+    ? split.map((sources) => ({
+        sources,
+        diff: shard.diff,
+        fragmented: true,
+      })) as [ReviewPromptShard, ReviewPromptShard]
+    : null;
 }
 
 /**
@@ -139,30 +192,49 @@ function splitSources(sources: ReviewSource[]): [ReviewSource[], ReviewSource[]]
  */
 export function splitReviewPromptShard(
   shard: ReviewPromptShard,
+  preferred?: 'sources' | 'diff',
 ): [ReviewPromptShard, ReviewPromptShard] | null {
   const sourcesLength = sourceChars(shard.sources);
-  const splitDiff = sourcesLength < shard.diff.length ? splitText(shard.diff) : null;
-  if (splitDiff) {
-    return splitDiff.map((diff) => ({
-      sources: shard.sources,
-      diff,
-      fragmented: true,
-    })) as [ReviewPromptShard, ReviewPromptShard];
+  const first = preferred ?? (sourcesLength < shard.diff.length ? 'diff' : 'sources');
+  const second = first === 'sources' ? 'diff' : 'sources';
+  return splitReviewPromptShardBy(shard, first)
+    ?? splitReviewPromptShardBy(shard, second);
+}
+
+/**
+ * Prepares lossless shards before the first provider request. Each split
+ * partitions either sources or diff, so the leaf shards still cover the full
+ * source × diff review space. The supplied weight function lets the caller
+ * include static prompt overhead when choosing the more effective split.
+ */
+export function preSplitReviewPromptShard(
+  shard: ReviewPromptShard,
+  budget: ReviewPromptShardBudget,
+): { shards: ReviewPromptShard[]; withinBudget: boolean } {
+  const shards = [shard];
+  while (true) {
+    const weights = shards.map((candidate) => budget.weight(candidate));
+    const selected = weights.reduce(
+      (largest, weight, index) => weight > weights[largest] ? index : largest,
+      0,
+    );
+    if (weights[selected] <= budget.maxWeight) {
+      return {
+        shards: shards.length > 1
+          ? shards.map((item) => ({ ...item, fragmented: true }))
+          : shards,
+        withinBudget: true,
+      };
+    }
+    if (shards.length >= budget.maxShards) {
+      return { shards, withinBudget: false };
+    }
+    const candidates = (['sources', 'diff'] as const)
+      .map((dimension) => splitReviewPromptShardBy(shards[selected], dimension))
+      .filter((value): value is [ReviewPromptShard, ReviewPromptShard] => value !== null);
+    if (candidates.length === 0) return { shards, withinBudget: false };
+    const split = candidates.sort((left, right) =>
+      Math.max(...left.map(budget.weight)) - Math.max(...right.map(budget.weight)))[0];
+    shards.splice(selected, 1, ...split);
   }
-  const split = splitSources(shard.sources);
-  if (split) {
-    return split.map((sources) => ({
-        sources,
-        diff: shard.diff,
-        fragmented: true,
-      })) as [ReviewPromptShard, ReviewPromptShard];
-  }
-  const fallbackDiff = splitText(shard.diff);
-  return fallbackDiff
-    ? fallbackDiff.map((diff) => ({
-        sources: shard.sources,
-        diff,
-        fragmented: true,
-      })) as [ReviewPromptShard, ReviewPromptShard]
-    : null;
 }
