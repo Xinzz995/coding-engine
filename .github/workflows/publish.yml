@@ -16,7 +16,7 @@ jobs:
       pull-requests: read # 找到生成发布提交的已合并 PR
       id-token: write # 供 npm provenance 使用
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # 需要完整历史 + tags 才能按提交生成 Release 说明
 
