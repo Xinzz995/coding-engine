@@ -14,7 +14,7 @@ jobs:
     if: github.event.pull_request.draft == false
     uses: ./.github/workflows/coding-x-project-checks.yml
     with:
-      coding-x-version: "0.30.4"
+      coding-x-version: "0.30.5"
       base-sha: ${{ github.event.pull_request.base.sha }}
       head-sha: ${{ github.event.pull_request.head.sha }}
       pull-request-number: ${{ github.event.pull_request.number }}
@@ -45,7 +45,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.4"
+          --package="coding-x@0.30.5"
           -- coding-x quality gate
           --publish-project-check "$PROJECT_JOB_RESULT"
           --event-path "$GITHUB_EVENT_PATH"
@@ -76,7 +76,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.4"
+          --package="coding-x@0.30.5"
           -- coding-x quality gate
           --axis spec
           --event-path "$GITHUB_EVENT_PATH"
@@ -107,7 +107,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.4"
+          --package="coding-x@0.30.5"
           -- coding-x quality gate
           --axis standards
           --event-path "$GITHUB_EVENT_PATH"
@@ -138,7 +138,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.30.4"
+          --package="coding-x@0.30.5"
           -- coding-x quality gate
           --axis deep
           --event-path "$GITHUB_EVENT_PATH"
