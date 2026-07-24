@@ -44,6 +44,7 @@ describe('review model output', () => {
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
       const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
       expect(payload.tool_choice).toBe('none');
+      expect(payload.max_tokens).toBe(4_000);
       expect(payload.response_format).toEqual(reviewResponseSchema);
       expect(String(init?.headers && (init.headers as Record<string, string>).Authorization))
         .toBe('Bearer token-value');
@@ -81,5 +82,25 @@ describe('review model output', () => {
       fetchImpl: vi.fn(async () => response) as unknown as typeof fetch,
     });
     expect(result.status).toBe('invalid');
+  });
+
+  it('classifies the GitHub Models free-tier input limit for lossless sharding', async () => {
+    const result = await callGitHubModel({
+      token: 'token',
+      model: 'openai/gpt-4.1',
+      systemPrompt: 'system',
+      userPrompt: 'oversized',
+      axis: 'spec',
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify({
+        error: {
+          code: 'tokens_limit_reached',
+          message: 'Request body too large. Max size: 8000 tokens.',
+        },
+      }), { status: 413 })) as unknown as typeof fetch,
+    });
+    expect(result).toMatchObject({
+      status: 'invalid',
+      reason: 'input-too-large',
+    });
   });
 });

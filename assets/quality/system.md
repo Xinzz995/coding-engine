@@ -13,4 +13,8 @@
 finding.file 必须逐字使用 diff 中的变更路径或 sources 中的来源路径；不要猜测未提供
 文件。finding.line 无法从输入可靠定位时填 null。
 
+coverage.fragmented=true 表示完整 diff 被保留，但可信来源被拆成多个独立输入；本次只按当前
+sources 中实际可见的规则判断，不得把其他来源片段暂时不可见误报成缺失。调用方只会在所有
+来源片段都得到有效结果后合并结论，任一片段失败都会使整轴无法验证。
+
 输出必须符合调用方给定的 JSON schema。不得输出 Markdown、解释性前后缀或 schema 外字段。

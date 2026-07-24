@@ -28,6 +28,10 @@ coding-x 已能在 Developer 后独立运行项目门禁并让 Validator 对 sto
 GitHub 是首个远端 adapter。项目命令在无敏感权限的 PR workflow 运行；AI 评审在默认分支
 `pull_request_target` workflow 运行，通过 API 读取 PR 数据，不签出或执行 PR 代码，并用
 GitHub Models 的 `models: read` 权限取得结构化结论。对应 Check Run 明确绑定 PR head。
+GitHub 免费调用额度当前限制每次 8000 个输入 token 和 4000 个输出 token；adapter 将输出上限
+固定为 4000。输入超限时保留完整 diff，只把可信来源无损拆成最多八个隔离片段，逐片有效后
+才合并 finding；任一片段失败、需要更多片段或仅完整 diff 已超限时均为 `unverifiable`，
+不截断内容后假装完成评审。
 
 默认分支上的契约和固定 coding-x 版本是可信政策源。PR 修改契约、评审规则或工作流时仍由
 旧政策裁决，并自动触发深度评审。规则集要求 PR、最新提交检查、解决对话、禁止强推与删除。
@@ -40,8 +44,10 @@ GitHub Models 的 `models: read` 权限取得结构化结论。对应 Check Run 
 
 coding-engine 不允许使用 PR 中的新实现批准自身。首次通过现有 CI 发布 0.30.0；自托管前
 发现同名源码仓库会干扰直接 `npx coding-x`，因此发布使用隔离 npm 前缀的 0.30.1。首次
-远端运行又证明 npm 前缀必须是已存在目录，经 #13 记录的有界 bootstrap 修复后，由 0.30.1
-正式审查并发布 0.30.2。以后门禁版本升级始终由旧版本审查。
+远端运行又证明 npm 前缀必须是已存在目录，且 0.30.1 的单次模型输入超过 GitHub 免费额度。
+两个不可由旧二进制自修的启动缺陷都记入 #13；仅在原有四平台 CI 和项目命令通过后进行有界
+bootstrap，发布 0.30.2 后必须用后续真实 PR 证明三个评审轴，再关闭异常。此后门禁版本升级
+始终由旧版本审查。
 
 ## 可信边界
 

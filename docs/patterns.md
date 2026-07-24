@@ -50,6 +50,7 @@ scope: root
 - 2026-07-24 项目原生检查必须由受 Git 管理的契约显式声明命令、工作目录和适用路径；coding-x 可以发现候选，但写入前必须让人确认。下游只依赖 Git 与能用退出状态表达结论的命令，禁止把 coding-engine 的 npm/Vitest/TypeScript 约定推广成跨项目合同。
 - 2026-07-24 GitHub ruleset 是真实合并控制，CLI 写文件和本地 review 都不是；配置后必须回读语义而非只相信写 API 成功。管理员仍能删除规则，所以定时 doctor 要检查启用状态、所需检查及应用来源、协作者对应的审核人数、发布引用和异常期限，漂移即失败。
 - 2026-07-24 受管 workflow 运行固定版本的 coding-x 时，不能在项目目录直接 `npx coding-x@<version>`：当下游仓库本身也叫 `coding-x`，npm 会优先按当前同名项目解析，表现为发布包存在但 bin 找不到。统一用 `npm exec --prefix "$RUNNER_TEMP" --package="coding-x@<exact>" -- coding-x ...` 隔离安装，同时保留调用时的项目工作目录；`--prefix` 必须指向已存在目录，npm 不会替调用方创建缺失的末级目录。
+- 2026-07-24 provider 的可用额度不是模型 catalog 的理论上下文：GitHub Models 免费层按账号限制单次输入/输出。超限处理必须保留完整 diff，只无损拆分 source 并逐片 fail closed；不得截断证据、丢弃失败片段或让后一个片段降低前一个片段的严重度。
 
 ## 陷阱
 

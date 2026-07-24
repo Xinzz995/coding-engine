@@ -291,6 +291,7 @@ export async function runLocalQualityReview(opts: {
       headSha: diff.headSha,
       contractSha256: contractRead.sha256,
       intent,
+      changedFiles: diff.changedFiles,
       diff: diff.diff,
       sources,
       deepReasons: risk.reasons,

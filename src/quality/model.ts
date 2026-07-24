@@ -141,6 +141,20 @@ interface GitHubModelsResponse {
   choices?: Array<{ message?: { content?: unknown } }>;
 }
 
+export type ModelFailureReason =
+  | 'input-too-large'
+  | 'provider-error'
+  | 'invalid-output';
+
+export type GitHubModelResult =
+  | { status: 'valid'; output: ReviewModelOutput; error: null }
+  | {
+      status: 'invalid';
+      output: null;
+      error: string;
+      reason: ModelFailureReason;
+    };
+
 export async function callGitHubModel(opts: {
   token: string;
   model: string;
@@ -149,10 +163,7 @@ export async function callGitHubModel(opts: {
   axis: ReviewAxis;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
-}): Promise<
-  | { status: 'valid'; output: ReviewModelOutput; error: null }
-  | { status: 'invalid'; output: null; error: string }
-> {
+}): Promise<GitHubModelResult> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 120_000);
@@ -172,7 +183,7 @@ export async function callGitHubModel(opts: {
           { role: 'user', content: opts.userPrompt },
         ],
         temperature: 0,
-        max_tokens: 5_000,
+        max_tokens: 4_000,
         tool_choice: 'none',
         response_format: reviewResponseSchema,
       }),
@@ -184,25 +195,42 @@ export async function callGitHubModel(opts: {
         status: 'invalid',
         output: null,
         error: `GitHub Models HTTP ${response.status}${diagnostic ? `：${diagnostic}` : ''}`,
+        reason: response.status === 413 && diagnostic.includes('tokens_limit_reached')
+          ? 'input-too-large'
+          : 'provider-error',
       };
     }
     const envelope = await response.json() as GitHubModelsResponse;
     const content = envelope.choices?.[0]?.message?.content;
     if (typeof content !== 'string') {
-      return { status: 'invalid', output: null, error: 'GitHub Models 响应缺少文本 content' };
+      return {
+        status: 'invalid',
+        output: null,
+        error: 'GitHub Models 响应缺少文本 content',
+        reason: 'invalid-output',
+      };
     }
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
     } catch {
-      return { status: 'invalid', output: null, error: 'GitHub Models content 不是 JSON' };
+      return {
+        status: 'invalid',
+        output: null,
+        error: 'GitHub Models content 不是 JSON',
+        reason: 'invalid-output',
+      };
     }
-    return normalizeReviewModelOutput(parsed, opts.axis);
+    const normalized = normalizeReviewModelOutput(parsed, opts.axis);
+    return normalized.status === 'valid'
+      ? normalized
+      : { ...normalized, reason: 'invalid-output' };
   } catch (error) {
     return {
       status: 'invalid',
       output: null,
       error: error instanceof Error ? error.message : String(error),
+      reason: 'provider-error',
     };
   } finally {
     clearTimeout(timer);

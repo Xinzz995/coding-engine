@@ -46,3 +46,4 @@ scope: root
 | 27 | 远端 AI job 不签出、不运行 PR 代码且无写仓库内容权限；项目命令 job 没有模型权限、写权限、用户 secrets 或持久 Git 凭据 | ADR-018 / 0.30.2 | 检查默认分支 workflow；恶意下游 PR 尝试读 secret/写仓库，确认失败且敏感值未出现在日志 |
 | 28 | `quality doctor --remote` 对权限不足、ruleset 停用、检查来源替换、审核人数漂移、发布引用缺失或异常过期均返回 unverifiable/failed；配置 API 成功但回读不一致也不能通过 | ADR-018 / 0.30.2 | 临时仓库逐项破坏规则后回读，确认诊断和退出码，再恢复并复验 |
 | 29 | 至少一个非 Node 多模块仓库使用自己的项目命令完成失败→修复→新提交重评→合并的真实 PR 闭环；其质量契约不出现 npm、Vitest、TypeScript 项目假设 | ADR-018 / 0.30.2 | 外部 dogfood 仓库的契约、PR check 历史、合并提交和 ruleset 对账 |
+| 30 | GitHub Models 单次输入超限时完整 diff 不被截断，source 无损拆成不超过八片；每片都有效才合并，重复 finding 保留最高严重度，任一片失败或继续超限都阻断 | ADR-018 / 0.30.2 | mock 413 后核对逐片调用与聚合；真实含多份来源的 PR 核对 Check Run 和模型调用日志 |

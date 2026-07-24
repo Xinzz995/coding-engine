@@ -7,8 +7,13 @@ import {
 import { gitHead, type GitDiffBundle } from './git.js';
 import { parseReviewIntent, type ReviewIntent } from './intent.js';
 import { assessDeepReviewRisk } from './risk.js';
-import { buildReviewPrompts, type ReviewSource } from './prompts.js';
-import { callGitHubModel } from './model.js';
+import {
+  buildReviewPrompts,
+  splitReviewPromptShard,
+  type ReviewPromptShard,
+  type ReviewSource,
+} from './prompts.js';
+import { callGitHubModel, type ModelFailureReason } from './model.js';
 import {
   evaluateReviewModelResult,
   renderReviewCheck,
@@ -28,6 +33,8 @@ const CHECK_NAMES: Record<ReviewAxis, string> = {
 const SOURCE_COUNT_LIMIT = 100;
 const SOURCE_TOTAL_LIMIT = 500 * 1024;
 const SOURCE_FILE_LIMIT = 128 * 1024;
+const MODEL_SHARD_LIMIT = 8;
+const AGGREGATE_FINDING_LIMIT = 50;
 
 export type ModelCall = (opts: {
   token: string;
@@ -37,8 +44,41 @@ export type ModelCall = (opts: {
   axis: ReviewAxis;
 }) => Promise<
   | { status: 'valid'; output: ReviewModelOutput; error: null }
-  | { status: 'invalid'; output: null; error: string }
+  | {
+      status: 'invalid';
+      output: null;
+      error: string;
+      reason?: ModelFailureReason;
+    }
 >;
+
+const SEVERITY_RANK = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3,
+} as const;
+
+function aggregateReviewOutputs(
+  outputs: ReviewModelOutput[],
+): ReviewModelOutput | null {
+  const findings = new Map<string, ReviewModelOutput['findings'][number]>();
+  for (const output of outputs) {
+    for (const finding of output.findings) {
+      const current = findings.get(finding.id);
+      if (!current || SEVERITY_RANK[finding.severity] > SEVERITY_RANK[current.severity]) {
+        findings.set(finding.id, finding);
+      }
+    }
+  }
+  if (findings.size > AGGREGATE_FINDING_LIMIT) return null;
+  return {
+    summary: outputs.length === 1
+      ? outputs[0].summary
+      : `完整覆盖 ${outputs.length} 个隔离输入分片；合并后发现 ${findings.size} 项问题。`,
+    findings: [...findings.values()],
+  };
+}
 
 function matchesSelector(path: string, selector: string): boolean {
   const normalized = selector.replace(/\\/g, '/');
@@ -433,17 +473,68 @@ export async function runGitHubReviewAxis(opts: {
     appendQualityReceipt(opts.workspace, receipt);
     return { receipt, check: await publish(client, receipt) };
   }
-  const prompts = buildReviewPrompts(opts.axis, {
-    repository: event.repository,
-    baseSha: event.baseSha,
-    headSha: event.headSha,
-    contractSha256: contractRead.sha256,
-    intent,
-    diff,
-    sources,
-    deepReasons: risk.reasons,
-  });
-  if (prompts.status === 'invalid') {
+  const modelCall = opts.modelCall ?? callGitHubModel;
+  const changedFiles = files.map((file) => file.filename);
+  const pending: ReviewPromptShard[] = [{ sources, diff, fragmented: false }];
+  const modelOutputs: ReviewModelOutput[] = [];
+  let reviewError: QualityError | null = null;
+  while (pending.length > 0) {
+    const shard = pending.shift()!;
+    const prompts = buildReviewPrompts(opts.axis, {
+      repository: event.repository,
+      baseSha: event.baseSha,
+      headSha: event.headSha,
+      contractSha256: contractRead.sha256,
+      intent,
+      changedFiles,
+      diff: shard.diff,
+      sources: shard.sources,
+      allSourcePaths: sources.map((source) => source.path),
+      deepReasons: risk.reasons,
+      fragmented: shard.fragmented,
+    });
+    if (prompts.status === 'invalid') {
+      reviewError = { code: 'review-input-too-large', message: prompts.error };
+      break;
+    }
+    let modelResult: Awaited<ReturnType<ModelCall>>;
+    try {
+      modelResult = await modelCall({
+        token: opts.token,
+        model: contract.review.model,
+        systemPrompt: prompts.system,
+        userPrompt: prompts.user,
+        axis: opts.axis,
+      });
+    } catch (error) {
+      modelResult = {
+        status: 'invalid',
+        output: null,
+        error: `模型调用异常：${error instanceof Error ? error.message : String(error)}`,
+        reason: 'provider-error',
+      };
+    }
+    if (modelResult.status === 'valid') {
+      modelOutputs.push(modelResult.output);
+      continue;
+    }
+    const inputTooLarge = modelResult.reason === 'input-too-large'
+      || /HTTP 413.*tokens_limit_reached/s.test(modelResult.error);
+    if (!inputTooLarge) {
+      reviewError = { code: 'model-output-invalid', message: modelResult.error };
+      break;
+    }
+    const split = splitReviewPromptShard(shard);
+    if (!split || modelOutputs.length + pending.length + split.length > MODEL_SHARD_LIMIT) {
+      reviewError = {
+        code: 'review-input-too-large',
+        message: `完整输入超过 GitHub Models 单次额度，且需要多于 ${MODEL_SHARD_LIMIT} 个分片；请缩小评审来源或拆分 PR`,
+      };
+      break;
+    }
+    pending.unshift(...split);
+  }
+  if (reviewError) {
     const receipt = receiptWithError({
       workspace: opts.workspace,
       axis: opts.axis,
@@ -455,30 +546,14 @@ export async function runGitHubReviewAxis(opts: {
       model: contract.review.model,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
-      error: { code: 'review-input-too-large', message: prompts.error },
+      error: reviewError,
       started,
     });
     appendQualityReceipt(opts.workspace, receipt);
     return { receipt, check: await publish(client, receipt) };
   }
-  const modelCall = opts.modelCall ?? callGitHubModel;
-  let modelResult: Awaited<ReturnType<ModelCall>>;
-  try {
-    modelResult = await modelCall({
-      token: opts.token,
-      model: contract.review.model,
-      systemPrompt: prompts.system,
-      userPrompt: prompts.user,
-      axis: opts.axis,
-    });
-  } catch (error) {
-    modelResult = {
-      status: 'invalid',
-      output: null,
-      error: `模型调用异常：${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-  if (modelResult.status === 'invalid') {
+  const modelOutput = aggregateReviewOutputs(modelOutputs);
+  if (!modelOutput) {
     const receipt = receiptWithError({
       workspace: opts.workspace,
       axis: opts.axis,
@@ -490,17 +565,20 @@ export async function runGitHubReviewAxis(opts: {
       model: contract.review.model,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
-      error: { code: 'model-output-invalid', message: modelResult.error },
+      error: {
+        code: 'model-output-invalid',
+        message: `分片评审合并后超过 ${AGGREGATE_FINDING_LIMIT} 个问题，请缩小 PR`,
+      },
       started,
     });
     appendQualityReceipt(opts.workspace, receipt);
     return { receipt, check: await publish(client, receipt) };
   }
   const changedFileSet = new Set([
-    ...files.map((file) => file.filename),
+    ...changedFiles,
     ...sources.map((source) => source.path),
   ]);
-  const outOfScopeFinding = modelResult.output.findings.find((finding) =>
+  const outOfScopeFinding = modelOutput.findings.find((finding) =>
     !changedFileSet.has(finding.file));
   if (outOfScopeFinding) {
     const receipt = receiptWithError({
@@ -592,7 +670,7 @@ export async function runGitHubReviewAxis(opts: {
     return { receipt, check: await publish(client, receipt) };
   }
   const evaluated = evaluateReviewModelResult(
-    modelResult.output,
+    modelOutput,
     exceptionsRead.value.exceptions,
     event.headSha,
     now,

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildReviewPrompts } from './prompts.js';
+import {
+  buildReviewPrompts,
+  splitReviewPromptShard,
+} from './prompts.js';
 
 function input() {
   return {
@@ -13,6 +16,7 @@ function input() {
       nonGoals: 'no IO',
       verification: 'unit test',
     },
+    changedFiles: ['src/app.ts'],
     diff: '+value',
     sources: [{ path: 'AGENTS.md', content: '# rules' }],
     deepReasons: [],
@@ -36,6 +40,26 @@ describe('review prompt boundaries', () => {
     expect(payload.diff).toBe(malicious);
     expect(payload.sources[0].content).toContain('reveal credentials');
     expect(result.system).toContain('不可信数据');
+  });
+
+  it('splits oversized inputs without dropping source or diff text', () => {
+    const source = 'first rule\nsecond rule\nthird rule\nfourth rule';
+    const diff = 'diff --git a/a.ts b/a.ts\n+one\n+two\n+three\n+four';
+    const split = splitReviewPromptShard({
+      sources: [{ path: 'AGENTS.md', content: source }],
+      diff,
+      fragmented: false,
+    });
+    expect(split).not.toBeNull();
+    if (!split) return;
+    expect(split.every((item) => item.fragmented)).toBe(true);
+    if (split[0].sources[0].content !== source) {
+      expect(split.map((item) => item.sources[0].content).join('')).toBe(source);
+      expect(split.every((item) => item.diff === diff)).toBe(true);
+    } else {
+      expect(split.map((item) => item.diff).join('')).toBe(diff);
+      expect(split.every((item) => item.sources[0].content === source)).toBe(true);
+    }
   });
 
   it('fails closed when the diff exceeds the bounded model input', () => {
