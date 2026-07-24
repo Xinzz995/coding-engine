@@ -1,5 +1,15 @@
 {
   "version": 1,
   "exceptions": [],
-  "deliveries": []
+  "deliveries": [
+    {
+      "id": "delivery-2026-07-24-bootstrap-runtime-dir",
+      "commitSha": "b8730c8ef1cf15711118556a38fd2ef7e3c5eac8",
+      "reason": "首次自托管工作流把 npm 前缀指向不存在的 GitHub 临时子目录；按公开异常记录仅合并已通过原有四平台 CI 的启动修复，随后立即恢复 branch ruleset。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-25T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30094331734"
+    }
+  ]
 }

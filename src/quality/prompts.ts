@@ -18,9 +18,18 @@ export interface ReviewPromptInput {
   headSha: string;
   contractSha256: string;
   intent: ReviewIntent;
+  changedFiles: string[];
   diff: string;
   sources: ReviewSource[];
+  allSourcePaths?: string[];
   deepReasons: string[];
+  fragmented?: boolean;
+}
+
+export interface ReviewPromptShard {
+  sources: ReviewSource[];
+  diff: string;
+  fragmented: boolean;
 }
 
 function assetPath(name: string): string {
@@ -69,9 +78,74 @@ export function buildReviewPrompts(
       },
       intent: input.intent,
       deepReviewReasons: input.deepReasons,
+      coverage: {
+        changedFiles: input.changedFiles,
+        fragmented: input.fragmented ?? false,
+        allSourcePaths: input.allSourcePaths
+          ?? [...new Set(input.sources.map((source) => source.path))],
+        fragmentSourcePaths: [...new Set(input.sources.map((source) => source.path))],
+      },
       sources: input.sources,
       diff: input.diff,
     }),
   ].join('\n');
   return { status: 'valid', system, user };
+}
+
+function splitText(value: string): [string, string] | null {
+  if (value.length < 2) return null;
+  const middle = Math.floor(value.length / 2);
+  const before = value.lastIndexOf('\n', middle);
+  const after = value.indexOf('\n', middle);
+  const candidates = [
+    before >= Math.floor(value.length / 4) ? before + 1 : -1,
+    after >= 0 && after <= Math.ceil(value.length * 3 / 4) ? after + 1 : -1,
+  ].filter((item) => item > 0 && item < value.length);
+  const splitAt = candidates.length > 0
+    ? candidates.sort((a, b) => Math.abs(a - middle) - Math.abs(b - middle))[0]
+    : middle;
+  return [value.slice(0, splitAt), value.slice(splitAt)];
+}
+
+function sourceChars(sources: ReviewSource[]): number {
+  return sources.reduce((sum, source) => sum + source.content.length, 0);
+}
+
+function splitSources(sources: ReviewSource[]): [ReviewSource[], ReviewSource[]] | null {
+  if (sources.length === 0) return null;
+  if (sources.length === 1) {
+    const split = splitText(sources[0].content);
+    if (!split) return null;
+    return [
+      [{ path: sources[0].path, content: split[0] }],
+      [{ path: sources[0].path, content: split[1] }],
+    ];
+  }
+  const target = sourceChars(sources) / 2;
+  let total = 0;
+  let splitAt = 1;
+  for (let index = 0; index < sources.length - 1; index += 1) {
+    total += sources[index].content.length;
+    splitAt = index + 1;
+    if (total >= target) break;
+  }
+  return [sources.slice(0, splitAt), sources.slice(splitAt)];
+}
+
+/**
+ * Splits an oversized model input without dropping repository-controlled text.
+ * The caller recursively reviews both returned shards and only accepts the
+ * aggregate when every shard returns a valid result.
+ */
+export function splitReviewPromptShard(
+  shard: ReviewPromptShard,
+): [ReviewPromptShard, ReviewPromptShard] | null {
+  const split = splitSources(shard.sources);
+  return split
+    ? split.map((sources) => ({
+        sources,
+        diff: shard.diff,
+        fragmented: true,
+      })) as [ReviewPromptShard, ReviewPromptShard]
+    : null;
 }

@@ -140,6 +140,98 @@ describe('remote review axis', () => {
     }));
   });
 
+  it('reviews every lossless shard and keeps the most severe duplicate result', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    const modelCall = vi.fn()
+      .mockResolvedValueOnce({
+        status: 'invalid' as const,
+        output: null,
+        error: 'GitHub Models HTTP 413: tokens_limit_reached',
+        reason: 'input-too-large' as const,
+      })
+      .mockResolvedValueOnce({
+        status: 'valid' as const,
+        output: {
+          summary: 'fragment clear',
+          findings: [{
+            id: 'spec:src-py:1:duplicate',
+            axis: 'spec' as const,
+            severity: 'low' as const,
+            file: 'src.py',
+            line: 1,
+            title: 'minor note',
+            evidence: 'same evidence',
+            source: 'acceptance criteria',
+            impact: 'small',
+            recommendation: 'consider later',
+          }],
+        },
+        error: null,
+      })
+      .mockResolvedValueOnce({
+        status: 'valid' as const,
+        output: {
+          summary: 'fragment found a blocker',
+          findings: [{
+            id: 'spec:src-py:1:duplicate',
+            axis: 'spec' as const,
+            severity: 'high' as const,
+            file: 'src.py',
+            line: 1,
+            title: 'minor note',
+            evidence: 'same evidence',
+            source: 'acceptance criteria',
+            impact: 'breaks the promised behavior',
+            recommendation: 'fix before merging',
+          }],
+        },
+        error: null,
+      });
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'spec',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall: modelCall as ModelCall,
+      now: new Date('2026-07-24T00:00:00Z'),
+    });
+    expect(modelCall).toHaveBeenCalledTimes(3);
+    expect(result.receipt.status).toBe('failed');
+    expect(result.receipt.findings).toHaveLength(1);
+    expect(result.receipt.findings[0].severity).toBe('high');
+    expect(result.receipt.reviewSummary).toContain('2 个隔离输入分片');
+  });
+
+  it('fails closed instead of dropping input when eight source shards are insufficient', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    (api.getTextFile as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) =>
+      path === 'AGENTS.md' ? 'Always handle the declared failure path.\n'.repeat(2_000) : 'src');
+    const modelCall = vi.fn(async () => ({
+      status: 'invalid' as const,
+      output: null,
+      error: 'GitHub Models HTTP 413: tokens_limit_reached',
+      reason: 'input-too-large' as const,
+    }));
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'standards',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+    });
+    expect(modelCall).toHaveBeenCalledTimes(8);
+    expect(result.receipt.status).toBe('unverifiable');
+    expect(result.receipt.errors[0]).toMatchObject({
+      code: 'review-input-too-large',
+    });
+  });
+
   it('does not call the model and publishes unverifiable when PR intent is incomplete', async () => {
     const { root, baseSha, eventPath } = setup();
     const api = client(baseSha, '## 意图\nOnly intent');

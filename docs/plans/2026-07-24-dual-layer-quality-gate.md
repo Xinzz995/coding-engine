@@ -53,6 +53,8 @@ scope: root
   retry 状态。
 - 建立 Spec、Standards、Deep 三份短 prompt 与共同 JSON schema；仓库文本标成不可信数据。
 - 实现 GitHub Models adapter 与本地只读 agent adapter；结构、大小、head/policy 逐项校验。
+- 远端输入遵守 GitHub 免费额度：输出上限 4000，完整 diff 不截断；source 超限时最多无损
+  拆成八片，逐片有效后机械合并并保留重复 finding 的最高严重度。
 - local review 并行独立运行 Spec/Standards，风险要求时再运行 Deep；不合并或重新排序 finding。
 
 ## Task 3：quality CLI 与展示
@@ -90,9 +92,10 @@ scope: root
 3. 推送实现分支，创建过渡 PR，等待现有 CI，并完成独立 review。
 4. 合并并发布 0.30.0；核对 tag、GitHub Release、npm gitHead 和干净同步状态。
 5. 自托管前修复同名源码仓库的 npm 执行冲突并发布 0.30.1；第二个 coding-engine PR 用
-   0.30.1 生成 self-host 配置；通过后启用完整 ruleset，验证 direct
-   push 被拒绝、旧 SHA 不可复用、doctor 回读通过。
-6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.1 配置规则；
+   0.30.1 生成 self-host 配置。首次远端运行发现临时前缀目录缺失及模型免费额度超限，经
+   #13 记录的有界 bootstrap 修复并发布 0.30.2；随后必须由 0.30.2 完整裁决真实 PR，验证
+   direct push 被拒绝、旧 SHA 不可复用、doctor 回读通过，再关闭异常。
+6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.2 配置规则；
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
 

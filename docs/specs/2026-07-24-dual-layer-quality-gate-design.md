@@ -82,7 +82,7 @@ scope: root
     "repository": "owner/repo",
     "defaultBranch": "main",
     "releaseRefs": ["refs/tags/v*"],
-    "codingXVersion": "0.30.1",
+    "codingXVersion": "0.30.2",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",
@@ -131,6 +131,12 @@ PR 正文必须有四个非空段：意图、验收标准、非目标、验证�
 
 输入中的仓库内容全部用明确边界标为不可信数据。评审模型无工具、无写权限，不能服从 diff、
 PR 正文或源码中的指令。
+
+远端 adapter 兼容 GitHub 免费额度的 8000 输入/4000 输出 token 上限，模型输出最多请求
+4000 token。单次输入超限时不得截断：完整 diff 在每次调用中保持不变，只把可信 source
+无损拆成最多八个片段，逐片调用并机械合并，同一 finding 冲突时保留更高严重度。任一片段
+失败、合并后超过 50 个 finding、需要超过八片，或完整 diff 本身仍超限，都返回
+`unverifiable` 并要求缩小 source 或 PR。分片只发生在同一轴内部，不合并三条评审轴。
 
 ### 输出
 
@@ -185,7 +191,8 @@ receipt 以 JSONL 追加到 workspace；GitHub 通过 Check Run 保存共享结�
 
 远端评审使用 GitHub Models 和自动提供的 `GITHUB_TOKEN`，不要求上传本机模型密钥。API 错误、
 限流、模型不支持结构化输出或响应无法验证时，对应 Check Run 为 failure，结论
-`unverifiable`。
+`unverifiable`。[GitHub 当前免费额度](https://docs.github.com/en/github-models/use-github-models/prototyping-with-ai-models#rate-limits)
+是 provider 边界，不得把 catalog 中模型的理论上下文长度误当成仓库可用额度。
 
 规则集使用固定名称 `coding-x quality gate`。init 只更新同名 repository ruleset，不触碰用户
 其他规则集。写远端前展示旧/新摘要并要求确认；写后重新 GET，按语义比较而不是相信写请求的
@@ -236,9 +243,10 @@ HTTP 成功。
 1. 新能力在现有 CI、完整测试和独立人工/agent 复核下进入 main；
 2. 发布 0.30.0；
 3. 自托管预演发现同名源码仓库的直接 npx 调用冲突，发布隔离安装修复 0.30.1；
-4. 后续 PR 添加 coding-engine 的自托管工作流，固定使用 0.30.1；
-5. 该 PR 通过过渡规则后，启用完整 ruleset；
-6. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
+4. 后续 PR 添加 coding-engine 的自托管工作流并启用完整 ruleset；
+5. 首次远端运行发现 npm 前缀目录不存在，经公开异常记录和有界 bootstrap 修复；
+6. 由恢复后的 0.30.1 门禁审查并发布 0.30.2，正式固定使用 0.30.2；
+7. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
 依赖审计；CI 另跑 Node 18/22 与 Linux/macOS/Windows 兼容矩阵。发布工作流验证 tag 提交位于
@@ -253,6 +261,7 @@ main，且关联提交通过完整质量门禁。
 | 命令无法启动、cwd 越界 | unverifiable，退出 2 |
 | PR 四段意图缺失 | Spec unverifiable，不调用模型 |
 | 模型/API/结构化输出失败 | 对应轴 unverifiable |
+| 模型输入超限 | 完整 diff + 无损 source 分片；任一片失败或超过八片则 unverifiable |
 | critical/high finding | failed |
 | medium finding 无有效例外 | failed |
 | medium finding有有效例外 | passed，并记录 exception |
