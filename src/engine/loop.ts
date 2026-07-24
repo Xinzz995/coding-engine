@@ -1,10 +1,7 @@
-import { join, basename, resolve } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { writeFileAtomicSync } from './fs-atomic.js';
-import { permissionWarning, runAgent, type AgentKind, type RunResult } from './agent.js';
-import { type Prd } from './prd.js';
+import { permissionWarning, runAgent, type AgentKind } from './agent.js';
 import { createPrdGuard } from './prd-guard.js';
-import type { PrdReadResult } from './prd-guard.js';
 import {
   ensureStateFile, blankStateFor, tryReadState, getCurrentStoryId, allStoriesResolved,
   enableEscalation, restoreEscalated, restoreValidated, issueValidationReceipt,
@@ -13,7 +10,7 @@ import {
 } from './state.js';
 import {
   runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback,
-  abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES, applyValidatorFailure,
+  abortDesc, applyValidatorFailure,
   applyValidatorSuccess,
 } from './gate.js';
 import { resolveBuilderModel, resolveValidatorModel } from './models.js';
@@ -36,6 +33,16 @@ import {
   type ValidationRequest,
 } from './validation-protocol.js';
 import { checkTddPolicy, readTddConfig, runTddGate, type TddConfig } from './tdd-gate.js';
+import { readLoopInstruction, renderInstruction } from './loop-instructions.js';
+import { convergedExit, readRunState, waitForSigint } from './loop-lifecycle.js';
+import {
+  agentInvocation,
+  agentOutcome,
+  createLoopEvidenceRecorder,
+  readRawFile,
+} from './loop-observability.js';
+
+export { renderInstruction } from './loop-instructions.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -69,64 +76,6 @@ export interface LoopConfig {
   legacyValidatorProtocolForTests?: boolean;
 }
 
-function waitForSigint(): Promise<void> {
-  return new Promise((resolve) => process.once('SIGINT', () => resolve()));
-}
-
-function readInstruction(dir: string, file: string): string | null {
-  try {
-    return readFileSync(join(dir, file), 'utf-8');
-  } catch {
-    return null;
-  }
-}
-
-// Instruction files use the {{WORKSPACE}} placeholder instead of a hardcoded
-// '.workspace/' prefix so a custom --workspace path reaches the agent. The
-// agent runs at the project root, and cfg.workspace is resolved the same way
-// the engine resolves it (relative to the project root, or absolute), so the
-// agent and engine always share the same prd.json / state.json / progress.md.
-const TDD_WORKFLOW_INSTRUCTION = [
-  '',
-  '本轮已启用 TDD。读取并遵循已安装的 `tdd` skill；本 story 的 acceptanceCriteria 已获用户批准，',
-  '把它们作为行为清单逐项完成真实 RED→GREEN→重构。若 acceptanceCriteria 不足以确定公共行为、',
-  '与源码事实冲突或需要新增覆盖排除，使用 [需要人工核实] 并将 story 置 blocked，不自行补意图。',
-  '',
-].join('\n');
-
-export function renderInstruction(
-  text: string,
-  workspace: string,
-  tddEnabled = false,
-): string {
-  return text
-    .replaceAll('{{WORKSPACE}}', workspace)
-    .replaceAll('{{MAX_RETRIES}}', String(MAX_RETRIES))
-    .replaceAll('{{ARBITRATION_PREFIXES}}', ARBITRATION_PREFIXES.join('、'))
-    .replaceAll('{{TDD_WORKFLOW}}', tddEnabled ? TDD_WORKFLOW_INSTRUCTION : '');
-}
-
-// 运行期读取执行状态；缺失/损坏时按全部未开始处理（绝不覆盖原文件，交给 repair）。
-function readRunState(statePath: string, prd: Prd): RunState {
-  const state = tryReadState(statePath);
-  if (state) return state;
-  console.warn('⚠️  state.json 缺失或不可读，本轮按全部 story 未开始处理；若文件损坏请运行 npx coding-x repair');
-  return blankStateFor(prd);
-}
-
-// 收敛出口单源：两个 allStoriesResolved 出口（no-op 快路径/轮末完成判定）共用，
-// blocked>0 时 exit 3——「收敛但待人工」对所有出口成立（ADR-009/发现 D）
-const convergedExit = (prd: Prd, state: RunState): number => {
-  const blockedIds = prd.userStories.filter((s) => state[s.id]?.blocked).map((s) => s.id);
-  if (blockedIds.length > 0) {
-    const passedCount = prd.userStories.length - blockedIds.length;
-    console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
-    return 3;
-  }
-  console.log('\n✅ 实现已验证：全部 story 通过。交付尚未就绪；可先运行 /review-loop（复用 quality review）获取本地反馈，再提交 PR 让最新提交通过远端质量门禁；合并后运行 /compound-docs 收口。');
-  return 0;
-};
-
 export async function runLoop(cfg: LoopConfig): Promise<number> {
   // 单写者互斥（ADR-008）：活锁 fail-fast、stale 自动接管；冲突时未启动任何资源，直接退出码 2
   let lock: LockHandle;
@@ -142,8 +91,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
   const prdPath = join(cfg.workspace, 'prd.json');
   const statePath = join(cfg.workspace, 'state.json');
   const guard = createPrdGuard(prdPath);
-  const builderRaw = readInstruction(cfg.instructionsDir, 'builder.md');
-  const validatorRaw = readInstruction(cfg.instructionsDir, 'validator.md');
+  const builderRaw = readLoopInstruction(cfg.instructionsDir, 'builder.md');
+  const validatorRaw = readLoopInstruction(cfg.instructionsDir, 'validator.md');
 
   let server: ReturnType<typeof dashboard.start> | null = null;
   try {
@@ -266,45 +215,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // so engine and agent would never share state and the loop would always hit
     // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
     const progressPath = join(cfg.workspace, 'progress.md');
-    const rawOf = (p: string): string | null => {
-      try { return readFileSync(p, 'utf-8'); } catch { return null; }
-    };
-    const outcomeOf = (r: { timedOut: boolean; exitCode: number | null }): 'completed' | 'timeout' | 'error' =>
-      r.timedOut ? 'timeout' : r.exitCode === 0 ? 'completed' : 'error';
-    const invocationOf = (
-      result: RunResult,
-      outcome: 'completed' | 'timeout' | 'error',
-    ): AgentInvocationEvidence => {
-      const diagnostic = outcome === 'completed'
-        ? ''
-        : clipEvidenceDiagnostic(result.outputTail).trim();
-      return {
-        durationMs: result.durationMs,
-        exitCode: result.exitCode,
-        ...(diagnostic ? { diagnosticTail: diagnostic } : {}),
-      };
-    };
-    // evidence 是增强不是关键路径：写入失败只 warn（去重一次），绝不影响循环
-    let warnedEvidence = false;
-    const recordEvidence = (record: EvidenceRecord) => {
-      try {
-        appendEvidence(cfg.workspace, record);
-      } catch (err) {
-        if (!warnedEvidence) {
-          warnedEvidence = true;
-          console.warn(`⚠️  evidence 记录写入失败（不影响循环）：${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-    };
-    // 每次 guard.read() 都可能检出新篡改事件——三处读取点共用（archive 记文件名，与报告红旗区文件清单对齐）
-    const recordTamper = (read: PrdReadResult, iteration: number) => {
-      if (read.tamperedArchive !== undefined) {
-        recordEvidence({
-          type: 'tamper', source: 'engine', at: new Date().toISOString(), iteration,
-          archive: read.tamperedArchive === null ? null : basename(read.tamperedArchive),
-        });
-      }
-    };
+    const rawOf = readRawFile;
+    const outcomeOf = agentOutcome;
+    const invocationOf = agentInvocation;
+    // evidence 是增强不是关键路径：写入失败只 warn（去重一次），绝不影响循环。
+    const { record: recordEvidence, recordTamper } = createLoopEvidenceRecorder(cfg.workspace);
     // 四处提前退出（builder 异常轮熔断 / no-op 全部 resolved 快路径 / no-op 非 resolved 熔断 / validator 异常轮熔断）
     // break 前统一补一次 guard.read()+recordTamper()——它们都复用轮首快照提前结束本轮，
     // 若 builder 在本轮篡改了 prd.json，不补这一读就不会被检测/恢复/存档（与标准完成判定

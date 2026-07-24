@@ -24,7 +24,7 @@ scope: root
 - 2026-07-04 机器可读输出（`--json` 类）的契约：stdout 恒为单个可 `JSON.parse` 的对象（错误态也输出 `{error, ...}` 对象而非裸文本），警告/提示一律走 stderr 且由 `src/cli.ts` 层发出（render 纯函数只产 stdout 文本与退出码）；测试断言用「`console.log` spy 恰被调用一次 + 对该次参数整体 `JSON.parse`」的不变式，强于正则匹配（见 `renderStatusJson` 与 cli.test.ts 的 status --json 用例）。
 - 2026-07-08 展示/渲染层消费宽松解析产物时（`tryReadPrd` 无逐字段守卫——与 `tryReadState` 的读入守卫模式不同，属历史设计），任何值插进输出标记前必须统一走「空值兜底+转义」helper（见 render.ts `text()`），不逐点裸插——缺字段的合法 JSON 会让裸插值抛 TypeError，造成「status 正常降级而验证报告崩」的消费端分叉；段级配置已有单源守卫的直接复用（`readQualityChecks`/`readModelsConfig`），并且其 warnings 必须透出到呈现面，否则「配置非法」与「未配置」不可区分。
 - 2026-07-08 跨文件消费的 notes 行前缀/标签一律从 gate.ts 导出常量做单源（`ARBITRATION_PREFIXES`、`GATE_FAIL_LINE_PREFIX`、`VALIDATOR_FAIL_LINE_PREFIX`、`BLOCKED_LINE_PREFIX`），所有生产/消费方 import 同一常量；测试对这些前缀保留字面量断言、不 import 实现常量——字面量断言即格式契约守卫，任何一方单独改措辞立刻红。
-- 2026-07-08 主循环内的增强副产物（证据记录、自动验证报告）写入失败只 warn（同类告警去重一次），不改循环控制流与退出码；用户显式调用同一能力时仍须以非零退出报告失败（对比 loop.ts `recordEvidence`/自动 writeReport 与 CLI `report`）。
+- 2026-07-08 主循环内的增强副产物（证据记录、自动验证报告）写入失败只 warn（同类告警去重一次），不改循环控制流与退出码；用户显式调用同一能力时仍须以非零退出报告失败（对比 `loop-observability.ts` 的 recorder/loop 自动 writeReport 与 CLI `report`）。
 - 2026-07-08 多写方共享的追加式记录文件用 JSONL（每行一条独立 JSON 带 `source` 字段）：读取端逐行解析+逐字段守卫+未知 type 跳过计数（前向兼容，新版本写的类型旧消费方不炸），坏行只损失自己；「文件不存在」（ENOENT）是唯一合法空态，其余 IO 故障必须上抛——把 EACCES/EISDIR 伪装成「零记录」是审计信道的假阴性（见 `evidence.ts readEvidence`）。
 - 2026-07-22 可变状态里的瞬时失败详情必须在机械确认失败的同一时点快照进 append-only 证据，不能等收口时从最终 state/progress 反推——成功重试会清空 notes、覆盖现场。生产端只保留接近失败点的有界尾部，读取端对同名字段逐类型/长度守卫，报告端折叠并按纯文本转义；当前门禁 outputTail 与引擎接受的 Validator failed claim 共用 2000 字符单源边界（见 `clipEvidenceDiagnostic`、`diagnosticTail`、`validatorDiagnostic`）。
 - 2026-07-08 新增 workspace 运行产物时三处必须同步：prd-to-json 归档清单的**复制**动作、**删除**动作（残留旧轮数据会污染新轮）、以及报告等消费端的文件集合——任何一处缺席都是「归档回看断链」或「新轮红旗区被旧轮污染」（0.20.0 终审实证：tampered 存档曾三处全缺）。
@@ -38,7 +38,7 @@ scope: root
 - 2026-07-22 skill 要改写 workspace 前，先通过 doctor 读取工作区锁结论，完成只读准备后在首次真实写入前再次检查；活锁、无法判定或结论变化都保持零写入，陈旧/损坏锁不由 skill 删除。双检查只缩小 TOCTOU 窗口，文案不得把它冒充 O_EXCL 机械互斥。
 - 2026-07-16 把 CLI 传入的 workspace 路径与项目根拼接时用 `resolve` 不用 `join`——`--workspace` 可传绝对路径，`join` 会把已是绝对路径的段原样拼在 root 之下产生不存在的路径，检查类消费方表现为假阴性（doctor 的锁检查「引擎运行中却报无锁」与门禁配置检查同款实翻，0.21.0 终审端到端实测检出）。
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。
-- 2026-07-20 引擎对 agent 的一切判定只消费机械信号：进程结局按超时标志与退出码三分（completed/timeout/error），产物变化按轮首/轮后内容字符串对比（不 parse）——agent 自己声明的「做完了」不可信，与机械门禁不可共谋同源（见 loop.ts `outcomeOf` 与 no-op 双无变化判定；ADR-009）。给判定加新维度时先自问是否仍是引擎自己观测的确定性事实。
+- 2026-07-20 引擎对 agent 的一切判定只消费机械信号：进程结局按超时标志与退出码三分（completed/timeout/error），产物变化按轮首/轮后内容字符串对比（不 parse）——agent 自己声明的「做完了」不可信，与机械门禁不可共谋同源（见 `loop-observability.ts` 的 `agentOutcome` 与 loop 的 no-op 双无变化判定；ADR-009）。给判定加新维度时先自问是否仍是引擎自己观测的确定性事实。
 - 2026-07-20 给循环体新增「每轮必做」的收口逻辑（留痕、篡改检测、收敛判定）时，先枚举退出点全集——continue、break、快路径 return，以及循环自然耗尽这个隐式出口——再抽 helper 单源逐点接入；枚举必须在 plan 阶段完成，不能靠 review 逐个数（0.22.0 实证：终轮篡改检测五个点位分四批才收齐，每处都是审查抓漏；见 `tamperCheckBeforeExit` 四调用点+post-loop 收口、`convergedExit` 两出口单源）。
 - 2026-07-23 开发过程约束与最终机械结论必须分层：TDD skill 的 RED/GREEN 顺序只能形成可复核的 agent 声明；宿主 hook 只给提交前反馈；引擎必须在 Validator 前独立重跑冻结政策下的 coverageCheck，不能复用 hook 通过结论或从 Git 时间推断“先写测试”（ADR-017）。
 - 2026-07-23 把项目原生命令升级为安全门禁时，冻结的不能只有命令字符串：同时枚举并摘要保护阈值、排除、零测试、基线和 diff-coverage 委托文件，限制 realpath 在项目根内，再检查基线后生产路径新增的 ignore marker。摘要能发现常见政策漂移，但同权限工具链仍不防伪，文案不得越界（见 `tdd-gate.ts`、ADR-017）。
