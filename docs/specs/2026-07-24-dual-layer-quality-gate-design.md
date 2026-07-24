@@ -157,6 +157,11 @@ source 或拆分 PR。provider 仍返回 413 时可在剩余片数内继续无�
 - 标题、具体证据、违反的来源；
 - 真实影响与建议处理。
 
+finding 只表示需要修改或正式延期的缺陷，正向确认只能进入 summary。每条 evidence 必须是模型
+当前分片中 `finding.file` 对应 diff 或 source 至少 12 个字符的逐字连续摘录；本地与远端
+adapter 都机械回查。改写、虚构、过短、跨文件或跨分片引用使该轴 `unverifiable`，不能作为
+失败 finding 进入门禁。
+
 严重度为 `critical | high | medium | low`：
 
 - critical/high：阻断，不能由普通延期放行；
@@ -306,6 +311,7 @@ main，branch/tag ruleset 仍启用，并按 ruleset 的 GitHub App 来源核对
 | PR 五段意图或关联规格声明缺失 | Spec unverifiable，不调用模型 |
 | 关联规格越界、不在契约范围或 head 不存在 | Spec unverifiable，不调用模型 |
 | 模型/API/结构化输出失败 | 对应轴 unverifiable |
+| finding 证据非当前分片对应文件逐字原文或不足 12 字符 | 对应轴 unverifiable |
 | 模型输入超限 | source/diff 无损分片覆盖完整评审空间；任一片失败或超过八片则 unverifiable |
 | critical/high finding | failed |
 | medium finding 无有效例外 | failed |

@@ -71,6 +71,10 @@ Standards 与 Deep 读取工程标准，Deep 不再重新裁决产品范围。�
 后续运行又连续复现 Standards 或 Deep 在仓库没有运行中模型任务时永久排队。根因是三个有
 依赖关系的 job 都加入同一个 `queue: max` 组；改为一个仓库队列 job 内顺序执行三轴，仍分别
 发布三条 Check Run，并在任一轴未通过时让汇总 job 失败。
+随后真实结构治理 PR 又暴露模型把正向确认误写成 finding、并生成输入中不存在的 diff 证据。
+finding 因此只允许表达需要改变或正式延期的缺陷；evidence 必须是当前分片中对应
+`finding.file` 至少 12 个字符的逐字原文，由 adapter 回查。虚构、改写、过短、跨文件或跨
+分片引用均为输出无效，不进入失败裁决。
 
 发布检查不能只按名称相信同名 Check Run：发布时重新读取启用中的 branch/tag ruleset，以
 ruleset 绑定的 GitHub App ID 核对关联 PR head 的最新结果。正常路径要求全部成功；只有受
