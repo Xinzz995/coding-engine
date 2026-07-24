@@ -122,7 +122,7 @@ runner:
   --yes                          quality init：确认应用预览中的变更
   --local-only                   quality init：只写项目文件，不配置远端
   --remote                       quality doctor：同时回读 GitHub 规则
-  --intent-file <path>           quality review：四段式意图文件
+  --intent-file <path>           quality review：五段式意图与关联规格文件
   --base-ref <ref>               quality review：比较基线
   --checks                       quality gate：运行项目原生命令
   --axis <spec|standards|deep>   quality gate：运行一条远端评审轴

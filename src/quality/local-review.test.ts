@@ -19,6 +19,7 @@ function setup(): { root: string; intentPath: string } {
   mkdirSync(join(root, 'docs', 'specs'), { recursive: true });
   writeFileSync(join(root, 'AGENTS.md'), '# Standards');
   writeFileSync(join(root, 'docs', 'specs', 'one.md'), '# Spec');
+  writeFileSync(join(root, 'docs', 'specs', 'unrelated.md'), '# Unrelated');
   writeFileSync(join(root, 'app.py'), 'def value(): return 1\n');
   writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify({
     version: 1,
@@ -51,14 +52,17 @@ function setup(): { root: string; intentPath: string } {
   git(root, 'add', 'app.py');
   git(root, 'commit', '-qm', 'change');
   const intentPath = `${root}-intent.md`;
-  writeFileSync(intentPath, '## 意图\nchange\n## 验收标准\nreturns 2\n## 非目标\nno IO\n## 验证方式\nunit test');
+  writeFileSync(
+    intentPath,
+    '## 意图\nchange\n## 验收标准\nreturns 2\n## 非目标\nno IO\n## 验证方式\nunit test\n## 关联规格\n- docs/specs/one.md',
+  );
   return { root, intentPath };
 }
 
 describe('local quality review', () => {
   it('runs isolated spec and standards reviews and records deep not-required', async () => {
     const { root, intentPath } = setup();
-    const agentCall = vi.fn(async ({ axis }: { axis: string }) => ({
+    const agentCall = vi.fn(async ({ axis }: { axis: string; prompt: string }) => ({
       status: 'valid' as const,
       output: { summary: `${axis} clear`, findings: [] },
       error: null,
@@ -77,6 +81,9 @@ describe('local quality review', () => {
     expect(result.status).toBe('passed');
     expect(result.receipts.map((receipt) => receipt.axis)).toEqual(['spec', 'standards', 'deep']);
     expect(agentCall).toHaveBeenCalledTimes(2);
+    const specPrompt = agentCall.mock.calls.find(([call]) => call.axis === 'spec')?.[0].prompt;
+    expect(specPrompt).toContain('docs/specs/one.md');
+    expect(specPrompt).not.toContain('docs/specs/unrelated.md');
     expect(readFileSync(join(workspace, 'quality', 'review-latest.md'), 'utf8'))
       .toContain('交付凭证');
   });

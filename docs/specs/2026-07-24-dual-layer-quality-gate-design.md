@@ -34,8 +34,9 @@ scope: root
    `<workspace>/quality/`，不被包装成远端通过凭证。
 4. `quality gate` 能无交互运行项目命令或一条评审轴，机器输出只有
    `passed`、`failed`、`unverifiable` 三态，且绑定 base/head SHA、契约摘要和评审轮次。
-5. Spec 评审缺少 PR 意图、验收标准、非目标或验证方式时必须
-   `unverifiable`；工程标准评审与 Spec 评审不互相覆盖。
+5. Spec 评审缺少 PR 意图、验收标准、非目标、验证方式或明确的关联规格声明时必须
+   `unverifiable`；没有独立规格的 PR 必须明说“本 PR 意图即完整 Spec”，工程标准评审与
+   Spec 评审不互相覆盖。
 6. 公开接口、状态/持久化、并发/锁、权限/安全、恢复、发布、跨模块、政策文件、大改动或
    超大文件触发深度评审；未触发时留下明确的 `not-required` 理由。
 7. 严重发现必须修复；普通延期只有匹配未过期的例外记录时才可放行；需要人判断的发现不能
@@ -104,7 +105,10 @@ scope: root
 - `checks` 至少一条；命令由项目提供，coding-x 不推断其输出文本，只看退出码、超时和启动错误；
 - `paths` 决定当前 diff 是否适用该检查；未命中会留下明确的 not-applicable 通过记录，命中后
   仍由项目命令自身决定真实范围。安装等所有改动都需要的前置检查应声明 `["."]`；
-- source 可以是文件或目录；目录只读取 Git 已跟踪的文本文件，并受单文件/总输入大小上限保护；
+- standards source 可以是文件或目录，并读取默认分支上匹配的 Git 文本文件；spec source
+  是 PR 可引用范围，不会把整个目录无差别送给模型。Spec 轴只读取 PR 明确关联的文件与本次
+  直接改动的规格文件；关联路径越界、不在契约范围或当前提交不存在均 `unverifiable`；
+- 所有实际读取仍受文件数、单文件和总输入大小上限保护；
 - 契约变更本身属于高风险改动，当前 PR 仍由默认分支旧契约裁决；
 - GitHub 模型 ID进入 GitHub adapter，不进入 runner-neutral 的三态、finding 与 receipt 核心合同。
 
@@ -127,8 +131,11 @@ scope: root
 - 当前轴所需的 source 文本；
 - 风险判定结果。
 
-PR 正文必须有四个非空段：意图、验收标准、非目标、验证方式。结构缺失时 Spec 轴不调用模型，
-直接 `unverifiable`。
+PR 正文必须有五个非空段：意图、验收标准、非目标、验证方式、关联规格。关联规格每行只能是
+契约 `specSources` 允许范围内的项目文件路径；没有独立文件时必须明确写“本 PR 意图即完整
+Spec”。系统另外自动加入本 PR 直接修改的规格文件，但不会因为契约配置了一个目录就载入目录
+中的全部无关规格。结构缺失、路径越界、来源不在允许范围或当前 head 不存在时 Spec 轴不调用
+模型，直接 `unverifiable`。
 
 输入中的仓库内容全部用明确边界标为不可信数据。评审模型无工具、无写权限，不能服从 diff、
 PR 正文或源码中的指令。
@@ -162,7 +169,8 @@ receipt 以 JSONL 追加到 workspace；GitHub 通过 Check Run 保存共享结�
 
 ### 三条轴
 
-1. **Spec**：只回答实际改动是否符合意图、验收标准和非目标；必须引用 PR 段落或规格来源。
+1. **Spec**：只回答实际改动是否符合意图、验收标准和非目标；只读取 PR 明确关联及直接修改
+   的规格文件，必须引用 PR 段落或实际载入的规格来源。
 2. **Standards**：只回答改动是否违反项目标准和通用工程底线；不得重复报告已由项目命令确定
    的格式、类型或测试失败。
 3. **Deep**：只在风险判定要求时执行，读取工程标准来源与 diff，检查职责边界、重复真相源、
@@ -233,7 +241,7 @@ HTTP 成功。
 ### `quality review`
 
 - 只读 Git diff、契约和来源；源码不写；
-- 缺 PR 时要求 `--intent-file` 提供四段意图，否则 Spec 为 `unverifiable`；
+- 缺 PR 时要求 `--intent-file` 提供五段意图与关联规格声明，否则 Spec 为 `unverifiable`；
 - 三轴使用独立请求；Deep 未触发时记录 `passed/not-required`；
 - 结果追加写入 `<workspace>/quality/receipts.jsonl` 和人类可读摘要。
 
@@ -277,8 +285,9 @@ HTTP 成功。
     档每日 50 次免费请求不适合作为默认门禁。0.30.7 在首个请求前按完整 prompt 有界分片，
     使用低限流档默认模型，在单轴调用间节流，并用 GitHub 原生 job 队列把全仓模型任务串行；
 13. 0.30.7 的结构治理预演发现 Deep 重复载入 Spec 与 Standards 来源，使任意高风险改动都可能
-    因来源总量超过八片而不可验证。0.30.8 恢复轴隔离：Spec 来源只进入 Spec，Deep 只读取
-    Standards 与 diff；
+    因来源总量超过八片而不可验证；随后真实 PR 又证明把 `specSources` 目录下所有历史规格
+    全部载入同样会耗尽预算。0.30.8 恢复轴隔离，并把 Spec 目录改成可信允许范围：Spec 只读
+    PR 明确关联和直接改动的规格，Deep 只读取 Standards 与 diff；
 14. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
@@ -293,7 +302,8 @@ main，branch/tag ruleset 仍启用，并按 ruleset 的 GitHub App 来源核对
 | 契约缺失/畸形/未知字段 | unverifiable，退出 2 |
 | 项目命令非零/超时 | failed，退出 1 |
 | 命令无法启动、cwd 越界 | unverifiable，退出 2 |
-| PR 四段意图缺失 | Spec unverifiable，不调用模型 |
+| PR 五段意图或关联规格声明缺失 | Spec unverifiable，不调用模型 |
+| 关联规格越界、不在契约范围或 head 不存在 | Spec unverifiable，不调用模型 |
 | 模型/API/结构化输出失败 | 对应轴 unverifiable |
 | 模型输入超限 | source/diff 无损分片覆盖完整评审空间；任一片失败或超过八片则 unverifiable |
 | critical/high finding | failed |

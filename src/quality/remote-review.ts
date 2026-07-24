@@ -5,7 +5,11 @@ import {
   parseGitHubPullRequestEvent,
 } from './github.js';
 import { gitHead, type GitDiffBundle } from './git.js';
-import { parseReviewIntent, type ReviewIntent } from './intent.js';
+import {
+  parseReviewIntent,
+  selectReviewSpecPaths,
+  type ReviewIntent,
+} from './intent.js';
 import { assessDeepReviewRisk } from './risk.js';
 import {
   buildReviewPrompts,
@@ -96,6 +100,16 @@ async function collectRemoteSources(
 ): Promise<ReviewSource[]> {
   const tree = await client.getTreePaths(ref);
   const paths = tree.filter((path) => selectors.some((selector) => matchesSelector(path, selector)));
+  return readRemoteSources(client, ref, paths, false);
+}
+
+async function readRemoteSources(
+  client: GitHubClient,
+  ref: string,
+  paths: string[],
+  allowEmpty: boolean,
+): Promise<ReviewSource[]> {
+  if (paths.length === 0 && allowEmpty) return [];
   if (paths.length === 0) throw new Error('没有找到任何评审来源文件');
   if (paths.length > SOURCE_COUNT_LIMIT) throw new Error('评审来源文件超过 100 个');
   const sources: ReviewSource[] = [];
@@ -309,6 +323,9 @@ export async function runGitHubReviewAxis(opts: {
   const intent = intentRead.status === 'valid'
     ? intentRead.intent
     : fallbackIntent(current.title, current.body);
+  const specification = intentRead.status === 'valid'
+    ? intentRead.specification
+    : null;
 
   let diff: string;
   let files: Awaited<ReturnType<GitHubClient['getPullFiles']>>;
@@ -459,7 +476,20 @@ export async function runGitHubReviewAxis(opts: {
   const sourceRef = opts.axis === 'spec' ? event.headSha : event.baseSha;
   let sources: ReviewSource[];
   try {
-    sources = await collectRemoteSources(client, sourceRef, selectors);
+    if (opts.axis === 'spec') {
+      if (!specification) throw new Error('PR 没有可用的关联规格声明');
+      const tree = await client.getTreePaths(sourceRef);
+      const available = tree.filter((path) =>
+        selectors.some((selector) => matchesSelector(path, selector)));
+      const selected = selectReviewSpecPaths(
+        specification,
+        available,
+        files.map((file) => file.filename),
+      );
+      sources = await readRemoteSources(client, sourceRef, selected, true);
+    } else {
+      sources = await collectRemoteSources(client, sourceRef, selectors);
+    }
   } catch (error) {
     const receipt = receiptWithError({
       workspace: opts.workspace,
