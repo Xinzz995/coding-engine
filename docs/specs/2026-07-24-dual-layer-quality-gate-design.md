@@ -190,9 +190,15 @@ receipt 以 JSONL 追加到 workspace；GitHub 通过 Check Run 保存共享结�
    contents/pull-requests/models read 与 checks write；不签出 PR head，不执行 PR 文件，通过
    GitHub API 读取数据并在精确 head SHA 上发布 Spec、Standards、Deep 三个 Check Run。
 
-远端评审使用 GitHub Models 和自动提供的 `GITHUB_TOKEN`，不要求上传本机模型密钥。API 错误、
-限流、模型不支持结构化输出或响应无法验证时，对应 Check Run 为 failure，结论
-`unverifiable`。[GitHub 当前免费额度](https://docs.github.com/en/github-models/use-github-models/prototyping-with-ai-models#rate-limits)
+远端评审使用 GitHub Models。仓库读取与 Check Run 发布始终使用权限受限的自动
+`GITHUB_TOKEN`；模型调用优先使用仓库 secret `CODING_X_MODEL_TOKEN`，没有配置时才退回
+自动 token。两个 token 在 adapter 边界分开传递，模型 token 不用于仓库 API。AI job 仍只运行
+默认分支固定版本，不签出 PR head，因此 secret 不会交给 PR 代码。
+
+GitHub 免费 Models 同时受请求频率和整周期用量约束，只适合原型；强门禁需要为
+`CODING_X_MODEL_TOKEN` 配置有可用额度的专用凭据，或明确接受自动 token 额度耗尽即阻断。
+API 错误、限流、模型不支持结构化输出或响应无法验证时，对应 Check Run 为 failure，结论
+`unverifiable`。[GitHub Models 计费与免费额度](https://docs.github.com/en/billing/concepts/product-billing/github-models)
 是 provider 边界，不得把 catalog 中模型的理论上下文长度误当成仓库可用额度。
 
 规则集使用固定名称 `coding-x quality gate`。init 只更新同名 repository ruleset，不触碰用户
@@ -253,7 +259,10 @@ HTTP 成功。
 8. v0.30.3 首次真实自托管 PR 暴露模型请求和干净检出两项兼容问题，PR 保持阻断且不合并；
 9. 两项修复通过真实 provider 与干净检出复验后发布 0.30.4，由 0.30.4 完整裁决后续真实 PR，
    成功后关闭异常；
-10. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
+10. 后续结构治理 PR 的仓库自动 token 用尽免费 Models 周期额度，三轴均保持
+    `unverifiable`；#23 记录恢复过程，0.30.5 将 GitHub API token 与专用模型 token 隔离，
+    不以重试或例外把不可用伪装成通过；
+11. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
 依赖审计；CI 另跑 Node 18/22 与 Linux/macOS/Windows 兼容矩阵。发布工作流验证 tag 提交位于

@@ -72,6 +72,7 @@ jobs:
       - name: Review Spec against the exact pull request head
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
@@ -102,6 +103,7 @@ jobs:
       - name: Review engineering standards against the exact pull request head
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
@@ -132,6 +134,7 @@ jobs:
       - name: Run risk-triggered structural review
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"

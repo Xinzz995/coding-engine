@@ -35,6 +35,9 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow).toContain('--axis spec');
     expect(workflow).toContain('--axis standards');
     expect(workflow).toContain('--axis deep');
+    expect(workflow.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/g)?.length).toBe(4);
+    expect(workflow.match(/CODING_X_MODEL_TOKEN: \$\{\{ secrets\.CODING_X_MODEL_TOKEN \}\}/g)?.length)
+      .toBe(3);
   });
 
   it('installs every invocation at an isolated prefix and pins the exact version', () => {
