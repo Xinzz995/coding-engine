@@ -68,6 +68,15 @@
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30109488571"
+    },
+    {
+      "id": "delivery-2026-07-24-review-evidence-grounding",
+      "commitSha": "4c20f5fcea92b8d43c46e78786da2878c15789f6",
+      "reason": "0.30.8 正在修复的缺陷使它无法可信审查证据核验修复自身：PR #29 最新提交的 Spec 通过，但 Standards 把 26 条正向确认、Deep 把 8 条已实现要求生成阻断 finding，并错误声称实际已使用的逐文件差异未使用。仅在人工逐项核对这些输出、补齐跨文件证据隔离、809 项测试、项目原生检查、四平台 CI、类型检查、静态检查、构建、CLI 冒烟和高危依赖审计全部通过后异常合并。发布修复版本后，coding-engine 结构治理 PR 与外部非 Node PR 必须由正常规则完整通过，才关闭记录。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30110551369"
     }
   ]
 }
