@@ -122,6 +122,25 @@ describe('review result evaluation', () => {
     )).toContain('对应文件');
   });
 
+  it('does not attribute evidence from another changed file to the finding path', () => {
+    expect(validateReviewOutputGrounding(
+      groundedOutput('return allowAllUsers();'),
+      {
+        diff: [
+          'diff --git a/src/x.ts b/src/x.ts',
+          '+return authorizeCaller();',
+          'diff --git a/src/y.ts b/src/y.ts',
+          '+return allowAllUsers();',
+        ].join('\n'),
+        sources: [],
+        diffByFile: new Map([
+          ['src/x.ts', '+return authorizeCaller();'],
+          ['src/y.ts', '+return allowAllUsers();'],
+        ]),
+      },
+    )).toContain('对应文件');
+  });
+
   it('rejects trivial excerpts that cannot substantiate a finding', () => {
     expect(validateReviewOutputGrounding(groundedOutput('+'), {
       diff: '+return authorizeCaller();',

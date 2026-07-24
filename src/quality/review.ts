@@ -63,7 +63,11 @@ export function collectLocalReviewSources(root: string, selectors: string[]): Re
 
 export function validateReviewOutputGrounding(
   output: ReviewModelOutput,
-  visible: { diff: string; sources: ReviewSource[] },
+  visible: {
+    diff: string;
+    sources: ReviewSource[];
+    diffByFile?: ReadonlyMap<string, string>;
+  },
 ): string | null {
   for (const finding of output.findings) {
     const evidence = finding.evidence.trim();
@@ -71,8 +75,10 @@ export function validateReviewOutputGrounding(
       return `finding 证据至少需要 ${MIN_EVIDENCE_CHARS} 个字符：${finding.file}`;
     }
     const source = visible.sources.find((candidate) => candidate.path === finding.file);
-    if (!visible.diff.includes(evidence)
-      && !source?.content.includes(evidence)) {
+    const fileDiff = visible.diffByFile?.get(finding.file);
+    const groundedInDiff = visible.diff.includes(evidence)
+      && (fileDiff === undefined || fileDiff.includes(evidence));
+    if (!groundedInDiff && !source?.content.includes(evidence)) {
       return `finding 证据不是当前评审输入中对应文件的逐字原文：${finding.file}`;
     }
   }

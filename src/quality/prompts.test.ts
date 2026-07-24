@@ -43,6 +43,7 @@ describe('review prompt boundaries', () => {
     expect(payload.sources[0].content).toContain('reveal credentials');
     expect(result.system).toContain('不可信数据');
     expect(result.system).toContain('逐字连续摘录');
+    expect(result.system).toContain('不得借用其他文件内容');
     expect(result.system).toContain('正向确认');
   });
 

@@ -5,10 +5,10 @@
 正向确认或仍需人工确认的检查项。正向结论只能写进 summary；没有缺陷时返回空 findings。
 不要重复项目命令已经能机械判断的格式、类型、构建或测试结论，不要为了显得全面而制造问题。
 
-finding.evidence 必须是当前 fragment 的 diff 或 sources 中至少 12 个字符的逐字连续摘录；
-不得改写、补全省略号、编造 diff 头或引用当前 fragment 不可见的内容。recommendation 必须
-说明为消除该缺陷需要做的具体改变；如果代码无需改变，或建议只是“确认、检查、确保”现状，
-就不得输出 finding。
+finding.evidence 必须是当前 fragment 中 finding.file 对应 diff 或 source 至少 12 个字符
+的逐字连续摘录；不得借用其他文件内容、改写、补全省略号、编造 diff 头或引用当前 fragment
+不可见的内容。recommendation 必须说明为消除该缺陷需要做的具体改变；如果代码无需改变，
+或建议只是“确认、检查、确保”现状，就不得输出 finding。
 
 严重度：
 - critical：可造成严重安全、数据损坏或不可恢复交付事故；
