@@ -38,11 +38,15 @@ describe('coding-engine delivery controls', () => {
 
   it('publishes only an exact main-derived version with corresponding PR delivery checks', () => {
     const workflow = rootFile('.github/workflows/publish.yml');
+    const verifier = rootFile('build/verify-release-delivery.mjs');
     expect(workflow).toContain('git merge-base --is-ancestor "$GITHUB_SHA" origin/main');
     expect(workflow).toContain('/commits/${GITHUB_SHA}/pulls?per_page=100');
     expect(workflow).toContain('pr?.merge_commit_sha === process.env.GITHUB_SHA');
     expect(workflow).toContain('/commits/${DELIVERY_HEAD}/check-runs?per_page=100');
-    expect(workflow).toContain('contract.github.requiredChecks');
+    expect(workflow).toContain('node build/verify-release-delivery.mjs');
+    expect(verifier).toContain('contract.github.requiredChecks');
+    expect(verifier).toContain('run?.app?.id === expected.appId');
+    expect(verifier).toContain("status: 'exceptional'");
     expect(workflow).toContain('npm publish --provenance --access public');
     expect(workflow).not.toMatch(/uses:\s+actions\/(?:checkout|setup-node)@v\d+/);
   });

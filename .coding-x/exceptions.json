@@ -10,6 +10,15 @@
       "expiresAt": "2026-07-25T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30094331734"
+    },
+    {
+      "id": "delivery-2026-07-24-bootstrap-model-budget",
+      "commitSha": "c4de93c82c737010b7d9480a3d124f371d5b3061",
+      "reason": "默认分支 0.30.1 把完整评审输入一次发送给 GitHub Models，三个 AI 轴均因免费层 8000-token 上限而 unverifiable；仅在四平台 CI 和项目原生命令通过后合并无损 source 分片修复，随后立即恢复 branch ruleset。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-25T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30095745594"
     }
   ]
 }
