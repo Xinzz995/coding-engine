@@ -44,6 +44,9 @@ describe('coding-engine delivery controls', () => {
     expect(workflow).toContain('pr?.merge_commit_sha === process.env.GITHUB_SHA');
     expect(workflow).toContain('/commits/${DELIVERY_HEAD}/check-runs?per_page=100');
     expect(workflow).toContain('node build/verify-release-delivery.mjs');
+    expect(workflow).toContain('GH_TOKEN: ${{ secrets.CODING_X_ADMIN_TOKEN }}');
+    expect(workflow).not.toContain('GH_TOKEN: ${{ github.token }}');
+    expect(workflow).not.toContain('secrets.CODING_X_ADMIN_TOKEN || github.token');
     expect(verifier).toContain('contract.github.requiredChecks');
     expect(verifier).toContain('run?.app?.id === expected.appId');
     expect(verifier).toContain("status: 'exceptional'");

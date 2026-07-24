@@ -72,12 +72,13 @@ jobs:
       - name: Dependency audit
         run: npm audit --audit-level=high
 
-      # 0.30.0 是显式 bootstrap：它先发布门禁能力，随后仓库才用固定的 0.30.0 自托管。
-      # 从受管 workflow 已进入 tag 的版本开始，发布提交必须已取得契约列出的全部 required checks。
+      # 首次自托管经历了显式记录的 bootstrap；从受管 workflow 已进入 tag 的版本开始，
+      # 发布提交必须已取得契约列出的全部 required checks，或匹配未关闭的有界交付异常。
+      # 读取完整 ruleset（包括 bypass_actors）必须使用显式管理凭据；缺失时 fail closed。
       - name: Verify delivery checks for self-hosted releases
         if: hashFiles('.github/workflows/coding-x-review.yml') != ''
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.CODING_X_ADMIN_TOKEN }}
         run: |
           gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls?per_page=100" \
             -H "Accept: application/vnd.github+json" \
