@@ -210,6 +210,37 @@ describe('remote review axis', () => {
     expect(result.receipt.reviewSummary).toContain('2 个隔离输入分片');
   });
 
+  it('pre-shards oversized prompts and paces valid provider calls', async () => {
+    const { root, baseSha, eventPath } = setup();
+    const api = client(baseSha);
+    (api.getTextFile as ReturnType<typeof vi.fn>).mockImplementation(async (path: string) =>
+      path === 'AGENTS.md'
+        ? 'Always handle the declared failure path.\n'.repeat(1_800)
+        : '# Feature\nMust return true.');
+    const modelCall = vi.fn(async () => ({
+      status: 'valid' as const,
+      output: { summary: 'fragment clear', findings: [] },
+      error: null,
+    }));
+    const modelPause = vi.fn(async () => {});
+    const result = await runGitHubReviewAxis({
+      root,
+      workspace: join(root, '.workspace'),
+      eventPath,
+      axis: 'standards',
+      token: 'token',
+      client: api as GitHubClient,
+      modelCall,
+      modelPause,
+      modelPaceMs: 7,
+    });
+    expect(result.receipt.status).toBe('passed');
+    expect(modelCall.mock.calls.length).toBeGreaterThan(1);
+    expect(modelCall.mock.calls.length).toBeLessThanOrEqual(8);
+    expect(modelPause).toHaveBeenCalledTimes(modelCall.mock.calls.length - 1);
+    expect(modelPause).toHaveBeenCalledWith(7);
+  });
+
   it('fails closed instead of dropping input when eight source shards are insufficient', async () => {
     const { root, baseSha, eventPath } = setup();
     const api = client(baseSha);
@@ -230,7 +261,8 @@ describe('remote review axis', () => {
       client: api as GitHubClient,
       modelCall,
     });
-    expect(modelCall).toHaveBeenCalledTimes(8);
+    expect(modelCall.mock.calls.length).toBeGreaterThan(0);
+    expect(modelCall.mock.calls.length).toBeLessThanOrEqual(8);
     expect(result.receipt.status).toBe('unverifiable');
     expect(result.receipt.errors[0]).toMatchObject({
       code: 'review-input-too-large',

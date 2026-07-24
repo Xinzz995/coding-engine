@@ -50,7 +50,7 @@ scope: root
 - 2026-07-24 项目原生检查必须由受 Git 管理的契约显式声明命令、工作目录和适用路径；coding-x 可以发现候选，但写入前必须让人确认。下游只依赖 Git 与能用退出状态表达结论的命令，禁止把 coding-engine 的 npm/Vitest/TypeScript 约定推广成跨项目合同。
 - 2026-07-24 GitHub ruleset 是真实合并控制，CLI 写文件和本地 review 都不是；配置后必须回读语义而非只相信写 API 成功。管理员仍能删除规则，所以定时 doctor 要检查启用状态、所需检查及应用来源、协作者对应的审核人数、发布引用和异常期限，漂移即失败。
 - 2026-07-24 受管 workflow 运行固定版本的 coding-x 时，不能在项目目录直接 `npx coding-x@<version>`：当下游仓库本身也叫 `coding-x`，npm 会优先按当前同名项目解析，表现为发布包存在但 bin 找不到。统一用 `npm exec --prefix "$RUNNER_TEMP" --package="coding-x@<exact>" -- coding-x ...` 隔离安装，同时保留调用时的项目工作目录；`--prefix` 必须指向已存在目录，npm 不会替调用方创建缺失的末级目录。
-- 2026-07-24 provider 的可用额度不是模型 catalog 的理论上下文：GitHub Models 免费层按账号限制单次输入/输出。超限处理必须保留完整 diff，只无损拆分 source 并逐片 fail closed；不得截断证据、丢弃失败片段或让后一个片段降低前一个片段的严重度。
+- 2026-07-24 provider 的可用额度不是模型 catalog 的理论上下文：GitHub Models 免费层按账号限制单次输入/输出、每分钟和每日请求。超限处理必须在首次调用前按完整 prompt 预算，无损拆分 source、diff 或两者，使叶子片段共同覆盖完整评审空间并逐片 fail closed；不得截断证据、丢弃失败片段或让后一个片段降低前一个片段的严重度。不同 PR 共享模型额度时还必须在仓库级串行，单个 PR 内串行不够。
 - 2026-07-24 发布验证不能只按 Check Run 名称查 success；必须从启用中的 ruleset 取得预期 GitHub App ID，并核对关联 PR head 的最新同源结果。紧急发布只能消费受 Git 管理、未过期、未关闭且 commit 是发布祖先的 delivery 记录，日志必须明确标成异常发布。
 
 ## 陷阱

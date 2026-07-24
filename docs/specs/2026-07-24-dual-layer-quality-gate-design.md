@@ -69,7 +69,7 @@ scope: root
     }
   ],
   "review": {
-    "model": "openai/gpt-4.1",
+    "model": "openai/gpt-4.1-mini",
     "specSources": ["docs/specs/"],
     "standardsSources": ["AGENTS.md", "docs/golden-principles.md"],
     "deepReview": {
@@ -134,10 +134,12 @@ PR 正文必须有四个非空段：意图、验收标准、非目标、验证�
 PR 正文或源码中的指令。
 
 远端 adapter 兼容 GitHub 免费额度的 8000 输入/4000 输出 token 上限，模型输出最多请求
-4000 token。单次输入超限时不得截断：完整 diff 在每次调用中保持不变，只把可信 source
-无损拆成最多八个片段，逐片调用并机械合并，同一 finding 冲突时保留更高严重度。任一片段
-失败、合并后超过 50 个 finding、需要超过八片，或完整 diff 本身仍超限，都返回
-`unverifiable` 并要求缩小 source 或 PR。分片只发生在同一轴内部，不合并三条评审轴。
+4000 token。调用前先保守估算完整 prompt；超限时不得截断，而是按实际 prompt 大小选择拆分
+可信 source、diff 或两者，最多形成八个无损片段。叶子片段共同覆盖完整
+`source × diff` 评审空间，逐片有效后才机械合并，同一 finding 冲突时保留更高严重度。任一
+片段失败、合并后超过 50 个 finding、需要超过八片，均返回 `unverifiable` 并要求缩小
+source 或拆分 PR。provider 仍返回 413 时可在剩余片数内继续无损拆分，绝不以截断换取成功。
+分片只发生在同一轴内部，不合并三条评审轴。
 
 ### 输出
 
@@ -190,12 +192,18 @@ receipt 以 JSONL 追加到 workspace；GitHub 通过 Check Run 保存共享结�
    contents/pull-requests/models read 与 checks write；不签出 PR head，不执行 PR 文件，通过
    GitHub API 读取数据并在精确 head SHA 上发布 Spec、Standards、Deep 三个 Check Run。
 
-远端评审使用 GitHub Models。仓库读取与 Check Run 发布始终使用权限受限的自动
+远端评审使用 GitHub Models。默认使用低限流档的 `openai/gpt-4.1-mini`，避免高限流档免费
+账户每天 50 次请求无法支撑日常门禁；项目仍可显式选择其他支持严格结构化输出的模型。仓库
+读取与 Check Run 发布始终使用权限受限的自动
 `GITHUB_TOKEN`；模型调用优先使用仓库 secret `CODING_X_MODEL_TOKEN`，没有配置时才退回
 自动 token。两个 token 在 adapter 边界分开传递，模型 token 不用于仓库 API。AI job 仍只运行
 默认分支固定版本，不签出 PR head，因此 secret 不会交给 PR 代码。
 
-GitHub 免费 Models 同时受请求频率和整周期用量约束，只适合原型；强门禁需要为
+同一仓库的三轴与不同 PR 模型 job 使用 GitHub 原生并发组排成一个保留等待项的串行队列；
+单轴内部的分片调用再按低于 provider 每分钟上限的节奏发送。新 head 仍会通过外层 PR 并发组
+取消自己的旧运行，不会拿旧结果占据当前门禁。该队列只协调当前仓库，不是中央服务。
+
+GitHub 免费 Models 同时受请求频率和整周期用量约束，官方定位仍是原型；强门禁需要为
 `CODING_X_MODEL_TOKEN` 配置有可用额度的专用凭据，或明确接受自动 token 额度耗尽即阻断。
 API 错误、限流、模型不支持结构化输出或响应无法验证时，对应 Check Run 为 failure，结论
 `unverifiable`。[GitHub Models 计费与免费额度](https://docs.github.com/en/billing/concepts/product-billing/github-models)
@@ -264,7 +272,10 @@ HTTP 成功。
     不以例外把不可用伪装成通过；
 11. 0.30.6 对 429 按 `Retry-After` 在两分钟内最多尝试五次，并将三轴依次调度；重试耗尽仍
     为 `unverifiable`，不改变三态语义；
-12. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
+12. 真实运行继续证明“单个 PR 串行”不足以约束多个 Dependabot/人工 PR 的共享额度，且高限流
+    档每日 50 次免费请求不适合作为默认门禁。0.30.7 在首个请求前按完整 prompt 有界分片，
+    使用低限流档默认模型，在单轴调用间节流，并用 GitHub 原生 job 队列把全仓模型任务串行；
+13. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
 依赖审计；CI 另跑 Node 18/22 与 Linux/macOS/Windows 兼容矩阵。发布工作流验证 tag 提交位于
@@ -280,7 +291,7 @@ main，branch/tag ruleset 仍启用，并按 ruleset 的 GitHub App 来源核对
 | 命令无法启动、cwd 越界 | unverifiable，退出 2 |
 | PR 四段意图缺失 | Spec unverifiable，不调用模型 |
 | 模型/API/结构化输出失败 | 对应轴 unverifiable |
-| 模型输入超限 | 完整 diff + 无损 source 分片；任一片失败或超过八片则 unverifiable |
+| 模型输入超限 | source/diff 无损分片覆盖完整评审空间；任一片失败或超过八片则 unverifiable |
 | critical/high finding | failed |
 | medium finding 无有效例外 | failed |
 | medium finding有有效例外 | passed，并记录 exception |

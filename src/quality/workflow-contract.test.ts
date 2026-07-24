@@ -35,6 +35,9 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow).toContain('--axis spec');
     expect(workflow).toContain('--axis standards');
     expect(workflow).toContain('--axis deep');
+    expect(workflow.match(/group: coding-x-model-\$\{\{ github\.repository_id \}\}/g)?.length)
+      .toBe(3);
+    expect(workflow.match(/queue: max/g)?.length).toBe(3);
     expect(workflow).toMatch(
       /standards-review:\r?\n\s+if: always\(\).*\r?\n\s+needs: \[spec-review\]/,
     );

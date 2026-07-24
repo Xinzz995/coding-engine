@@ -89,7 +89,7 @@
     }
   ],
   "review": {
-    "model": "openai/gpt-4.1",
+    "model": "openai/gpt-4.1-mini",
     "specSources": [
       "docs/specs/",
       "docs/prds/"
@@ -119,7 +119,7 @@
     "releaseRefs": [
       "refs/tags/v*"
     ],
-    "codingXVersion": "0.30.6",
+    "codingXVersion": "0.30.7",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",

@@ -31,9 +31,9 @@ GitHub Models 取得结构化结论。仓库 API 与 Check Run 只使用自动 `
 可使用独立的 `CODING_X_MODEL_TOKEN`，且该 token 不进入 GitHub API client。对应 Check Run
 明确绑定 PR head。
 GitHub 免费调用额度当前限制每次 8000 个输入 token 和 4000 个输出 token；adapter 将输出上限
-固定为 4000。输入超限时保留完整 diff，只把可信来源无损拆成最多八个隔离片段，逐片有效后
-才合并 finding；任一片段失败、需要更多片段或仅完整 diff 已超限时均为 `unverifiable`，
-不截断内容后假装完成评审。
+固定为 4000。调用前按完整 prompt 保守预算，输入超限时无损拆分可信来源、diff 或两者，最多
+八个叶子片段共同覆盖完整 `source × diff` 评审空间，逐片有效后才合并 finding；任一片段
+失败或需要更多片段时均为 `unverifiable`，不截断内容后假装完成评审。
 
 默认分支上的契约和固定 coding-x 版本是可信政策源。PR 修改契约、评审规则或工作流时仍由
 旧政策裁决，并自动触发深度评审。规则集要求 PR、最新提交检查、解决对话、禁止强推与删除。
@@ -58,7 +58,11 @@ npm 包或 GitHub Release；失败标签保留用于审计，发布改用显式�
 仍可调用。#23 记录有界恢复；0.30.5 将模型凭据与仓库凭据隔离，避免为了增加模型容量而扩大
 Check Run 或仓库读取权限。0.30.6 对 429 遵守 provider 的 `Retry-After` 并在两分钟总时限内
 最多尝试五次，同时依次调度三轴评审，耗尽后仍为 `unverifiable`。此后门禁版本升级始终由
-旧版本审查。
+旧版本审查。0.30.6 的后续真实运行又证明单个 PR 内串行无法约束多个 PR 共享的账户额度，
+且默认 GPT-4.1 所属高限流档的免费日额度只有 50 次。0.30.7 改用已真实验证结构化输出的
+GPT-4.1 mini 作为低限流档默认值，在请求前按完整 prompt 选择 source/diff 分片，在分片间
+节流，并通过 GitHub 原生 job 并发组及 `queue: max` 将全仓模型任务串行；该方案不引入中央
+队列、守护进程或静默降级。
 
 发布检查不能只按名称相信同名 Check Run：发布时重新读取启用中的 branch/tag ruleset，以
 ruleset 绑定的 GitHub App ID 核对关联 PR head 的最新结果。正常路径要求全部成功；只有受
