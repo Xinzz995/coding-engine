@@ -44,12 +44,12 @@
     },
     {
       "id": "delivery-2026-07-24-model-token-restoration",
-      "commitSha": "fd9c9e1b0b396166472264f380a32950ed628988",
-      "reason": "仓库自动身份耗尽 GitHub Models 免费周期额度，PR #22 的三条独立评审均保持 unverifiable；仅在项目检查、四平台 CI、隔离边界测试和个人 token 真实模型调用通过后，异常交付模型凭据隔离修复，恢复后立即用旧版本规则复审并关闭记录。",
+      "commitSha": "78b8d72dd94c167b56309ee7e056c74219118fd7",
+      "reason": "仓库自动身份耗尽 GitHub Models 免费周期额度后，0.30.5 虽隔离了专用模型凭据，但旧版在大输入分片时连续发请求且三轴并发，PR #25 仍全部因 429 保持 unverifiable；仅在 787 项测试、项目检查、四平台 CI、隔离边界测试和个人 token 真实模型调用通过后，异常交付遵守 Retry-After 的有限重试与三轴串行修复。规则恢复后必须由 0.30.6 正常审完 PR #22 才能关闭记录。",
       "owner": "Xinzz995",
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
-      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30099148962"
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30101879354"
     }
   ]
 }
