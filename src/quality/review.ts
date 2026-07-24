@@ -18,6 +18,12 @@ const SOURCE_FILE_LIMIT = 128 * 1024;
 const SOURCE_TOTAL_LIMIT = 500 * 1024;
 const SOURCE_COUNT_LIMIT = 100;
 const MIN_EVIDENCE_CHARS = 12;
+const NO_CHANGE_RECOMMENDATIONS = [
+  /^(?:现有|当前|该|此处|代码|实现|行为|测试覆盖|测试)?(?:已经|已)?(?:符合要求[，,。；;\s]*)?(?:无需|无须|不必|不需要)(?:进行)?(?:任何)?(?:代码)?(?:修改|改动|改变|处理|修复|调整|行动)[。.!！\s]*$/u,
+  /^(?:no (?:code )?(?:change|changes|modification|modifications|fix|action)(?: is| are)? (?:needed|required|necessary)|no action required|requires? no (?:code )?(?:change|fix|action))[.!?\s]*$/iu,
+  /^keep (?:the (?:code|implementation)|it|this)?\s*as[- ]is[.!?\s]*$/iu,
+];
+const DIFF_BOUNDARY = '\0coding-x-diff-boundary\0';
 
 function isWithin(root: string, path: string): boolean {
   const rel = relative(root, path);
@@ -61,6 +67,32 @@ export function collectLocalReviewSources(root: string, selectors: string[]): Re
   return sources;
 }
 
+function unifiedDiffCode(value: string): string {
+  return value.split('\n').flatMap((line) => {
+    if (line.startsWith('diff --git ')
+      || line.startsWith('index ')
+      || line.startsWith('--- ')
+      || line.startsWith('+++ ')
+      || line.startsWith('@@')
+      || line.startsWith('\\ No newline at end of file')) {
+      return [DIFF_BOUNDARY];
+    }
+    return line.startsWith(' ') || line.startsWith('+') || line.startsWith('-')
+      ? [line.slice(1)]
+      : [];
+  }).join('\n');
+}
+
+export function validateReviewOutputSemantics(output: ReviewModelOutput): string | null {
+  for (const finding of output.findings) {
+    const recommendation = finding.recommendation.trim();
+    if (NO_CHANGE_RECOMMENDATIONS.some((pattern) => pattern.test(recommendation))) {
+      return `finding 建议明确表示无需修改，不是需要变更或正式延期的缺陷：${finding.file}`;
+    }
+  }
+  return null;
+}
+
 export function validateReviewOutputGrounding(
   output: ReviewModelOutput,
   visible: {
@@ -76,8 +108,11 @@ export function validateReviewOutputGrounding(
     }
     const source = visible.sources.find((candidate) => candidate.path === finding.file);
     const fileDiff = visible.diffByFile.get(finding.file);
-    const groundedInDiff = visible.diff.includes(evidence)
-      && fileDiff?.includes(evidence) === true;
+    const shardContainsEvidence = visible.diff.includes(evidence)
+      || unifiedDiffCode(visible.diff).includes(evidence);
+    const fileContainsEvidence = fileDiff?.includes(evidence) === true
+      || (fileDiff !== undefined && unifiedDiffCode(fileDiff).includes(evidence));
+    const groundedInDiff = shardContainsEvidence && fileContainsEvidence;
     if (!groundedInDiff && !source?.content.includes(evidence)) {
       return `finding 证据不是当前评审输入中对应文件的逐字原文：${finding.file}`;
     }
