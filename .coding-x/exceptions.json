@@ -95,6 +95,15 @@
       "expiresAt": "2026-07-26T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30116450737"
+    },
+    {
+      "id": "delivery-2026-07-24-review-correction-release",
+      "commitSha": "40ff41862fdd29f8574a6baf23abfa68c44c2398",
+      "reason": "PR #37 的异常记录原先要求远端纠正重审在 0.30.10 发布后由正常规则通过，但发布包若不先包含重审逻辑就无法满足这一顺序，故以本记录公开收窄该错误前提而不改写旧记录。PR #38 的项目检查与四平台 CI 全部通过；0.30.9 的 Standards 与 Deep 因旧八分片上限 unverifiable，Spec 把另一个分片已实现的结构无效重试误报为 high finding，并生成三条“无需修改”的正向 finding。人工以同一提交、规则、分片和模型复现后，用 0.30.10 固定机械拒绝原因重审同一分片，模型返回空 findings。仅允许异常合并精确发布提交；0.30.10 发布并正常固定后，本地接入、结构治理和全部异常关闭不得再走例外。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-26T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/23",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30117435567"
     }
   ]
 }
