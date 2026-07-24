@@ -208,9 +208,10 @@ receipt 以 JSONL 追加到 workspace；GitHub 通过 Check Run 保存共享结�
 自动 token。两个 token 在 adapter 边界分开传递，模型 token 不用于仓库 API。AI job 仍只运行
 默认分支固定版本，不签出 PR head，因此 secret 不会交给 PR 代码。
 
-同一仓库的三轴与不同 PR 模型 job 使用 GitHub 原生并发组排成一个保留等待项的串行队列；
-单轴内部的分片调用再按低于 provider 每分钟上限的节奏发送。新 head 仍会通过外层 PR 并发组
-取消自己的旧运行，不会拿旧结果占据当前门禁。该队列只协调当前仓库，不是中央服务。
+每个 PR 只创建一个模型队列 job，在该 job 内依次运行 Spec、Standards、Deep 并分别发布
+Check Run；不同 PR 的这个单一 job 再用 GitHub 原生 `queue: max` 并发组串行。不能让三个
+有依赖关系的 job 同时加入同一队列，否则已完成轴可能留下后续轴永久等待。单轴分片仍按低于
+provider 每分钟上限的节奏发送；新 head 由外层 PR 并发组取消旧运行。该队列只协调当前仓库。
 
 GitHub 免费 Models 同时受请求频率和整周期用量约束，官方定位仍是原型；强门禁需要为
 `CODING_X_MODEL_TOKEN` 配置有可用额度的专用凭据，或明确接受自动 token 额度耗尽即阻断。
