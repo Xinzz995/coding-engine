@@ -82,7 +82,7 @@ scope: root
     "repository": "owner/repo",
     "defaultBranch": "main",
     "releaseRefs": ["refs/tags/v*"],
-    "codingXVersion": "0.30.2",
+    "codingXVersion": "0.30.3",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",
@@ -247,9 +247,11 @@ HTTP 成功。
 4. 后续 PR 添加 coding-engine 的自托管工作流并启用完整 ruleset；
 5. 首次远端运行发现 npm 前缀目录不存在及免费模型输入超限，经 #13 公开记录后，仅在原有
    四平台 CI 和项目命令通过时执行有界 bootstrap；
-6. 发布工作流以受 Git 管理的未关闭异常记录显式发布 0.30.2，日志标记异常而非伪造检查成功；
-7. 0.30.2 必须完整裁决后续真实 PR，成功后关闭异常；
-8. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
+6. v0.30.2 的发布校验因默认 Actions 身份无法完整读取 ruleset 而安全失败，标签保留且不移动；
+7. 发布工作流改用显式管理只读凭据，并以受 Git 管理的未关闭异常记录发布 0.30.3，日志标记
+   异常而非伪造检查成功；
+8. 0.30.3 必须完整裁决后续真实 PR，成功后关闭异常；
+9. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
 依赖审计；CI 另跑 Node 18/22 与 Linux/macOS/Windows 兼容矩阵。发布工作流验证 tag 提交位于

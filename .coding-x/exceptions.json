@@ -19,6 +19,15 @@
       "expiresAt": "2026-07-25T12:00:00Z",
       "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
       "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30095745594"
+    },
+    {
+      "id": "delivery-2026-07-24-bootstrap-ruleset-readback",
+      "commitSha": "e2421cbf98771a8bebefc2d6cab2afe6523f3fdb",
+      "reason": "v0.30.2 发布校验使用 GitHub Actions 默认身份读取 ruleset 时看不到 bypass_actors，无法证明规则没有绕过主体，因此在发布前安全失败且未生成 npm 包或 GitHub Release；仅以明确配置的管理只读凭据修正回读，保留失败标签作为审计记录并改发 0.30.3。",
+      "owner": "Xinzz995",
+      "expiresAt": "2026-07-25T12:00:00Z",
+      "followUpUrl": "https://github.com/Xinzz995/coding-engine/issues/13",
+      "auditUrl": "https://github.com/Xinzz995/coding-engine/actions/runs/30096590460"
     }
   ]
 }

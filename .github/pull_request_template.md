@@ -1,4 +1,4 @@
-<!-- Managed by coding-x@0.30.2 quality init. -->
+<!-- Managed by coding-x@0.30.3 quality init. -->
 
 ## 意图
 
