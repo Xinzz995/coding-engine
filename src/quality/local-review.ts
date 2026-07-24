@@ -396,7 +396,22 @@ export async function runLocalQualityReview(opts: {
     receipts.push(receipt);
     appendQualityReceipt(opts.workspace, receipt);
   }
-  const deep = await runAxis('deep');
+  const interrupted = [spec, standards].find((receipt) =>
+    receipt.errors.some((error) => error.message.includes('reviewer 被 SIG')));
+  const deep = interrupted
+    ? errorReceipt({
+        workspace: opts.workspace,
+        now,
+        axis: 'deep',
+        repository: contractRead.contract.github.repository,
+        baseSha: diff.baseSha,
+        headSha: diff.headSha,
+        contractSha256: contractRead.sha256,
+        model: opts.model,
+        code: 'review-interrupted',
+        message: `前序评审被中断，未启动深度评审：${interrupted.errors[0]?.message ?? 'unknown'}`,
+      })
+    : await runAxis('deep');
   receipts.push(deep);
   appendQualityReceipt(opts.workspace, deep);
   writeFileAtomicSync(summaryPath, renderLocalSummary(receipts));

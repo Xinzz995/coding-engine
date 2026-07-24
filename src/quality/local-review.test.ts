@@ -112,4 +112,27 @@ describe('local quality review', () => {
     expect(result.receipts.slice(0, 2).every((receipt) =>
       receipt.errors[0]?.message.includes('runner unavailable'))).toBe(true);
   });
+
+  it('records interruption and does not start a new deep reviewer', async () => {
+    const { root, intentPath } = setup();
+    const agentCall = vi.fn(async () => ({
+      status: 'invalid' as const,
+      output: null,
+      error: '只读 reviewer 被 SIGINT 中断',
+      durationMs: 1,
+    }));
+    const result = await runLocalQualityReview({
+      root,
+      workspace: join(root, '.workspace'),
+      baseRef: 'main',
+      intentPath,
+      kind: 'codex',
+      agentCall,
+    });
+    expect(result.status).toBe('unverifiable');
+    expect(agentCall).toHaveBeenCalledTimes(2);
+    expect(result.receipts[2].errors[0]).toMatchObject({
+      code: 'review-interrupted',
+    });
+  });
 });

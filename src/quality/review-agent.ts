@@ -107,6 +107,7 @@ export async function runReadOnlyReviewAgent(opts: {
       stdout: string;
       stderr: string;
       overflow: boolean;
+      interrupted: NodeJS.Signals | null;
     }>((resolve) => {
       const child = spawn(command, args, {
         cwd: opts.cwd,
@@ -130,12 +131,36 @@ export async function runReadOnlyReviewAgent(opts: {
       child.stderr.on('data', (chunk: Buffer) => { stderr = collect(stderr, chunk); });
       const killOnExit = () => forceKillProcessTreeOnExit(child);
       process.once('exit', killOnExit);
-      const finish = (timedOut: boolean, exitCode: number | null) => {
+      const interrupt = (signal: NodeJS.Signals) => {
+        if (settled || terminating) return;
+        terminating = true;
+        void terminateProcessTree(child).then(
+          () => finish(false, null, signal),
+          (error) => {
+            stderr = collect(
+              stderr,
+              Buffer.from(`中断后清理 reviewer 失败：${error instanceof Error ? error.message : String(error)}`),
+            );
+            finish(false, null, signal);
+          },
+        );
+      };
+      const onSigint = () => interrupt('SIGINT');
+      const onSigterm = () => interrupt('SIGTERM');
+      process.once('SIGINT', onSigint);
+      process.once('SIGTERM', onSigterm);
+      const finish = (
+        timedOut: boolean,
+        exitCode: number | null,
+        interrupted: NodeJS.Signals | null = null,
+      ) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         process.removeListener('exit', killOnExit);
-        resolve({ timedOut, exitCode, stdout, stderr, overflow });
+        process.removeListener('SIGINT', onSigint);
+        process.removeListener('SIGTERM', onSigterm);
+        resolve({ timedOut, exitCode, stdout, stderr, overflow, interrupted });
       };
       const timer = setTimeout(() => {
         if (settled || terminating) return;
@@ -151,6 +176,14 @@ export async function runReadOnlyReviewAgent(opts: {
       });
     });
     const durationMs = Date.now() - started;
+    if (result.interrupted !== null) {
+      return {
+        status: 'invalid',
+        output: null,
+        error: `只读 reviewer 被 ${result.interrupted} 中断${result.stderr === '' ? '' : `：${result.stderr.slice(-1000)}`}`,
+        durationMs,
+      };
+    }
     if (result.timedOut) {
       return { status: 'invalid', output: null, error: '只读 reviewer 超时', durationMs };
     }
