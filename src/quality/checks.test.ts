@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -53,6 +53,24 @@ describe('project quality checks', () => {
       check(`${process.execPath} -e "process.exit(process.env.BASE_SHA === 'base' && process.env.HEAD_SHA === 'head' ? 0 : 9)"`),
     ], root, 5_000, undefined, { BASE_SHA: 'base', HEAD_SHA: 'head' });
     expect(result.status).toBe('passed');
+  });
+
+  it('routes project stdout to diagnostics so machine stdout stays clean', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'quality-check-output-'));
+    mkdirSync(join(root, 'src'));
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const result = await runProjectChecks([
+        check(`${process.execPath} -e "console.log('quality-output-marker')"`),
+      ], root);
+      expect(result.status).toBe('passed');
+      expect(stdout.mock.calls.flat().join('')).not.toContain('quality-output-marker');
+      expect(stderr.mock.calls.flat().join('')).toContain('quality-output-marker');
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+    }
   });
 
   it('fails on a nonzero command and stops before later checks', async () => {

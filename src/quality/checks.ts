@@ -83,7 +83,10 @@ export async function runProjectChecks(
     const checkStarted = Date.now();
     let failure;
     try {
-      failure = await runGateCommand(check.command, cwd, timeoutMs, env);
+      failure = await runGateCommand(check.command, cwd, timeoutMs, {
+        env,
+        stdout: 'stderr',
+      });
     } catch (error) {
       results.push({
         id: check.id,
