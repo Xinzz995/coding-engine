@@ -43,7 +43,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PROJECT_JOB_RESULT: ${{ needs.project-checks.result }}
         run: >-
-          npx --yes "coding-x@{{CODING_X_VERSION}}" quality gate
+          npm exec --yes
+          --prefix "$RUNNER_TEMP/coding-x-runtime"
+          --package="coding-x@{{CODING_X_VERSION}}"
+          -- coding-x quality gate
           --publish-project-check "$PROJECT_JOB_RESULT"
           --event-path "$GITHUB_EVENT_PATH"
           --json
@@ -70,7 +73,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          npx --yes "coding-x@{{CODING_X_VERSION}}" quality gate
+          npm exec --yes
+          --prefix "$RUNNER_TEMP/coding-x-runtime"
+          --package="coding-x@{{CODING_X_VERSION}}"
+          -- coding-x quality gate
           --axis spec
           --event-path "$GITHUB_EVENT_PATH"
           --json
@@ -97,7 +103,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          npx --yes "coding-x@{{CODING_X_VERSION}}" quality gate
+          npm exec --yes
+          --prefix "$RUNNER_TEMP/coding-x-runtime"
+          --package="coding-x@{{CODING_X_VERSION}}"
+          -- coding-x quality gate
           --axis standards
           --event-path "$GITHUB_EVENT_PATH"
           --json
@@ -124,7 +133,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: >-
-          npx --yes "coding-x@{{CODING_X_VERSION}}" quality gate
+          npm exec --yes
+          --prefix "$RUNNER_TEMP/coding-x-runtime"
+          --package="coding-x@{{CODING_X_VERSION}}"
+          -- coding-x quality gate
           --axis deep
           --event-path "$GITHUB_EVENT_PATH"
           --json

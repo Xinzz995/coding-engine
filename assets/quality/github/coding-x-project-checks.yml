@@ -53,7 +53,10 @@ jobs:
           BASE_SHA: ${{ inputs.base-sha }}
           HEAD_SHA: ${{ inputs.head-sha }}
         run: >-
-          npx --yes "coding-x@${CODING_X_VERSION}" quality gate
+          npm exec --yes
+          --prefix "$RUNNER_TEMP/coding-x-runtime"
+          --package="coding-x@${CODING_X_VERSION}"
+          -- coding-x quality gate
           --checks
           --contract-file "$GITHUB_WORKSPACE/_coding_x_base/.coding-x/quality.json"
           --base-sha "$BASE_SHA"

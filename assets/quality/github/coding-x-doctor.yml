@@ -26,6 +26,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.CODING_X_ADMIN_TOKEN || github.token }}
         run: >-
-          npx --yes "coding-x@{{CODING_X_VERSION}}" quality doctor
+          npm exec --yes
+          --prefix "$RUNNER_TEMP/coding-x-runtime"
+          --package="coding-x@{{CODING_X_VERSION}}"
+          -- coding-x quality doctor
           --remote
           --json

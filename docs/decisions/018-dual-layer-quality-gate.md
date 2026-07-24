@@ -38,8 +38,9 @@ GitHub Models 的 `models: read` 权限取得结构化结论。对应 Check Run 
 本地 `quality review` 复用同一评审核心，但只提供反馈；共享交付事实以 GitHub Check/PR
 历史为准。`run/status/report` 分开展示实现验证与交付就绪。
 
-coding-engine 不允许使用 PR 中的新实现批准自身。首次通过现有 CI 发布 0.30.0，再由后续 PR
-固定使用该已发布版本启用自托管规则；以后门禁版本升级始终由旧版本审查。
+coding-engine 不允许使用 PR 中的新实现批准自身。首次通过现有 CI 发布 0.30.0；自托管前
+发现同名源码仓库会干扰直接 `npx coding-x`，因此先发布使用隔离 npm 前缀的 0.30.1，再由
+后续 PR 固定使用 0.30.1 启用自托管规则。以后门禁版本升级始终由旧版本审查。
 
 ## 可信边界
 

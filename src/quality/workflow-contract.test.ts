@@ -37,14 +37,22 @@ describe('managed GitHub workflow trust boundaries', () => {
     expect(workflow).toContain('--axis deep');
   });
 
-  it('pins every generated npx invocation to an exact version placeholder', () => {
-    for (const name of ['coding-x-review.yml', 'coding-x-doctor.yml']) {
+  it('installs every invocation at an isolated prefix and pins the exact version', () => {
+    for (const name of [
+      'coding-x-review.yml',
+      'coding-x-doctor.yml',
+      'coding-x-project-checks.yml',
+    ]) {
       const workflow = asset(name);
-      expect(workflow).toContain('coding-x@{{CODING_X_VERSION}}');
+      expect(workflow).toContain('--prefix "$RUNNER_TEMP/coding-x-runtime"');
+      expect(workflow).not.toMatch(/^\s*npx\s/m);
       expect(workflow).not.toMatch(/coding-x@(?:latest|\^|~|\*)/);
     }
+    for (const name of ['coding-x-review.yml', 'coding-x-doctor.yml']) {
+      expect(asset(name)).toContain('--package="coding-x@{{CODING_X_VERSION}}"');
+    }
     const projectChecks = asset('coding-x-project-checks.yml');
-    expect(projectChecks).toContain('coding-x@${CODING_X_VERSION}');
+    expect(projectChecks).toContain('--package="coding-x@${CODING_X_VERSION}"');
     expect(projectChecks).toContain('coding-x-version:');
     expect(asset('coding-x-review.yml')).toContain('coding-x-version: "{{CODING_X_VERSION}}"');
   });

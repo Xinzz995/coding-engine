@@ -49,6 +49,7 @@ scope: root
 - 2026-07-24 外部调用只有三态：完整证据为 passed，明确问题为 failed，资料/凭据/权限/模型/格式/提交身份任一不可核验为 unverifiable；异常不得吞掉后返回“跳过”或“默认通过”。需要人判断的问题继续阻断，自动确认参数不能替人作产品裁决。
 - 2026-07-24 项目原生检查必须由受 Git 管理的契约显式声明命令、工作目录和适用路径；coding-x 可以发现候选，但写入前必须让人确认。下游只依赖 Git 与能用退出状态表达结论的命令，禁止把 coding-engine 的 npm/Vitest/TypeScript 约定推广成跨项目合同。
 - 2026-07-24 GitHub ruleset 是真实合并控制，CLI 写文件和本地 review 都不是；配置后必须回读语义而非只相信写 API 成功。管理员仍能删除规则，所以定时 doctor 要检查启用状态、所需检查及应用来源、协作者对应的审核人数、发布引用和异常期限，漂移即失败。
+- 2026-07-24 受管 workflow 运行固定版本的 coding-x 时，不能在项目目录直接 `npx coding-x@<version>`：当下游仓库本身也叫 `coding-x`，npm 会优先按当前同名项目解析，表现为发布包存在但 bin 找不到。统一用 `npm exec --prefix "$RUNNER_TEMP/coding-x-runtime" --package="coding-x@<exact>" -- coding-x ...` 隔离安装，同时保留调用时的项目工作目录。
 
 ## 陷阱
 
