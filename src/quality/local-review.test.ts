@@ -21,6 +21,7 @@ function setup(): { root: string; intentPath: string } {
   writeFileSync(join(root, 'docs', 'specs', 'one.md'), '# Spec');
   writeFileSync(join(root, 'docs', 'specs', 'unrelated.md'), '# Unrelated');
   writeFileSync(join(root, 'app.py'), 'def value(): return 1\n');
+  writeFileSync(join(root, 'other.py'), 'def other(): return 10\n');
   writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify({
     version: 1,
     checks: [{ id: 'test', command: 'python -m unittest', cwd: '.', paths: ['app.py'] }],
@@ -49,7 +50,8 @@ function setup(): { root: string; intentPath: string } {
   git(root, 'branch', '-M', 'main');
   git(root, 'checkout', '-qb', 'feature');
   writeFileSync(join(root, 'app.py'), 'def value(): return 2\n');
-  git(root, 'add', 'app.py');
+  writeFileSync(join(root, 'other.py'), 'def other(): return 20\n');
+  git(root, 'add', 'app.py', 'other.py');
   git(root, 'commit', '-qm', 'change');
   const intentPath = `${root}-intent.md`;
   writeFileSync(
@@ -142,5 +144,83 @@ describe('local quality review', () => {
       code: 'review-interrupted',
     });
     expect(result.receipts[0].durationMs).toBe(1);
+  });
+
+  it('rejects locally fabricated finding evidence instead of treating it as a defect', async () => {
+    const { root, intentPath } = setup();
+    const agentCall = vi.fn(async ({ axis }: { axis: string }) => ({
+      status: 'valid' as const,
+      output: axis === 'spec'
+        ? { summary: 'clear', findings: [] }
+        : {
+            summary: 'invented',
+            findings: [{
+              id: 'standards:app-py:1:x',
+              axis: 'standards' as const,
+              severity: 'high' as const,
+              file: 'app.py',
+              line: 1,
+              title: 'invented return value',
+              evidence: '+def value(): return 3',
+              source: 'general engineering baseline',
+              impact: 'would return an unsupported value',
+              recommendation: 'return the intended value',
+            }],
+          },
+      error: null,
+      durationMs: 1,
+    }));
+    const result = await runLocalQualityReview({
+      root,
+      workspace: join(root, '.workspace'),
+      baseRef: 'main',
+      intentPath,
+      kind: 'codex',
+      agentCall,
+    });
+    expect(result.status).toBe('unverifiable');
+    expect(result.receipts[1].errors[0]).toMatchObject({
+      code: 'model-output-invalid',
+      message: expect.stringContaining('逐字原文'),
+    });
+  });
+
+  it('does not borrow local diff evidence from another changed file', async () => {
+    const { root, intentPath } = setup();
+    const agentCall = vi.fn(async ({ axis }: { axis: string }) => ({
+      status: 'valid' as const,
+      output: axis === 'spec'
+        ? { summary: 'clear', findings: [] }
+        : {
+            summary: 'wrong file',
+            findings: [{
+              id: 'standards:app-py:1:x',
+              axis: 'standards' as const,
+              severity: 'high' as const,
+              file: 'app.py',
+              line: 1,
+              title: 'wrongly attributed return value',
+              evidence: '+def other(): return 20',
+              source: 'general engineering baseline',
+              impact: 'attributes another file to app.py',
+              recommendation: 'cite the matching file',
+            }],
+          },
+      error: null,
+      durationMs: 1,
+    }));
+    const result = await runLocalQualityReview({
+      root,
+      workspace: join(root, '.workspace'),
+      baseRef: 'main',
+      intentPath,
+      kind: 'codex',
+      agentCall,
+    });
+    expect(result.status).toBe('unverifiable');
+    expect(result.receipts[1].errors[0]).toMatchObject({
+      code: 'model-output-invalid',
+      message: expect.stringContaining('对应文件'),
+    });
   });
 });
