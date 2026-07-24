@@ -82,7 +82,7 @@ scope: root
     "repository": "owner/repo",
     "defaultBranch": "main",
     "releaseRefs": ["refs/tags/v*"],
-    "codingXVersion": "0.30.1",
+    "codingXVersion": "0.30.2",
     "requiredChecks": [
       "coding-x / project-checks",
       "coding-x / spec-review",
@@ -236,9 +236,10 @@ HTTP 成功。
 1. 新能力在现有 CI、完整测试和独立人工/agent 复核下进入 main；
 2. 发布 0.30.0；
 3. 自托管预演发现同名源码仓库的直接 npx 调用冲突，发布隔离安装修复 0.30.1；
-4. 后续 PR 添加 coding-engine 的自托管工作流，固定使用 0.30.1；
-5. 该 PR 通过过渡规则后，启用完整 ruleset；
-6. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
+4. 后续 PR 添加 coding-engine 的自托管工作流并启用完整 ruleset；
+5. 首次远端运行发现 npm 前缀目录不存在，经公开异常记录和有界 bootstrap 修复；
+6. 由恢复后的 0.30.1 门禁审查并发布 0.30.2，正式固定使用 0.30.2；
+7. 以后升级受管版本时，更新 PR 由旧版本规则评审，合并后新版本才生效。
 
 coding-engine 契约包括 typecheck、test、build、doctor、构建 CLI 冒烟、lint、diff check 和高危
 依赖审计；CI 另跑 Node 18/22 与 Linux/macOS/Windows 兼容矩阵。发布工作流验证 tag 提交位于

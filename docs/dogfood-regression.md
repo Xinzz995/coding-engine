@@ -40,9 +40,9 @@ scope: root
 | 21 | 启用 TDD 时，builder 对每个公共行为留下可复核的真实 RED→同命令 GREEN→绿色重构记录；环境错误不能冒充 RED，过程记录不得被报告成机器证明 | ADR-017 强化版 A | 真实 story 对账 builder 输出/progress 与聚焦测试结局；人工抽查一个错误 RED 场景会停止而不是继续实现 |
 | 22 | Codex/Claude 插件 hook 与显式安装的 Cursor 项目检查只在 agent commit 前提前运行 TDD 检查；失败阻断、成功放行，且不安装目标 Git hook、不写持久日志。Cursor 首次/升级安装幂等，卸载保留用户原配置；真实验收不得用桌面应用代替 | ADR-017 跨宿主适配 | 三种真实 payload 对账共同脚本；Codex/Claude 真实插件 smoke；用构建产物执行 `hooks cursor install/status/remove`，再由真实 Cursor Agent 验证失败时 Git 历史不变、成功时提交产生 |
 | 23 | 无论宿主 hook 是否触发或曾通过，引擎都在 qualityChecks 后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |
-| 24 | 直接推送默认分支被 GitHub 拒绝；PR 最新提交缺 Spec、项目检查失败、模型不可用或格式损坏时，至少一个必需检查为 failed/unverifiable 且无法合并 | ADR-018 / 0.30.1 | 在临时分支尝试直推；真实 PR 依次制造四类失败并检查 ruleset 合并状态 |
-| 25 | Spec、工程标准和深度结构三个 Check Run 分开发布；普通文档改动的深度轴为可解释的 passed/not-applicable，高风险目录、公开接口、状态、并发、发布或超大文件改动会真实运行深度评审 | ADR-018 / 0.30.1 | 一次低风险 PR 与一次 loop.ts/超大测试治理 PR 对账三个 Check Run 及触发理由 |
-| 26 | PR 新提交后旧 head 的所有结果失效；修改 `.coding-x/` 或受管 workflow 的 PR 仍由默认分支旧契约和旧工作流裁决，不能用同一 PR 放宽自己的检查 | ADR-018 / 0.30.1 | 在 PR 追加提交并比较 check run head；门禁变更 PR 对账 base contract SHA |
-| 27 | 远端 AI job 不签出、不运行 PR 代码且无写仓库内容权限；项目命令 job 没有模型权限、写权限、用户 secrets 或持久 Git 凭据 | ADR-018 / 0.30.1 | 检查默认分支 workflow；恶意下游 PR 尝试读 secret/写仓库，确认失败且敏感值未出现在日志 |
-| 28 | `quality doctor --remote` 对权限不足、ruleset 停用、检查来源替换、审核人数漂移、发布引用缺失或异常过期均返回 unverifiable/failed；配置 API 成功但回读不一致也不能通过 | ADR-018 / 0.30.1 | 临时仓库逐项破坏规则后回读，确认诊断和退出码，再恢复并复验 |
-| 29 | 至少一个非 Node 多模块仓库使用自己的项目命令完成失败→修复→新提交重评→合并的真实 PR 闭环；其质量契约不出现 npm、Vitest、TypeScript 项目假设 | ADR-018 / 0.30.1 | 外部 dogfood 仓库的契约、PR check 历史、合并提交和 ruleset 对账 |
+| 24 | 直接推送默认分支被 GitHub 拒绝；PR 最新提交缺 Spec、项目检查失败、模型不可用或格式损坏时，至少一个必需检查为 failed/unverifiable 且无法合并 | ADR-018 / 0.30.2 | 在临时分支尝试直推；真实 PR 依次制造四类失败并检查 ruleset 合并状态 |
+| 25 | Spec、工程标准和深度结构三个 Check Run 分开发布；普通文档改动的深度轴为可解释的 passed/not-applicable，高风险目录、公开接口、状态、并发、发布或超大文件改动会真实运行深度评审 | ADR-018 / 0.30.2 | 一次低风险 PR 与一次 loop.ts/超大测试治理 PR 对账三个 Check Run 及触发理由 |
+| 26 | PR 新提交后旧 head 的所有结果失效；修改 `.coding-x/` 或受管 workflow 的 PR 仍由默认分支旧契约和旧工作流裁决，不能用同一 PR 放宽自己的检查 | ADR-018 / 0.30.2 | 在 PR 追加提交并比较 check run head；门禁变更 PR 对账 base contract SHA |
+| 27 | 远端 AI job 不签出、不运行 PR 代码且无写仓库内容权限；项目命令 job 没有模型权限、写权限、用户 secrets 或持久 Git 凭据 | ADR-018 / 0.30.2 | 检查默认分支 workflow；恶意下游 PR 尝试读 secret/写仓库，确认失败且敏感值未出现在日志 |
+| 28 | `quality doctor --remote` 对权限不足、ruleset 停用、检查来源替换、审核人数漂移、发布引用缺失或异常过期均返回 unverifiable/failed；配置 API 成功但回读不一致也不能通过 | ADR-018 / 0.30.2 | 临时仓库逐项破坏规则后回读，确认诊断和退出码，再恢复并复验 |
+| 29 | 至少一个非 Node 多模块仓库使用自己的项目命令完成失败→修复→新提交重评→合并的真实 PR 闭环；其质量契约不出现 npm、Vitest、TypeScript 项目假设 | ADR-018 / 0.30.2 | 外部 dogfood 仓库的契约、PR check 历史、合并提交和 ruleset 对账 |

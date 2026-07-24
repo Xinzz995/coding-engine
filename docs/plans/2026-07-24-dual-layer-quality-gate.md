@@ -90,9 +90,10 @@ scope: root
 3. 推送实现分支，创建过渡 PR，等待现有 CI，并完成独立 review。
 4. 合并并发布 0.30.0；核对 tag、GitHub Release、npm gitHead 和干净同步状态。
 5. 自托管前修复同名源码仓库的 npm 执行冲突并发布 0.30.1；第二个 coding-engine PR 用
-   0.30.1 生成 self-host 配置；通过后启用完整 ruleset，验证 direct
-   push 被拒绝、旧 SHA 不可复用、doctor 回读通过。
-6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.1 配置规则；
+   0.30.1 生成 self-host 配置。首次远端运行发现临时前缀目录缺失，经 #13/#14 有界修复后，
+   由恢复的 0.30.1 门禁审查并发布 0.30.2；验证 direct push 被拒绝、旧 SHA 不可复用、
+   doctor 回读通过。
+6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.2 配置规则；
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
 

@@ -54,7 +54,7 @@ jobs:
           HEAD_SHA: ${{ inputs.head-sha }}
         run: >-
           npm exec --yes
-          --prefix "$RUNNER_TEMP/coding-x-runtime"
+          --prefix "$RUNNER_TEMP"
           --package="coding-x@${CODING_X_VERSION}"
           -- coding-x quality gate
           --checks

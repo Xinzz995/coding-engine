@@ -44,7 +44,7 @@ describe('managed GitHub workflow trust boundaries', () => {
       'coding-x-project-checks.yml',
     ]) {
       const workflow = asset(name);
-      expect(workflow).toContain('--prefix "$RUNNER_TEMP/coding-x-runtime"');
+      expect(workflow).toContain('--prefix "$RUNNER_TEMP"');
       expect(workflow).not.toMatch(/^\s*npx\s/m);
       expect(workflow).not.toMatch(/coding-x@(?:latest|\^|~|\*)/);
     }
