@@ -8,6 +8,8 @@ export type ManagedQualityAsset =
   | 'github/coding-x-doctor.yml'
   | 'github/pull_request_template.md';
 
+export const DEFAULT_COPILOT_CLI_VERSION = '1.0.74';
+
 function qualityAssetPath(path: string): string {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -24,9 +26,14 @@ function qualityAssetPath(path: string): string {
   }
   return candidates[0];
 }
-export function readManagedQualityAsset(path: ManagedQualityAsset, version: string): string {
+export function readManagedQualityAsset(
+  path: ManagedQualityAsset,
+  version: string,
+  copilotCliVersion = DEFAULT_COPILOT_CLI_VERSION,
+): string {
   return readFileSync(qualityAssetPath(path), 'utf8')
-    .replaceAll('{{CODING_X_VERSION}}', version);
+    .replaceAll('{{CODING_X_VERSION}}', version)
+    .replaceAll('{{COPILOT_CLI_VERSION}}', copilotCliVersion);
 }
 
 export function currentPackageVersion(): string {

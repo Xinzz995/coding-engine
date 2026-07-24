@@ -14,7 +14,9 @@ function validContract(): unknown {
     version: 1,
     checks: [{ id: 'test', command: 'pytest -q', cwd: '.', paths: ['src/', 'tests/'] }],
     review: {
-      model: 'openai/gpt-4.1',
+      provider: 'github-copilot',
+      model: 'auto',
+      copilotCliVersion: '1.0.74',
       specSources: ['docs/specs/'],
       standardsSources: ['AGENTS.md'],
       deepReview: {
@@ -46,7 +48,11 @@ describe('quality contract', () => {
     expect(result).toMatchObject({ status: 'valid' });
     if (result.status === 'valid') {
       expect(result.contract.checks[0].command).toBe('pytest -q');
-      expect(result.contract.review.model).toBe('openai/gpt-4.1');
+      expect(result.contract.review).toMatchObject({
+        provider: 'github-copilot',
+        model: 'auto',
+        copilotCliVersion: '1.0.74',
+      });
     }
   });
 
@@ -70,6 +76,20 @@ describe('quality contract', () => {
       review: {
         ...(validContract() as { review: object }).review,
         specSources: ['../secret'],
+      },
+    }],
+    ['missing provider', {
+      ...validContract() as object,
+      review: {
+        ...(validContract() as { review: Record<string, unknown> }).review,
+        provider: undefined,
+      },
+    }],
+    ['floating Copilot CLI version', {
+      ...validContract() as object,
+      review: {
+        ...(validContract() as { review: object }).review,
+        copilotCliVersion: 'latest',
       },
     }],
     ['bad repository', {

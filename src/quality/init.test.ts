@@ -59,7 +59,11 @@ describe('quality init', () => {
     expect(JSON.parse(readFileSync(join(root, '.coding-x', 'quality.json'), 'utf8')))
       .toMatchObject({
         version: 1,
-        review: { model: 'openai/gpt-4.1-mini' },
+        review: {
+          provider: 'github-copilot',
+          model: 'auto',
+          copilotCliVersion: '1.0.74',
+        },
         github: { codingXVersion: expect.any(String) },
       });
     expect(readFileSync(join(root, '.gitignore'), 'utf8')).toContain('/.workspace/');
@@ -95,7 +99,7 @@ describe('quality init', () => {
     contract.github.codingXVersion = '0.29.0';
     writeFileSync(path, `${JSON.stringify(contract, null, 2)}\n`);
     const upgraded = buildQualityInitPlan(root);
-    expect(upgraded.contract.github.codingXVersion).toBe('0.30.10');
+    expect(upgraded.contract.github.codingXVersion).toBe('0.31.0');
     expect(upgraded.files.find((file) => file.path === '.coding-x/quality.json')?.action)
       .toBe('update');
     expect(() => buildQualityInitPlan(root, { model: 'other/model' }))

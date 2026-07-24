@@ -39,7 +39,7 @@ export interface ReviewPromptShardBudget {
 }
 
 /**
- * Conservative dependency-free estimate for GitHub Models input budgeting.
+ * Conservative dependency-free estimate for remote review input budgeting.
  * ASCII-heavy code averages several characters per token, while CJK and other
  * non-ASCII text is commonly close to one code point per token.
  */

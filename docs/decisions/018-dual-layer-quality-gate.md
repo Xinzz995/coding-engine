@@ -83,6 +83,11 @@ PR 连续三次收到“测试覆盖充分、无需修改”的 medium finding�
 一次，第二次仍无效继续 `unverifiable`。纠正轮不能继承第一次输出，也不能用于 provider
 失败、输入超限或提交身份变化。
 
+2026-07-24 确认 GitHub Models 将于 2026-07-30 完全退役，且真实 PR 已复现账户额度令三轴
+无法在同一 head 上稳定完成。远端 provider 从 0.31.0 起按 ADR-019 改为隔离的 GitHub
+Copilot CLI；本 ADR 中关于 Models 端点、模型 secret、额度和重试的内容仅解释 0.30.x
+历史，不再是当前运行合同。
+
 发布检查不能只按名称相信同名 Check Run：发布时重新读取启用中的 branch/tag ruleset，以
 ruleset 绑定的 GitHub App ID 核对关联 PR head 的最新结果。正常路径要求全部成功；只有受
 Git 管理、未过期、未关闭、精确提交是发布提交祖先的紧急交付记录才能进入“异常发布”，并在
@@ -93,9 +98,9 @@ Actions 日志留下 warning。规则停用、来源不符、例外过期或不�
 - AI finding 是独立评审结论，不是机械正确性证明；模型不可用或输出畸形时 fail closed。
 - GitHub workflow 和 ruleset 能约束正常协作流程，但仓库管理员仍能删除规则。定时 doctor
   负责发现漂移，不能把管理员权限包装成密码学不可绕过。
-- GitHub Models 是 provider adapter；模型 ID、token 和 API 形状不进入核心三态与 receipt
-  语义。免费额度不构成生产容量保证；有限重试只恢复 provider 明确报告的瞬时 429，耗尽或
-  周期额度不足仍是 `unverifiable`，不能通过无限重试或例外改写成正常通过。
+- AI provider 的模型 ID、认证和输出形状不进入核心三态与 finding 语义。当前 GitHub
+  Copilot CLI 适配与隔离边界见 ADR-019；额度耗尽、政策禁用或 provider 异常仍是
+  `unverifiable`，不能通过无限重试或例外改写成正常通过。
 - 同权限的项目测试工具仍可能被恶意代码伪造；coding-x 证明的是受保护工作流观察到的命令
   结局，不证明工具链绝对可信。
 

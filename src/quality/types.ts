@@ -1,6 +1,7 @@
 export type QualityStatus = 'passed' | 'failed' | 'unverifiable';
 export type ReviewAxis = 'spec' | 'standards' | 'deep';
 export type FindingSeverity = 'critical' | 'high' | 'medium' | 'low';
+export type ReviewProvider = 'github-copilot';
 
 export interface QualityCheck {
   id: string;
@@ -16,7 +17,9 @@ export interface DeepReviewPolicy {
 }
 
 export interface ReviewPolicy {
+  provider: ReviewProvider;
   model: string;
+  copilotCliVersion: string;
   specSources: string[];
   standardsSources: string[];
   deepReview: DeepReviewPolicy;
@@ -110,6 +113,8 @@ export interface QualityReceipt {
   contractSha256: string | null;
   axis?: ReviewAxis;
   model?: string;
+  modelCalls?: number;
+  premiumRequests?: number;
   deepRequired?: boolean;
   deepReasons?: string[];
   reviewSummary?: string;

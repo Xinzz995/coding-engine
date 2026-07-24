@@ -26,7 +26,9 @@ function setup(): { root: string; intentPath: string } {
     version: 1,
     checks: [{ id: 'test', command: 'python -m unittest', cwd: '.', paths: ['app.py'] }],
     review: {
-      model: 'openai/gpt-4.1',
+      provider: 'github-copilot',
+      model: 'auto',
+      copilotCliVersion: '1.0.74',
       specSources: ['docs/specs/'],
       standardsSources: ['AGENTS.md'],
       deepReview: { highRiskPaths: [], changedProductionLines: 400, largeFileLines: 1000 },

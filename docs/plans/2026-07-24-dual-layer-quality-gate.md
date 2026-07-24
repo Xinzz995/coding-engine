@@ -12,7 +12,7 @@ scope: root
 
 **设计规格:** `docs/specs/2026-07-24-dual-layer-quality-gate-design.md`
 
-**设计决策:** `docs/decisions/018-dual-layer-quality-gate.md`
+**设计决策:** `docs/decisions/018-dual-layer-quality-gate.md`、`docs/decisions/019-copilot-cli-quality-provider.md`
 
 ## 完成合同与证据
 
@@ -34,7 +34,7 @@ scope: root
 | 1. 完成必须可证伪 | 适用。每条能力对应 exit code、JSON 三态、Check Run、ruleset 或真实 PR；“AI 审过”“管理员绝对不能绕过”不作为完成结论。 | 正反例矩阵、GitHub E2E、最终远端回读。 |
 | 2. 生成方不能自签 | 适用。本地 agent receipt 只是反馈；GitHub 默认分支固定版本独立重跑。coding-engine 先发布再自托管，不用 PR 中实现批准自身。 | old-head/policy-change 回归；bootstrap 与后续 self-host PR 分开。 |
 | 3. 自主性与风险对称 | 适用。init 新增远端写入，因此写前展示、显式确认、只更新同名受管 ruleset、写后回读；不自动合并/发布。AI workflow 无 PR 代码执行权。 | 拒绝确认零写入、权限不足、部分失败、幂等更新与恶意 PR 测试。 |
-| 4. 复用原生执行面 | 适用。项目命令由原生工具执行；远端阻断复用 GitHub ruleset/Checks/Models；provider 差异收口在 GitHub adapter。 | 非 Node/monorepo fixture；核心类型不含 GitHub token/API 对象。 |
+| 4. 复用原生执行面 | 适用。项目命令由原生工具执行；远端阻断复用 GitHub ruleset/Checks/Copilot；provider 差异收口在 model adapter。 | 非 Node/monorepo fixture；核心类型不含 GitHub token/API 对象。 |
 | 5. 先度量失败与恢复 | 适用。先覆盖缺契约、命令失败、模型错误、输出畸形、旧 SHA、策略篡改、规则漂移和过期例外；预期降低可跳过评审与旧结果复用造成的假绿。 | failure-first 单测、receipt 错误码、真实被阻断 PR 与修复后重跑。 |
 
 当前无实现方向未裁决项。用户已确认：全部新项目默认启用；核心中立、GitHub 首适配；远端
@@ -110,6 +110,24 @@ scope: root
 6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.4 配置规则；
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
+
+## Task 7：provider 退役迁移
+
+- 失败前提：GitHub Models 已宣布 2026-07-30 完全退役；coding-engine PR #39 又证明其账户
+  额度无法让三轴在同一 head 稳定完成。继续重试不构成恢复。
+- 契约显式记录 `github-copilot`、`auto` 与固定 Copilot CLI 版本；缺字段、版本漂移或
+  provider 不可用均阻断。
+- provider adapter 在独立临时 Git 根加载可信 custom agent，工具列表为空；PR 内容只进入
+  user data。禁用 MCP、自定义指令、远程会话、远程导出和自动更新。
+- 有界解析 JSONL，机械核对退出状态、唯一最终回复、零工具请求和实际模型；receipt 记录模型、
+  调用次数、premium request 用量与耗时。
+- 工作流改用 `copilot-requests: write` 与内建 `GITHUB_TOKEN`，删除模型 secret 依赖；固定
+  coding-x 与 Copilot CLI 两个完整版本。
+- failure-first 测试覆盖 CLI 缺失/错版、超时、损坏事件、模型身份矛盾、工具请求和 prompt
+  injection；真实本地调用与 GitHub PR 都验证工具隔离。
+- 因旧 provider 已成为不可恢复的外部死锁，0.31.0 迁移只允许一次公开、精确提交、有期限且
+  绑定 #23 的紧急交付；规则恢复后，coding-engine 固定版本、结构治理、安全修复和外部
+  Python 升级全部必须走正常 PR。
 
 后续真实运行补充：
 

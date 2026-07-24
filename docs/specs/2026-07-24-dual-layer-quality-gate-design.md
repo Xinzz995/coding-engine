@@ -70,7 +70,9 @@ scope: root
     }
   ],
   "review": {
-    "model": "openai/gpt-4.1-mini",
+    "provider": "github-copilot",
+    "model": "auto",
+    "copilotCliVersion": "1.0.74",
     "specSources": ["docs/specs/"],
     "standardsSources": ["AGENTS.md", "docs/golden-principles.md"],
     "deepReview": {
@@ -110,7 +112,8 @@ scope: root
   直接改动的规格文件；关联路径越界、不在契约范围或当前提交不存在均 `unverifiable`；
 - 所有实际读取仍受文件数、单文件和总输入大小上限保护；
 - 契约变更本身属于高风险改动，当前 PR 仍由默认分支旧契约裁决；
-- GitHub 模型 ID进入 GitHub adapter，不进入 runner-neutral 的三态、finding 与 receipt 核心合同。
+- provider、模型路由和 Copilot CLI 版本进入 GitHub adapter，不改变 runner-neutral 的三态与
+  finding 合同；receipt 只额外保留实际模型、调用次数和 provider 用量。
 
 `.coding-x/exceptions.json` 同样严格版本化，分为普通 finding 延期与紧急交付记录。普通延期
 必须有 finding ID、原因、责任人、ISO 截止时间和后续 URL；过期、字段缺失、head/范围不匹配
@@ -207,27 +210,31 @@ receipt 以 JSONL 追加到 workspace；GitHub 通过 Check Run 保存共享结�
 1. `coding-x-project-checks.yml`：由可信默认分支工作流调用，分别签出 base 契约与 PR head，
    项目命令步骤拿不到持久化仓库凭据、模型、checks write 或其他敏感权限；两个 checkout
    也使私有仓库不依赖匿名 fetch。
-2. `coding-x-review.yml`：`pull_request_target`，使用默认分支固定版本的 coding-x；拥有
-   contents/pull-requests/models read 与 checks write；不签出 PR head，不执行 PR 文件，通过
-   GitHub API 读取数据并在精确 head SHA 上发布 Spec、Standards、Deep 三个 Check Run。
+2. `coding-x-review.yml`：`pull_request_target`，使用默认分支固定版本的 coding-x 与
+   GitHub Copilot CLI；拥有 contents/pull-requests read、checks write 与
+   `copilot-requests: write`；不签出 PR head，不执行 PR 文件，通过 GitHub API 读取数据并在
+   精确 head SHA 上发布 Spec、Standards、Deep 三个 Check Run。
 
-远端评审使用 GitHub Models。默认使用低限流档的 `openai/gpt-4.1-mini`，避免高限流档免费
-账户每天 50 次请求无法支撑日常门禁；项目仍可显式选择其他支持严格结构化输出的模型。仓库
-读取与 Check Run 发布始终使用权限受限的自动
-`GITHUB_TOKEN`；模型调用优先使用仓库 secret `CODING_X_MODEL_TOKEN`，没有配置时才退回
-自动 token。两个 token 在 adapter 边界分开传递，模型 token 不用于仓库 API。AI job 仍只运行
-默认分支固定版本，不签出 PR head，因此 secret 不会交给 PR 代码。
+远端评审从 0.31.0 起使用 GitHub Copilot CLI。GitHub Models 将于 2026-07-30 完全退役，
+不再作为回退。workflow 使用内建 `GITHUB_TOKEN` 完成 GitHub API 与 Copilot 请求，不保存
+`CODING_X_MODEL_TOKEN`。coding-x 为每次调用创建独立临时 Git 根和 `COPILOT_HOME`，将可信
+system prompt 写成 `tools: []` 的 custom agent；PR diff、来源和意图仅作为不可信 user data。
+调用禁用全部工具、内建 MCP、项目/用户指令、远程会话、远程导出和自动更新。
+
+Copilot CLI 与 coding-x 都固定完整版本。adapter 先核对 CLI 版本，再有界解析 JSONL：只接受
+一个无工具请求的最终回复、成功 result 和一致的实际模型；代码围栏只可包裹单个 JSON 对象。
+超时、输出过大、事件损坏、工具请求、模型身份冲突、额度不足或组织政策禁用均为
+`unverifiable`。`model: "auto"` 的真实模型和 premium request 用量写入 receipt；同一轴多个
+分片选择了不同模型时不接受合并。
 
 每个 PR 只创建一个模型队列 job，在该 job 内依次运行 Spec、Standards、Deep 并分别发布
 Check Run；不同 PR 的这个单一 job 再用 GitHub 原生 `queue: max` 并发组串行。不能让三个
-有依赖关系的 job 同时加入同一队列，否则已完成轴可能留下后续轴永久等待。单轴分片仍按低于
-provider 每分钟上限的节奏发送；新 head 由外层 PR 并发组取消旧运行。该队列只协调当前仓库。
+有依赖关系的 job 同时加入同一队列，否则已完成轴可能留下后续轴永久等待。单轴分片保持顺序
+调用；Copilot 没有可写入契约的稳定每分钟间隔，因此不伪造固定节流值，provider 拒绝时直接
+`unverifiable`。新 head 由外层 PR 并发组取消旧运行。该队列只协调当前仓库。
 
-GitHub 免费 Models 同时受请求频率和整周期用量约束，官方定位仍是原型；强门禁需要为
-`CODING_X_MODEL_TOKEN` 配置有可用额度的专用凭据，或明确接受自动 token 额度耗尽即阻断。
-API 错误、限流、模型不支持结构化输出或响应无法验证时，对应 Check Run 为 failure，结论
-`unverifiable`。[GitHub Models 计费与免费额度](https://docs.github.com/en/billing/concepts/product-billing/github-models)
-是 provider 边界，不得把 catalog 中模型的理论上下文长度误当成仓库可用额度。
+Copilot 额度仍不是无限容量保证。额度或政策不可用时，对应 Check Run 为 failure，结论
+`unverifiable`；不以旧 Models、个人 secret 或本地报告静默降级。
 
 规则集使用固定名称 `coding-x quality gate`。init 只更新同名 repository ruleset，不触碰用户
 其他规则集。写远端前展示旧/新摘要并要求确认；写后重新 GET，按语义比较而不是相信写请求的

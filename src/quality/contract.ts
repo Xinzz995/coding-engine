@@ -35,7 +35,9 @@ const ROOT_KEYS = new Set([
   'version', 'checks', 'review', 'github', 'exceptionPolicy', 'exceptionsFile',
 ]);
 const CHECK_KEYS = new Set(['id', 'command', 'cwd', 'paths']);
-const REVIEW_KEYS = new Set(['model', 'specSources', 'standardsSources', 'deepReview']);
+const REVIEW_KEYS = new Set([
+  'provider', 'model', 'copilotCliVersion', 'specSources', 'standardsSources', 'deepReview',
+]);
 const DEEP_KEYS = new Set(['highRiskPaths', 'changedProductionLines', 'largeFileLines']);
 const GITHUB_KEYS = new Set([
   'repository', 'defaultBranch', 'releaseRefs', 'codingXVersion', 'requiredChecks',
@@ -183,7 +185,23 @@ function readReview(value: unknown, root: string, errors: string[]): ReviewPolic
     return null;
   }
   unknownKeys(value, REVIEW_KEYS, 'review', errors);
+  const validProvider = value.provider === 'github-copilot';
+  if (!validProvider) {
+    errors.push('review.provider 目前必须是 github-copilot');
+  }
   const validModel = nonEmpty(value.model, 'review.model', errors);
+  if (validModel && !/^[A-Za-z0-9._/-]{1,128}$/.test(value.model as string)) {
+    errors.push('review.model 不是安全的模型名');
+  }
+  const validCliVersion = nonEmpty(
+    value.copilotCliVersion,
+    'review.copilotCliVersion',
+    errors,
+  );
+  if (validCliVersion
+    && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value.copilotCliVersion as string)) {
+    errors.push('review.copilotCliVersion 必须固定为完整版本号');
+  }
   const validSpec = stringArray(value.specSources, 'review.specSources', errors, false);
   const validStandards = stringArray(value.standardsSources, 'review.standardsSources', errors, false);
   if (validSpec) {
@@ -232,9 +250,13 @@ function readReview(value: unknown, root: string, errors: string[]): ReviewPolic
       };
     }
   }
-  if (!validModel || !validSpec || !validStandards || !deep) return null;
+  if (!validProvider || !validModel || !validCliVersion || !validSpec || !validStandards || !deep) {
+    return null;
+  }
   return {
+    provider: 'github-copilot',
     model: value.model as string,
+    copilotCliVersion: value.copilotCliVersion as string,
     specSources: [...value.specSources as string[]],
     standardsSources: [...value.standardsSources as string[]],
     deepReview: deep,

@@ -27,7 +27,9 @@ function setup(command = `node -e "process.exit(/^[0-9a-f]{40}$/.test(process.en
     version: 1,
     checks: [{ id: 'test', command, cwd: '.', paths: ['README.md'] }],
     review: {
-      model: 'openai/gpt-4.1',
+      provider: 'github-copilot',
+      model: 'auto',
+      copilotCliVersion: '1.0.74',
       specSources: ['README.md'],
       standardsSources: ['README.md'],
       deepReview: { highRiskPaths: [], changedProductionLines: 400, largeFileLines: 1000 },

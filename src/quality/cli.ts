@@ -287,9 +287,6 @@ async function runGate(cfg: QualityCliConfig, io: QualityCliIo): Promise<number>
     eventPath,
     axis: cfg.axis!,
     token,
-    ...(process.env.CODING_X_MODEL_TOKEN?.trim()
-      ? { modelToken: process.env.CODING_X_MODEL_TOKEN.trim() }
-      : {}),
   });
   output(
     cfg,

@@ -19,7 +19,7 @@ import {
   type ReviewPromptShard,
   type ReviewSource,
 } from './prompts.js';
-import { callGitHubModel, type ModelFailureReason } from './model.js';
+import { callCopilotModel, type ModelFailureReason } from './model.js';
 import {
   evaluateReviewModelResult,
   renderReviewCheck,
@@ -43,7 +43,7 @@ const SOURCE_TOTAL_LIMIT = 500 * 1024;
 const SOURCE_FILE_LIMIT = 128 * 1024;
 const MODEL_SHARD_LIMIT = 8;
 const MODEL_PROMPT_TOKEN_BUDGET = 7_000;
-const MODEL_CALL_PACE_MS = 6_500;
+const MODEL_CALL_PACE_MS = 0;
 const AGGREGATE_FINDING_LIMIT = 50;
 
 function correctionSystemPrompt(system: string, reason: string): string {
@@ -79,16 +79,25 @@ function correctionReasonForOutput(
 export type ModelCall = (opts: {
   token: string;
   model: string;
+  cliVersion: string;
   systemPrompt: string;
   userPrompt: string;
   axis: ReviewAxis;
 }) => Promise<
-  | { status: 'valid'; output: ReviewModelOutput; error: null }
+  | {
+      status: 'valid';
+      output: ReviewModelOutput;
+      error: null;
+      model?: string;
+      premiumRequests?: number;
+    }
   | {
       status: 'invalid';
       output: null;
       error: string;
       reason?: ModelFailureReason;
+      model?: string;
+      premiumRequests?: number;
     }
 >;
 
@@ -174,6 +183,8 @@ function receiptWithError(opts: {
   headSha: string | null;
   contractSha256: string | null;
   model?: string;
+  modelCalls?: number;
+  premiumRequests?: number;
   deepRequired?: boolean;
   deepReasons?: string[];
   error: QualityError;
@@ -191,6 +202,8 @@ function receiptWithError(opts: {
     contractSha256: opts.contractSha256,
     axis: opts.axis,
     ...(opts.model === undefined ? {} : { model: opts.model }),
+    ...(opts.modelCalls === undefined ? {} : { modelCalls: opts.modelCalls }),
+    ...(opts.premiumRequests === undefined ? {} : { premiumRequests: opts.premiumRequests }),
     ...(opts.deepRequired === undefined ? {} : { deepRequired: opts.deepRequired }),
     ...(opts.deepReasons === undefined ? {} : { deepReasons: opts.deepReasons }),
     findings: [],
@@ -221,7 +234,6 @@ export async function runGitHubReviewAxis(opts: {
   eventPath: string;
   axis: ReviewAxis;
   token: string;
-  modelToken?: string;
   client?: GitHubClient;
   modelCall?: ModelCall;
   modelPause?: (ms: number) => Promise<void>;
@@ -271,6 +283,7 @@ export async function runGitHubReviewAxis(opts: {
     return { receipt, check: await publish(client, receipt) };
   }
   const contract = contractRead.contract;
+  let receiptModel = `${contract.review.provider}:${contract.review.model}`;
   const baseIdentityValid = contract.github.repository === event.repository
     && contract.github.defaultBranch === event.baseRef;
   let localBase: string | null = null;
@@ -288,7 +301,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       error: {
         code: 'trusted-base-mismatch',
         message: '本次评审未运行在事件指定的默认分支 base SHA 与契约上',
@@ -311,7 +324,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       error: { code: 'github-pr-read-failed', message: error instanceof Error ? error.message : String(error) },
       started,
     });
@@ -327,7 +340,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       error: { code: 'stale-head', message: `PR 已变化，当前 head=${current.headSha}` },
       started,
     });
@@ -345,7 +358,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       error: { code: 'intent-missing', message: `PR 缺少：${intentRead.missing.join('、')}` },
       started,
     });
@@ -375,7 +388,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       error: { code: 'github-diff-read-failed', message: error instanceof Error ? error.message : String(error) },
       started,
     });
@@ -393,7 +406,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       error: {
         code: 'diff-incomplete',
         message: incompleteFiles.length > 0
@@ -446,7 +459,7 @@ export async function runGitHubReviewAxis(opts: {
           baseSha: event.baseSha,
           headSha: event.headSha,
           contractSha256: contractRead.sha256,
-          model: contract.review.model,
+          model: receiptModel,
           deepRequired: false,
           deepReasons: [],
           error: {
@@ -467,7 +480,7 @@ export async function runGitHubReviewAxis(opts: {
         baseSha: event.baseSha,
         headSha: event.headSha,
         contractSha256: contractRead.sha256,
-        model: contract.review.model,
+        model: receiptModel,
         deepRequired: false,
         deepReasons: [],
         error: {
@@ -490,7 +503,7 @@ export async function runGitHubReviewAxis(opts: {
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
       axis: 'deep',
-      model: contract.review.model,
+      model: receiptModel,
       deepRequired: false,
       deepReasons: [],
       findings: [],
@@ -531,7 +544,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: { code: 'review-source-invalid', message: error instanceof Error ? error.message : String(error) },
@@ -540,7 +553,7 @@ export async function runGitHubReviewAxis(opts: {
     appendQualityReceipt(opts.workspace, receipt);
     return { receipt, check: await publish(client, receipt) };
   }
-  const modelCall = opts.modelCall ?? callGitHubModel;
+  const modelCall = opts.modelCall ?? callCopilotModel;
   const modelPause = opts.modelPause
     ?? (opts.modelCall ? async () => {} : async (ms: number) => {
       await new Promise((resolve) => setTimeout(resolve, ms));
@@ -571,7 +584,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: { code: 'review-input-too-large', message: initialPrompts.error },
@@ -612,7 +625,7 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: {
@@ -628,6 +641,8 @@ export async function runGitHubReviewAxis(opts: {
   const modelOutputs: ReviewModelOutput[] = [];
   let reviewError: QualityError | null = null;
   let modelCallCount = 0;
+  let premiumRequests = 0;
+  const observedModels = new Set<string>();
   const invokeModel = async (
     prompts: { system: string; user: string },
     systemPrompt = prompts.system,
@@ -635,13 +650,28 @@ export async function runGitHubReviewAxis(opts: {
     if (modelCallCount > 0 && modelPaceMs > 0) await modelPause(modelPaceMs);
     modelCallCount += 1;
     try {
-      return await modelCall({
-        token: opts.modelToken ?? opts.token,
+      const result = await modelCall({
+        token: opts.token,
         model: contract.review.model,
+        cliVersion: contract.review.copilotCliVersion,
         systemPrompt,
         userPrompt: prompts.user,
         axis: opts.axis,
       });
+      premiumRequests += result.premiumRequests ?? 0;
+      if (result.model) {
+        observedModels.add(result.model);
+        receiptModel = `${contract.review.provider}:${result.model}`;
+      }
+      if (observedModels.size > 1) {
+        return {
+          status: 'invalid',
+          output: null,
+          error: `同一评审轴使用了不一致的实际模型：${[...observedModels].sort().join('、')}`,
+          reason: 'invalid-output',
+        };
+      }
+      return result;
     } catch (error) {
       return {
         status: 'invalid',
@@ -694,7 +724,7 @@ export async function runGitHubReviewAxis(opts: {
     if (!split || modelOutputs.length + pending.length + split.length > MODEL_SHARD_LIMIT) {
       reviewError = {
         code: 'review-input-too-large',
-        message: `完整输入超过 GitHub Models 单次额度，且需要多于 ${MODEL_SHARD_LIMIT} 个分片；请缩小评审来源或拆分 PR`,
+        message: `完整输入超过 AI provider 单次额度，且需要多于 ${MODEL_SHARD_LIMIT} 个分片；请缩小评审来源或拆分 PR`,
       };
       break;
     }
@@ -709,7 +739,9 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
+      modelCalls: modelCallCount,
+      premiumRequests,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: reviewError,
@@ -728,7 +760,9 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
+      modelCalls: modelCallCount,
+      premiumRequests,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: {
@@ -755,7 +789,9 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
+      modelCalls: modelCallCount,
+      premiumRequests,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: {
@@ -778,7 +814,9 @@ export async function runGitHubReviewAxis(opts: {
         baseSha: event.baseSha,
         headSha: event.headSha,
         contractSha256: contractRead.sha256,
-        model: contract.review.model,
+        model: receiptModel,
+        modelCalls: modelCallCount,
+        premiumRequests,
         deepRequired: opts.axis === 'deep' ? risk.required : undefined,
         deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
         error: {
@@ -799,7 +837,9 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
+      modelCalls: modelCallCount,
+      premiumRequests,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: {
@@ -821,7 +861,9 @@ export async function runGitHubReviewAxis(opts: {
       baseSha: event.baseSha,
       headSha: event.headSha,
       contractSha256: contractRead.sha256,
-      model: contract.review.model,
+      model: receiptModel,
+      modelCalls: modelCallCount,
+      premiumRequests,
       deepRequired: opts.axis === 'deep' ? risk.required : undefined,
       deepReasons: opts.axis === 'deep' ? risk.reasons : undefined,
       error: {
@@ -854,7 +896,9 @@ export async function runGitHubReviewAxis(opts: {
     headSha: event.headSha,
     contractSha256: contractRead.sha256,
     axis: opts.axis,
-    model: contract.review.model,
+    model: receiptModel,
+    modelCalls: modelCallCount,
+    premiumRequests,
     ...(opts.axis === 'deep'
       ? { deepRequired: risk.required, deepReasons: risk.reasons }
       : {}),

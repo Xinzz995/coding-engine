@@ -61,7 +61,7 @@ jobs:
       contents: read
       pull-requests: read
       checks: write
-      models: read
+      copilot-requests: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -77,11 +77,11 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
           --package="coding-x@{{CODING_X_VERSION}}"
+          --package="@github/copilot@{{COPILOT_CLI_VERSION}}"
           -- coding-x quality gate
           --axis spec
           --event-path "$GITHUB_EVENT_PATH"
@@ -93,11 +93,11 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
           --package="coding-x@{{CODING_X_VERSION}}"
+          --package="@github/copilot@{{COPILOT_CLI_VERSION}}"
           -- coding-x quality gate
           --axis standards
           --event-path "$GITHUB_EVENT_PATH"
@@ -109,11 +109,11 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CODING_X_MODEL_TOKEN: ${{ secrets.CODING_X_MODEL_TOKEN }}
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
           --package="coding-x@{{CODING_X_VERSION}}"
+          --package="@github/copilot@{{COPILOT_CLI_VERSION}}"
           -- coding-x quality gate
           --axis deep
           --event-path "$GITHUB_EVENT_PATH"
