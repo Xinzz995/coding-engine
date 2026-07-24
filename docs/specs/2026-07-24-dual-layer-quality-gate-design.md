@@ -222,9 +222,10 @@ system prompt 写成 `tools: []` 的 custom agent；PR diff、来源和意图仅
 调用禁用全部工具、内建 MCP、项目/用户指令、远程会话、远程导出和自动更新。
 
 Copilot CLI 与 coding-x 都固定完整版本。adapter 先核对 CLI 版本，再有界解析 JSONL：只接受
-一个无工具请求的最终回复、成功 result，以及与该次 auto 路由事件一致的实际模型；代码围栏只
-可包裹单个 JSON 对象。单次调用最长等待五分钟；超时、输出过大、事件损坏、工具请求、单次
-调用中的模型身份冲突、额度不足或组织政策禁用均为 `unverifiable`。`model: "auto"` 的全部
+同一实际模型的无工具回复、成功 result，以及回复内容中唯一一个可解析 JSON 对象；provider
+可以附加说明或代码围栏，但多个 JSON 对象仍视为歧义。单次调用最长等待五分钟；超时、输出
+过大、事件损坏、工具请求、单次调用中的模型身份冲突、额度不足或组织政策禁用均为
+`unverifiable`。`model: "auto"` 的全部
 真实模型和 premium request 用量写入 receipt；同一轴多个分片可以由 provider 路由到不同模型，
 但必须稳定列出所有实际身份。provider 未返回用量时不得以零代替。
 
@@ -232,7 +233,9 @@ Copilot CLI 与 coding-x 都固定完整版本。adapter 先核对 CLI 版本，
 Check Run；不同 PR 的这个单一 job 再用 GitHub 原生 `queue: max` 并发组串行。不能让三个
 有依赖关系的 job 同时加入同一队列，否则已完成轴可能留下后续轴永久等待。单轴分片保持顺序
 调用；Copilot 没有可写入契约的稳定每分钟间隔，因此不伪造固定节流值，provider 拒绝时直接
-`unverifiable`。新 head 由外层 PR 并发组取消旧运行。该队列只协调当前仓库。
+`unverifiable`。AI job 只在隔离的项目命令 job 成功后进入模型队列，避免已经确定不能交付的
+提交继续占用评审容量；两个 job 仍使用不同权限和工作区。新 head 由外层 PR 并发组取消旧运行。
+该队列只协调当前仓库。
 
 Copilot 额度仍不是无限容量保证。额度或政策不可用时，对应 Check Run 为 failure，结论
 `unverifiable`；不以旧 Models、个人 secret 或本地报告静默降级。

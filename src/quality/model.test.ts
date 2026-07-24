@@ -27,24 +27,34 @@ function copilotJsonl(opts: {
   content?: string;
   actualModel?: string;
   autoModel?: string;
+  assistantMessages?: Array<{
+    model: string;
+    content: string;
+    toolRequests?: unknown[];
+  }>;
   toolRequests?: unknown[];
   exitCode?: number;
   premiumRequests?: number;
 } = {}): string {
   const actualModel = opts.actualModel ?? 'claude-haiku-4.5';
+  const assistantMessages = opts.assistantMessages ?? [{
+    model: actualModel,
+    content: opts.content ?? '{"summary":"clear","findings":[]}',
+    toolRequests: opts.toolRequests ?? [],
+  }];
   return [
     JSON.stringify({
       type: 'session.auto_mode_resolved',
       data: { chosenModel: opts.autoModel ?? actualModel },
     }),
-    JSON.stringify({
+    ...assistantMessages.map((message) => JSON.stringify({
       type: 'assistant.message',
       data: {
-        model: actualModel,
-        content: opts.content ?? '{"summary":"clear","findings":[]}',
-        toolRequests: opts.toolRequests ?? [],
+        model: message.model,
+        content: message.content,
+        toolRequests: message.toolRequests ?? [],
       },
-    }),
+    })),
     JSON.stringify({
       type: 'result',
       exitCode: opts.exitCode ?? 0,
@@ -94,15 +104,35 @@ describe('review model output', () => {
 });
 
 describe('Copilot CLI JSONL adapter', () => {
-  it('accepts one fenced JSON reply and records the actual routed model and usage', () => {
+  it('accepts prose around one fenced JSON object and records actual routing evidence', () => {
     const result = parseCopilotJsonl(copilotJsonl({
-      content: '```json\n{"summary":"clear","findings":[]}\n```',
+      content: 'Review complete.\n```json\n{"summary":"clear","findings":[]}\n```\nNo tools were used.',
       premiumRequests: 0.33,
     }), 'auto', 'spec');
     expect(result).toMatchObject({
       status: 'valid',
       model: 'claude-haiku-4.5',
       premiumRequests: 0.33,
+      output: { summary: 'clear', findings: [] },
+    });
+  });
+
+  it('accepts multiple tool-free assistant messages containing one JSON object in total', () => {
+    const result = parseCopilotJsonl(copilotJsonl({
+      assistantMessages: [
+        {
+          model: 'claude-haiku-4.5',
+          content: 'I reviewed the supplied evidence.',
+        },
+        {
+          model: 'claude-haiku-4.5',
+          content: '```json\n{"summary":"clear","findings":[]}\n```',
+        },
+      ],
+    }), 'auto', 'standards');
+    expect(result).toMatchObject({
+      status: 'valid',
+      model: 'claude-haiku-4.5',
       output: { summary: 'clear', findings: [] },
     });
   });
@@ -125,13 +155,42 @@ describe('Copilot CLI JSONL adapter', () => {
     });
   });
 
-  it('rejects any tool request even when the textual answer is valid', () => {
+  it('rejects a tool request in any assistant message even when the JSON is valid', () => {
     expect(parseCopilotJsonl(copilotJsonl({
-      toolRequests: [{ name: 'view', arguments: { path: '/etc/passwd' } }],
+      assistantMessages: [
+        {
+          model: 'claude-haiku-4.5',
+          content: 'I need more context.',
+          toolRequests: [{ name: 'view', arguments: { path: '/etc/passwd' } }],
+        },
+        {
+          model: 'claude-haiku-4.5',
+          content: '{"summary":"clear","findings":[]}',
+        },
+      ],
     }), 'auto', 'standards')).toMatchObject({
       status: 'invalid',
       reason: 'invalid-output',
       error: expect.stringContaining('禁止的工具'),
+    });
+  });
+
+  it('rejects assistant messages that report different actual models', () => {
+    expect(parseCopilotJsonl(copilotJsonl({
+      assistantMessages: [
+        {
+          model: 'claude-haiku-4.5',
+          content: 'Reviewing.',
+        },
+        {
+          model: 'gpt-5-mini',
+          content: '{"summary":"clear","findings":[]}',
+        },
+      ],
+    }), 'auto', 'standards')).toMatchObject({
+      status: 'invalid',
+      reason: 'invalid-output',
+      error: expect.stringContaining('身份'),
     });
   });
 

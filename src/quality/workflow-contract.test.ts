@@ -55,6 +55,10 @@ describe('managed GitHub workflow trust boundaries', () => {
       .toBe(1);
     expect(workflow.match(/queue: max/g)?.length).toBe(1);
     expect(workflow).toContain('ai-reviews:');
+    expect(workflow).toContain(
+      "if: needs.project-checks.result == 'success' && github.event.pull_request.draft == false",
+    );
+    expect(workflow.match(/needs: \[project-checks\]/g)?.length).toBe(2);
     expect(workflow).not.toContain('standards-review:');
     expect(workflow).not.toContain('deep-review:');
     expect(workflow.match(/continue-on-error: true/g)?.length).toBe(3);

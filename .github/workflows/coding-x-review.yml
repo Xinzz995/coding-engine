@@ -14,7 +14,7 @@ jobs:
     if: github.event.pull_request.draft == false
     uses: ./.github/workflows/coding-x-project-checks.yml
     with:
-      coding-x-version: "0.31.1"
+      coding-x-version: "0.31.2"
       base-sha: ${{ github.event.pull_request.base.sha }}
       head-sha: ${{ github.event.pull_request.head.sha }}
       pull-request-number: ${{ github.event.pull_request.number }}
@@ -45,14 +45,15 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.31.1"
+          --package="coding-x@0.31.2"
           -- coding-x quality gate
           --publish-project-check "$PROJECT_JOB_RESULT"
           --event-path "$GITHUB_EVENT_PATH"
           --json
 
   ai-reviews:
-    if: github.event.pull_request.draft == false
+    if: needs.project-checks.result == 'success' && github.event.pull_request.draft == false
+    needs: [project-checks]
     runs-on: ubuntu-latest
     concurrency:
       group: coding-x-model-${{ github.repository_id }}
@@ -80,7 +81,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.31.1"
+          --package="coding-x@0.31.2"
           --package="@github/copilot@1.0.74"
           -- coding-x quality gate
           --axis spec
@@ -96,7 +97,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.31.1"
+          --package="coding-x@0.31.2"
           --package="@github/copilot@1.0.74"
           -- coding-x quality gate
           --axis standards
@@ -112,7 +113,7 @@ jobs:
         run: >-
           npm exec --yes
           --prefix "$RUNNER_TEMP"
-          --package="coding-x@0.31.1"
+          --package="coding-x@0.31.2"
           --package="@github/copilot@1.0.74"
           -- coding-x quality gate
           --axis deep

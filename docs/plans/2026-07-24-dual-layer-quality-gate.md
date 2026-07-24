@@ -119,8 +119,9 @@ scope: root
   provider 不可用均阻断。
 - provider adapter 在独立临时 Git 根加载可信 custom agent，工具列表为空；PR 内容只进入
   user data。禁用 MCP、自定义指令、远程会话、远程导出和自动更新。
-- 有界解析 JSONL，机械核对退出状态、唯一最终回复、零工具请求和实际模型；receipt 记录模型、
-  调用次数、premium request 用量与耗时。
+- 有界解析 JSONL，机械核对退出状态、同一实际模型、全部回复零工具请求，以及回复中只有一个
+  可解析 JSON 对象；允许 provider 的说明文字和代码围栏，多个对象仍按歧义阻断。receipt
+  记录模型、调用次数、premium request 用量与耗时。
 - 工作流改用 `copilot-requests: write` 与内建 `GITHUB_TOKEN`，删除模型 secret 依赖；固定
   coding-x 与 Copilot CLI 两个完整版本。
 - failure-first 测试覆盖 CLI 缺失/错版、超时、损坏事件、模型身份矛盾、工具请求和 prompt
