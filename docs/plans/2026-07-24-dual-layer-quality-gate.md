@@ -80,7 +80,7 @@ scope: root
 - 扩展 CI：Linux Node 22 完整检查、Node 18 兼容、macOS/Windows 关键测试/构建、依赖审计、
   CodeQL、Dependabot。
 - 发布 workflow 验证 tag commit 位于 origin/main 且相同提交的质量 checks 已通过。
-- 提交 coding-engine contract；self-host workflow 延至 0.30.0 发布后的第二个 PR。
+- 提交 coding-engine contract；self-host workflow 延至 bootstrap 版本发布后的独立 PR。
 - `loop.ts`/巨型测试拆分另开结构治理 PR，不与门禁产品实现混改。
 
 ## Task 6：验证、bootstrap、真实下游
@@ -89,15 +89,16 @@ scope: root
 2. 临时 Git 仓库覆盖 Node、Python、monorepo、路径空格、无 remote、权限不足和 malicious diff。
 3. 推送实现分支，创建过渡 PR，等待现有 CI，并完成独立 review。
 4. 合并并发布 0.30.0；核对 tag、GitHub Release、npm gitHead 和干净同步状态。
-5. 第二个 coding-engine PR 用 0.30.0 生成 self-host 配置；通过后启用完整 ruleset，验证 direct
+5. 自托管前修复同名源码仓库的 npm 执行冲突并发布 0.30.1；第二个 coding-engine PR 用
+   0.30.1 生成 self-host 配置；通过后启用完整 ruleset，验证 direct
    push 被拒绝、旧 SHA 不可复用、doctor 回读通过。
-6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.0 配置规则；
+6. 建立私有或公开的最小 Python 多模块仓库，先做明确 bootstrap，再用 0.30.1 配置规则；
    用失败 PR 证明阻断，修复后同一 PR 最新 head 全绿并合并。
 7. 最终记录两个 PR、ruleset、checks、发布与外部仓库边界；不删除外部仓库，除非用户另行授权。
 
 ## 交付边界
 
-- 本次授权包含实现、提交、推送、PR、GitHub 规则配置和为自托管所需的 0.30.0 正式发布。
+- 本次授权包含实现、提交、推送、PR、GitHub 规则配置和为自托管所需的正式发布。
 - 远端写入只作用于 `Xinzz995/coding-engine` 和本次新建的明确 dogfood 仓库。
 - 不自动合并未通过检查的 PR，不静默管理员绕过，不上传本机模型密钥。
 - 不实现 Git 代理、守护进程、数据库、TUI、中央服务、签名、自动修复/合并/发布。
