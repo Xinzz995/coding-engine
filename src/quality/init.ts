@@ -3,7 +3,6 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   rmSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -31,6 +30,7 @@ import {
 } from './github.js';
 import {
   defaultBranch,
+  gitText,
   repositoryFromRemote,
   resolveGitRoot,
 } from './git.js';
@@ -354,9 +354,9 @@ export function buildQualityInitPlan(
   overrides: QualityInitOverrides = {},
 ): QualityInitPlan {
   const root = resolveGitRoot(cwd);
-  const canonicalCwd = realpathSync(cwd);
-  const canonicalRoot = realpathSync(root);
-  if (canonicalRoot !== canonicalCwd) {
+  // Git 自己最清楚当前目录相对 worktree 根的位置。这也避免 Windows 8.3
+  // 短路径（RUNNER~1）与同一目录的长路径被字符串比较误判成两个仓库。
+  if (gitText(cwd, ['rev-parse', '--show-prefix']).trim() !== '') {
     throw new Error(`quality init 必须在 Git 仓库根执行：${root}`);
   }
   const candidates = discoverQualityCandidates(root);

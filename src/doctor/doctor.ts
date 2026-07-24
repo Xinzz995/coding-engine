@@ -250,10 +250,10 @@ function isGitWorkTree(root: string): boolean {
 export function checkWorkspaceGitIsolation(root: string, workspace: string): WorkspaceGitCheckResult {
   const workspacePath = workspace;
   // macOS 的临时目录常同时以 /var 与 /private/var 表示；比较仓库边界前先消除该别名。
-  const canonicalRoot = realpathSync(root);
+  const canonicalRoot = realpathSync.native(root);
   const unresolvedWorkspace = resolve(canonicalRoot, workspace);
   const workspaceAbs = existsSync(unresolvedWorkspace)
-    ? realpathSync(unresolvedWorkspace)
+    ? realpathSync.native(unresolvedWorkspace)
     : unresolvedWorkspace;
   const base: WorkspaceGitCheckResult = {
     workspacePath,
@@ -266,7 +266,7 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
 
   let gitRoot: string;
   try {
-    gitRoot = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    gitRoot = realpathSync.native(execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd: root,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],

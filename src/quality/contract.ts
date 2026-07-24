@@ -129,7 +129,7 @@ export function validateProjectRelativePath(
   }
   if (existsSync(absolute)) {
     try {
-      if (!isWithinRoot(realpathSync(root), realpathSync(absolute))) {
+      if (!isWithinRoot(realpathSync.native(root), realpathSync.native(absolute))) {
         errors.push(`${path} 的真实路径不能越出项目根`);
         return false;
       }

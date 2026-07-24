@@ -179,7 +179,7 @@ function checkPolicy(config, root) {
     let real;
     let actual;
     try {
-      real = realpathSync(lexical);
+      real = realpathSync.native(lexical);
       if (!isInside(root, real)) {
         return { ok: false, error: `政策文件 realpath 越出项目根：${policy.path}` };
       }
@@ -227,7 +227,7 @@ function checkPolicy(config, root) {
     let real;
     let content;
     try {
-      real = realpathSync(resolve(root, path));
+      real = realpathSync.native(resolve(root, path));
       if (!isInside(root, real)) return { ok: false, error: `未跟踪生产文件越出项目根：${path}` };
       content = readFileSync(real, 'utf8');
     } catch (error) {
@@ -427,7 +427,7 @@ async function main() {
   if (!top.ok) return allow(cursorPayload);
   let root;
   try {
-    root = realpathSync(top.stdout.trim());
+    root = realpathSync.native(top.stdout.trim());
   } catch {
     return allow(cursorPayload);
   }
@@ -437,7 +437,7 @@ async function main() {
   const injectedWorkspace = process.env.CODING_X_WORKSPACE;
   if (injectedRoot && injectedWorkspace && isAbsolute(injectedWorkspace)) {
     try {
-      if (realpathSync(injectedRoot) === root) workspace = injectedWorkspace;
+      if (realpathSync.native(injectedRoot) === root) workspace = injectedWorkspace;
     } catch {
       // 环境来自其他项目或已失效时只回退当前 Git 根，不跨项目误读。
     }

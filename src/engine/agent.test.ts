@@ -116,6 +116,8 @@ describe('resolveBinary', () => {
 
   it('supports the current agent command and the legacy cursor-agent command without configuration', () => {
     const dir = mkdtempSync(join(tmpdir(), 'coding-x-cursor-bin-'));
+    const extension = process.platform === 'win32' ? '.CMD' : '';
+    const executable = process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n';
     const originalPath = process.env.PATH;
     const originalOverride = process.env.CODING_X_CURSOR_BIN;
     delete process.env.CODING_X_CURSOR_BIN;
@@ -123,14 +125,14 @@ describe('resolveBinary', () => {
       process.env.PATH = dir;
       expect(resolveBinary('cursor')).toBe('agent');
 
-      const current = join(dir, 'agent');
-      writeFileSync(current, '#!/bin/sh\n');
-      chmodSync(current, 0o755);
+      const current = join(dir, `agent${extension}`);
+      writeFileSync(current, executable);
+      if (process.platform !== 'win32') chmodSync(current, 0o755);
       expect(resolveBinary('cursor')).toBe('agent');
 
-      const legacy = join(dir, 'cursor-agent');
-      writeFileSync(legacy, '#!/bin/sh\n');
-      chmodSync(legacy, 0o755);
+      const legacy = join(dir, `cursor-agent${extension}`);
+      writeFileSync(legacy, executable);
+      if (process.platform !== 'win32') chmodSync(legacy, 0o755);
       expect(resolveBinary('cursor')).toBe('cursor-agent');
     } finally {
       if (originalPath === undefined) delete process.env.PATH;
