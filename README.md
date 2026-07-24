@@ -50,7 +50,7 @@ coding-x 同时包含两部分：
 
 - commands 和 skills 通常在你当前打开的 AI 会话中执行，不会因为名字里有 `loop` 就自动新开会话。`/priming` 建立的理解也主要服务于当前会话。
 - 引擎中的每次 Developer 和 Validator 调用都是新的 headless runner 进程，不能依赖上轮聊天记忆；它们通过 Git、`AGENTS.md`、`docs/` 和 `.workspace/` 接力。
-- `/review-loop` 现在调用统一的 `quality review` 核心；Spec、工程标准和深度结构评审分别启动只读上下文，三类结果各自保留且不会相互抵消。它仍只是本地反馈，GitHub 会对 PR 最新提交重新运行。
+- `/review-loop` 现在调用统一的 `quality review` 核心；Spec、工程标准和深度结构评审分别启动只读上下文，三类结果各自保留且不会相互抵消。任一轴资料不足时，其他两轴的通过不能替代它。它仍只是本地反馈，GitHub 会对 PR 最新提交重新运行。
 
 > **下文命令名的写法：** 为了让三种宿主共用一份说明，本文把命令逻辑名简写成 `/priming`、`/planning` 等。Claude Code 安装插件后的实际名字带命名空间，例如 `/coding-x:priming`；Cursor 以斜杠菜单实际显示的名字为准；Codex 可直接说“使用 coding-x 的 priming 工作流”。如果宿主没有显示裸命令，不要机械输入不存在的 `/priming`，安装和验证方法见「安装」。
 
