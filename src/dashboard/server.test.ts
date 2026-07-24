@@ -197,6 +197,7 @@ describe('start', () => {
 
     const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
     cleanup.push(() => srv.close());
+    await srv.ready;
     const addr = srv.address();
     const res = await fetch(`http://127.0.0.1:${addr.port}/api/state`);
     const body = await res.json();
