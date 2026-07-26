@@ -34,12 +34,12 @@ export function reviewOutputSchema(): Record<string, unknown> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['status', 'summary', 'requestDeepReview', 'findings'],
+    required: ['status', 'summary', 'requestDeepReview', 'unverifiableReason', 'findings'],
     properties: {
       status: { type: 'string', enum: ['passed', 'failed', 'unverifiable'] },
       summary: { type: 'string', minLength: 1, maxLength: 4000 },
       requestDeepReview: { type: 'boolean' },
-      unverifiableReason: { type: 'string', minLength: 1, maxLength: 2000 },
+      unverifiableReason: { type: ['string', 'null'], minLength: 1, maxLength: 2000 },
       findings: {
         type: 'array',
         maxItems: 100,
@@ -56,11 +56,11 @@ export function reviewOutputSchema(): Record<string, unknown> {
             location: {
               type: 'object',
               additionalProperties: false,
-              required: ['path'],
+              required: ['path', 'line', 'symbol'],
               properties: {
                 path: { type: 'string', minLength: 1, maxLength: 1000 },
-                line: { type: 'integer', minimum: 1 },
-                symbol: { type: 'string', minLength: 1, maxLength: 500 },
+                line: { type: ['integer', 'null'], minimum: 1 },
+                symbol: { type: ['string', 'null'], minLength: 1, maxLength: 500 },
               },
             },
             ruleSource: { type: 'string', minLength: 1, maxLength: 1000 },
