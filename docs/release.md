@@ -1,7 +1,7 @@
 ---
 title: coding-x 候选发布与恢复手册
 status: active
-updated: 2026-07-26
+updated: 2026-07-27
 scope: root
 ---
 
@@ -72,9 +72,16 @@ Review，也不得用候选版本为自己签发正式结果。0.33.0 发布并�
 
 ### 3. 批准前 Dogfood
 
+coding-engine 的候选影子运行必须针对真实的开放 PR：运行位置必须是包含最新 `main` 的干净功能
+分支，GitHub 上必须存在绑定该分支当前提交的开放 PR。模型只在本地运行，GitHub 不调用模型。
+
+如果版本 PR 已合并，只能用一项真实、最小、非业务的文档或流程修正，从最新 `main` 建立独立
+开放 PR。不得复用已合并 PR、添加空标记，或伪造本地和远端状态来制造“通过”证明。
+
 三个项目都安装 `npm-candidate-X.Y.Z` 中同一个压缩包并记录 SHA-256：
 
-- coding-engine 使用候选版本运行 `--shadow`；退出 7 只表示影子验证走完，不表示可交付；
+- coding-engine 使用候选版本运行 `--shadow`；影子成功固定返回 7，只表示影子验证走完，绝不表示
+  候选可交付、已发布或正式通过；
 - Go 多模块项目运行自身 Go 检查，GitHub CI 不安装 Node 或 coding-x；
 - Python Monorepo 运行自身 Python 检查，GitHub CI 不安装 Node 或 coding-x。
 
