@@ -34,12 +34,41 @@ function data(over: Partial<ReportData> = {}): ReportData {
     tamperedArchives: [],
     screenshots: [],
     evidence: { records: [], skippedLines: 0 },
+    finalReview: { status: 'missing' },
     ...over,
   };
 }
 
 function ev(records: EvidenceRecord[], skippedLines = 0) {
   return { evidence: { records, skippedLines } };
+}
+
+function readyReview(shadow = false): ReportData['finalReview'] {
+  return {
+    status: 'ready',
+    state: {
+      schemaVersion: 1,
+      status: 'passed',
+      deliveryStatus: shadow ? 'shadow' : 'ready',
+      binding: {
+        prNumber: 9, targetBranch: 'main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40),
+        prTitleDigest: 'title', prBodyDigest: 'body', specDigest: 'spec',
+        engineeringStandardsDigest: 'standards', qualityContractDigest: 'contract',
+        codingXVersion: '0.30.0', runner: 'codex', model: 'gpt-test', runnerVersion: '1.0.0',
+        reviewRulesVersion: '1.0.0', reviewRulesDigest: 'rules', riskDigest: 'risk',
+      },
+      risk: {
+        triggered: false, categories: [], reasons: [], changedFiles: ['src/a.ts'],
+        changedModules: ['src'], digest: 'risk',
+      },
+      axes: [{
+        axis: 'spec', status: 'passed', summary: 'ok', findings: [],
+        requestDeepReview: false, durationMs: 1, attempts: 1,
+      }],
+      remote: { status: 'ready', checks: [], rulesetErrors: [], checkedAt: '2026-07-08T12:34:00Z' },
+      round: 1, shadow, startedAt: '2026-07-08T12:33:00Z', completedAt: '2026-07-08T12:34:00Z',
+    },
+  };
 }
 
 describe('escapeHtml', () => {
@@ -102,7 +131,7 @@ describe('renderReportHtml', () => {
   });
 
   it('结果横幅三态', () => {
-    expect(renderReportHtml(data())).toContain('全部通过 1/1');
+    expect(renderReportHtml(data())).toContain('Story 验证完成 1/1');
     const s = data().stories[0];
     expect(renderReportHtml(data({
       stories: [{ ...s, passes: false, blocked: true }],
@@ -110,6 +139,23 @@ describe('renderReportHtml', () => {
     expect(renderReportHtml(data({
       stories: [{ ...s, passes: false, blocked: false }],
     }))).toContain('进行中');
+  });
+
+  it('把 Story、本地 Review 和 GitHub 交付分开显示', () => {
+    const pending = renderReportHtml(data());
+    expect(pending).toContain('Story 结果不等于可交付');
+    expect(pending).toContain('本地最终 Review 尚未运行');
+
+    const ready = renderReportHtml(data({ finalReview: readyReview() }));
+    expect(ready).toContain('本地 Review 与 GitHub 交付条件已就绪');
+    expect(ready).toContain('PR #9');
+
+    const shadow = renderReportHtml(data({ finalReview: readyReview(true) }));
+    expect(shadow).toContain('Shadow 结果不能表示可交付');
+
+    const corrupted = renderReportHtml(data({ finalReview: readyReview(), stateCorrupted: true }));
+    expect(corrupted).toContain('Story 状态未完成或不可验证，不能交付');
+    expect(corrupted).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
   });
 
   it('空 userStories 显式警示横幅：不落入「进行中 0/0」', () => {
@@ -204,8 +250,8 @@ describe('renderReportHtml', () => {
     expect(html).toContain('ADR-007');
   });
 
-  it('review 留痕：无 → 占位指引；有 → 渲染 md 内容并附留痕真实性免责标注', () => {
-    expect(renderReportHtml(data())).toContain('尚无人审包');
+  it('历史 review Markdown 只作为本地反馈展示，不再声称是可信留痕', () => {
+    expect(renderReportHtml(data())).toContain('尚无历史 Markdown 反馈');
     const html = renderReportHtml(data({
       reviews: [{ filename: 'review-2026-07-08.md', content: '## 层 2 发现清单\n- 发现 A' }],
     }));
@@ -213,7 +259,8 @@ describe('renderReportHtml', () => {
     expect(html).toContain('<h5>层 2 发现清单</h5>');
     expect(html).toContain('<li>发现 A</li>');
     expect(html).not.toContain('尚无人审包');
-    expect(html).toContain('留痕真实性');
+    expect(html).toContain('不能作为通过证明');
+    expect(html).toContain('GitHub 检查与 PR 历史');
   });
 
   it('progress 折叠附录：空则整节省略，有则在 details 内', () => {

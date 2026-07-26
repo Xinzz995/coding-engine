@@ -163,15 +163,58 @@ ${renderGallery(shots, anyClaims ? new Set(claims.map((c) => c.file)) : null)}
 </section>`;
 }
 
-function renderBanner(stories: StoryView[], stateCorrupted: boolean): string {
+function renderImplementationBanner(stories: StoryView[], stateCorrupted: boolean): string {
   if (stateCorrupted) return '<div class="banner blocked">❌ 状态不可验证：state.json 已损坏</div>';
   const total = stories.length;
   if (total === 0) return '<div class="banner blocked">⚠️ prd.json 中没有任何 story</div>';
   const passed = stories.filter(isStoryPassed).length;
   const blocked = stories.filter((x) => x.blocked).length;
-  if (total > 0 && passed === total) return `<div class="banner ok">✅ 全部通过 ${passed}/${total}</div>`;
+  if (total > 0 && passed === total) return `<div class="banner ok">✅ Story 验证完成 ${passed}/${total}</div>`;
   if (blocked > 0) return `<div class="banner blocked">⛔ ${passed} 通过 · ${blocked} blocked · 共 ${total}</div>`;
   return `<div class="banner running">⏳ 进行中：${passed}/${total} 通过</div>`;
+}
+
+function reviewStatusLabel(status: 'passed' | 'failed' | 'unverifiable'): string {
+  if (status === 'passed') return '已通过';
+  if (status === 'failed') return '有待处理问题';
+  return '无法验证';
+}
+
+function renderFinalReview(data: ReportData, stories: StoryView[]): string {
+  const review = data.finalReview;
+  if (review.status === 'missing') {
+    return `<section class="card"><h2>交付状态</h2>
+<div class="banner running">⏳ Story 结果不等于可交付</div>
+<p>本地最终 Review 尚未运行；GitHub 交付状态尚未由最终 Review 记录。</p></section>`;
+  }
+  if (review.status === 'invalid') {
+    return `<section class="card red-flag"><h2>交付状态</h2>
+<div class="banner blocked">❌ 本地最终 Review 状态损坏</div>
+<p>${text(review.error)}</p></section>`;
+  }
+  const state = review.state;
+  const findings = state.axes.flatMap((axis) => axis.findings);
+  const axes = state.axes.map((axis) =>
+    `<li>${text(axis.axis)}：${text(reviewStatusLabel(axis.status))} · ${axis.findings.length} 个 finding</li>`,
+  ).join('');
+  const implementationReady = !data.stateCorrupted
+    && stories.length > 0
+    && stories.every(isStoryPassed);
+  const deliveryReady = implementationReady
+    && state.status === 'passed' && state.remote.status === 'ready' && !state.shadow;
+  const banner = deliveryReady
+    ? '<div class="banner ok">✅ 本地 Review 与 GitHub 交付条件已就绪</div>'
+    : `<div class="banner ${state.status === 'failed' || state.status === 'unverifiable' || !implementationReady ? 'blocked' : 'running'}">` +
+      `${state.shadow ? '🧪 Shadow 结果不能表示可交付'
+        : !implementationReady ? '❌ Story 状态未完成或不可验证，不能交付'
+          : '⏳ 尚未达到交付条件'}</div>`;
+  return `<section class="card"><h2>交付状态</h2>
+${banner}
+<div class="meta-line">本地 Review：${text(reviewStatusLabel(state.status))} · GitHub：${text(state.remote.status)} · finding：${findings.length}</div>
+<div class="meta-line">PR #${state.binding.prNumber} · head <code>${text(state.binding.headSha.slice(0, 12))}</code> · ${text(state.binding.runner)} / ${text(state.binding.model)}</div>
+${axes ? `<ul class="checks">${axes}</ul>` : ''}
+<p class="placeholder">这是本机 workspace 中的结果展示，不是 GitHub 共享证明；共享交付记录以 GitHub 检查与 PR 历史为准。</p>
+</section>`;
 }
 
 function renderGateConfig(data: ReportData): string {
@@ -435,13 +478,12 @@ function renderUnattributed(shots: ScreenshotEntry[], orphanClaims: ScreenshotCl
 
 function renderReviews(reviews: ReportData['reviews']): string {
   if (reviews.length === 0) {
-    return '<section class="card"><h2>人审留痕</h2><p class="placeholder">尚无人审包——循环结束后运行 /review-loop，再跑 <code>coding-x report</code> 刷新本报告。</p></section>';
+    return '<section class="card"><h2>本地裁决记录</h2><p class="placeholder">尚无历史 Markdown 反馈；正式裁决只写入结构化记录。</p></section>';
   }
-  // 免责标注：.workspace/ 是 agent 可写目录，report.html 本身也是渲染产物——
-  // 留痕内容的真实性以 git 提交历史中的 review-*.md 为准，报告只负责展示
-  const disclaimer = '<p class="placeholder">留痕真实性以 git 提交的 review-*.md 为准（.workspace/ 属 agent 可写目录）。</p>';
+  // 旧 review-*.md 只作为本地历史反馈展示；它被 Git 忽略，不能成为共享交付凭证。
+  const disclaimer = '<p class="placeholder">以下 Markdown 仅为被 Git 忽略的本地历史反馈；不能作为通过证明。共享交付记录以 GitHub 检查与 PR 历史为准。</p>';
   const sections = reviews.map((r) =>
-    `<section class="card review"><h2>人审留痕：${text(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
+    `<section class="card review"><h2>历史本地反馈：${text(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
   ).join('\n');
   return disclaimer + sections;
 }
@@ -570,7 +612,7 @@ export function renderReportHtml(data: ReportData): string {
 <main>
 <header class="card">
 <h1>${title}</h1>
-${renderBanner(stories, data.stateCorrupted)}
+${renderImplementationBanner(stories, data.stateCorrupted)}
 <div class="meta-line">分支：<code>${text(prd.branchName)}</code>${prd.sourcePrd ? ` · 源 PRD：<code>${text(prd.sourcePrd)}</code>` : ''}</div>
 <div class="meta-line">生成时间：${formatStamp(data.generatedAt)} · workspace：<code>${text(data.workspace)}</code></div>
 ${prdSource}
@@ -584,6 +626,7 @@ ${renderModels(data)}
 <div class="meta-line">统计：${stories.length} story · ${data.screenshots.length} 个截图工件 · ${data.reviews.length} 份人审留痕</div>
 </header>
 ${renderRedFlags(data.tamperedArchives, data.evidence.records)}
+${renderFinalReview(data, stories)}
 <h2 class="section-title">story 证据</h2>
 ${claimDisclaimer}
 ${cards}

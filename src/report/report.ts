@@ -5,6 +5,7 @@ import { readDisplayState, mergedStories, type StoryView } from '../engine/state
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import { readProgress } from '../engine/progress.js';
 import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
+import { readFinalReviewState, type ReviewStateRead } from '../review/state.js';
 import { renderReportHtml } from './render.js';
 
 export interface ScreenshotEntry {
@@ -32,6 +33,8 @@ export interface ReportData {
   screenshots: ScreenshotEntry[];
   /** evidence.jsonl 结构化证据（缺失=空记录零跳过） */
   evidence: { records: EvidenceRecord[]; skippedLines: number };
+  /** 本地最终 Review 的最后一次结构化结果；报告只展示，不把 workspace 当共享凭证。 */
+  finalReview: ReviewStateRead;
 }
 
 export type ReportSource =
@@ -103,6 +106,7 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
       tamperedArchives: rootFiles.filter((n) => /^prd\.tampered-.*\.json$/.test(n)).sort(),
       screenshots: listFiles(join(workspace, 'screenshots')).sort().map((f) => parseScreenshotEntry(f, storyIds)),
       evidence: readEvidence(workspace),
+      finalReview: readFinalReviewState(workspace),
     },
   };
 }

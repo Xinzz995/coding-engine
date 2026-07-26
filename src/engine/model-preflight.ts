@@ -27,7 +27,8 @@ export interface ModelPreflightResult {
   warnings: string[];
   storyRoutes: StoryRoutePreview[];
   validator: ModelChoice;
-  overrides: { builder?: string; validator?: string; escalation?: string };
+  review: ModelChoice;
+  overrides: { builder?: string; validator?: string; escalation?: string; review?: string };
 }
 
 export interface ModelPreflightOptions {
@@ -38,6 +39,7 @@ export interface ModelPreflightOptions {
   builderOverride?: string;
   validatorOverride?: string;
   escalationOverride?: string;
+  reviewOverride?: string;
   catalog?: (runner: AgentKind) => ModelCatalogResult | Promise<ModelCatalogResult>;
 }
 
@@ -71,6 +73,7 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
     ['--builder-model', opts.builderOverride],
     ['--validator-model', opts.validatorOverride],
     ['--escalation-model', opts.escalationOverride],
+    ['--review-model', opts.reviewOverride],
   ] as const) {
     if (value !== undefined && value.trim().length === 0) {
       throw new ModelPreflightError(`${flag} 必须是非空模型标识`);
@@ -115,7 +118,13 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
 
   const hasPending = storyRoutes.length > 0;
   const validator = resolveValidatorModel({ cliOverride: opts.validatorOverride, config });
+  const review: ModelChoice = opts.reviewOverride
+    ? { model: opts.reviewOverride, source: 'cli-review' }
+    : { ...resolveValidatorModel({ cliOverride: opts.validatorOverride, config }), source: 'review' };
   if (hasPending) addModel(required, validator.model, 'validator');
+  // 最终 Review 在 story 收敛后必然发生；已经明确的模型必须在任何 agent 启动前进入允许目录。
+  // 正式 runLoop 还会在本预检返回后拒绝未固定的 Review 模型。
+  addModel(required, review.model, 'final reviewer');
   if (hasPending && config && opts.validatorOverride) addModel(shadowed, config.validator, 'models.validator');
   if (hasPending && config && opts.escalationOverride) addModel(shadowed, config.escalation, 'models.escalation');
 
@@ -126,6 +135,7 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
     addModel(required, opts.builderOverride, '--builder-model');
     addModel(required, opts.validatorOverride, '--validator-model');
     addModel(required, opts.escalationOverride, '--escalation-model');
+    addModel(required, opts.reviewOverride, '--review-model');
   }
 
   // 没有待执行 story 就不会发生模型调用：schema/runner 仍严格校验，
@@ -134,15 +144,18 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
   const hasOverrides = opts.builderOverride !== undefined
     || opts.validatorOverride !== undefined
     || opts.escalationOverride !== undefined;
+  const hasReviewModel = review.model !== undefined;
   const hasPolicy = (hasPending && (config !== null || hasOverrides))
+    || hasReviewModel
     || (prdUnavailable && hasOverrides);
   if (!hasPolicy) {
     return {
-      runner, config, catalog: { status: 'skipped', runner }, warnings: [], storyRoutes, validator,
+      runner, config, catalog: { status: 'skipped', runner }, warnings: [], storyRoutes, validator, review,
       overrides: {
         ...(opts.builderOverride !== undefined ? { builder: opts.builderOverride } : {}),
         ...(opts.validatorOverride !== undefined ? { validator: opts.validatorOverride } : {}),
         ...(opts.escalationOverride !== undefined ? { escalation: opts.escalationOverride } : {}),
+        ...(opts.reviewOverride !== undefined ? { review: opts.reviewOverride } : {}),
       },
     };
   }
@@ -165,11 +178,12 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
     }
   }
   return {
-    runner, config, catalog, warnings, storyRoutes, validator,
+    runner, config, catalog, warnings, storyRoutes, validator, review,
     overrides: {
       ...(opts.builderOverride !== undefined ? { builder: opts.builderOverride } : {}),
       ...(opts.validatorOverride !== undefined ? { validator: opts.validatorOverride } : {}),
       ...(opts.escalationOverride !== undefined ? { escalation: opts.escalationOverride } : {}),
+      ...(opts.reviewOverride !== undefined ? { review: opts.reviewOverride } : {}),
     },
   };
 }
@@ -180,9 +194,10 @@ export function renderPreflightSummary(result: ModelPreflightResult): string {
     lines.push(
       `   builder: low=${result.config.builder.low} · medium=${result.config.builder.medium} · high=${result.config.builder.high}`,
       `   validator: ${result.config.validator} · escalation: ${result.config.escalation}`,
+      `   final reviewer: ${result.review.model ?? '未固定'}`,
     );
   } else {
-    lines.push('   prd.json 模型路由：未启用');
+    lines.push(`   prd.json 模型路由：未启用 · final reviewer=${result.review.model ?? '未固定'}`);
   }
   const overrides = Object.entries(result.overrides);
   if (overrides.length > 0) {

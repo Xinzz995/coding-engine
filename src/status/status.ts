@@ -12,6 +12,8 @@ import {
   type LoopValidationProtocolErrorCode,
 } from '../engine/evidence.js';
 import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
+import { collectCurrentReviewStatus, type CurrentReviewStatus } from '../review/status.js';
+import type { GitHubQualityClient } from '../quality/github.js';
 
 export interface RecentModelRoute {
   model: string | null;
@@ -50,6 +52,7 @@ export type StatusReport =
       evidenceUnavailable: boolean;
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
       stateCorrupted: boolean;
+      finalReview: CurrentReviewStatus;
     };
 
 // progress.md 是追加式日志，迭代记录标题固定以日期开头（`## yyyy-mm-dd HH:mm - Story ID`），
@@ -105,7 +108,11 @@ function recentValidationOf(records: EvidenceRecord[]): Record<string, StoryRece
 }
 
 /** 只读收集 workspace 执行状态；state.json 缺失兼容 legacy，存在但损坏则 fail-closed。 */
-export function collectStatus(workspace: string): StatusReport {
+export function collectStatus(workspace: string, options: {
+  projectRoot?: string;
+  client?: GitHubQualityClient;
+  refreshRemote?: boolean;
+} = {}): StatusReport {
   const prdPath = join(workspace, 'prd.json');
   if (!existsSync(prdPath)) return { status: 'missing', workspace };
   const prd = tryReadPrd(prdPath);
@@ -132,6 +139,12 @@ export function collectStatus(workspace: string): StatusReport {
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
     stateCorrupted,
+    finalReview: collectCurrentReviewStatus({
+      workspace,
+      ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
+      ...(options.client ? { client: options.client } : {}),
+      refreshRemote: options.refreshRemote ?? false,
+    }),
   };
 }
 
@@ -172,6 +185,23 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     `   story 通过 ${passed}/${total}${blocked > 0 ? `，阻塞 ${blocked}` : ''}`,
     '',
   ];
+  const review = report.finalReview;
+  if (review.read.status === 'missing') {
+    lines.push('🔎 本地最终 Review：尚未运行', '');
+  } else if (review.read.status === 'invalid') {
+    lines.push(`❌ 本地最终 Review 状态损坏：${review.read.error}`, '');
+  } else {
+    const state = review.read.state;
+    const remote = review.refreshedRemote ?? state.remote;
+    lines.push(
+      `🔎 本地最终 Review：${review.current ? state.status : '已失效'}`,
+      `   绑定 PR #${state.binding.prNumber} · head=${state.binding.headSha.slice(0, 12)} · ` +
+        `${state.binding.runner}/${state.binding.model}`,
+      `   GitHub 交付：${remote.status}${state.shadow ? ' · shadow' : ''}`,
+      ...review.staleReasons.map((reason) => `   ⚠️ ${reason}`),
+      '',
+    );
+  }
   if (report.modelRouting.status === 'enabled') {
     const m = report.modelRouting.config;
     lines.push(
@@ -244,8 +274,35 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     return { text: lines.join('\n'), exitCode: 1 };
   }
   const allPassed = !report.stateCorrupted && passed === total;
-  lines.push('', allPassed ? '✅ 全部 story 已通过' : `⏳ 还有 ${total - passed} 个 story 未完成`);
-  return { text: lines.join('\n'), exitCode: allPassed ? 0 : 1 };
+  if (!allPassed) {
+    lines.push('', blocked > 0 ? '⏸️ 存在 blocked story' : `⏳ 还有 ${total - passed} 个 story 未完成`);
+    return { text: lines.join('\n'), exitCode: blocked > 0 ? 3 : 1 };
+  }
+  const finalReview = report.finalReview;
+  if (finalReview.read.status === 'invalid') {
+    lines.push('', '❌ Story 已通过，但本地 Review 状态损坏');
+    return { text: lines.join('\n'), exitCode: 2 };
+  }
+  if (finalReview.read.status === 'missing' || !finalReview.current) {
+    lines.push('', '⏳ Story 已通过，但本地最终 Review 尚未完成或已经失效');
+    return { text: lines.join('\n'), exitCode: 6 };
+  }
+  const reviewState = finalReview.read.state;
+  if (reviewState.status === 'unverifiable') return {
+    text: [...lines, '', '❌ 本地最终 Review 无法验证'].join('\n'), exitCode: 5,
+  };
+  if (reviewState.status === 'failed') return {
+    text: [...lines, '', '⏸️ 本地最终 Review 存在待人工处理 finding'].join('\n'), exitCode: 4,
+  };
+  if (reviewState.shadow) return {
+    text: [...lines, '', '🧪 Shadow 已完成，但不能表示可交付'].join('\n'), exitCode: 7,
+  };
+  const remote = finalReview.refreshedRemote ?? reviewState.remote;
+  if (remote.status !== 'ready') return {
+    text: [...lines, '', '⏳ 本地已完成，GitHub CI 或 Ruleset 尚未就绪'].join('\n'), exitCode: 6,
+  };
+  lines.push('', '✅ 实现验证、本地 Review 与 GitHub 交付条件均已就绪');
+  return { text: lines.join('\n'), exitCode: 0 };
 }
 
 /**
@@ -286,9 +343,18 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
       skippedLines: report.evidenceSkippedLines,
       unavailable: report.evidenceUnavailable,
     },
+    finalReview: report.finalReview,
     summary,
   };
   // 与人类可读模式同一保守语义：空 story 列表不算全绿
   const allPassed = !report.stateCorrupted && summary.total > 0 && summary.passed === summary.total;
-  return { text: JSON.stringify(view, null, 2), exitCode: allPassed ? 0 : 1 };
+  if (!allPassed) return { text: JSON.stringify(view, null, 2), exitCode: summary.blocked > 0 ? 3 : 1 };
+  const review = report.finalReview;
+  if (review.read.status === 'invalid') return { text: JSON.stringify(view, null, 2), exitCode: 2 };
+  if (review.read.status === 'missing' || !review.current) return { text: JSON.stringify(view, null, 2), exitCode: 6 };
+  if (review.read.state.status === 'unverifiable') return { text: JSON.stringify(view, null, 2), exitCode: 5 };
+  if (review.read.state.status === 'failed') return { text: JSON.stringify(view, null, 2), exitCode: 4 };
+  if (review.read.state.shadow) return { text: JSON.stringify(view, null, 2), exitCode: 7 };
+  const remote = review.refreshedRemote ?? review.read.state.remote;
+  return { text: JSON.stringify(view, null, 2), exitCode: remote.status === 'ready' ? 0 : 6 };
 }

@@ -14,6 +14,7 @@ import {
   type DoctorOptions,
 } from './doctor.js';
 import { deriveQualityChecks, readQualityContract } from '../quality/contract.js';
+import { renderManagedGitHubFiles } from '../quality/github-workflows.js';
 
 const FULL_FM = ['---', 'title: 示例', 'status: active', 'updated: 2026-07-03', 'scope: root', '---', '', '# 正文'].join('\n');
 const ORIGINAL_CODING_X_CONFIG = process.env.CODING_X_CONFIG;
@@ -21,6 +22,7 @@ const ISOLATED_MISSING_CONFIG = join(tmpdir(), `coding-x-doctor-${process.pid}-m
 
 const runDoctor = (root: string, options: DoctorOptions = {}) => runDoctorWithQuality(root, {
   requireQualityContract: false,
+  local: true,
   ...options,
 });
 
@@ -31,6 +33,10 @@ function writeQualityContract(root: string, codingXVersion = '0.29.0'): string {
   writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify(source));
   const result = readQualityContract(root);
   if (result.status !== 'ready') throw new Error(`fixture contract invalid: ${result.status}`);
+  for (const [relativePath, content] of Object.entries(renderManagedGitHubFiles(result.contract))) {
+    mkdirSync(join(root, relativePath, '..'), { recursive: true });
+    writeFileSync(join(root, relativePath), content);
+  }
   return result.digest;
 }
 
@@ -524,7 +530,7 @@ describe('runDoctor quality contract check', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
     try {
       mkdirSync(join(root, 'docs'));
-      const report = runDoctorWithQuality(root);
+      const report = runDoctorWithQuality(root, { local: true });
       expect(report.quality).toMatchObject({ status: 'missing', prdFound: false });
       const rendered = renderDoctorReport(report);
       expect(rendered.exitCode).toBe(1);
@@ -537,7 +543,7 @@ describe('runDoctor quality contract check', () => {
     try {
       mkdirSync(join(root, 'docs'));
       const digest = writeQualityContract(root);
-      const report = runDoctorWithQuality(root);
+      const report = runDoctorWithQuality(root, { local: true });
       expect(report.quality).toMatchObject({
         status: 'ready', digest, prdFound: false, prdDigestMatches: null,
       });
@@ -557,7 +563,7 @@ describe('runDoctor quality contract check', () => {
         qualityContractDigest: `sha256:${'b'.repeat(64)}`,
         qualityChecks: ['npm test'],
       }));
-      const report = runDoctorWithQuality(root);
+      const report = runDoctorWithQuality(root, { local: true });
       expect(report.quality.prdDigestMatches).toBe(false);
       const { text, exitCode } = renderDoctorReport(report);
       expect(exitCode).toBe(1);
@@ -576,7 +582,7 @@ describe('runDoctor quality contract check', () => {
         qualityContractDigest: digest,
         qualityChecks: qualitySnapshot(root),
       }));
-      const report = runDoctorWithQuality(root, { workspace: workspaceAbs });
+      const report = runDoctorWithQuality(root, { workspace: workspaceAbs, local: true });
       expect(report.docsFound).toBe(false);
       expect(report.quality).toMatchObject({
         prdFound: true, prdDigestMatches: true, prdChecksMatch: true,
@@ -593,7 +599,7 @@ describe('runDoctor quality contract check', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-gate-version-'));
     try {
       writeQualityContract(root, '9.9.9');
-      const report = runDoctorWithQuality(root);
+      const report = runDoctorWithQuality(root, { local: true });
       expect(report.quality.status).toBe('version-mismatch');
       const { text, exitCode } = renderDoctorReport(report);
       expect(exitCode).toBe(1);
@@ -606,7 +612,7 @@ describe('runDoctor quality contract check', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-gate-json-'));
     try {
       const digest = writeQualityContract(root);
-      const report = runDoctorWithQuality(root);
+      const report = runDoctorWithQuality(root, { local: true });
       const json = renderDoctorJson(report);
       expect(json.exitCode).toBe(renderDoctorReport(report).exitCode);
       expect(JSON.parse(json.text)).toMatchObject({

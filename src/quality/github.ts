@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 
 export const MANAGED_RULESET_NAME = 'coding-x quality gate';
 export const LEGACY_BOOTSTRAP_RULESET_NAME = 'coding-x bootstrap minimum';
+/** github.com 的 GitHub Actions 官方 App integration ID。 */
+export const GITHUB_ACTIONS_APP_ID = 15_368;
 
 export interface GitHubRepositoryInfo {
   fullName: string;
@@ -14,9 +16,25 @@ export interface GitHubPullRequestInfo {
   headSha: string;
   baseBranch: string;
   url: string;
+  /** Review 绑定所需；旧 init fixture 可以不提供，最终 Review 会严格拒绝缺失。 */
+  baseSha?: string;
+  title?: string;
+  body?: string;
+  labels?: string[];
+}
+
+export interface GitHubIssueInfo {
+  number: number;
+  state: 'open' | 'closed';
+  title: string;
+  body: string;
+  labels: string[];
+  url: string;
+  isPullRequest: boolean;
 }
 
 export interface GitHubCheckRun {
+  id?: number;
   name: string;
   headSha: string;
   status: string;
@@ -69,6 +87,8 @@ export interface GitHubQualityClient {
     branch: string,
   ): GitHubPullRequestInfo | null;
   listCheckRuns(repository: string, sha: string): GitHubCheckRun[];
+  getIssue?(repository: string, number: number): GitHubIssueInfo;
+  listOpenIssuesByLabel?(repository: string, label: string): GitHubIssueInfo[];
   ensureLabel(repository: string, name: string, color: string, description: string): void;
 }
 
@@ -153,11 +173,41 @@ function parsePullRequest(value: unknown): GitHubPullRequestInfo {
   if (!isRecord(value) || !isRecord(value.head) || !isRecord(value.base)) {
     throw new GitHubQualityError('无法解析 GitHub PR');
   }
+  const labels = Array.isArray(value.labels)
+    ? value.labels.map((entry) => {
+        if (!isRecord(entry)) throw new GitHubQualityError('GitHub PR label 非法');
+        return stringField(entry.name, 'pull_request.labels.name');
+      })
+    : [];
   return {
     number: numberField(value.number, 'pull_request.number'),
     headSha: stringField(value.head.sha, 'pull_request.head.sha'),
     baseBranch: stringField(value.base.ref, 'pull_request.base.ref'),
     url: stringField(value.html_url, 'pull_request.html_url'),
+    baseSha: stringField(value.base.sha, 'pull_request.base.sha'),
+    title: stringField(value.title, 'pull_request.title'),
+    body: typeof value.body === 'string' ? value.body : '',
+    labels,
+  };
+}
+
+function parseIssue(value: unknown): GitHubIssueInfo {
+  if (!isRecord(value) || !Array.isArray(value.labels)) {
+    throw new GitHubQualityError('无法解析 GitHub Issue');
+  }
+  const state = value.state;
+  if (state !== 'open' && state !== 'closed') throw new GitHubQualityError('GitHub Issue state 非法');
+  return {
+    number: numberField(value.number, 'issue.number'),
+    state,
+    title: stringField(value.title, 'issue.title'),
+    body: typeof value.body === 'string' ? value.body : '',
+    labels: value.labels.map((entry) => {
+      if (!isRecord(entry)) throw new GitHubQualityError('GitHub Issue label 非法');
+      return stringField(entry.name, 'issue.labels.name');
+    }),
+    url: stringField(value.html_url, 'issue.html_url'),
+    isPullRequest: isRecord(value.pull_request),
   };
 }
 
@@ -170,6 +220,7 @@ function parseCheckRun(value: unknown): GitHubCheckRun {
     throw new GitHubQualityError('GitHub check run conclusion 非法');
   }
   return {
+    id: numberField(value.id, 'check_run.id'),
     name: stringField(value.name, 'check_run.name'),
     headSha: stringField(value.head_sha, 'check_run.head_sha'),
     status: stringField(value.status, 'check_run.status'),
@@ -268,6 +319,17 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
       throw new GitHubQualityError('GitHub 返回的 check runs 非法');
     }
     return value.check_runs.map(parseCheckRun);
+  }
+
+  getIssue(repository: string, number: number): GitHubIssueInfo {
+    return parseIssue(this.api(`repos/${repository}/issues/${number}`));
+  }
+
+  listOpenIssuesByLabel(repository: string, label: string): GitHubIssueInfo[] {
+    const query = new URLSearchParams({ state: 'open', labels: label, per_page: '100' });
+    const value = this.api(`repos/${repository}/issues?${query}`);
+    if (!Array.isArray(value)) throw new GitHubQualityError('GitHub 返回的 Issue 列表非法');
+    return value.map(parseIssue).filter((issue) => !issue.isPullRequest);
   }
 
   ensureLabel(repository: string, name: string, color: string, description: string): void {

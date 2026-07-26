@@ -1,0 +1,46 @@
+import { createHash } from 'node:crypto';
+
+export function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (typeof value !== 'object' || value === null) return value;
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(record).sort().map((key) => [key, canonicalize(record[key])]),
+  );
+}
+
+export function digest(value: unknown): string {
+  const data = typeof value === 'string' ? value : JSON.stringify(canonicalize(value));
+  return `sha256:${createHash('sha256').update(data).digest('hex')}`;
+}
+
+export function normalizeText(value: string): string {
+  return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
+}
+
+export function globMatches(path: string, pattern: string): boolean {
+  let regex = '';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === '*' && pattern[index + 1] === '*') {
+      if (pattern[index + 2] === '/') {
+        regex += '(?:.*/)?';
+        index += 2;
+      } else {
+        regex += '.*';
+        index += 1;
+      }
+    } else if (char === '*') {
+      regex += '[^/]*';
+    } else if (char === '?') {
+      regex += '[^/]';
+    } else {
+      regex += char.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp(`^${regex}$`).test(path);
+}
+
+export function matchesAny(path: string, patterns: readonly string[]): boolean {
+  return patterns.some((pattern) => globMatches(path, pattern));
+}

@@ -3,9 +3,57 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status.js';
+import { digest } from '../review/common.js';
 
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), 'status-ws-'));
+}
+
+function writeReadyFinalReview(workspace: string, shadow = false): void {
+  const risk = {
+    triggered: false, categories: [], reasons: [], changedFiles: ['src/demo.ts'],
+    changedModules: ['src'],
+  };
+  const riskDigest = digest(risk);
+  writeFileSync(join(workspace, 'final-review.json'), JSON.stringify({
+    schemaVersion: 1,
+    status: 'passed',
+    deliveryStatus: shadow ? 'shadow' : 'ready',
+    binding: {
+      prNumber: 123,
+      targetBranch: 'main',
+      baseSha: 'a'.repeat(40),
+      headSha: 'b'.repeat(40),
+      prTitleDigest: 'sha256:title',
+      prBodyDigest: 'sha256:body',
+      specDigest: 'sha256:spec',
+      engineeringStandardsDigest: 'sha256:standards',
+      qualityContractDigest: 'sha256:contract',
+      codingXVersion: '0.29.0',
+      runner: 'codex',
+      model: 'gpt-test',
+      runnerVersion: 'codex-test',
+      reviewRulesVersion: '1.0.0',
+      reviewRulesDigest: 'sha256:rules',
+      riskDigest,
+    },
+    risk: { ...risk, digest: riskDigest },
+    axes: [
+      {
+        axis: 'spec', status: 'passed', summary: 'spec ok', findings: [],
+        requestDeepReview: false, durationMs: 1, attempts: 1,
+      },
+      {
+        axis: 'engineering', status: 'passed', summary: 'engineering ok', findings: [],
+        requestDeepReview: false, durationMs: 1, attempts: 1,
+      },
+    ],
+    remote: { status: 'ready', checks: [], rulesetErrors: [], checkedAt: new Date().toISOString() },
+    round: 1,
+    shadow,
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+  }));
 }
 
 const story = (id: string, title: string, priority: number) => ({
@@ -151,7 +199,7 @@ describe('renderStatusReport', () => {
     expect(exitCode).toBe(2);
   });
 
-  it('prints overview (project, branch, passed/total), all-green message and exits 0 when every story passes', () => {
+  it('separates completed stories from delivery readiness when final Review is missing', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
@@ -162,8 +210,9 @@ describe('renderStatusReport', () => {
       expect(text).toContain('demo-proj');
       expect(text).toContain('ralph/demo');
       expect(text).toContain('3/3');
-      expect(text).toContain('全部 story 已通过');
-      expect(exitCode).toBe(0);
+      expect(text).toContain('Story 已通过');
+      expect(text).toContain('本地最终 Review 尚未完成');
+      expect(exitCode).toBe(6);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -192,13 +241,13 @@ describe('renderStatusReport', () => {
       expect(lineOf('US-002')).toContain('重试');
       expect(lineOf('US-001')).not.toContain('重试'); // retryCount 为 0 不显示
       expect(lineOf('US-003')).not.toContain('重试');
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(3);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
   });
 
-  it('exits 1 when a story is blocked even if the rest pass', () => {
+  it('exits 3 when a story is blocked even if the rest pass', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
@@ -208,7 +257,7 @@ describe('renderStatusReport', () => {
         'US-003': { passes: false, notes: '', retryCount: 3, blocked: true },
       }));
       const { exitCode } = renderStatusReport(collectStatus(ws));
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(3);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -576,7 +625,7 @@ describe('renderStatusJson', () => {
         passes: false, validated: false, notes: '一条失败记录', retryCount: 2, blocked: false, escalated: false,
       });
       expect(obj.summary).toEqual({ total: 3, passed: 1, blocked: 1 });
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(3);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -593,7 +642,7 @@ describe('renderStatusJson', () => {
     }
   });
 
-  it('exits 0 when every story passes, matching human-readable semantics', () => {
+  it('exits 6 when every story passes but final Review is missing', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
@@ -602,7 +651,7 @@ describe('renderStatusJson', () => {
       )));
       const { text, exitCode } = renderStatusJson(collectStatus(ws));
       expect(JSON.parse(text).summary).toEqual({ total: 3, passed: 3, blocked: 0 });
-      expect(exitCode).toBe(0);
+      expect(exitCode).toBe(6);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -629,7 +678,7 @@ describe('renderStatusJson', () => {
       });
       expect(obj.stories[1].blocked).toBe(true);
       expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(3);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -688,6 +737,26 @@ describe('renderStatusJson', () => {
     }
   });
 
+  it('exits 0 only when stories, local Review and GitHub delivery are all ready', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
+        PRD.userStories.map((s) => [s.id, {
+          passes: true, validated: true, notes: '', retryCount: 0, blocked: false,
+        }]),
+      )));
+      writeReadyFinalReview(ws);
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report);
+      expect(human.text).toContain('实现验证、本地 Review 与 GitHub 交付条件均已就绪');
+      expect(human.exitCode).toBe(0);
+      expect(renderStatusJson(report).exitCode).toBe(0);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it('gives blocked precedence over contradictory pass and receipt fields', () => {
     const ws = makeWorkspace();
     try {
@@ -699,10 +768,10 @@ describe('renderStatusJson', () => {
       const human = renderStatusReport(report);
       expect(human.text).toContain('⛔ US-001');
       expect(human.text).not.toContain('待引擎验收');
-      expect(human.exitCode).toBe(1);
+      expect(human.exitCode).toBe(3);
       const json = renderStatusJson(report);
       expect(JSON.parse(json.text).summary).toEqual({ total: 1, passed: 0, blocked: 1 });
-      expect(json.exitCode).toBe(1);
+      expect(json.exitCode).toBe(3);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }

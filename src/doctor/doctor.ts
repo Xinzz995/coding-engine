@@ -16,7 +16,10 @@ import {
   qualityChecksMatchContract,
   readQualityContract,
   type FrozenQualityChecks,
+  type QualityContract,
 } from '../quality/contract.js';
+import type { GitHubQualityClient } from '../quality/github.js';
+import { checkDeliveryGate, type DeliveryGateCheckResult } from './delivery.js';
 import { CODING_X_VERSION } from '../version.js';
 
 export interface DoctorIssue {
@@ -62,6 +65,12 @@ export interface DoctorOptions {
   actualVersion?: string;
   /** 独立单元测试可关闭本项；CLI 不设置，生产始终要求质量契约。 */
   requireQualityContract?: boolean;
+  /** 只核对本地契约与生成物，不查询 GitHub。 */
+  local?: boolean;
+  /** 测试或其他适配器注入；生产缺省复用 gh 登录。 */
+  githubClient?: GitHubQualityClient;
+  /** 例外到期检查的时钟；生产缺省当前时间。 */
+  now?: Date;
 }
 
 export interface QualityContractCheckResult {
@@ -138,6 +147,7 @@ export interface DoctorReport {
   agentsIndex: AgentsIndexCheckResult | null;
   links: LinksCheckResult | null;
   quality: QualityContractCheckResult;
+  delivery: DeliveryGateCheckResult;
   tdd: TddConfigCheckResult;
   modelCatalog: ModelCatalogCheckResult;
   workspaceGit: WorkspaceGitCheckResult;
@@ -471,6 +481,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     prdChecksMatch: null,
     issues: [],
   };
+  let qualityContract: QualityContract | null = null;
   if (requireQuality) {
     const contractRead = readQualityContract(root);
     if (contractRead.status === 'missing') {
@@ -485,6 +496,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
         issues: details.map((message) => ({ file: contractRel, message })),
       };
     } else {
+      qualityContract = contractRead.contract;
       const runtime = assessQualityRuntime(
         contractRead.contract,
         options.actualVersion ?? CODING_X_VERSION,
@@ -538,6 +550,14 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
       }
     }
   }
+  const delivery = checkDeliveryGate({
+    root,
+    workspace,
+    contract: qualityContract,
+    local: options.local ?? false,
+    ...(options.githubClient ? { client: options.githubClient } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  });
   let tdd: TddConfigCheckResult = { prdPath: prdRel, status: 'missing', issues: [] };
   // resolve（非 join）：workspace 可能是绝对路径（如 --workspace 巡检异地目录）；join 会把
   // 已是绝对路径的第二段原样拼在 root 之下产生不存在的路径，resolve 则在遇到绝对路径段时
@@ -585,7 +605,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
     return {
       docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null,
-      quality, tdd, modelCatalog, workspaceGit, lock,
+      quality, delivery, tdd, modelCatalog, workspaceGit, lock,
     };
   }
   const files = walkMarkdownFiles(docsDir);
@@ -668,6 +688,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     agentsIndex,
     links: { checked: linksChecked, issues: linkIssues },
     quality,
+    delivery,
     tdd,
     modelCatalog,
     workspaceGit,
@@ -695,6 +716,26 @@ function renderQualityLines(result: QualityContractCheckResult): string[] {
     lines.push(`  ℹ️  未找到 ${result.prdPath}：当前没有待运行 PRD，无需核对摘要`);
   } else {
     lines.push(`  ✅ ${result.prdPath} 已绑定当前契约摘要`);
+  }
+  return lines;
+}
+
+function renderDeliveryLines(result: DeliveryGateCheckResult): string[] {
+  const lines = ['🛡️  交付门禁漂移'];
+  if (result.status === 'skipped') {
+    lines.push('  ℹ️  质量契约不可用，本项已跳过');
+    return lines;
+  }
+  for (const issue of result.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
+  if (result.issues.length === 0) {
+    lines.push(
+      result.remoteChecked
+        ? `  ✅ 本地 ${result.managedFilesChecked} 个托管文件与 GitHub Ruleset 均一致`
+        : `  ✅ 本地 ${result.managedFilesChecked} 个托管文件一致（--local 已跳过 GitHub）`,
+    );
+  }
+  if (result.remoteChecked) {
+    lines.push(`  ℹ️  已核对 ${result.exceptionIssuesChecked} 份开放或当前引用的例外记录`);
   }
   return lines;
 }
@@ -778,11 +819,12 @@ function renderWorkspaceGitLines(result: WorkspaceGitCheckResult): string[] {
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
     const total = report.modelCatalog.issues.length + report.tdd.issues.length
-      + report.quality.issues.length;
+      + report.quality.issues.length + report.delivery.issues.length;
     return {
       text: [
         'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
         '', ...renderQualityLines(report.quality),
+        '', ...renderDeliveryLines(report.delivery),
         '', ...renderTddLines(report.tdd),
         '', ...renderModelCatalogLines(report.modelCatalog),
         '', ...renderWorkspaceGitLines(report.workspaceGit),
@@ -827,12 +869,14 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
     for (const issue of links.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
   lines.push('', ...renderQualityLines(report.quality));
+  lines.push('', ...renderDeliveryLines(report.delivery));
   lines.push('', ...renderTddLines(report.tdd));
   lines.push('', ...renderModelCatalogLines(report.modelCatalog));
   lines.push('', ...renderWorkspaceGitLines(report.workspaceGit));
   lines.push('', ...renderLockLines(report.lock));
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
-    + report.modelCatalog.issues.length + report.tdd.issues.length + report.quality.issues.length;
+    + report.modelCatalog.issues.length + report.tdd.issues.length + report.quality.issues.length
+    + report.delivery.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
 }

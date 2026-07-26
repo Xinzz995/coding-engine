@@ -9,6 +9,9 @@ import { readLockInfo, LOCK_FILE } from './lock.js';
 import * as dashboard from '../dashboard/server.js';
 import type { QualityContract, QualityContractReadResult } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
+import { writeFinalReviewState } from '../review/state.js';
+import { digest } from '../review/common.js';
+import type { FinalReviewState } from '../review/types.js';
 
 const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 const TEST_QUALITY_CONTRACT = {
@@ -79,6 +82,61 @@ const catalogWith = (...ids: string[]) => async () => ({
   models: ids.map((id) => ({ id })),
 });
 
+const finalReviewPass: NonNullable<LoopConfig['finalReviewRunner']> = async (options) => ({
+  exitCode: options.shadow ? 7 : 0,
+  message: options.shadow ? 'fixture shadow review' : 'fixture final review passed',
+});
+
+function previousFinalReview(headSha: string): FinalReviewState {
+  const risk = {
+    triggered: false,
+    categories: [],
+    reasons: [],
+    changedFiles: ['src/a.ts'],
+    changedModules: ['root'],
+  };
+  const riskDigest = digest(risk);
+  return {
+    schemaVersion: 1,
+    status: 'passed',
+    deliveryStatus: 'ready',
+    binding: {
+      prNumber: 1,
+      targetBranch: 'main',
+      baseSha: 'b'.repeat(40),
+      headSha,
+      prTitleDigest: 'title',
+      prBodyDigest: 'body',
+      specDigest: 'spec',
+      engineeringStandardsDigest: 'standards',
+      qualityContractDigest: 'contract',
+      codingXVersion: CODING_X_VERSION,
+      runner: 'claude',
+      model: 'review-model',
+      runnerVersion: 'claude-test',
+      reviewRulesVersion: '1.0.0',
+      reviewRulesDigest: 'rules',
+      riskDigest,
+    },
+    risk: { ...risk, digest: riskDigest },
+    axes: [
+      {
+        axis: 'spec', status: 'passed', summary: 'ok', findings: [],
+        requestDeepReview: false, durationMs: 1, attempts: 1,
+      },
+      {
+        axis: 'engineering', status: 'passed', summary: 'ok', findings: [],
+        requestDeepReview: false, durationMs: 1, attempts: 1,
+      },
+    ],
+    remote: { status: 'ready', checks: [], rulesetErrors: [], checkedAt: '2026-07-26T00:00:00Z' },
+    round: 1,
+    shadow: false,
+    startedAt: '2026-07-26T00:00:00Z',
+    completedAt: '2026-07-26T00:01:00Z',
+  };
+}
+
 // instruction assets 契约测试共享的文件读取 helper（两个 describe 曾各自重复定义，见 triage#9）。
 const read = (f: string) =>
   readFileSync(new URL(`../../assets/instructions/${f}`, import.meta.url), 'utf-8');
@@ -90,6 +148,7 @@ const runLoop = (cfg: LoopConfig): Promise<number> => runProductionLoop({
   ...cfg,
   qualityContractReader: () => readyQualityContract(),
   legacyValidatorProtocolForTests: true,
+  finalReviewRunner: cfg.finalReviewRunner ?? finalReviewPass,
 });
 
 // builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
@@ -173,10 +232,39 @@ function strictConfig(workspace: string, instructionsDir: string): LoopConfig {
     kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
     workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 3,
     qualityContractReader: () => readyQualityContract(),
+    finalReviewRunner: finalReviewPass,
   };
 }
 
 describe('quality contract preflight and shadow mode', () => {
+  it('fails before any Story agent when a production final Review model is not explicit', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+    const config = strictConfig(workspace, instructionsDir);
+    delete config.finalReviewRunner;
+
+    expect(await runProductionLoop(config)).toBe(2);
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
+  it('reruns Story validation when a commit appears after the previous final Review', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false,
+      },
+    }));
+    writeFinalReviewState(workspace, previousFinalReview('a'.repeat(40)));
+    const fake = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+
+    expect(await runLoop(strictConfig(workspace, instructionsDir))).toBe(0);
+    expect(readFileSync(fake.calls, 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+      .toMatchObject({ passes: true, validated: true });
+  });
+
   it.each([
     ['missing', { status: 'missing', path: '/fixture/.coding-x/quality.json' }],
     ['invalid-json', { status: 'invalid-json', path: '/fixture/.coding-x/quality.json', error: 'bad json' }],
@@ -746,7 +834,7 @@ describe('runLoop', () => {
     }
   });
 
-  it('prints review-loop and compound-docs hints when all stories resolve', async () => {
+  it('enters final review instead of treating story convergence as delivery-ready', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `
@@ -766,8 +854,8 @@ describe('runLoop', () => {
         workspace, instructionsDir, port: 0, openBrowser: false,
       });
       expect(code).toBe(0);
-      expect(logs.some((l) => l.includes('/compound-docs'))).toBe(true);
-      expect(logs.some((l) => l.includes('/review-loop'))).toBe(true);
+      expect(logs.some((l) => l.includes('开始针对当前 PR 最新提交执行本地最终 Review'))).toBe(true);
+      expect(logs.some((l) => l.includes('fixture final review passed'))).toBe(true);
     } finally {
       console.log = orig;
       delete process.env.CODING_X_CLAUDE_BIN;
@@ -935,7 +1023,8 @@ describe('runLoop', () => {
       const html = readFileSync(join(workspace, 'report.html'), 'utf-8');
       expect(html).toContain('<!DOCTYPE html>');
       expect(html).toContain('US-001');
-      expect(html).toContain('全部通过');
+      expect(html).toContain('Story 验证完成');
+      expect(html).toContain('Story 结果不等于可交付');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -1594,7 +1683,7 @@ describe('runLoop model routing', () => {
     }
   });
 
-  it('skips a missing catalog for a routed workspace that is already settled', async () => {
+  it('rejects a missing final-review model catalog even when stories are already settled', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     writeFileSync(join(workspace, 'state.json'), JSON.stringify({
       'US-001': { passes: true, notes: '', retryCount: 0, blocked: false, escalated: false },
@@ -1609,7 +1698,7 @@ describe('runLoop model routing', () => {
         kind: 'claude', kindExplicit: false, maxIterations: 1,
         devTimeoutMs: 5000, valTimeoutMs: 5000,
         workspace, instructionsDir, port: 0, openBrowser: false,
-      })).toBe(0);
+      })).toBe(2);
       expect(existsSync(argvLog)).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
