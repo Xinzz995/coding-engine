@@ -114,7 +114,24 @@ function allowedDirtyPath(root: string, workspace: string, generated: string[], 
 }
 
 function parseSections(body: string): Record<string, string> {
-  const normalized = normalizeText(body).replace(/<!--[^]*?-->/g, '');
+  const source = normalizeText(body);
+  const visible: string[] = [];
+  let commentDepth = 0;
+  for (let index = 0; index < source.length;) {
+    if (source.startsWith('<!--', index)) {
+      commentDepth += 1;
+      index += 4;
+      continue;
+    }
+    if (commentDepth > 0 && source.startsWith('-->', index)) {
+      commentDepth -= 1;
+      index += 3;
+      continue;
+    }
+    if (commentDepth === 0) visible.push(source[index]);
+    index += 1;
+  }
+  const normalized = visible.join('');
   const sections: Record<string, string> = {};
   const matches = [...normalized.matchAll(/^##\s+(.+?)\s*$/gm)];
   matches.forEach((match, index) => {
@@ -125,11 +142,15 @@ function parseSections(body: string): Record<string, string> {
   return sections;
 }
 
+function hasMeaningfulIntent(value: string | undefined): boolean {
+  return value !== undefined && /[\p{L}\p{N}]/u.test(value);
+}
+
 export function validatePullRequestIntent(body: string):
   | { ok: true; sections: Record<(typeof REQUIRED_PR_SECTIONS)[number], string> }
   | { ok: false; missing: string[] } {
   const parsed = parseSections(body);
-  const missing = REQUIRED_PR_SECTIONS.filter((name) => !parsed[name]?.trim());
+  const missing = REQUIRED_PR_SECTIONS.filter((name) => !hasMeaningfulIntent(parsed[name]));
   if (missing.length > 0) return { ok: false, missing: [...missing] };
   return {
     ok: true,

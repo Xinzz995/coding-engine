@@ -155,16 +155,22 @@ export function listConfiguredModels(
 export function initializeGlobalModelConfig(
   path = resolveGlobalConfigPath(),
 ): InitializeGlobalModelConfigResult {
-  if (existsSync(path)) return { status: 'exists', path };
   try {
     mkdirSync(dirname(path), { recursive: true });
+  } catch (err) {
+    return {
+      status: 'error', path,
+      error: `无法创建全局模型配置：${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  try {
     writeFileSync(path, `${JSON.stringify({ version: 1, models: {} }, null, 2)}\n`, { flag: 'wx' });
     return { status: 'created', path };
   } catch (err) {
     const code = isRecord(err) && typeof err.code === 'string' ? err.code : null;
-    // wx 并发创建目标时返回 EEXIST，可安全报告“不覆盖”；但父路径本身是文件时
-    // mkdirSync 也会返回 EEXIST，此时目标并不存在，必须保留为真实 I/O 错误。
-    if (code === 'EEXIST' && existsSync(path)) return { status: 'exists', path };
+    // 父目录已单独创建成功，因此这里的 EEXIST 只能来自目标的原子 wx 创建竞争；
+    // 不再先 exists 再 write，避免检查与创建之间的竞态窗口。
+    if (code === 'EEXIST') return { status: 'exists', path };
     return {
       status: 'error', path,
       error: `无法创建全局模型配置：${err instanceof Error ? err.message : String(err)}`,

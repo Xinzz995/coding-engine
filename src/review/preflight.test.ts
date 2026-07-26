@@ -38,6 +38,19 @@ describe('validatePullRequestIntent', () => {
     ));
     expect(result).toEqual({ ok: false, missing: ['Spec 与验收标准来源'] });
   });
+
+  it.each([
+    ['nested comment markers', '<!<!-- nested -->--><!-- 请填写 -->'],
+    ['punctuation only', '<!-- 请填写 -->\n---'],
+    ['unfinished comment', '<!-- 尚未填写'],
+  ])('rejects %s as meaningful intent', (_label, replacement) => {
+    const result = validatePullRequestIntent(completeBody.replace(
+      'docs/specs/review.md 与 PR 验收说明。',
+      replacement,
+    ));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.missing).toContain('Spec 与验收标准来源');
+  });
 });
 
 function run(root: string, args: string[]): string {

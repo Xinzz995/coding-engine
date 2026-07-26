@@ -118,6 +118,34 @@ describe('TDD commit hook', () => {
     });
   });
 
+  it.each([
+    'git -C "" commit -m story',
+    'git -C "repo with spaces" commit -m story',
+    '/usr/bin/git -c "user.name=Review Bot" commit --amend',
+    'bash -c "git commit -m nested"',
+  ])('recognizes commit command form: %s', (command) => {
+    const value = fixture({ policySource: 'process.exit(9);\n' });
+    const result = runHook(value.root, {
+      ...nestedCommit(value.root),
+      tool_input: { command },
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('TDD');
+  });
+
+  it('handles a long non-commit command without pathological backtracking', () => {
+    const value = fixture();
+    const command = `git ${'-c key=value '.repeat(20_000)}status`;
+    const started = Date.now();
+    const result = runHook(value.root, {
+      ...nestedCommit(value.root),
+      tool_input: { command },
+    });
+
+    expect(result.status).toBe(0);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   it('blocks a failing coverage command with exit 2 and a bounded diagnostic', () => {
     const value = fixture({
       policySource: `console.error('${'x'.repeat(2500)}TAIL-END');\nprocess.exit(7);\n`,

@@ -366,9 +366,85 @@ function runCoverage(command, root, timeoutMs) {
   });
 }
 
+function shellWords(command) {
+  const words = [];
+  let current = '';
+  let started = false;
+  let quote = null;
+  let escaped = false;
+  const push = () => {
+    if (started) words.push(current);
+    current = '';
+    started = false;
+  };
+  for (const char of command) {
+    if (escaped) {
+      current += char;
+      started = true;
+      escaped = false;
+      continue;
+    }
+    if (quote !== null) {
+      if (char === quote) quote = null;
+      else if (char === '\\' && quote !== "'") escaped = true;
+      else {
+        current += char;
+        started = true;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      started = true;
+    } else if (char === '\\') {
+      escaped = true;
+      started = true;
+    } else if (/\s/.test(char) || ';|&(){}'.includes(char)) {
+      push();
+    } else {
+      current += char;
+      started = true;
+    }
+  }
+  if (escaped) current += '\\';
+  push();
+  return words;
+}
+
+function isGitExecutable(value) {
+  const name = value.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
+  return name === 'git' || name === 'git.exe';
+}
+
+function wordSequenceContainsCommit(words) {
+  for (let index = 0; index < words.length; index += 1) {
+    if (!isGitExecutable(words[index])) continue;
+    let candidate = index + 1;
+    while (candidate < words.length && ['-c', '-C'].includes(words[candidate])) {
+      candidate += 2; // global -C/-c always consumes exactly one following argument
+    }
+    if (words[candidate]?.toLowerCase() === 'commit') return true;
+  }
+  return false;
+}
+
 function looksLikeCommit(command) {
-  return /\bgit(?:\s+(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|-c\s+\S+))*\s+commit(?=\s|$)/i
-    .test(command);
+  const pending = [command];
+  const seen = new Set();
+  while (pending.length > 0) {
+    const fragment = pending.pop();
+    if (seen.has(fragment)) continue;
+    seen.add(fragment);
+    const words = shellWords(fragment);
+    if (wordSequenceContainsCommit(words)) return true;
+    const relaxed = fragment.replace(/["':=,\[\]{}]/g, ' ');
+    if (relaxed !== fragment) pending.push(relaxed);
+    for (const word of words) {
+      // Quoted nested shell snippets remain one token; inspect them once more without quotes.
+      if (/\s/.test(word) && word.length < fragment.length) pending.push(word);
+    }
+  }
+  return false;
 }
 
 async function readInput() {
