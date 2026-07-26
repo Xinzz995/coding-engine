@@ -89,6 +89,20 @@ describe('parseCodexReviewJsonl', () => {
     expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
   });
 
+  it('allows Codex internal todo metadata without treating it as an external tool call', () => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'todo_list', items: [{ text: 'inspect supplied review data', completed: true }] },
+      }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(answer) } }),
+      JSON.stringify({ type: 'turn.completed' }),
+    ].join('\n');
+    expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
+  });
+
   it.each(['command_execution', 'mcp_tool_call', 'web_search', 'file_change'])(
     'rejects an observed %s tool event even if a final answer exists',
     (type) => {
@@ -99,6 +113,34 @@ describe('parseCodexReviewJsonl', () => {
       expect(() => parseCodexReviewJsonl(stdout)).toThrow(`禁用工具事件：${type}`);
     },
   );
+
+  it('rejects an unrecognized item type so future capabilities fail closed', () => {
+    const stdout = JSON.stringify({
+      type: 'item.started', item: { type: 'future_capability' },
+    });
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件：future_capability');
+  });
+
+  it('rejects an unrecognized top-level event even when a valid final answer follows', () => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'future.event', payload: 'unknown capability' }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(answer) } }),
+    ].join('\n');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知顶层事件：future.event');
+  });
+
+  it('rejects an item event whose item payload is missing', () => {
+    const stdout = JSON.stringify({ type: 'item.started' });
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('item.started 缺少 item');
+  });
+
+  it('rejects a passive top-level event that unexpectedly carries a tool item', () => {
+    const stdout = JSON.stringify({
+      type: 'turn.completed', item: { type: 'command_execution', command: 'whoami' },
+    });
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('turn.completed 含非预期 item');
+  });
 });
 
 describe('codexReviewPermissionOverrides', () => {
