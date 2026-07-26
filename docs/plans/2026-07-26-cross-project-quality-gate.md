@@ -37,7 +37,7 @@ scope: root
 | 原则 | 适用性与裁决 | 必须保留的证据 |
 |---|---|---|
 | 1. 完成必须可证伪 | 适用。每个本地、远端、发布状态都有失败路径和唯一结论；“AI 评过”“CI 绿了”“包已发布”均不能单独代表完成。 | 契约/状态合同测试；真实 PR check-run；候选与 registry tarball SHA-256；Ruleset 回读；最终 ref 对齐。 |
-| 2. 生成者不能自签 | 适用。Developer 不签 Validator；本地 Review 不签 GitHub；候选 N+1 只能 shadow，由稳定 N 和机械 CI 裁决。首次 0.30.0 使用人工 Bootstrap。 | Validator receipt；Review binding；shadow exit 7；旧版本运行记录；Bootstrap Issue/PR 历史。 |
+| 2. 生成者不能自签 | 适用。Developer 不签 Validator；本地 Review 不签 GitHub；候选 N+1 只能 shadow，由稳定 N 和机械 CI 裁决。首次 0.33.0 使用人工 Bootstrap。 | Validator receipt；Review binding；shadow exit 7；旧版本运行记录；Bootstrap Issue/PR 历史。 |
 | 3. 自主性与风险对称 | 适用。`init` 每次远端变更先展示、确认、应用、回读；不自动 merge/rebase/commit/push/开 PR/发布。Reviewer 只读、最小环境、一次重试。发布和例外保留人工批准。 | 幂等/中断恢复测试；远端失败回读；runner 攻击反测；2FA/stage 审批记录；过期例外 doctor 失败。 |
 | 4. 复用原生执行面 | 适用。下游 GitHub CI 只运行 Go/Python 等项目原生命令，不安装 Node/coding-x。核心契约跨语言，GitHub 和三个 runner 只在适配层分叉。 | Go/Python workflow 扫描和真实 run；核心类型无生态专属字段；三 runner 同一输出 schema。 |
 | 5. 先度量失败与恢复 | 适用。先实现缺契约、脏树、落后分支、缺 PR、跳过 job、模型损坏、秘密读取、stage 失败和 latest 回退测试，再开放成功路径。 | failure-first 自动化；临时远端破坏场景；失败后 ref/dist-tag 保持或恢复；doctor 漂移告警。 |
@@ -195,7 +195,7 @@ scope: root
 - 用户用 2FA 批准 stage 到 `next`；三个项目从 registry 按精确版本重跑安装冒烟；
 - 内容摘要一致后人工移动 `latest`；创建对应 `v*` 标签和 GitHub Release；
 - 独立核验 npm `gitHead`/provenance、peeled tag、Release asset、main 和工作树同步；
-- 通过旧规则 Policy PR 固定 0.30.0，再由 0.30.0 完成一个正式 coding-engine PR；
+- 通过旧规则 Policy PR 固定 0.33.0，再由 0.33.0 完成一个正式 coding-engine PR；
 - 关闭 Bootstrap Issue #44 前附三个 PR、Ruleset、npm、tag、Release 和摘要证据。
 
 ## Phase 6：结构治理与收口
@@ -247,9 +247,11 @@ scope: root
   `doctor` 状态为 ready；本次受保护政策变更已由 owner 明确授权，并登记限时政策例外
   Issue #58，PR 最新提交仍必须在新规则下通过后才能合并；
 - 候选暂存与不可变发布流程已通过 PR #61 合并；发布标签 Ruleset、不可变 Release、
-  `npm-staging` environment 和 stage-only Trusted Publisher 均已回读，真实 OIDC 暂存尚未执行；
-- 0.30.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
+  `npm-staging` environment 和 stage-only Trusted Publisher 均已回读；运行 #30212975390 已证明
+  OIDC 身份和来源声明有效，但 npm 以 0.30.0 曾被使用为由拒绝暂存，未创建 stage，公开
+  `latest` 仍为 0.29.0；owner 已明确改用 0.33.0，不重试不可复用的 0.30.0；
+- 0.33.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
   检查，已获 owner 授权拆出 coding-engine 仓库健康测试；PR #63 按已约定的一次性“机械
   CI + owner 人工 Bootstrap”裁决，不声称完成正式本地 AI Review，固定裁判继续保持 0.29.0；
-- 首次真实 staged publish、三个项目的同包 Dogfood、发布后固定 0.30.0 的 Policy PR 和结构
+- 首次真实 staged publish、三个项目的同包 Dogfood、发布后固定 0.33.0 的 Policy PR 和结构
   治理仍待后续独立步骤。
