@@ -89,6 +89,20 @@ describe('parseCodexReviewJsonl', () => {
     expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
   });
 
+  it('allows Codex internal todo metadata without treating it as an external tool call', () => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'todo_list', items: [{ text: 'inspect supplied review data', completed: true }] },
+      }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(answer) } }),
+      JSON.stringify({ type: 'turn.completed' }),
+    ].join('\n');
+    expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
+  });
+
   it.each(['command_execution', 'mcp_tool_call', 'web_search', 'file_change'])(
     'rejects an observed %s tool event even if a final answer exists',
     (type) => {

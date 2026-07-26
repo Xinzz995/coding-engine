@@ -19,7 +19,8 @@ import type { ReviewPackage } from './package.js';
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
 const MAX_RUNNER_OUTPUT_BYTES = 4 * 1024 * 1024;
-const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v1';
+const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v2';
+const CODEX_PASSIVE_ITEM_TYPES = new Set(['reasoning', 'agent_message', 'todo_list']);
 
 export interface SafeRunnerInvocation {
   runner: AgentKind;
@@ -232,7 +233,10 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
     if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
     const record = item as Record<string, unknown>;
     const type = typeof record.type === 'string' ? record.type : 'unknown';
-    if (type !== 'reasoning' && type !== 'agent_message') {
+    // todo_list only records ephemeral planning metadata inside the Codex response stream. It
+    // does not access files, commands, network, MCP, or another external capability. Unknown
+    // item types still fail closed so a newly introduced tool cannot silently bypass the probe.
+    if (!CODEX_PASSIVE_ITEM_TYPES.has(type)) {
       throw new RunnerPolicyViolation(`codex Review 产生了禁用工具事件：${type}`);
     }
     if (envelope.type === 'item.completed' && type === 'agent_message') {

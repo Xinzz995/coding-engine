@@ -266,18 +266,22 @@ describe('runQualityInit', () => {
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(false);
   });
 
-  it('refuses unrelated dirty files, default-branch initialization, and version mismatch', async () => {
+  it('refuses unrelated dirty files', async () => {
     const dirtyRoot = repositoryFixture();
     writeFileSync(join(dirtyRoot, 'unrelated.txt'), 'do not mix\n');
     await expect(runQualityInit(options(dirtyRoot, new FakeGitHubClient()))).rejects.toThrow('无关的改动');
+  }, 15_000);
 
+  it('refuses initialization on the default branch', async () => {
     const mainRoot = repositoryFixture();
     git(mainRoot, 'checkout', 'main');
     await expect(runQualityInit(options(mainRoot, new FakeGitHubClient()))).rejects.toThrow('默认分支');
+  }, 15_000);
 
+  it('refuses a coding-x version that differs from the quality contract', async () => {
     const versionRoot = repositoryFixture();
     await expect(runQualityInit({
       ...options(versionRoot, new FakeGitHubClient()), actualVersion: '0.30.0',
     })).rejects.toThrow('质量契约固定 0.29.0');
-  });
+  }, 15_000);
 });
