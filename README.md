@@ -73,6 +73,11 @@ coding-x 同时包含两部分：
 12. **合并前审查。** 运行 `/review-loop`，逐条给出“已修/接受/推迟/驳回”裁决。它不会自动修复；要修的项需要你明确授权。
 13. **合并和收口。** 所有发现闭环、检查重新通过后，由人决定合并。随后可运行 `/compound-docs`，把仍然成立的经验沉淀到长期文档；物理归档只有在你明确授权时才发生。
 
+`init` 本来就是分阶段完成的：第一次只在远端最小规则回读成功后生成文件；你提交、推送并
+打开 Bootstrap PR 后再次运行，它才会把该 PR 最新提交上真实出现的 `quality-gate` 设为必需
+检查。Bootstrap 合并后还需一个 Activation PR，让已进入默认分支的旧 `policy-guard` 产生
+绑定最新提交的检查，再运行一次完成最终绑定。中间返回 6 表示“尚未就绪”，不是执行失败。
+
 最短可用路线是：**`coding-x init` → 已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop`**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
 
 ### 首次运行前的安全红线
@@ -570,10 +575,14 @@ npx coding-x codex      # 使用 Codex；也可以换成 claude 或 cursor
 
 可以按 `Ctrl+C` 中止后稍后重跑。已验证 story 会保留；如果进程停在“Builder 声称完成、Validator 尚未签发”之间，下次启动会把该 story 恢复为待复核。异常退出留下的 stale lock 会由下次运行判定接管，不需要日常手删。
 
-下面是完整命令示例；第一次只需关心 `doctor`、一个 runner、`status` 和 `report`：
+下面是完整命令示例；新项目先完成 `init`，日常主要关心 `doctor`、一个 runner、`status` 和
+`report`：
 
 ```bash
 npx coding-x --help             # 显示完整命令与参数后退出，不读取 workspace 或启动 runner
+npx coding-x init               # 交互确认后分阶段配置质量契约、原生 CI 和 GitHub 门禁
+npx coding-x init --contract quality.json  # 使用已人工确认的契约候选文件
+npx coding-x init --yes         # 非交互接受已展示的变更；不会代填“不适用”理由
 npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x cursor             # 改用 Cursor Agent 后端
@@ -598,6 +607,7 @@ npx coding-x status             # 终端一屏速览工作区执行状态（退�
 npx coding-x status --json      # 同上，stdout 输出单个 JSON 对象供脚本与 agent 消费
 npx coding-x doctor             # docs/、workspace Git 隔离等健康检查（硬错误以退出码 1 结束）
 npx coding-x doctor --json      # 单个 JSON；含契约摘要及 PRD 应原样冻结的结构化检查快照
+npx coding-x doctor --local     # 只做本地检查；供项目 CI 使用，避免反向依赖 GitHub 状态
 npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30）
 npx coding-x report             # 手动（重）生成 .workspace/report.html；state 损坏时产出红色诊断报告并退出 1
 ```
@@ -646,6 +656,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | --- | --- | --- |
 | 位置参数 `help` / `-h, --help` | — | 输出完整用法并退出 0；可放在子命令后（如 `config --help`），不读取 workspace、不获取锁、不启动 runner/dashboard |
 | 位置参数 `claude` / `codex` / `cursor` | — | 显式选择 runner；若 PRD 启用了模型路由，必须与 `models.runner` 一致。未显式指定时优先用 `models.runner`，否则默认 claude |
+| 位置参数 `init` | — | 在功能分支分阶段初始化：先回读确认 GitHub 最小规则，再生成质量契约、原生 CI 和模板；PR 最新提交出现可信检查后才加入 Ruleset。不会自动提交、推送、开 PR 或合并；未完成返回 6，配置或远端错误返回 2 |
 | 位置参数 `config path\|init\|validate` | — | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁 |
 | 位置参数 `models [claude\|codex\|cursor]` | — | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json` |
 | 位置参数 `hooks cursor install\|status\|remove` | — | 在当前 Git 项目安全安装、只读检查或卸载 Cursor TDD 提交前检查；只管理 `.cursor/` 中 coding-x 拥有的内容，不改 Git hooks、索引或提交。install/remove 成功与 status 健康返回 0；缺失、冲突或过期返回 1 |
@@ -666,12 +677,17 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `--port <n>` | `7331` | 仪表盘端口 |
 | `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：active 区文件的 git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期，`docs/archive/` 冷档案不参与 |
-| `--json` | 关闭 | `status`：输出 story 状态、配置/实际路由（含调用 outcome/duration/exit/异常诊断）与最近结构化验收；`models`：输出 `available` 或 `error` 的单个 JSON 对象 |
+| `--contract <file>` | — | 仅 `init`：读取仓库内已经人工确认的契约候选；不能读取仓库外路径 |
+| `--yes` | 关闭 | 仅 `init`：接受命令已经展示的远端和文件变更；不会猜测或自动填写缺失检查的不适用理由 |
+| `--local` | 关闭 | 仅 `doctor`：不查询 GitHub，只检查本地契约、派生快照、文档和 workspace；用于项目原生 CI |
+| `--json` | 关闭 | `init`、`doctor`、`status`、`models` 输出单个 JSON 对象；交互提示不写入 JSON stdout |
 | `--shadow` | 关闭 | 只供候选版本 Dogfood；原本成功的收敛固定退出 7，不能表示正式通过；真实失败仍保留原失败码 |
 
 ### 退出码
 
-默认命令（`run`，即无 `repair`/`dashboard`/`doctor`/`status`/`report`/`models`/`config` 位置参数时；位置参数 `claude`/`codex`/`cursor` 只切换 runner，仍属 `run`，退出码规则相同）循环结束的进程退出码：
+默认命令（`run`，即无 `init`/`repair`/`dashboard`/`doctor`/`status`/`report`/`models`/`config`
+位置参数时；位置参数 `claude`/`codex`/`cursor` 只切换 runner，仍属 `run`，退出码规则相同）
+循环结束的进程退出码：
 
 | 退出码 | 含义 |
 | --- | --- |
@@ -681,7 +697,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `3` | 全部 story 已收敛（`passes && validated`，或 `blocked`），但存在 `blocked` story 待人工处理 |
 | `7` | shadow 运行完成；只表示候选验证跑完，永远不能表示可交付 |
 
-`repair`/`doctor`/`status`/`report`/`models`/`config`/`hooks` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
+`init`/`repair`/`doctor`/`status`/`report`/`models`/`config`/`hooks` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
 
 ### 环境变量
 

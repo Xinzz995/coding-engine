@@ -1,0 +1,36 @@
+# Generated from .coding-x/quality.json. Change the contract, then regenerate.
+name: 'P1 延期'
+description: '登记一次有责任人和期限的 P1 延期'
+title: '[P1 延期] '
+labels:
+  - 'quality-p1-deferral'
+body:
+  - type: input
+    id: owner
+    attributes:
+      label: 负责人
+      description: 对后续处理负责的 GitHub 用户名或团队
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: 原因
+      description: 为什么现在不能按正常规则完成
+    validations:
+      required: true
+  - type: input
+    id: expiry
+    attributes:
+      label: 到期日
+      description: YYYY-MM-DD，最长 30 天
+      placeholder: YYYY-MM-DD
+    validations:
+      required: true
+  - type: textarea
+    id: follow-up
+    attributes:
+      label: 跟进事项
+      description: 明确的修复或恢复正常规则事项
+    validations:
+      required: true

@@ -1,0 +1,191 @@
+name: Quality Gate
+
+# Generated from .coding-x/quality.json. Change the contract, then regenerate.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
+jobs:
+  checks_ubuntu-node-22:
+    name: checks / ubuntu-node-22
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: 'toolchain / node 22'
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+      - name: 'setup / 1'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''ci'''
+      - name: 'test / tests'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''test'' ''--'' ''--run'''
+      - name: 'build / build'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''run'' ''build'''
+      - name: 'build / cli-smoke'
+        working-directory: '.'
+        timeout-minutes: 1
+        shell: bash
+        run: '''node'' ''dist/cli.js'' ''--help'''
+      - name: 'static / typecheck'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''run'' ''typecheck'''
+      - name: 'static / docs-health'
+        working-directory: '.'
+        timeout-minutes: 2
+        shell: bash
+        run: '''node'' ''dist/cli.js'' ''doctor'' ''--local'''
+      - name: 'security / production-audit'
+        working-directory: '.'
+        timeout-minutes: 5
+        shell: bash
+        run: '''npm'' ''audit'' ''--omit=dev'' ''--audit-level=high'''
+  checks_ubuntu-node-24:
+    name: checks / ubuntu-node-24
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: 'toolchain / node 24'
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+      - name: 'setup / 1'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''ci'''
+      - name: 'test / tests'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''test'' ''--'' ''--run'''
+      - name: 'build / build'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''run'' ''build'''
+      - name: 'build / cli-smoke'
+        working-directory: '.'
+        timeout-minutes: 1
+        shell: bash
+        run: '''node'' ''dist/cli.js'' ''--help'''
+  checks_macos-node-24:
+    name: checks / macos-node-24
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: 'toolchain / node 24'
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+      - name: 'setup / 1'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''ci'''
+      - name: 'test / tests'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''test'' ''--'' ''--run'''
+      - name: 'build / build'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''run'' ''build'''
+      - name: 'build / cli-smoke'
+        working-directory: '.'
+        timeout-minutes: 1
+        shell: bash
+        run: '''node'' ''dist/cli.js'' ''--help'''
+  checks_windows-node-24:
+    name: checks / windows-node-24
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: 'toolchain / node 24'
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+      - name: 'setup / 1'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: pwsh
+        run: '& ''npm'' ''ci'''
+      - name: 'test / tests'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: pwsh
+        run: '& ''npm'' ''test'' ''--'' ''--run'''
+      - name: 'build / build'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: pwsh
+        run: '& ''npm'' ''run'' ''build'''
+      - name: 'build / cli-smoke'
+        working-directory: '.'
+        timeout-minutes: 1
+        shell: pwsh
+        run: '& ''node'' ''dist/cli.js'' ''--help'''
+  quality-gate:
+    name: quality-gate
+    if: ${{ always() }}
+    needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-24, checks_windows-node-24]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Verify every required job completed successfully
+        shell: bash
+        env:
+          RESULT_1: ${{ needs.checks_ubuntu-node-22.result }}
+          RESULT_2: ${{ needs.checks_ubuntu-node-24.result }}
+          RESULT_3: ${{ needs.checks_macos-node-24.result }}
+          RESULT_4: ${{ needs.checks_windows-node-24.result }}
+        run: |
+          failed=0
+          for result in "${!RESULT_@}"; do
+            value="${!result}"
+            if [ "$value" != "success" ]; then
+              echo "::error::${result}=${value}; required jobs must not fail, cancel, time out, or skip"
+              failed=1
+            fi
+          done
+          exit "$failed"
+

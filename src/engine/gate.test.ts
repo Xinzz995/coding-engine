@@ -365,26 +365,29 @@ describe('runContractQualityChecks', () => {
     }
   });
 
-  it('runs an explicitly declared shell script and never infers shell from executable args', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'contract-shell-'));
-    const marker = join(root, 'shell.txt');
-    try {
-      const result = await runContractQualityChecks(contractWith({
-        checks: [{
-          id: 'shell', module: 'root',
-          command: {
-            shell: '/bin/sh',
-            script: `printf shell-ok > ${JSON.stringify(marker)}`,
-            cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
-          },
-        }],
-      }), root, 'macos');
-      expect(result.ok).toBe(true);
-      expect(readFileSync(marker, 'utf8')).toBe('shell-ok');
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'runs an explicitly declared POSIX shell script and never infers shell from executable args',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'contract-shell-'));
+      const marker = join(root, 'shell.txt');
+      try {
+        const result = await runContractQualityChecks(contractWith({
+          checks: [{
+            id: 'shell', module: 'root',
+            command: {
+              shell: '/bin/sh',
+              script: `printf shell-ok > ${JSON.stringify(marker)}`,
+              cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
+            },
+          }],
+        }), root, 'macos');
+        expect(result.ok).toBe(true);
+        expect(readFileSync(marker, 'utf8')).toBe('shell-ok');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('skips checks that do not apply to the current platform and records their ids', async () => {
     const result = await runContractQualityChecks(contractWith({

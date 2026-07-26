@@ -148,7 +148,8 @@
             "executable": "node",
             "args": [
               "dist/cli.js",
-              "doctor"
+              "doctor",
+              "--local"
             ],
             "cwd": ".",
             "platforms": [
@@ -255,6 +256,131 @@
     ]
   },
   "github": {
+    "jobs": [
+      {
+        "id": "ubuntu-node-22",
+        "platform": "linux",
+        "toolchains": [
+          {
+            "kind": "node",
+            "version": "22",
+            "cache": "npm",
+            "cacheDependencyPath": "package-lock.json"
+          }
+        ],
+        "setup": [
+          {
+            "executable": "npm",
+            "args": [
+              "ci"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux"
+            ],
+            "timeoutMs": 600000
+          }
+        ],
+        "checkIds": [
+          "tests",
+          "build",
+          "cli-smoke",
+          "typecheck",
+          "docs-health",
+          "production-audit"
+        ]
+      },
+      {
+        "id": "ubuntu-node-24",
+        "platform": "linux",
+        "toolchains": [
+          {
+            "kind": "node",
+            "version": "24",
+            "cache": "npm",
+            "cacheDependencyPath": "package-lock.json"
+          }
+        ],
+        "setup": [
+          {
+            "executable": "npm",
+            "args": [
+              "ci"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux"
+            ],
+            "timeoutMs": 600000
+          }
+        ],
+        "checkIds": [
+          "tests",
+          "build",
+          "cli-smoke"
+        ]
+      },
+      {
+        "id": "macos-node-24",
+        "platform": "macos",
+        "toolchains": [
+          {
+            "kind": "node",
+            "version": "24",
+            "cache": "npm",
+            "cacheDependencyPath": "package-lock.json"
+          }
+        ],
+        "setup": [
+          {
+            "executable": "npm",
+            "args": [
+              "ci"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "macos"
+            ],
+            "timeoutMs": 600000
+          }
+        ],
+        "checkIds": [
+          "tests",
+          "build",
+          "cli-smoke"
+        ]
+      },
+      {
+        "id": "windows-node-24",
+        "platform": "windows",
+        "toolchains": [
+          {
+            "kind": "node",
+            "version": "24",
+            "cache": "npm",
+            "cacheDependencyPath": "package-lock.json"
+          }
+        ],
+        "setup": [
+          {
+            "executable": "npm",
+            "args": [
+              "ci"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "windows"
+            ],
+            "timeoutMs": 600000
+          }
+        ],
+        "checkIds": [
+          "tests",
+          "build",
+          "cli-smoke"
+        ]
+      }
+    ],
     "requiredChecks": [
       "quality-gate",
       "policy-guard"

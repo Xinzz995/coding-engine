@@ -281,32 +281,32 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
     trackedFiles: [],
   };
 
-  let gitRoot: string;
   try {
-    gitRoot = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
       cwd: root,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim());
+    });
   } catch {
     return base;
   }
-  if (gitRoot === '') return base;
 
-  const relFromGitRoot = relative(gitRoot, workspaceAbs);
-  const insideRepository = relFromGitRoot === ''
-    || (!isAbsolute(relFromGitRoot)
-      && relFromGitRoot !== '..'
-      && !relFromGitRoot.startsWith(`..${sep}`));
+  // 以调用目录为相对基准，不比较 Git 输出的绝对路径。Windows runner 可能让 Node 返回
+  // 8.3 短路径、Git 返回长路径；二者指向同一目录却不能按字符串比较。
+  const relFromProjectRoot = relative(canonicalRoot, workspaceAbs);
+  const insideRepository = relFromProjectRoot === ''
+    || (!isAbsolute(relFromProjectRoot)
+      && relFromProjectRoot !== '..'
+      && !relFromProjectRoot.startsWith(`..${sep}`));
   if (!insideRepository) return { ...base, gitAvailable: true };
 
   // Git 的 pathspec 固定使用正斜杠；workspace=仓库根时不能把整个仓库误列为运行时文件。
-  const pathspec = relFromGitRoot.split(sep).join('/');
+  const pathspec = relFromProjectRoot.split(sep).join('/');
   let trackedFiles: string[] = [];
   if (pathspec !== '') {
     try {
       const tracked = execFileSync('git', ['ls-files', '-z', '--', pathspec], {
-        cwd: gitRoot,
+        cwd: root,
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'ignore'],
       });
@@ -320,7 +320,7 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
   if (pathspec !== '') {
     try {
       execFileSync('git', ['check-ignore', '-q', '--no-index', '--', `${pathspec}/`], {
-        cwd: gitRoot,
+        cwd: root,
         stdio: 'ignore',
       });
       ignored = true;

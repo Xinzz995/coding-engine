@@ -89,6 +89,32 @@ function validContract(): unknown {
       pathRules: [{ paths: ['packages/api/**'], categories: ['public-contract', 'security'] }],
     },
     github: {
+      jobs: [
+        {
+          id: 'ubuntu-node-22', platform: 'linux',
+          toolchains: [{ kind: 'node', version: '22', cache: 'npm', cacheDependencyPath: 'package-lock.json' }],
+          setup: [{
+            executable: 'npm', args: ['ci'], cwd: '.', platforms: ['linux'], timeoutMs: 600_000,
+          }],
+          checkIds: ['unit', 'build', 'shell-static'],
+        },
+        {
+          id: 'macos-node-24', platform: 'macos',
+          toolchains: [{ kind: 'node', version: '24' }],
+          setup: [{
+            executable: 'npm', args: ['ci'], cwd: '.', platforms: ['macos'], timeoutMs: 600_000,
+          }],
+          checkIds: ['unit', 'build', 'shell-static'],
+        },
+        {
+          id: 'windows-node-24', platform: 'windows',
+          toolchains: [{ kind: 'node', version: '24' }],
+          setup: [{
+            executable: 'npm', args: ['ci'], cwd: '.', platforms: ['windows'], timeoutMs: 600_000,
+          }],
+          checkIds: ['unit', 'build'],
+        },
+      ],
       requiredChecks: ['quality-gate', 'policy-guard'],
     },
     exceptions: {
@@ -184,6 +210,47 @@ describe('parseQualityContract', () => {
     const both = clone();
     both.checks.security = { checks: clone().checks.test.checks, notApplicable: 'no' };
     expect(parseQualityContract(both)).toMatchObject({ status: 'invalid' });
+  });
+
+  it('requires at least one project check and validates every GitHub job setup command', () => {
+    const input = clone();
+    input.checks = {
+      test: { notApplicable: 'none' },
+      build: { notApplicable: 'none' },
+      static: { notApplicable: 'none' },
+      security: { notApplicable: 'none' },
+    };
+    input.github.jobs[0].setup = [{
+      executable: 'npm', args: ['ci'], cwd: '..', platforms: [], timeoutMs: 0,
+    }];
+    const result = parseQualityContract(input);
+    expect(result.status).toBe('invalid');
+    if (result.status === 'invalid') {
+      const errors = result.errors.join('\n');
+      expect(errors).toContain('至少必须声明一项');
+      expect(errors).toContain('github.jobs[0].setup[0].cwd');
+      expect(errors).toContain('github.jobs[0].setup[0].platforms');
+      expect(errors).toContain('github.jobs[0].setup[0].timeoutMs');
+    }
+  });
+
+  it('requires jobs to use valid toolchains and cover only checks supported by that platform', () => {
+    const input = clone();
+    input.github.jobs[0].toolchains = [
+      { kind: 'node', version: '22', cache: 'pip' },
+      { kind: 'node', version: '24' },
+    ];
+    input.github.jobs[0].checkIds.push('missing');
+    input.github.jobs[2].checkIds.push('shell-static');
+    const result = parseQualityContract(input);
+    expect(result.status).toBe('invalid');
+    if (result.status === 'invalid') {
+      const errors = result.errors.join('\n');
+      expect(errors).toContain('对 node 必须是 npm、yarn 或 pnpm');
+      expect(errors).toContain('toolchains 含重复 node');
+      expect(errors).toContain('引用未知检查 missing');
+      expect(errors).toContain('在 windows 运行不适用的检查 shell-static');
+    }
   });
 
   it('rejects duplicate module ids, check ids, required checks, and unknown module references', () => {

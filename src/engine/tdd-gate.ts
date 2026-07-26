@@ -324,32 +324,27 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
     };
   }
 
-  const top = runGit(root, ['rev-parse', '--show-toplevel']);
-  if (!top.ok) {
-    return {
-      ok: false,
-      failure: fail('git-unavailable', `TDD 门禁要求 Git 仓库：${top.diagnostic}`, 'git rev-parse', top.exitCode),
-      ms: Date.now() - started,
-    };
-  }
-  let gitRoot: string;
-  try {
-    gitRoot = realpathSync(top.stdout.trim());
-  } catch (err) {
+  const prefix = runGit(root, ['rev-parse', '--show-prefix']);
+  if (!prefix.ok) {
     return {
       ok: false,
       failure: fail(
         'git-unavailable',
-        `Git 根不可读：${err instanceof Error ? err.message : String(err)}`,
+        `TDD 门禁要求 Git 仓库：${prefix.diagnostic}`,
         'git rev-parse',
+        prefix.exitCode,
       ),
       ms: Date.now() - started,
     };
   }
-  if (gitRoot !== root) {
+  if (prefix.stdout.trim() !== '') {
+    const top = runGit(root, ['rev-parse', '--show-toplevel']);
     return {
       ok: false,
-      failure: fail('git-root-mismatch', `coding-x 必须从 Git 根启动；当前 ${root}，Git 根 ${gitRoot}`),
+      failure: fail(
+        'git-root-mismatch',
+        `coding-x 必须从 Git 根启动；当前 ${root}，Git 根 ${top.ok ? top.stdout.trim() : '不可读'}`,
+      ),
       ms: Date.now() - started,
     };
   }
