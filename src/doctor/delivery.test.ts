@@ -48,7 +48,7 @@ class FakeClient implements GitHubQualityClient {
       id: 7,
       ...buildManagedRulesetPayload(null, value.github.requiredChecks.map((context) => ({
         context, integration_id: integrationId,
-      }))),
+      })), value.github.requiredCodeScanning),
     };
     this.securityFeatures = structuredClone(value.github.securityFeatures ?? {
       dependabotSecurityUpdates: false,
@@ -134,6 +134,11 @@ describe('checkDeliveryGate', () => {
 
       client.ruleset = new FakeClient(value, 999).ruleset;
       client.securityFeatures.secretScanningPushProtection = false;
+      const codeScanningRule = client.ruleset.rules.find((rule) => rule.type === 'code_scanning');
+      const codeScanningTools = codeScanningRule?.parameters?.code_scanning_tools as
+        | Array<Record<string, unknown>>
+        | undefined;
+      if (codeScanningTools) codeScanningTools[0].alerts_threshold = 'all';
       client.issues = [issue({ body: issue().body.replace('2026-08-01', '2026-07-20') })];
       const invalid = checkDeliveryGate({
         root, workspace: '.workspace', contract: value, local: false, client,
@@ -142,6 +147,7 @@ describe('checkDeliveryGate', () => {
       expect(invalid.status).toBe('invalid');
       expect(invalid.issues.map((entry) => entry.message)).toEqual(expect.arrayContaining([
         expect.stringContaining('未绑定预期 GitHub App'),
+        expect.stringContaining('普通告警阈值为 all'),
         expect.stringContaining('秘密推送保护实际为关闭'),
         '延期 Issue 已过期',
       ]));

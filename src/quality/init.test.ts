@@ -22,7 +22,7 @@ import {
 } from './github.js';
 import { QUALITY_WORKFLOW_PATH } from './github-workflows.js';
 import { runQualityInit } from './init.js';
-import { requiredChecksFromRuleset } from './ruleset.js';
+import { codeScanningToolsFromRuleset, requiredChecksFromRuleset } from './ruleset.js';
 
 const roots: string[] = [];
 
@@ -126,12 +126,20 @@ class FakeGitHubClient implements GitHubQualityClient {
   }
 }
 
-function options(root: string, client: FakeGitHubClient, confirmations: boolean[] = []) {
+function options(
+  root: string,
+  client: FakeGitHubClient,
+  confirmations: boolean[] = [],
+  summaries: string[] = [],
+) {
   return {
     root,
     actualVersion: '0.29.0',
     client,
-    confirm: async () => confirmations.shift() ?? true,
+    confirm: async (summary: string) => {
+      summaries.push(summary);
+      return confirmations.shift() ?? true;
+    },
     ask: async () => '经仓库所有者确认不适用。',
   };
 }
@@ -144,14 +152,19 @@ describe('runQualityInit', () => {
   it('completes minimum lock, managed files, quality gate activation, then policy activation', async () => {
     const root = repositoryFixture();
     const client = new FakeGitHubClient();
+    const summaries: string[] = [];
 
-    const generated = await runQualityInit(options(root, client));
+    const generated = await runQualityInit(options(root, client, [], summaries));
     expect(generated).toMatchObject({
       status: 'files-created', exitCode: 6, rulesetId: 101,
       activeRequiredChecks: [], pendingRequiredChecks: ['quality-gate', 'policy-guard'],
     });
     expect(client.rulesets[0].name).toBe(MANAGED_RULESET_NAME);
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([]);
+    expect(codeScanningToolsFromRuleset(client.rulesets[0])).toEqual(
+      codingEngineContract().github.requiredCodeScanning,
+    );
+    expect(summaries[0]).toContain('CodeQL（安全 high_or_higher；普通 errors）');
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(true);
     expect(readFileSync(join(root, QUALITY_WORKFLOW_PATH), 'utf8')).toContain('name: quality-gate');
     expect(client.labels).toEqual(new Set([

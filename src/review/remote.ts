@@ -25,7 +25,11 @@ export function evaluateReviewRemoteState(options: {
       context: name,
       integration_id: GITHUB_ACTIONS_APP_ID,
     }));
-    const rulesetErrors = validateManagedRuleset(ruleset, expected);
+    const rulesetErrors = validateManagedRuleset(
+      ruleset,
+      expected,
+      options.contract.github.requiredCodeScanning,
+    );
     const runs = options.client.listCheckRuns(
       options.contract.repository.fullName,
       options.context.headSha,

@@ -7,6 +7,7 @@ import {
 } from './github.js';
 import {
   buildManagedRulesetPayload,
+  codeScanningToolsFromRuleset,
   findManagedRuleset,
   requiredChecksFromRuleset,
   validateManagedRuleset,
@@ -39,6 +40,12 @@ const checks: RequiredStatusCheck[] = [
   { context: 'quality-gate', integration_id: 15368 },
   { context: 'policy-guard', integration_id: 15368 },
 ];
+
+const codeScanning = [{
+  tool: 'CodeQL',
+  alertsThreshold: 'errors',
+  securityAlertsThreshold: 'high_or_higher',
+}] as const;
 
 describe('managed GitHub ruleset', () => {
   it('finds either bootstrap or final name but refuses an ambiguous pair', () => {
@@ -75,6 +82,44 @@ describe('managed GitHub ruleset', () => {
     expect(validateManagedRuleset(remote, checks)).toEqual([]);
   });
 
+  it('preserves an unmanaged code scanning rule when the contract does not declare one', () => {
+    const codeScanningRule = {
+      type: 'code_scanning',
+      parameters: {
+        code_scanning_tools: [{
+          tool: 'CodeQL',
+          alerts_threshold: 'errors',
+          security_alerts_threshold: 'high_or_higher',
+        }],
+      },
+    };
+    const existing = ruleset({ rules: [...ruleset().rules, codeScanningRule] });
+    const payload = buildManagedRulesetPayload(existing, []);
+
+    expect(payload.rules).toContainEqual(codeScanningRule);
+    expect(validateManagedRuleset({ id: 1, ...payload }, [])).toEqual([]);
+  });
+
+  it('manages exact code scanning tools and detects threshold or tool drift', () => {
+    const payload = buildManagedRulesetPayload(ruleset(), checks, [...codeScanning]);
+    const remote = { id: 1, ...payload };
+    expect(codeScanningToolsFromRuleset(remote)).toEqual(codeScanning);
+    expect(validateManagedRuleset(remote, checks, [...codeScanning])).toEqual([]);
+
+    const drifted = structuredClone(remote);
+    const rule = drifted.rules.find((entry) => entry.type === 'code_scanning')!;
+    const tools = rule.parameters!.code_scanning_tools as Array<Record<string, unknown>>;
+    tools[0].security_alerts_threshold = 'medium_or_higher';
+    tools.push({
+      tool: 'Semgrep',
+      alerts_threshold: 'all',
+      security_alerts_threshold: 'all',
+    });
+    const errors = validateManagedRuleset(drifted, checks, [...codeScanning]).join('\n');
+    expect(errors).toContain('CodeQL 安全告警阈值为 medium_or_higher');
+    expect(errors).toContain('契约外代码扫描工具 Semgrep');
+  });
+
   it('reports disabled enforcement, bypass, missing rules, stale-branch policy, and app drift', () => {
     const payload = buildManagedRulesetPayload(ruleset(), checks);
     const remote = {
@@ -108,4 +153,3 @@ describe('managed GitHub ruleset', () => {
     expect(errors).toContain('契约外必需检查 unexpected');
   });
 });
-

@@ -28,6 +28,7 @@ scope: root
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
 | 质量契约 | `src/quality/contract.ts` | 严格解析 `.coding-x/quality.json`，规范化摘要、精确版本约束和 PRD 检查快照派生/一致性核对；契约是项目检查唯一人工维护来源 |
+| GitHub 交付门禁 | `src/quality/github.ts`、`src/quality/ruleset.ts`、`src/doctor/delivery.ts` | 配置并回读默认分支 PR/状态检查规则；契约明确声明时精确管理代码扫描工具和两类阻断阈值，未声明时保留已有扫描规则；doctor 与最终 Review 对远端漂移 fail-closed |
 | 机械门禁与回写 | `src/engine/gate.ts` | 按 test→build→static→security 执行 PRD 中由契约冻结的结构化检查；默认不经 shell，只有契约显式声明时使用指定 shell；超时复用进程树终止单源并等待整棵树退出；门禁/异常轮回写及结构化 Validator pass/fail 的引擎状态转移共享 notes/重试/blocked 规则 |
 | TDD 门禁 | `src/engine/tdd-gate.ts` | 严格解析 `prd.json.tdd`；校验 Git 根/完整基线、项目内政策文件真实路径与 SHA-256、生产 pathspec 和基线后新增覆盖忽略标记；通过公共 command runner 执行项目原生 coverageCheck（ADR-017） |
 | 模型路由 | `src/engine/models.ts` | 严格校验 runner 绑定的五模型 schema；builder 按 story 难度/升级态/CLI 覆盖解析，validator 恒定，输出实际路由来源 |

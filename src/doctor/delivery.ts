@@ -168,7 +168,11 @@ export function checkDeliveryGate(options: {
         context,
         integration_id: GITHUB_ACTIONS_APP_ID,
       }));
-      for (const message of validateManagedRuleset(ruleset, expectedChecks)) {
+      for (const message of validateManagedRuleset(
+        ruleset,
+        expectedChecks,
+        contract.github.requiredCodeScanning,
+      )) {
         issues.push({ file: `GitHub Ruleset #${ruleset.id}`, message });
       }
     }

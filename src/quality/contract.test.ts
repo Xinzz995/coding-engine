@@ -116,6 +116,11 @@ function validContract(): unknown {
         },
       ],
       requiredChecks: ['quality-gate', 'policy-guard'],
+      requiredCodeScanning: [{
+        tool: 'CodeQL',
+        alertsThreshold: 'errors',
+        securityAlertsThreshold: 'high_or_higher',
+      }],
       securityFeatures: {
         dependabotSecurityUpdates: true,
         secretScanning: true,
@@ -211,6 +216,36 @@ describe('parseQualityContract', () => {
       expect(policyResult.errors).toContain(
         'github.securityFeatures 启用推送保护时必须同时启用秘密扫描',
       );
+    }
+  });
+
+  it('validates optional required code scanning tools and thresholds', () => {
+    const optional = clone();
+    delete optional.github.requiredCodeScanning;
+    expect(parseQualityContract(optional)).toMatchObject({ status: 'ready' });
+
+    const empty = clone();
+    empty.github.requiredCodeScanning = [];
+    const emptyResult = parseQualityContract(empty);
+    expect(emptyResult.status).toBe('invalid');
+    if (emptyResult.status === 'invalid') {
+      expect(emptyResult.errors).toContain('github.requiredCodeScanning 不能为空');
+    }
+
+    const invalid = clone();
+    invalid.github.requiredCodeScanning.push({
+      tool: 'codeql',
+      alertsThreshold: 'warning',
+      securityAlertsThreshold: 'high',
+    });
+    const invalidResult = parseQualityContract(invalid);
+    expect(invalidResult.status).toBe('invalid');
+    if (invalidResult.status === 'invalid') {
+      expect(invalidResult.errors).toEqual(expect.arrayContaining([
+        'github.requiredCodeScanning 含重复工具 codeql',
+        'github.requiredCodeScanning[1].alertsThreshold 是未知阈值',
+        'github.requiredCodeScanning[1].securityAlertsThreshold 是未知阈值',
+      ]));
     }
   });
 
