@@ -436,6 +436,13 @@
       "quality-gate",
       "policy-guard"
     ],
+    "requiredCodeScanning": [
+      {
+        "tool": "CodeQL",
+        "alertsThreshold": "errors",
+        "securityAlertsThreshold": "high_or_higher"
+      }
+    ],
     "securityFeatures": {
       "dependabotSecurityUpdates": true,
       "secretScanning": true,

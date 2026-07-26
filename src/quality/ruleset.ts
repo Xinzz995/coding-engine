@@ -6,10 +6,22 @@ import {
   type GitHubRulesetRule,
   type RequiredStatusCheck,
 } from './github.js';
+import type {
+  QualityCodeScanningAlertsThreshold,
+  QualityCodeScanningSecurityAlertsThreshold,
+  QualityCodeScanningTool,
+} from './contract.js';
 
 const MANAGED_RULE_TYPES = new Set([
   'deletion', 'non_fast_forward', 'pull_request', 'required_status_checks',
 ]);
+const CODE_SCANNING_ALERTS_THRESHOLDS = new Set<QualityCodeScanningAlertsThreshold>([
+  'none', 'errors', 'errors_and_warnings', 'all',
+]);
+const CODE_SCANNING_SECURITY_ALERTS_THRESHOLDS =
+  new Set<QualityCodeScanningSecurityAlertsThreshold>([
+    'none', 'critical', 'high_or_higher', 'medium_or_higher', 'all',
+  ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -44,11 +56,51 @@ export function requiredChecksFromRuleset(ruleset: GitHubRuleset | null): Requir
   });
 }
 
+export function codeScanningToolsFromRuleset(
+  ruleset: GitHubRuleset | null,
+): QualityCodeScanningTool[] {
+  if (!ruleset) return [];
+  const rule = uniqueByType(ruleset.rules, 'code_scanning');
+  if (!rule) return [];
+  const raw = rule.parameters?.code_scanning_tools;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('Ruleset code_scanning_tools 形状非法');
+  }
+  const seen = new Set<string>();
+  const tools = raw.map((entry) => {
+    if (!isRecord(entry) || typeof entry.tool !== 'string' || entry.tool === ''
+        || typeof entry.alerts_threshold !== 'string'
+        || !CODE_SCANNING_ALERTS_THRESHOLDS.has(
+          entry.alerts_threshold as QualityCodeScanningAlertsThreshold,
+        )
+        || typeof entry.security_alerts_threshold !== 'string'
+        || !CODE_SCANNING_SECURITY_ALERTS_THRESHOLDS.has(
+          entry.security_alerts_threshold as QualityCodeScanningSecurityAlertsThreshold,
+        )) {
+      throw new Error('Ruleset 代码扫描工具或阈值非法');
+    }
+    const identity = entry.tool.toLowerCase();
+    if (seen.has(identity)) throw new Error(`Ruleset 含重复代码扫描工具 ${entry.tool}`);
+    seen.add(identity);
+    return {
+      tool: entry.tool,
+      alertsThreshold: entry.alerts_threshold as QualityCodeScanningAlertsThreshold,
+      securityAlertsThreshold:
+        entry.security_alerts_threshold as QualityCodeScanningSecurityAlertsThreshold,
+    };
+  });
+  return tools.sort((a, b) => a.tool.localeCompare(b.tool));
+}
+
 export function buildManagedRulesetPayload(
   existing: GitHubRuleset | null,
   checks: RequiredStatusCheck[],
+  codeScanning?: QualityCodeScanningTool[],
 ): GitHubRulesetPayload {
-  const extraRules = (existing?.rules ?? []).filter((rule) => !MANAGED_RULE_TYPES.has(rule.type));
+  const extraRules = (existing?.rules ?? []).filter((rule) => (
+    !MANAGED_RULE_TYPES.has(rule.type)
+    && !(codeScanning !== undefined && rule.type === 'code_scanning')
+  ));
   const rules: GitHubRulesetRule[] = [
     ...extraRules,
     { type: 'deletion' },
@@ -77,6 +129,20 @@ export function buildManagedRulesetPayload(
       },
     });
   }
+  if (codeScanning && codeScanning.length > 0) {
+    rules.push({
+      type: 'code_scanning',
+      parameters: {
+        code_scanning_tools: [...codeScanning]
+          .sort((a, b) => a.tool.localeCompare(b.tool))
+          .map((tool) => ({
+            tool: tool.tool,
+            alerts_threshold: tool.alertsThreshold,
+            security_alerts_threshold: tool.securityAlertsThreshold,
+          })),
+      },
+    });
+  }
   return {
     name: MANAGED_RULESET_NAME,
     target: 'branch',
@@ -99,6 +165,7 @@ function equalStrings(actual: unknown, expected: readonly string[]): boolean {
 export function validateManagedRuleset(
   ruleset: GitHubRuleset,
   expectedChecks: RequiredStatusCheck[],
+  expectedCodeScanning?: QualityCodeScanningTool[],
 ): string[] {
   const errors: string[] = [];
   if (ruleset.name !== MANAGED_RULESET_NAME) errors.push(`名称仍为 ${ruleset.name}`);
@@ -156,6 +223,43 @@ export function validateManagedRuleset(
   } else if (statusRule) {
     errors.push('最小阶段不应提前存在必需检查规则');
   }
+
+  if (expectedCodeScanning !== undefined) {
+    const codeScanningRule = ruleset.rules.find((rule) => rule.type === 'code_scanning');
+    let actualTools: QualityCodeScanningTool[] = [];
+    try { actualTools = codeScanningToolsFromRuleset(ruleset); } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error));
+    }
+    if (expectedCodeScanning.length > 0 && !codeScanningRule) {
+      errors.push('缺少 code_scanning 规则');
+    } else if (expectedCodeScanning.length === 0 && codeScanningRule) {
+      errors.push('存在契约外 code_scanning 规则');
+    } else if (codeScanningRule) {
+      const actualMap = new Map(actualTools.map((tool) => [tool.tool, tool]));
+      const expectedMap = new Map(expectedCodeScanning.map((tool) => [tool.tool, tool]));
+      for (const [toolName, expected] of expectedMap) {
+        const actual = actualMap.get(toolName);
+        if (!actual) {
+          errors.push(`缺少代码扫描工具 ${toolName}`);
+          continue;
+        }
+        if (actual.alertsThreshold !== expected.alertsThreshold) {
+          errors.push(
+            `代码扫描工具 ${toolName} 普通告警阈值为 ${actual.alertsThreshold}，` +
+            `契约要求 ${expected.alertsThreshold}`,
+          );
+        }
+        if (actual.securityAlertsThreshold !== expected.securityAlertsThreshold) {
+          errors.push(
+            `代码扫描工具 ${toolName} 安全告警阈值为 ${actual.securityAlertsThreshold}，` +
+            `契约要求 ${expected.securityAlertsThreshold}`,
+          );
+        }
+      }
+      for (const toolName of actualMap.keys()) {
+        if (!expectedMap.has(toolName)) errors.push(`存在契约外代码扫描工具 ${toolName}`);
+      }
+    }
+  }
   return [...new Set(errors)];
 }
-

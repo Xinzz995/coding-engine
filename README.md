@@ -155,7 +155,7 @@ coding-x 同时包含两部分：
 - **完成即退出**：全部 story 同时满足 `passes && validated`（无 blocked）→ 退出码 0；全部收敛但存在 blocked 待人工 → 退出码 3；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断 → 退出码 1（完整对照见「命令行参数」后的「退出码」表）。
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。每次真实调用记录完整收口耗时与退出码，异常时另保留最近 2000 字符诊断，终端输出仍实时可见。
-- **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止（ADR-007、018）。
+- **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018）。
 - **TDD 门禁（可选）**：启用 `prd.json.tdd` 后，Builder 按 `tdd` skill 对每个公共行为做真实 RED→同命令 GREEN→绿色重构；宿主 hook 在 agent commit 前提前检查，引擎仍在 Validator 前独立校验 Git 基线、政策摘要、新增覆盖忽略标记并运行项目原生 `coverageCheck`。hook 通过不能跳过引擎重跑；覆盖率证明代码被执行，不证明断言有效或历史上一定先写测试（ADR-017）。
 - **可信目标绑定**：每轮 Validator 都收到一次性 request ID、精确 story、AC 快照/hash 和调用前 Git HEAD，必须提交版本化、逐 AC、自洽的结构化 claim。缺结果、旧结果、错 story/hash/commit、漏 AC、产物变化或改写 `state.json` 全部 fail closed，不签发凭证（ADR-015）。该协议消除正常控制流中的错目标/无结果假绿，但同权限 agent 仍能伪造观察，不能替代机械门禁和人审。
 - **workspace 写入避让与 Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 在任何变更前及首次真实写入前各用 `doctor` 检查工作区锁，发现引擎运行中或无法判定就保持零写入，且绝不删除 `engine.lock`；随后检查目录是否被忽略、是否已有文件进入 Git 索引。它不会擅自修改 `.gitignore` 或 Git 索引。锁检查是尽力避让，不替代引擎的机械互斥。

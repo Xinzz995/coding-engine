@@ -18,7 +18,7 @@ function fixture(integrationId: number) {
     id: 1,
     ...buildManagedRulesetPayload(null, contract.github.requiredChecks.map((context) => ({
       context, integration_id: integrationId,
-    }))),
+    })), contract.github.requiredCodeScanning),
   };
   const client = {
     listRulesets: () => [ruleset],
@@ -45,5 +45,16 @@ describe('evaluateReviewRemoteState', () => {
     expect(result.rulesetErrors).toEqual(expect.arrayContaining([
       expect.stringContaining('未绑定预期 GitHub App'),
     ]));
+  });
+
+  it('fails closed when the required code scanning rule drifts', () => {
+    const value = fixture(GITHUB_ACTIONS_APP_ID);
+    const ruleset = value.client.listRulesets('example/project')[0];
+    ruleset.rules = ruleset.rules.filter((rule) => rule.type !== 'code_scanning');
+    value.client.listRulesets = () => [ruleset];
+
+    const result = evaluateReviewRemoteState(value);
+    expect(result.status).toBe('invalid');
+    expect(result.rulesetErrors).toContain('缺少 code_scanning 规则');
   });
 });

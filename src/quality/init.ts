@@ -7,6 +7,7 @@ import {
   parseQualityContract,
   readQualityContract,
   type QualityCheckCategory,
+  type QualityCodeScanningTool,
   type QualityContract,
 } from './contract.js';
 import {
@@ -206,23 +207,31 @@ async function ensureMinimumRules(
   repository: GitHubRepositoryInfo,
   existing: GitHubRuleset | null,
   currentChecks: RequiredStatusCheck[],
+  requiredCodeScanning: QualityCodeScanningTool[] | undefined,
 ): Promise<GitHubRuleset | null> {
-  const currentErrors = existing ? validateManagedRuleset(existing, currentChecks) : ['Ruleset 不存在'];
+  const currentErrors = existing
+    ? validateManagedRuleset(existing, currentChecks, requiredCodeScanning)
+    : ['Ruleset 不存在'];
   if (currentErrors.length === 0) return existing;
   const confirmed = await options.confirm([
     '即将配置 GitHub 默认分支规则：所有改动必须经过 PR、解决所有对话、禁止强推和删除、无日常绕过者。',
     currentChecks.length > 0
       ? `保留已启用检查：${currentChecks.map((check) => check.context).join('、')}`
       : '当前仍处于 Bootstrap 最小阶段，不提前要求尚未出现的检查。',
+    requiredCodeScanning && requiredCodeScanning.length > 0
+      ? `强制代码扫描：${requiredCodeScanning.map((entry) => (
+          `${entry.tool}（安全 ${entry.securityAlertsThreshold}；普通 ${entry.alertsThreshold}）`
+        )).join('、')}`
+      : '质量契约未要求 coding-x 接管代码扫描规则。',
     `远端当前差异：${currentErrors.join('；')}`,
   ].join('\n'));
   if (!confirmed) return null;
-  const payload = buildManagedRulesetPayload(existing, currentChecks);
+  const payload = buildManagedRulesetPayload(existing, currentChecks, requiredCodeScanning);
   const changed = existing
     ? options.client!.updateRuleset(repository.fullName, existing.id, payload)
     : options.client!.createRuleset(repository.fullName, payload);
   const readback = options.client!.getRuleset(repository.fullName, changed.id);
-  const errors = validateManagedRuleset(readback, currentChecks);
+  const errors = validateManagedRuleset(readback, currentChecks, requiredCodeScanning);
   if (errors.length > 0) throw new GitHubQualityError('Ruleset 回读核验失败', errors.join('；'));
   return readback;
 }
@@ -325,7 +334,14 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
   if (unexpected.length > 0) {
     throw new Error(`托管 Ruleset 含契约外检查：${unexpected.map((check) => check.context).join('、')}`);
   }
-  const ruleset = await ensureMinimumRules(options, repository, initialRuleset, currentChecks);
+  const requiredCodeScanning = contract.github.requiredCodeScanning;
+  const ruleset = await ensureMinimumRules(
+    options,
+    repository,
+    initialRuleset,
+    currentChecks,
+    requiredCodeScanning,
+  );
   if (!ruleset) {
     return result('cancelled', 6, repository, branch, initialRuleset, contract, {
       message: '用户取消 GitHub 最小规则配置；没有写本地初始化文件。',
@@ -399,10 +415,10 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
         message: '用户取消必需检查升级。',
       });
     }
-    const payload = buildManagedRulesetPayload(ruleset, merged);
+    const payload = buildManagedRulesetPayload(ruleset, merged, requiredCodeScanning);
     const changed = options.client.updateRuleset(repository.fullName, ruleset.id, payload);
     finalRuleset = options.client.getRuleset(repository.fullName, changed.id);
-    const errors = validateManagedRuleset(finalRuleset, merged);
+    const errors = validateManagedRuleset(finalRuleset, merged, requiredCodeScanning);
     if (errors.length > 0) throw new GitHubQualityError('必需检查回读核验失败', errors.join('；'));
   }
 
@@ -425,7 +441,7 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
       },
     );
   }
-  const errors = validateManagedRuleset(finalRuleset, finalChecks);
+  const errors = validateManagedRuleset(finalRuleset, finalChecks, requiredCodeScanning);
   if (errors.length > 0) throw new GitHubQualityError('最终 Ruleset 核验失败', errors.join('；'));
   return result('ready', 0, repository, branch, finalRuleset, contract, {
     pullRequest: pullRequest.number,

@@ -95,6 +95,25 @@ export interface QualityGitHubJob {
   checkIds: string[];
 }
 
+export type QualityCodeScanningAlertsThreshold =
+  | 'none'
+  | 'errors'
+  | 'errors_and_warnings'
+  | 'all';
+
+export type QualityCodeScanningSecurityAlertsThreshold =
+  | 'none'
+  | 'critical'
+  | 'high_or_higher'
+  | 'medium_or_higher'
+  | 'all';
+
+export interface QualityCodeScanningTool {
+  tool: string;
+  alertsThreshold: QualityCodeScanningAlertsThreshold;
+  securityAlertsThreshold: QualityCodeScanningSecurityAlertsThreshold;
+}
+
 export type QualityCheckPolicy =
   | { checks: QualityCheck[] }
   | { notApplicable: string };
@@ -128,6 +147,8 @@ export interface QualityContract {
     /** 明确表达系统、工具版本、准备命令和检查范围，工作流只从这里生成。 */
     jobs: QualityGitHubJob[];
     requiredChecks: string[];
+    /** 声明后由 Ruleset 强制指定工具及阈值；缺省表示 coding-x 不接管现有代码扫描规则。 */
+    requiredCodeScanning?: QualityCodeScanningTool[];
     /** 可选的仓库安全能力要求；声明后 doctor 必须回读真实 GitHub 状态。 */
     securityFeatures?: {
       dependabotSecurityUpdates: boolean;
@@ -170,6 +191,13 @@ type UnknownRecord = Record<string, unknown>;
 
 const PLATFORMS = new Set<QualityPlatform>(['linux', 'macos', 'windows']);
 const CHECK_CATEGORIES: QualityCheckCategory[] = ['test', 'build', 'static', 'security'];
+const CODE_SCANNING_ALERTS_THRESHOLDS = new Set<QualityCodeScanningAlertsThreshold>([
+  'none', 'errors', 'errors_and_warnings', 'all',
+]);
+const CODE_SCANNING_SECURITY_ALERTS_THRESHOLDS =
+  new Set<QualityCodeScanningSecurityAlertsThreshold>([
+    'none', 'critical', 'high_or_higher', 'medium_or_higher', 'all',
+  ]);
 const RISK_CATEGORIES = new Set<QualityRiskCategory>([
   'policy', 'public-contract', 'state', 'migration', 'recovery', 'idempotency',
   'concurrency', 'timeout', 'retry', 'subprocess', 'security', 'privacy',
@@ -605,7 +633,7 @@ function validateContract(value: unknown): string[] {
     root.github,
     'github',
     ['jobs', 'requiredChecks'],
-    ['securityFeatures'],
+    ['requiredCodeScanning', 'securityFeatures'],
     errors,
   );
   if (github) {
@@ -687,6 +715,45 @@ function validateContract(value: unknown): string[] {
           errors.push(`github.requiredChecks 必须包含 ${required}`);
         }
       }
+    }
+  }
+  if (github && Object.hasOwn(github, 'requiredCodeScanning')) {
+    if (!Array.isArray(github.requiredCodeScanning)) {
+      errors.push('github.requiredCodeScanning 必须是数组');
+    } else {
+      if (github.requiredCodeScanning.length === 0) {
+        errors.push('github.requiredCodeScanning 不能为空');
+      }
+      const tools = new Set<string>();
+      github.requiredCodeScanning.forEach((entry, index) => {
+        const path = `github.requiredCodeScanning[${index}]`;
+        const item = objectShape(
+          entry,
+          path,
+          ['tool', 'alertsThreshold', 'securityAlertsThreshold'],
+          [],
+          errors,
+        );
+        if (!item) return;
+        if (nonEmptyString(item.tool, `${path}.tool`, errors)) {
+          if (/[\r\n]/.test(item.tool)) errors.push(`${path}.tool 不能包含换行`);
+          const identity = item.tool.toLowerCase();
+          if (tools.has(identity)) errors.push(`github.requiredCodeScanning 含重复工具 ${item.tool}`);
+          tools.add(identity);
+        }
+        if (typeof item.alertsThreshold !== 'string'
+            || !CODE_SCANNING_ALERTS_THRESHOLDS.has(
+              item.alertsThreshold as QualityCodeScanningAlertsThreshold,
+            )) {
+          errors.push(`${path}.alertsThreshold 是未知阈值`);
+        }
+        if (typeof item.securityAlertsThreshold !== 'string'
+            || !CODE_SCANNING_SECURITY_ALERTS_THRESHOLDS.has(
+              item.securityAlertsThreshold as QualityCodeScanningSecurityAlertsThreshold,
+            )) {
+          errors.push(`${path}.securityAlertsThreshold 是未知阈值`);
+        }
+      });
     }
   }
   if (github && Object.hasOwn(github, 'securityFeatures')) {
