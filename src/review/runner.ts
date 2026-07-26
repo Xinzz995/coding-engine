@@ -292,7 +292,7 @@ function boundedString(value: unknown, name: string, max: number): string {
 
 export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
   const root = record(value, 'Review 输出');
-  exactKeys(root, ['status', 'summary', 'requestDeepReview', 'findings'], ['unverifiableReason'], 'Review 输出');
+  exactKeys(root, ['status', 'summary', 'requestDeepReview', 'unverifiableReason', 'findings'], [], 'Review 输出');
   if (!['passed', 'failed', 'unverifiable'].includes(String(root.status))) {
     throw new Error('Review status 非法');
   }
@@ -311,7 +311,7 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
       throw new Error(`findings[${index}].requiresHumanDecision 必须是 boolean`);
     }
     const location = record(item.location, `findings[${index}].location`);
-    exactKeys(location, ['path'], ['line', 'symbol'], `findings[${index}].location`);
+    exactKeys(location, ['path', 'line', 'symbol'], [], `findings[${index}].location`);
     const path = boundedString(location.path, `findings[${index}].location.path`, 1000);
     if (path.startsWith('/') || path.split('/').includes('..')) throw new Error(`findings[${index}].location.path 必须是仓库相对路径`);
     if (location.line !== undefined && location.line !== null && (
