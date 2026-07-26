@@ -81,9 +81,23 @@ function compareVersion(actual, expected, name) {
   }
 }
 
+function npmVersion() {
+  if (process.env.npm_execpath) {
+    return execFileSync(process.execPath, [process.env.npm_execpath, '--version'], {
+      encoding: 'utf8',
+    }).trim();
+  }
+  if (process.platform === 'win32') {
+    return execFileSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', 'npm --version'], {
+      encoding: 'utf8',
+    }).trim();
+  }
+  return execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
+}
+
 function releaseToolchain(args) {
   const node = process.versions.node;
-  const npm = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
+  const npm = npmVersion();
   if (args['require-node-major']) {
     const expectedMajor = Number(args['require-node-major']);
     if (Number(node.split('.')[0]) !== expectedMajor) {
@@ -227,10 +241,10 @@ function commandVerifySource(args) {
     const actualMajor = Number(process.versions.node.split('.')[0]);
     if (actualMajor !== expectedMajor) fail(`Node 主版本为 ${actualMajor}，要求 ${expectedMajor}`);
   }
-  const npmVersion = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
-  compareVersion(npmVersion, args['min-npm'] ?? '11.15.0', 'npm');
+  const actualNpmVersion = npmVersion();
+  compareVersion(actualNpmVersion, args['min-npm'] ?? '11.15.0', 'npm');
   process.stdout.write(
-    `${JSON.stringify({ packageName: PACKAGE_NAME, version, commit, npmVersion })}\n`,
+    `${JSON.stringify({ packageName: PACKAGE_NAME, version, commit, npmVersion: actualNpmVersion })}\n`,
   );
 }
 

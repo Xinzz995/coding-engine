@@ -38,6 +38,12 @@ function run(args: string[], cwd: string) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { cwd, encoding: 'utf8' });
 }
 
+function runNpm(args: string[], cwd: string): void {
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) throw new Error('测试必须由 npm 启动，以取得跨平台 npm CLI 路径');
+  execFileSync(process.execPath, [npmCli, ...args], { cwd, stdio: 'ignore' });
+}
+
 function digest(bytes: Buffer) {
   return {
     shasum: createHash('sha1').update(bytes).digest('hex'),
@@ -59,18 +65,14 @@ describe('release evidence script', () => {
     mkdirSync(first);
     mkdirSync(second);
     mkdirSync(unpacked);
-    const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    execFileSync(npm, ['pack', root, '--ignore-scripts', '--pack-destination', first], {
-      stdio: 'ignore',
-    });
+    runNpm(['pack', root, '--ignore-scripts', '--pack-destination', first], root);
     const firstTarball = join(first, 'coding-x-1.2.3.tgz');
     execFileSync('tar', ['-xzf', firstTarball, '-C', unpacked]);
     mkdirSync(join(unpacked, 'package/.git'), { recursive: true });
     writeFileSync(join(unpacked, 'package/.git/HEAD'), `${'d'.repeat(40)}\n`);
-    execFileSync(
-      npm,
+    runNpm(
       ['pack', join(unpacked, 'package'), '--ignore-scripts', '--pack-destination', second],
-      { stdio: 'ignore' },
+      root,
     );
     expect(readFileSync(join(second, 'coding-x-1.2.3.tgz'))).toEqual(readFileSync(firstTarball));
   });
@@ -101,6 +103,8 @@ describe('release evidence script', () => {
         'refs/heads/main',
         '--main-ref',
         'refs/remotes/origin/main',
+        '--min-npm',
+        '0.0.0',
       ],
       root,
     );
@@ -226,6 +230,8 @@ describe('release evidence script', () => {
         'a'.repeat(40),
         '--workflow-run-id',
         '123',
+        '--min-npm',
+        '0.0.0',
         '--pack-json',
         packJson,
         '--tarball',
@@ -256,6 +262,8 @@ describe('release evidence script', () => {
         'a'.repeat(40),
         '--workflow-run-id',
         '123',
+        '--min-npm',
+        '0.0.0',
         '--output',
         stagedEvidence,
       ],
@@ -282,6 +290,8 @@ describe('release evidence script', () => {
         'a'.repeat(40),
         '--workflow-run-id',
         '123',
+        '--min-npm',
+        '0.0.0',
         '--output',
         stagedEvidence,
       ],
