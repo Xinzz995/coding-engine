@@ -250,7 +250,6 @@ jobs:
           max_days = ${maxDays}
           event = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))
           repo = event["repository"]["full_name"]
-          pr = event["pull_request"]
           number = event["number"]
           token = os.environ["GH_TOKEN"]
 
@@ -267,6 +266,9 @@ jobs:
               with urllib.request.urlopen(request, timeout=30) as response:
                   return json.load(response)
 
+          # opened/labeled can race: the event payload is an immutable snapshot, so policy
+          # decisions must read the current labels and body from GitHub.
+          pr = api(f"/repos/{repo}/pulls/{number}")
           files = []
           page = 1
           while True:

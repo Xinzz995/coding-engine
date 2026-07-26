@@ -101,12 +101,14 @@ describe('renderPolicyGuardWorkflow', () => {
     const yaml = renderPolicyGuardWorkflow(codingEngineContract());
     expect(yaml).toContain('pull_request_target:');
     expect(yaml).toContain('name: policy-guard');
+    expect(yaml).toContain('pr = api(f"/repos/{repo}/pulls/{number}")');
     expect(yaml).toContain('/pulls/{number}/files');
     expect(yaml).toContain('quality-policy-approved');
     expect(yaml).toContain('Policy-Exception: #<issue>');
     expect(yaml).toContain('quality-policy-exception');
     expect(yaml).not.toContain('actions/checkout');
     expect(yaml).not.toContain('pull_request.head');
+    expect(yaml).not.toContain('pr = event["pull_request"]');
   });
 
   it('freezes current engineering standards and policy/release paths into the old-rule workflow', () => {
