@@ -19,7 +19,9 @@ import type { ReviewPackage } from './package.js';
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
 const MAX_RUNNER_OUTPUT_BYTES = 4 * 1024 * 1024;
-const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v2';
+const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v3';
+const CODEX_PASSIVE_ENVELOPE_TYPES = new Set(['thread.started', 'turn.started', 'turn.completed']);
+const CODEX_ITEM_ENVELOPE_TYPES = new Set(['item.started', 'item.updated', 'item.completed']);
 const CODEX_PASSIVE_ITEM_TYPES = new Set(['reasoning', 'agent_message', 'todo_list']);
 
 export interface SafeRunnerInvocation {
@@ -226,11 +228,18 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
       throw new Error(`codex JSONL 第 ${index + 1} 行不是事件对象`);
     }
     const envelope = event as Record<string, unknown>;
-    if (envelope.type === 'error' || envelope.type === 'turn.failed') {
+    const envelopeType = typeof envelope.type === 'string' ? envelope.type : 'unknown';
+    if (envelopeType === 'error' || envelopeType === 'turn.failed') {
       throw new Error(`codex Review 事件失败：${JSON.stringify(envelope).slice(-2000)}`);
     }
+    if (CODEX_PASSIVE_ENVELOPE_TYPES.has(envelopeType)) continue;
+    if (!CODEX_ITEM_ENVELOPE_TYPES.has(envelopeType)) {
+      throw new RunnerPolicyViolation(`codex Review 产生了未知顶层事件：${envelopeType}`);
+    }
     const item = envelope.item;
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      throw new Error(`codex ${envelopeType} 缺少 item 对象`);
+    }
     const record = item as Record<string, unknown>;
     const type = typeof record.type === 'string' ? record.type : 'unknown';
     // todo_list only records ephemeral planning metadata inside the Codex response stream. It
@@ -239,7 +248,7 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
     if (!CODEX_PASSIVE_ITEM_TYPES.has(type)) {
       throw new RunnerPolicyViolation(`codex Review 产生了禁用工具事件：${type}`);
     }
-    if (envelope.type === 'item.completed' && type === 'agent_message') {
+    if (envelopeType === 'item.completed' && type === 'agent_message') {
       if (typeof record.text !== 'string' || record.text.trim() === '') {
         throw new Error('codex agent_message 缺少最终文本');
       }

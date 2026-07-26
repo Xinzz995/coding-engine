@@ -120,6 +120,20 @@ describe('parseCodexReviewJsonl', () => {
     });
     expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件：future_capability');
   });
+
+  it('rejects an unrecognized top-level event even when a valid final answer follows', () => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'future.event', payload: 'unknown capability' }),
+      JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(answer) } }),
+    ].join('\n');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知顶层事件：future.event');
+  });
+
+  it('rejects an item event whose item payload is missing', () => {
+    const stdout = JSON.stringify({ type: 'item.started' });
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('item.started 缺少 item');
+  });
 });
 
 describe('codexReviewPermissionOverrides', () => {
