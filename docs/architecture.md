@@ -60,7 +60,7 @@ cli → quality + engine（loop → quality / agent / prd / state / progress / t
 
 coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。它们运行仓库机械健康检查，
 只验证文档、契约结构和契约生成文件；完整 doctor 继续拒绝候选版本与固定版本不一致。
-首次 0.30.0 由机械检查和 owner 人工 Bootstrap 裁决，不声称取得正式本地 Review；因此远端
+首次 0.33.0 由机械检查和 owner 人工 Bootstrap 裁决，不声称取得正式本地 Review；因此远端
 总闸成功不表示候选取得正式裁判资格（ADR-018）。
 
 发布链把“构建候选”和“取得 npm 暂存身份”拆成两个权限域。前者执行完整项目代码但没有
