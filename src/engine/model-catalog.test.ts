@@ -171,4 +171,13 @@ describe('initializeGlobalModelConfig', () => {
     const result = initializeGlobalModelConfig(path);
     expect(result).toMatchObject({ status: 'error', path });
   });
+
+  it('never overwrites an existing configuration', () => {
+    const path = join(tempDir(), 'config.json');
+    const original = '{"version":1,"models":{"codex":[{"id":"keep-me"}]}}\n';
+    writeFileSync(path, original);
+
+    expect(initializeGlobalModelConfig(path)).toEqual({ status: 'exists', path });
+    expect(readFileSync(path, 'utf8')).toBe(original);
+  });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -6,7 +6,11 @@ import { runInNewContext } from 'node:vm';
 import { setState, buildApiResponse, start, configureWorkspace, browserOpenCommand } from './server.js';
 
 let cleanup: Array<() => void> = [];
-afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
+afterEach(() => {
+  cleanup.forEach((f) => f());
+  cleanup = [];
+  vi.restoreAllMocks();
+});
 
 function tempWorkspace(): string {
   const dir = mkdtempSync(join(tmpdir(), 'ws-'));
@@ -203,5 +207,25 @@ describe('start', () => {
     expect(body.runtime.max_iterations).toBe(50);
     expect(res.headers.get('content-type')).toContain('application/json');
     expect(res.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('keeps dashboard asset failures out of the HTTP response', async () => {
+    const ws = tempWorkspace();
+    const pub = mkdtempSync(join(tmpdir(), 'pub-missing-'));
+    cleanup.push(() => rmSync(pub, { recursive: true, force: true }));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
+    cleanup.push(() => srv.close());
+    const addr = srv.address();
+    const res = await fetch(`http://127.0.0.1:${addr.port}/`);
+    const body = await res.text();
+
+    expect(res.status).toBe(500);
+    expect(res.headers.get('content-type')).toContain('text/plain');
+    expect(body).toBe('Internal Server Error');
+    expect(body).not.toContain(pub);
+    expect(body).not.toContain('ENOENT');
+    expect(log).toHaveBeenCalledOnce();
   });
 });

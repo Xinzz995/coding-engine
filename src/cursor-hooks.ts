@@ -1,9 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -40,7 +44,7 @@ export interface CursorHookOptions {
 }
 
 export const CURSOR_HOOK_COMMAND = 'node ".cursor/coding-x/tdd-commit-check.mjs"';
-export const CURSOR_HOOK_MATCHER = String.raw`\bgit(?:\s+(?:-C\s+(?:"[^"]*"|'[^']*'|\S+)|-c\s+\S+))*\s+commit(?=\s|$)`;
+export const CURSOR_HOOK_MATCHER = String.raw`\bgit\b[^\r\n]*\bcommit(?=\s|$)`;
 
 const CURSOR_HOOK_ENTRY = Object.freeze({
   command: CURSOR_HOOK_COMMAND,
@@ -207,6 +211,24 @@ function readInstallRecord(path: string): InstallRecord | null {
 
 function hashBytes(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function readBundle(path: string): Buffer | null {
+  let descriptor: number;
+  try {
+    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+    descriptor = openSync(path, constants.O_RDONLY | noFollow);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ELOOP') return null;
+    throw error;
+  }
+  try {
+    if (!fstatSync(descriptor).isFile()) return null;
+    return readFileSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function hashFile(path: string): string {
@@ -483,10 +505,10 @@ export function runCursorHookAction(
     const paths = pathsFor(root);
     validateTargetLayout(paths);
     if (action === 'remove') return remove(paths);
-    if (!existsSync(options.bundle) || !lstatSync(options.bundle).isFile()) {
+    const bundle = readBundle(options.bundle);
+    if (bundle === null) {
       return result('error', `❌ coding-x 发布物缺少 TDD hook：${options.bundle}`, root);
     }
-    const bundle = readFileSync(options.bundle);
     if (action === 'install') return install(paths, bundle);
     return status(paths, bundle);
   } catch (error) {

@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CURSOR_HOOK_COMMAND,
+  CURSOR_HOOK_MATCHER,
   runCursorHookAction,
 } from './cursor-hooks.js';
 
@@ -58,6 +59,13 @@ function sha256(path: string): string {
 }
 
 describe('Cursor project TDD hook management', () => {
+  it('matches commit commands without using the old backtracking expression', () => {
+    const matcher = new RegExp(CURSOR_HOOK_MATCHER, 'i');
+    expect(matcher.test('git -C "repo with spaces" commit -m story')).toBe(true);
+    expect(matcher.test('/usr/bin/git -c user.name=test commit --amend')).toBe(true);
+    expect(matcher.test('git status')).toBe(false);
+  });
+
   it('installs once, reports healthy, and stays idempotent', () => {
     const value = fixture();
 
@@ -230,6 +238,20 @@ describe('Cursor project TDD hook management', () => {
     });
     expect(lstatSync(join(cursorDir, 'hooks.json')).isSymbolicLink()).toBe(true);
     expect(existsSync(join(cursorDir, 'coding-x'))).toBe(false);
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses a symlinked published hook bundle', () => {
+    const value = fixture();
+    const outside = join(value.root, 'untrusted-hook.mjs');
+    writeFileSync(outside, 'console.log("untrusted");\n');
+    rmSync(value.bundle);
+    symlinkSync(outside, value.bundle);
+
+    expect(runCursorHookAction('install', value)).toMatchObject({
+      exitCode: 1,
+      status: 'error',
+    });
+    expect(existsSync(join(value.root, '.cursor'))).toBe(false);
   });
 
   it('fails without writes outside a Git repository', () => {

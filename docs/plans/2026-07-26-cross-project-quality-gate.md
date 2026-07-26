@@ -233,9 +233,12 @@ scope: root
   `policy-guard`，并完成远端回读；
 - Phase 1、质量契约底座、分阶段 `init`、本地三层 Review 和远端 doctor 已分别通过
   PR #45–#49 合并；
-- Node 22 基线、Node 24 跨系统验证、增量格式检查、静态检查、全依赖高危审计、固定版本
-  Actions、Dependabot、秘密扫描和 CodeQL 正在独立 Phase 4 PR 中验证；CodeQL 必须先在
-  默认分支形成真实基线，再用后续 Activation PR 加入 Ruleset，避免首次启用自锁；
+- Phase 4 基础设施 PR #55 已合并；Node 22/24、Linux/macOS/Windows、增量格式检查、静态
+  检查、高危依赖审计、固定版本 Actions、Dependabot、秘密扫描和 CodeQL 已在默认分支真实
+  运行；
+- 默认分支首次 CodeQL 基线发现 7 个现存问题（6 个高风险、1 个中风险），当前在独立修复
+  PR 中逐项消除并增加回归测试；在默认分支归零前不把 CodeQL 加入 Ruleset，避免把“扫描
+  工作流成功”误当成“没有告警”；
 - staged 发布、三个项目的同包 Dogfood 和结构治理仍待后续独立 PR；
 - npm 本机当前没有交互登录，后续 stage 2FA 批准需要维护者介入；在到达该步骤前不构成实现
   阻碍。

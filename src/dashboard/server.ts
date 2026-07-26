@@ -146,8 +146,9 @@ export function start(opts: {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(html);
     } catch (e) {
-      res.writeHead(500);
-      res.end(String(e));
+      console.error(`dashboard asset error: ${e instanceof Error ? e.message : String(e)}`);
+      res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Internal Server Error');
     }
   };
 

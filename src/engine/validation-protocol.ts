@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync, unlinkSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type { Story } from './prd.js';
 
@@ -214,8 +221,11 @@ export function readValidationResult(
   actualGitHead: string | null,
 ): ValidationProtocolOutcome {
   let raw: string;
+  let descriptor: number | null = null;
   try {
-    const stat = statSync(path);
+    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+    descriptor = openSync(path, constants.O_RDONLY | noFollow);
+    const stat = fstatSync(descriptor);
     if (!stat.isFile()) {
       return { ok: false, code: 'unreadable-result', diagnostic: 'validation result 不是普通文件' };
     }
@@ -226,7 +236,8 @@ export function readValidationResult(
         diagnostic: `validation result 超过 ${VALIDATION_RESULT_MAX_BYTES} bytes`,
       };
     }
-    raw = readFileSync(path, 'utf8');
+    // 始终从完成 fstat 的同一文件描述符读取，路径随后被替换也不会改读其他文件。
+    raw = readFileSync(descriptor, 'utf8');
     if (Buffer.byteLength(raw, 'utf8') > VALIDATION_RESULT_MAX_BYTES) {
       return {
         ok: false,
@@ -243,6 +254,8 @@ export function readValidationResult(
       code: 'unreadable-result',
       diagnostic: `validation result 不可读：${err instanceof Error ? err.message : String(err)}`,
     };
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
   }
 
   let parsed: unknown;

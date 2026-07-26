@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Story } from './prd.js';
@@ -148,6 +148,18 @@ describe('readValidationResult', () => {
     writeFileSync(req.resultPath, '{broken');
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
       ok: false, code: 'invalid-json',
+    });
+  });
+
+  it.runIf(process.platform !== 'win32')('refuses a validation result reached through a symlink', () => {
+    const dir = tempDir();
+    const req = request(dir);
+    const actual = join(dir, 'outside-result.json');
+    writeFileSync(actual, JSON.stringify(resultFor(req)));
+    symlinkSync(actual, req.resultPath);
+
+    expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
+      ok: false, code: 'unreadable-result',
     });
   });
 
