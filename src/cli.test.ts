@@ -49,6 +49,7 @@ describe('parseCliArgs', () => {
     expect(c.devTimeoutMs).toBe(30 * 60 * 1000);
     expect(c.valTimeoutMs).toBe(60 * 60 * 1000);
     expect(c.openBrowser).toBe(true);
+    expect(c.shadow).toBe(false);
   });
   it('parses codex positional and flag overrides', () => {
     const c = parseCliArgs(['codex', '--max-iter', '3', '--dev-timeout', '10', '--no-open']);
@@ -62,6 +63,9 @@ describe('parseCliArgs', () => {
     const c = parseCliArgs(['cursor']);
     expect(c.kind).toBe('cursor');
     expect(c.kindExplicit).toBe(true);
+  });
+  it('parses --shadow as an explicit non-delivery run mode', () => {
+    expect(parseCliArgs(['codex', '--shadow']).shadow).toBe(true);
   });
   it('recognizes the repair subcommand', () => {
     expect(parseCliArgs(['repair']).command).toBe('repair');
@@ -215,6 +219,7 @@ describe('main — help', () => {
         '--max-iter', '--dev-timeout', '--val-timeout', '--builder-model',
         '--validator-model', '--escalation-model', '--workspace', '--no-open',
         '--keep-open', '--port', '--stall-limit', '--stale-days', '--json',
+        '--shadow',
         '--help', '-h',
       ]) {
         expect(output, `help 缺少 ${token}`).toContain(token);
@@ -253,6 +258,25 @@ describe('main — invalid --stale-days', () => {
       expect(logSpy).not.toHaveBeenCalled(); // 未执行 doctor 检查，没有打印报告
     } finally {
       errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+});
+
+describe('main — doctor JSON', () => {
+  it('prints one parseable object including the quality contract digest', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(['doctor', '--json'])).toBe(0);
+      expect(logSpy).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(logSpy.mock.calls[0][0]))).toMatchObject({
+        schemaVersion: 1,
+        quality: {
+          status: 'ready',
+          digest: expect.stringMatching(/^sha256:/),
+        },
+      });
+    } finally {
       logSpy.mockRestore();
     }
   });

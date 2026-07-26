@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { AgentKind } from './agent.js';
+import type { FrozenQualityChecks } from '../quality/contract.js';
 
 export type StoryDifficulty = 'low' | 'medium' | 'high';
 
@@ -48,8 +49,13 @@ export interface Prd {
   description: string;
   /** 意图真相源（源 PRD）的仓库相对路径；由 prd-to-json 写入，引擎只透传不解析 */
   sourcePrd?: string;
-  /** 机械门禁命令（完整 shell 命令行，引擎逐条执行）；缺失或空数组=门禁不启用 */
-  qualityChecks?: string[];
+  /** 派生该 PRD 时冻结的 .coding-x/quality.json 规范化摘要。 */
+  qualityContractDigest?: string;
+  /**
+   * 由质量契约原样派生的检查快照；正式模式必须存在且与契约一致。
+   * string[] 只为读取 0.29 及更早的历史 workspace，正式模式会拒绝。
+   */
+  qualityChecks?: FrozenQualityChecks | string[];
   /** 可验证 TDD 政策；字段一旦出现即严格校验，非法时 fail closed。 */
   tdd?: TddConfig;
   /** 模型路由；缺失时只使用 CLI 临时覆盖或 runner 默认模型。 */

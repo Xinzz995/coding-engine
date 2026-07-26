@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-07-23
+updated: 2026-07-26
 scope: root
 ---
 
@@ -44,6 +44,7 @@ scope: root
 - 2026-07-23 把项目原生命令升级为安全门禁时，冻结的不能只有命令字符串：同时枚举并摘要保护阈值、排除、零测试、基线和 diff-coverage 委托文件，限制 realpath 在项目根内，再检查基线后生产路径新增的 ignore marker。摘要能发现常见政策漂移，但同权限工具链仍不防伪，文案不得越界（见 `tdd-gate.ts`、ADR-017）。
 - 2026-07-23 宿主 hook 读取外部 workspace 时必须与项目根成对绑定：只有绝对 `CODING_X_WORKSPACE` 搭配 canonical `CODING_X_PROJECT_ROOT` 且后者等于当前 Git 根才采用，否则回退 `<git-root>/.workspace`；禁止单独信任会跨项目遗留的 workspace 环境变量。
 - 2026-07-23 runner 的“插件发现”与“hook 实际调用”必须分层实测，不能由清单 schema 推断接线成功：Cursor Agent CLI `2026.07.20-8cc9c0b` 能通过插件目录发现能力，但提交前执行器实际读取项目根 `.cursor/hooks.json`；且 `failClosed` 下成功脚本必须输出原生明确放行 JSON，空 stdout 会被当作失败。对这种宿主差异使用显式、可逆的项目适配器，复制构建产物避免提交时依赖机器路径或联网，并保留引擎最终门禁（ADR-017）。
+- 2026-07-26 跨 PRD 与 CI 复用的项目检查只允许一个人工维护来源：质量契约严格解析后由工具派生 PRD 快照和远端工作流；正式运行同时绑定精确 coding-x 版本、规范化契约摘要和逐字段相同的结构化快照。结构化命令默认 `shell=false`，只有用户在契约中显式选择 shell 时才允许管道/重定向；任何一层漂移都停止，不能静默退回旧字符串数组（ADR-018）。
 
 ## 陷阱
 

@@ -1,7 +1,7 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import { INITIAL_STORY_STATE, isStoryPassed, type StoryView } from '../engine/state.js';
 import {
-  isArbitrationLine, readQualityChecks, GATE_FAIL_LINE_PREFIX,
+  isArbitrationLine, GATE_FAIL_LINE_PREFIX,
   VALIDATOR_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX,
 } from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
@@ -175,13 +175,40 @@ function renderBanner(stories: StoryView[], stateCorrupted: boolean): string {
 }
 
 function renderGateConfig(data: ReportData): string {
-  const checks = readQualityChecks(data.prd);
-  if (checks === null) return '<div class="meta-line">机械门禁：未启用</div>';
-  if (checks === 'invalid') {
-    return '<div class="meta-line warn">机械门禁：配置形状非法（应为字符串数组），运行期未启用</div>';
+  const value: unknown = data.prd.qualityChecks;
+  if (value === undefined) return '<div class="meta-line warn">质量契约检查：PRD 未绑定派生快照</div>';
+  if (Array.isArray(value)) {
+    const legacy = value.every((entry) => typeof entry === 'string');
+    return legacy
+      ? '<div class="meta-line warn">质量契约检查：仍是旧版字符串命令数组，正式运行会拒绝</div>'
+      : '<div class="meta-line warn">质量契约检查：派生快照形状非法</div>';
   }
-  return `<div class="meta-line">机械门禁（${checks.length} 条）：</div>` +
-    `<ul class="checks">${checks.map((c) => `<li><code>${escapeHtml(c)}</code></li>`).join('')}</ul>`;
+  if (typeof value !== 'object' || value === null) {
+    return '<div class="meta-line warn">质量契约检查：派生快照形状非法</div>';
+  }
+  const rows: string[] = [];
+  for (const category of ['test', 'build', 'static', 'security']) {
+    const group = (value as Record<string, unknown>)[category];
+    if (typeof group !== 'object' || group === null || Array.isArray(group)) {
+      return '<div class="meta-line warn">质量契约检查：派生快照形状非法</div>';
+    }
+    const record = group as Record<string, unknown>;
+    if (typeof record.notApplicable === 'string' && record.notApplicable.trim() !== '') {
+      rows.push(`<li>${text(category)}：不适用（${text(record.notApplicable)}）</li>`);
+      continue;
+    }
+    if (!Array.isArray(record.checks) || record.checks.length === 0) {
+      return '<div class="meta-line warn">质量契约检查：派生快照形状非法</div>';
+    }
+    for (const check of record.checks) {
+      if (typeof check !== 'object' || check === null || Array.isArray(check)
+          || typeof (check as Record<string, unknown>).id !== 'string') {
+        return '<div class="meta-line warn">质量契约检查：派生快照形状非法</div>';
+      }
+      rows.push(`<li>${text(category)}：<code>${text((check as Record<string, unknown>).id)}</code></li>`);
+    }
+  }
+  return `<div class="meta-line">质量契约派生检查：</div><ul class="checks">${rows.join('')}</ul>`;
 }
 
 function renderTddConfig(data: ReportData): string {

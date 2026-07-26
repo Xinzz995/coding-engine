@@ -1,15 +1,36 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import {
+  mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, symlinkSync, realpathSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES,
   applyAbortRollback, ABORT_LINE_PREFIX, applyValidatorFailure,
   applyValidatorSuccess,
+  runContractQualityChecks,
 } from './gate.js';
 import type { GateFailure } from './gate.js';
 import type { RunState } from './state.js';
 import type { Prd } from './prd.js';
+import type {
+  FrozenQualityChecks,
+  QualityContract,
+  QualityCheckPolicy,
+} from '../quality/contract.js';
+
+function contractWith(
+  test: QualityCheckPolicy,
+  rest: Partial<QualityContract['checks']> = {},
+): FrozenQualityChecks {
+  return {
+    test,
+    build: { notApplicable: 'fixture' },
+    static: { notApplicable: 'fixture' },
+    security: { notApplicable: 'fixture' },
+    ...rest,
+  };
+}
 
 const prdWith = (qualityChecks?: unknown): Prd => ({
   project: 'p', branchName: 'b', description: 'd', userStories: [],
@@ -317,6 +338,121 @@ describe('runQualityChecks', () => {
     expect(fail.ok).toBe(false);
     expect(fail.total).toBe(2);
     expect(fail.ran).toBe(1); // fail-fast：第 1 条失败，第 2 条未执行
+  });
+});
+
+describe('runContractQualityChecks', () => {
+  it('executes structured commands without a shell and honors the declared cwd', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'contract-gate-'));
+    const moduleDir = join(root, 'module');
+    const marker = join(moduleDir, 'structured.txt');
+    mkdirSync(moduleDir);
+    try {
+      const result = await runContractQualityChecks(contractWith({
+        checks: [{
+          id: 'structured', module: 'root',
+          command: {
+            executable: process.execPath,
+            args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.cwd())`],
+            cwd: 'module', platforms: ['linux', 'macos', 'windows'], timeoutMs: 5_000,
+          },
+        }],
+      }), root);
+      expect(result).toMatchObject({ ok: true, total: 1, ran: 1, skipped: [] });
+      expect(readFileSync(marker, 'utf8')).toBe(realpathSync(moduleDir));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('runs an explicitly declared shell script and never infers shell from executable args', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'contract-shell-'));
+    const marker = join(root, 'shell.txt');
+    try {
+      const result = await runContractQualityChecks(contractWith({
+        checks: [{
+          id: 'shell', module: 'root',
+          command: {
+            shell: '/bin/sh',
+            script: `printf shell-ok > ${JSON.stringify(marker)}`,
+            cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
+          },
+        }],
+      }), root, 'macos');
+      expect(result.ok).toBe(true);
+      expect(readFileSync(marker, 'utf8')).toBe('shell-ok');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips checks that do not apply to the current platform and records their ids', async () => {
+    const result = await runContractQualityChecks(contractWith({
+      checks: [{
+        id: 'windows-only', module: 'root',
+        command: {
+          executable: process.execPath, args: ['-e', 'process.exit(9)'], cwd: '.',
+          platforms: ['windows'], timeoutMs: 5_000,
+        },
+      }],
+    }), process.cwd(), 'linux');
+    expect(result).toMatchObject({ ok: true, total: 0, ran: 0, skipped: ['windows-only'] });
+  });
+
+  it('fails fast and names the check without exposing a shell-expanded command', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'contract-fail-'));
+    const marker = join(root, 'must-not-run.txt');
+    try {
+      const result = await runContractQualityChecks(contractWith({
+        checks: [
+          {
+            id: 'first-fails', module: 'root',
+            command: {
+              executable: process.execPath,
+              args: ['-e', 'console.error("contract-boom"); process.exit(3)'],
+              cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
+            },
+          },
+          {
+            id: 'second', module: 'root',
+            command: {
+              executable: process.execPath,
+              args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+              cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
+            },
+          },
+        ],
+      }), root, 'macos');
+      expect(result.ok).toBe(false);
+      expect(result.failure).toMatchObject({ command: '[first-fails]', exitCode: 3, timedOut: false });
+      expect(result.failure?.outputTail).toContain('contract-boom');
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a command cwd that resolves through a symlink outside the project root', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'contract-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'contract-outside-'));
+    symlinkSync(outside, join(root, 'escape'));
+    try {
+      const result = await runContractQualityChecks(contractWith({
+        checks: [{
+          id: 'escape', module: 'root',
+          command: {
+            executable: process.execPath, args: ['-e', 'process.exit(0)'], cwd: 'escape',
+            platforms: ['macos'], timeoutMs: 5_000,
+          },
+        }],
+      }), root, 'macos');
+      expect(result.ok).toBe(false);
+      expect(result.failure).toMatchObject({ command: '[escape]', exitCode: null, timedOut: false });
+      expect(result.failure?.outputTail).toContain('项目根之外');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
 

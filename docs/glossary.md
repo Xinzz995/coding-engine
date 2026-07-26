@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-23
+updated: 2026-07-26
 scope: root
 ---
 
@@ -50,12 +50,20 @@ validation request → Validator claim → engine protocol verdict/receipt 的 r
 系统显示 story 通过，但实际上未完成指定 AC 或没有验证指定产物。正常控制流中的无结果、错目标、旧结果由结构化验收协议关闭；同权限 agent 伪造观察、共谋或敷衍验证仍需机械门禁与 review-loop 独立复核。
 禁用：误报通过、虚假通过
 
+**质量契约**
+项目受 Git 管理的 `.coding-x/quality.json`：统一声明测试、构建、静态检查、安全检查、适用范围、风险来源和远端必需检查。它是项目检查唯一人工维护来源；PRD 只保存由它派生的摘要和结构化快照，不能另写一套规则。
+禁用：质量配置、PRD 门禁命令（统一用「质量契约」）
+
+**shadow（影子运行）**
+候选 coding-x 对真实项目执行的非交付验证模式。它可以暴露失败，但即使全部成功也固定返回影子结局，不能给候选版本自身签发正式通过。
+禁用：候选通过、自认证
+
 **TDD 循环**
 针对一个公共可观察行为完成的 RED→GREEN→重构：先运行聚焦测试并确认它因待实现行为缺失而失败，再用同一命令确认最小实现通过，最后只在绿色状态重构。过程记录是 agent 声明，不是历史顺序证明。
 禁用：先补测试（无法表达真实 RED）、测试覆盖流程
 
 **TDD 门禁**
-启用 `prd.json.tdd` 后，引擎在普通门禁之后、Validator 之前执行的项目级机械检查：先验证冻结的 Git 基线、政策摘要与新增覆盖忽略标记，再真实运行 coverageCheck。Codex/Claude 插件 hook 与 Cursor 显式安装的项目检查只是提前反馈，不属于最终 TDD 门禁。
+启用 `prd.json.tdd` 后，引擎在质量契约派生检查之后、Validator 之前执行的项目级机械检查：先验证冻结的 Git 基线、政策摘要与新增覆盖忽略标记，再真实运行 coverageCheck。Codex/Claude 插件 hook 与 Cursor 显式安装的项目检查只是提前反馈，不属于最终 TDD 门禁。
 禁用：TDD 证明、测试质量门禁
 
 **覆盖率政策面**

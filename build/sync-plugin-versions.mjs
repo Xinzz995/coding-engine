@@ -11,6 +11,8 @@ export const PLUGIN_MANIFESTS = [
   '.codex-plugin/plugin.json',
 ];
 
+export const RUNTIME_VERSION_SOURCE = 'src/version.ts';
+
 // 只重写 version 字段所在片段，不做 JSON 重新序列化——保留各清单的既有格式
 export function syncPluginVersions(rootDir, version) {
   const changed = [];
@@ -26,12 +28,27 @@ export function syncPluginVersions(rootDir, version) {
   return changed;
 }
 
+/** 保持运行时精确版本与 package.json 一致，供正式/Shadow 模式机械裁决。 */
+export function syncRuntimeVersion(rootDir, version) {
+  const path = join(rootDir, RUNTIME_VERSION_SOURCE);
+  const text = readFileSync(path, 'utf8');
+  const pattern = /CODING_X_VERSION\s*=\s*'([^']+)'/g;
+  const matches = [...text.matchAll(pattern)];
+  if (matches.length !== 1) {
+    throw new Error(`${RUNTIME_VERSION_SOURCE} 必须且只能包含一个 CODING_X_VERSION 常量`);
+  }
+  if (matches[0][1] === version) return false;
+  writeFileSync(path, text.replace(matches[0][0], `CODING_X_VERSION = '${version}'`));
+  return true;
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const version =
     process.env.npm_package_version ??
     // 剥 UTF-8 BOM：Windows 编辑器可能给 JSON 加 BOM，不剥会 SyntaxError
     JSON.parse(readFileSync('package.json', 'utf8').replace(/^\uFEFF/, '')).version;
   const changed = syncPluginVersions(process.cwd(), version);
+  if (syncRuntimeVersion(process.cwd(), version)) changed.push(RUNTIME_VERSION_SOURCE);
   console.log(
     changed.length
       ? `插件清单已同步到 ${version}：${changed.join(', ')}`

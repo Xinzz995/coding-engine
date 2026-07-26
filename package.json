@@ -38,7 +38,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "version": "node build/sync-plugin-versions.mjs && git add .claude-plugin/plugin.json .cursor-plugin/plugin.json .codex-plugin/plugin.json",
+    "version": "node build/sync-plugin-versions.mjs && git add .claude-plugin/plugin.json .cursor-plugin/plugin.json .codex-plugin/plugin.json src/version.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

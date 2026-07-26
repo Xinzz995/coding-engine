@@ -46,7 +46,13 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
   "project": "[Project Name]",
   "branchName": "ralph/[feature-name-kebab-case]",
   "sourcePrd": "docs/prds/prd-[feature-name].md",
-  "qualityChecks": ["npm run typecheck", "npm test"],
+  "qualityContractDigest": "sha256:<.coding-x/quality.json 的规范化摘要>",
+  "qualityChecks": {
+    "test": { "notApplicable": "<示意；实际原样复制 doctor.quality.derivedChecks.test>" },
+    "build": { "notApplicable": "<示意；实际原样复制 doctor.quality.derivedChecks.build>" },
+    "static": { "notApplicable": "<示意；实际原样复制 doctor.quality.derivedChecks.static>" },
+    "security": { "notApplicable": "<示意；实际原样复制 doctor.quality.derivedChecks.security>" }
+  },
   "tdd": {
     "coverageCheck": "node scripts/tdd-coverage-gate.mjs",
     "sourcePathspecs": [":(glob)src/**"],
@@ -88,22 +94,26 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 ---
 
-## qualityChecks：机械门禁命令（推荐配置）
+## 质量契约绑定（必填）
 
-顶层可选字段。引擎每轮 builder 之后、validator 之前逐条 shell 执行这些命令（fail-fast），任一非零退出码即确定性打回当前 story（passes 设回 false、retryCount +1、notes 写 `[门禁失败]` 详情）并跳过该轮 validator。
+转换前运行 `npx coding-x doctor --json --workspace .workspace`，读取
+`.coding-x/quality.json` 的状态和规范化摘要：
 
-生成规则：
+1. 契约缺失、非法、schema 过新或固定 coding-x 版本不匹配时立即停止，引导用户先运行
+   `coding-x init`；不得退回 PRD 自带命令，也不得编造项目检查。
+2. 把 doctor 返回的 `quality.digest` 原样写入顶层 `qualityContractDigest`。
+3. 把 doctor 返回的 `quality.derivedChecks` 原样写入顶层 `qualityChecks`。这是机器派生快照，
+   不能让用户或模型重新输入、改写、删减，也不能从旧 PRD 复用。
+4. 真正写入前再次运行 doctor；若摘要与首次读取不同，停止并重新派生，不能把旧摘要写入。
 
-- 从目标项目提取候选：`package.json` scripts 里的 typecheck / lint / test 类命令、根 `AGENTS.md` 的关键命令节
-- 廉价检查放前面（typecheck → lint → test）：fail-fast 下失败得更早
-- 把候选命令随转换对照表一并呈现，请用户确认
-- 提取不到可靠命令时省略该字段（门禁不启用），不要编造
+质量契约是唯一人工维护来源；PRD 同时绑定摘要和不可手改的派生快照。引擎会逐字段核对，
+任何差异都按配置错误停止。
 
 ---
 
 ## tdd：测试先行与可验证覆盖率（可选配置）
 
-stories 和普通 `qualityChecks` 定稿后，必须明确询问用户是否启用 TDD。用户不启用时完全
+stories 定稿且质量契约绑定后，必须明确询问用户是否启用 TDD。用户不启用时完全
 省略 `tdd`；不能根据 PRD 中出现“测试”一词自动开启。启用时按下面顺序一次完成发现、
 确认和真实基线，不能只写一个看起来合理的命令：
 
@@ -139,8 +149,9 @@ stories 和普通 `qualityChecks` 定稿后，必须明确询问用户是否启�
 允许零测试。运行中若需要改变 `coverageCheck`、阈值、排除、基线、生产路径、禁止标记或
 任一政策文件，停止当前运行并请用户批准后重新派生；不能只重算摘要让变化静默生效。
 
-`coverageCheck` 已经运行全量测试时，不要再把同一测试命令放进 `qualityChecks` 重复执行；
-后者保留 typecheck、lint 等普通检查。TDD 是项目级机械门禁，不替代每个 story 的行为 AC。
+`coverageCheck` 与质量契约中的测试可能重复时，先回到 `coding-x init` 修订契约并让用户
+确认；不要在 PRD 中静默删改项目检查。TDD 是附加的测试先行门禁，不替代契约检查或每个
+story 的行为 AC。
 
 若项目将使用 Cursor Agent，写入 TDD 配置后只提醒用户在项目根运行
 `npx coding-x hooks cursor install` 和 `npx coding-x hooks cursor status`。本 skill 不自动安装；
@@ -413,7 +424,9 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
 8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
-9. **qualityChecks 提取**：按上方「qualityChecks」节从目标项目提取候选并请用户确认；提取不到可靠命令时省略该字段
+9. **质量契约绑定**：doctor 必须确认契约有效且版本匹配；顶层写入
+   `qualityContractDigest`，并把 `quality.derivedChecks` 原样写入结构化 `qualityChecks`；
+   不得写 0.29 及更早版本的 shell 字符串数组
 10. **tdd 门禁（可选）**：只在用户明确启用、一次确认完整政策且真实基线通过后写入；否则省略整个字段
 11. **models 路由（可选）**：只在 stories 定稿后按上方「models」节处理；用户不启用时省略整段及所有 story 难度字段
 
@@ -599,9 +612,11 @@ Add ability to mark tasks with different statuses.
    - runner 变化、任一模型被移出目录、目录读取失败，或用户明确要求重配 → 停止保留，重新走目录选择与五道选择题；目录失败时不得退回历史列表或会话内临时列表
    - story 内容无实质变化 → 保留原 `difficulty` 与 `difficultyReason`，包括用户事后修正
    - story 内容有实质变化 → 按固定规则重新评估；用户可明确要求全量重新评估
-    - 原 `tdd` 配置与本次仓库事实完全一致且政策文件摘要未变 → 原样保留；任何命令、路径、
+   - 原 `tdd` 配置与本次仓库事实完全一致且政策文件摘要未变 → 原样保留；任何命令、路径、
       阈值、排除、基线、禁止标记或摘要变化都必须重新走 TDD 一次确认与真实基线，不能静默
       更新摘要
+   - 当前质量契约摘要与原 `qualityContractDigest` 不同 → 使用当前摘要整体重新派生；旧运行
+     结果不再可复用，不能只修改摘要并保留已通过状态
 3. 若 `state.json` 存在，先把旧 state 缺失的 `validated` 按同条 `passes` 理解、缺失的 `escalated` 按 `false` 理解，再按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
    - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
    - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 与 validated 置 `false`、retryCount 置 `0`、blocked 置 `false`、escalated 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）
@@ -634,7 +649,9 @@ Add ability to mark tasks with different statuses.
 - [ ] 没有 story 依赖于后面的 story
 - [ ] story 不含任何状态字段（passes/validated/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
-- [ ] qualityChecks 已配置时：写入前逐条真实跑一遍、确认当前基线全绿——命令不存在、命令写错、基线本来就红，都必须在这里（有人在场的派生环节）拦截，否则 builder 会在循环里白烧 5 轮到 blocked；基线绿同时保证循环中门禁失败必然是 builder 引入的
+- [ ] `npx coding-x doctor --json` 确认质量契约有效且固定版本匹配；顶层
+  `qualityContractDigest` 等于 doctor 当前摘要；结构化 `qualityChecks` 与
+  `doctor.quality.derivedChecks` 逐字段一致，没有旧 shell 字符串数组
 - [ ] tdd 已配置时：用户明确选择启用并确认新项目或存量项目；`coverageCheck` 已真实运行且至少执行一个测试、统计分支覆盖率、按批准阈值返回；`sourcePathspecs` 与覆盖范围一致；完整 `baselineRef` 可达；每个政策文件在 Git 根内且 `sha256` 与当前字节匹配；禁止标记已按目标工具确认
 - [ ] tdd 已配置且将使用 Cursor Agent 时：已提醒用户显式运行 `npx coding-x hooks cursor install` 与 `npx coding-x hooks cursor status`；转换过程未自动安装
 - [ ] tdd 未配置时：整个字段已省略；没有留下半套或未经基线验证的配置

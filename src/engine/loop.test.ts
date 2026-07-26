@@ -7,6 +7,28 @@ import { runLoop as runProductionLoop, renderInstruction, type LoopConfig } from
 import { readEvidence } from './evidence.js';
 import { readLockInfo, LOCK_FILE } from './lock.js';
 import * as dashboard from '../dashboard/server.js';
+import type { QualityContract, QualityContractReadResult } from '../quality/contract.js';
+import { CODING_X_VERSION } from '../version.js';
+
+const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
+const TEST_QUALITY_CONTRACT = {
+  codingXVersion: CODING_X_VERSION,
+  checks: {
+    test: { notApplicable: 'fixture' },
+    build: { notApplicable: 'fixture' },
+    static: { notApplicable: 'fixture' },
+    security: { notApplicable: 'fixture' },
+  },
+} as QualityContract;
+const readyQualityContract = (
+  contract: QualityContract = TEST_QUALITY_CONTRACT,
+  digest = TEST_QUALITY_DIGEST,
+): QualityContractReadResult => ({
+  status: 'ready',
+  path: '/fixture/.coding-x/quality.json',
+  contract,
+  digest,
+});
 
 let cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -21,7 +43,10 @@ function setup(prdStories: unknown[], prdExtra: Record<string, unknown> = {}): {
   cleanup.push(() => rmSync(workspace, { recursive: true, force: true }));
   cleanup.push(() => rmSync(instructionsDir, { recursive: true, force: true }));
   writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
-    project: 'p', branchName: 'ralph/x', description: 'd', userStories: prdStories, ...prdExtra,
+    project: 'p', branchName: 'ralph/x', description: 'd', userStories: prdStories,
+    qualityContractDigest: TEST_QUALITY_DIGEST,
+    qualityChecks: TEST_QUALITY_CONTRACT.checks,
+    ...prdExtra,
   }));
   writeFileSync(join(instructionsDir, 'builder.md'), 'build it');
   writeFileSync(join(instructionsDir, 'validator.md'), 'validate it');
@@ -63,6 +88,7 @@ const read = (f: string) =>
 // 调 runProductionLoop，防止 test-only 兼容路径遮住假绿。
 const runLoop = (cfg: LoopConfig): Promise<number> => runProductionLoop({
   ...cfg,
+  qualityContractReader: () => readyQualityContract(),
   legacyValidatorProtocolForTests: true,
 });
 
@@ -146,8 +172,91 @@ function strictConfig(workspace: string, instructionsDir: string): LoopConfig {
   return {
     kind: 'claude', maxIterations: 1, devTimeoutMs: 5000, valTimeoutMs: 5000,
     workspace, instructionsDir, port: 0, openBrowser: false, stallLimit: 3,
+    qualityContractReader: () => readyQualityContract(),
   };
 }
+
+describe('quality contract preflight and shadow mode', () => {
+  it.each([
+    ['missing', { status: 'missing', path: '/fixture/.coding-x/quality.json' }],
+    ['invalid-json', { status: 'invalid-json', path: '/fixture/.coding-x/quality.json', error: 'bad json' }],
+    ['invalid', { status: 'invalid', path: '/fixture/.coding-x/quality.json', errors: ['bad schema'] }],
+  ] as const)('fails with exit 2 before any agent when the contract is %s', async (_name, result) => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+    expect(await runProductionLoop({
+      ...strictConfig(workspace, instructionsDir),
+      qualityContractReader: () => result as QualityContractReadResult,
+    })).toBe(2);
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
+  it('rejects a formal version mismatch and a stale PRD contract digest before any agent', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const mismatch = { ...TEST_QUALITY_CONTRACT, codingXVersion: '0.30.0' } as QualityContract;
+    expect(await runProductionLoop({
+      ...strictConfig(workspace, instructionsDir),
+      qualityContractReader: () => readyQualityContract(mismatch),
+    })).toBe(2);
+
+    writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
+      project: 'p', branchName: 'ralph/x', description: 'd', userStories: [story()],
+      qualityContractDigest: `sha256:${'b'.repeat(64)}`,
+    }));
+    expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(2);
+  });
+
+  it('allows a mismatched candidate only in shadow mode and returns 7 instead of delivery-ready', async () => {
+    const { workspace, instructionsDir } = setup([story({ passes: true })]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+    }));
+    const candidate = { ...TEST_QUALITY_CONTRACT, codingXVersion: '0.30.0' } as QualityContract;
+    expect(await runProductionLoop({
+      ...strictConfig(workspace, instructionsDir),
+      shadow: true,
+      qualityContractReader: () => readyQualityContract(candidate),
+    })).toBe(7);
+  });
+
+  it('rejects a legacy command array or a snapshot that differs from the contract in formal mode', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "process.exit(0)"'],
+    });
+    expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(2);
+
+    writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
+      project: 'p', branchName: 'ralph/x', description: 'd', userStories: [story()],
+      qualityContractDigest: TEST_QUALITY_DIGEST,
+      qualityChecks: {
+        ...TEST_QUALITY_CONTRACT.checks,
+        test: { notApplicable: 'manually weakened' },
+      },
+    }));
+    expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(2);
+  });
+
+  it('stops with exit 2 before Validator when Developer changes the quality contract', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+    let reads = 0;
+    const changedDigest = `sha256:${'c'.repeat(64)}`;
+    const code = await runProductionLoop({
+      ...strictConfig(workspace, instructionsDir),
+      qualityContractReader: () => {
+        reads += 1;
+        return readyQualityContract(
+          TEST_QUALITY_CONTRACT,
+          reads >= 3 ? changedDigest : TEST_QUALITY_DIGEST,
+        );
+      },
+    });
+    expect(code).toBe(2);
+    expect(readFileSync(fake.calls, 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+});
 
 function currentRepoTdd(coverageCheck: string): Record<string, unknown> {
   return {

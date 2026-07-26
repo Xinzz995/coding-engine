@@ -2,7 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { PLUGIN_MANIFESTS, syncPluginVersions } from './sync-plugin-versions.mjs';
+import {
+  PLUGIN_MANIFESTS,
+  RUNTIME_VERSION_SOURCE,
+  syncPluginVersions,
+  syncRuntimeVersion,
+} from './sync-plugin-versions.mjs';
 
 // 仿真实清单格式：author 单行对象、2 空格缩进、尾换行——同步必须保留这些
 const manifest = (version) => `{
@@ -72,6 +77,24 @@ describe('syncPluginVersions', () => {
     contents[PLUGIN_MANIFESTS[2]] = '{\n  "name": "coding-x"\n}\n';
     withFixtureRoot(contents, (root) => {
       expect(() => syncPluginVersions(root, '9.9.9')).toThrow(PLUGIN_MANIFESTS[2]);
+    });
+  });
+});
+
+describe('syncRuntimeVersion', () => {
+  const source = (version) => `/** 由 npm version 生命周期同步；不要手工修改。 */\nexport const CODING_X_VERSION = '${version}';\n`;
+
+  it('updates the runtime version constant without rewriting other source text', () => {
+    withFixtureRoot({ [RUNTIME_VERSION_SOURCE]: source('0.29.0') }, (root) => {
+      expect(syncRuntimeVersion(root, '0.30.0')).toBe(true);
+      expect(readFileSync(join(root, RUNTIME_VERSION_SOURCE), 'utf8')).toBe(source('0.30.0'));
+      expect(syncRuntimeVersion(root, '0.30.0')).toBe(false);
+    });
+  });
+
+  it('fails closed when the runtime constant is missing or ambiguous', () => {
+    withFixtureRoot({ [RUNTIME_VERSION_SOURCE]: 'export const OTHER = 1;\n' }, (root) => {
+      expect(() => syncRuntimeVersion(root, '0.30.0')).toThrow(RUNTIME_VERSION_SOURCE);
     });
   });
 });

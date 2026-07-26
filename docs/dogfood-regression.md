@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-07-23
+updated: 2026-07-26
 scope: root
 
 ---
@@ -23,7 +23,7 @@ scope: root
 | 4 | prd-to-json 派生新 PRD 前，工作区旧 `state.json` 已删除或归档（story id 重编不撞旧状态） | 0.10.0 空转翻车 | 引擎首轮无「旧轮 passes 误判已完成」 |
 | 5 | builder 在有意识简化处留 `// 取舍: <当前上限>，<升级触发条件>`；compound-docs 收账产出账本（非空或「无取舍债务」） | 0.8.0 约定 / 0.12.1 首次触发 | `grep -rn "取舍:"` 与收口账本对照 |
 | 6 | 打回链路中 notes 保全仲裁标签行（`[需求冲突]`、`[需要人工核实]`）不丢失 | 0.4.0 仲裁约定 / 0.18.1 扩前缀族 | 触发过打回的 story 检查 notes |
-| 7 | 配置 `qualityChecks` 时：builder 后 validator 前逐条执行，失败确定性打回（notes 带 `[门禁失败-第N次]`）且该轮跳过 validator | 0.14.0（引擎单测已覆盖，此处验真实 agent 链路） | 制造一次门禁失败，观察打回路径 |
+| 7 | 质量契约与固定版本匹配、PRD 摘要和派生检查快照完全一致时，builder 后 validator 前按固定类别执行；结构化命令不经 shell，失败确定性打回且该轮跳过 validator；任一绑定不一致都在 agent 启动前退出 2 | ADR-018 | 分别制造摘要漂移、快照删减、版本不符与一项检查失败，对账零 agent 调用或门禁打回路径 |
 | 8 | /review-loop 人审包含 scope 越权核对节（AC 之外改动的反向清单） | 0.13.0 | 审查包结构检查 |
 | 9 | /compound-docs 沉淀中改写/删除既有条目时，交付说明附规则变更清单（旧表述 → 新表述 + 当前代码依据） | 0.14.4 | 收口交付说明检查（无改写则不适用） |
 | 10 | /compound-docs 收口交付说明含「状态变更清单」节（有变更列明细，无变更写「无状态变更」），任务型文档按证据表判定收尾 | 0.15.0 | 收口交付说明检查 |
@@ -39,4 +39,5 @@ scope: root
 | 20 | 真实 runner 的 provider/认证/网络异常（实证：Claude Code 402）必须保持 state 未通过、跳过 Validator、释放锁，并在 iteration/status/report 留下 outcome、退出码、调用收口耗时与有界原始诊断；成功调用不持久化 transcript | 2026-07-22 Claude/Codex 双 runner dogfood / ADR-016 | fake 402 自动回归；真实失败时对账终端、state、engine.lock、`builderInvocation`/`validatorInvocation`、status 与 report |
 | 21 | 启用 TDD 时，builder 对每个公共行为留下可复核的真实 RED→同命令 GREEN→绿色重构记录；环境错误不能冒充 RED，过程记录不得被报告成机器证明 | ADR-017 强化版 A | 真实 story 对账 builder 输出/progress 与聚焦测试结局；人工抽查一个错误 RED 场景会停止而不是继续实现 |
 | 22 | Codex/Claude 插件 hook 与显式安装的 Cursor 项目检查只在 agent commit 前提前运行 TDD 检查；失败阻断、成功放行，且不安装目标 Git hook、不写持久日志。Cursor 首次/升级安装幂等，卸载保留用户原配置；真实验收不得用桌面应用代替 | ADR-017 跨宿主适配 | 三种真实 payload 对账共同脚本；Codex/Claude 真实插件 smoke；用构建产物执行 `hooks cursor install/status/remove`，再由真实 Cursor Agent 验证失败时 Git 历史不变、成功时提交产生 |
-| 23 | 无论宿主 hook 是否触发或曾通过，引擎都在 qualityChecks 后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |
+| 23 | 无论宿主 hook 是否触发或曾通过，引擎都在契约派生检查后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |
+| 24 | 候选 coding-x 只有显式 `--shadow` 才能越过固定版本不匹配；原本成功的收敛固定退出 7，失败仍保留真实失败码，任何 shadow 结果都不能显示为交付就绪 | ADR-018 | 用契约版本 N 运行候选 N+1 的成功、配置失败和门禁失败三条链，对账退出码与终端/状态文案 |

@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairWorkspaceFiles } from './engine/repair.js';
 import { acquireLock, LockConflictError } from './engine/lock.js';
-import { runDoctor, renderDoctorReport } from './doctor/doctor.js';
+import { runDoctor, renderDoctorJson, renderDoctorReport } from './doctor/doctor.js';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status/status.js';
 import { writeReport } from './report/report.js';
 import { permissionWarning as agentPermissionWarning, type AgentKind } from './engine/agent.js';
@@ -24,6 +24,7 @@ import {
   type CursorHookAction,
 } from './cursor-hooks.js';
 import * as dashboard from './dashboard/server.js';
+import { CODING_X_VERSION } from './version.js';
 
 export interface CliConfig {
   command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config' | 'hooks';
@@ -47,6 +48,8 @@ export interface CliConfig {
   staleDays: number;
   json: boolean;
   stallLimit: number;
+  /** 候选版本 Dogfood；成功也固定返回 7，不能表示可交付。 */
+  shadow: boolean;
 }
 
 export const CLI_HELP = `coding-x — Ralph 自动化编码 harness
@@ -86,7 +89,8 @@ runner:
   --port <n>                     仪表盘端口（默认 7331）
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
-  --json                         JSON 输出（status/models）
+  --json                         JSON 输出（doctor/status/models）
+  --shadow                       候选版本 Dogfood；永远不产生可交付结论
   -h, --help                     显示本帮助并退出
 
 更多说明: https://github.com/Xinzz995/coding-engine#readme`;
@@ -109,6 +113,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'stale-days': { type: 'string' },
       json: { type: 'boolean' },
       'stall-limit': { type: 'string' },
+      shadow: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -202,6 +207,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     staleDays,
     json: values.json ?? false,
     stallLimit,
+    shadow: values.shadow ?? false,
   };
 }
 
@@ -285,7 +291,8 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'doctor') {
-    const { text, exitCode } = renderDoctorReport(runDoctor(process.cwd(), { staleDays: cfg.staleDays, workspace: cfg.workspace }));
+    const report = runDoctor(process.cwd(), { staleDays: cfg.staleDays, workspace: cfg.workspace });
+    const { text, exitCode } = cfg.json ? renderDoctorJson(report) : renderDoctorReport(report);
     console.log(text);
     return exitCode;
   }
@@ -404,6 +411,8 @@ export async function main(argv: string[]): Promise<number> {
     openBrowser: cfg.openBrowser,
     keepOpen: cfg.keepOpen,
     stallLimit: cfg.stallLimit,
+    shadow: cfg.shadow,
+    actualVersion: CODING_X_VERSION,
   });
 }
 

@@ -224,16 +224,29 @@ describe('renderReportHtml', () => {
     expect(html).toContain('<li>约定一</li>');
   });
 
-  it('门禁配置：未配置显示未启用；配置则逐条列出；形状非法显示警示', () => {
-    expect(renderReportHtml(data())).toContain('机械门禁：未启用');
+  it('质量契约快照：缺失、旧数组和非法形状告警，结构化快照列出检查', () => {
+    expect(renderReportHtml(data())).toContain('PRD 未绑定派生快照');
     const withChecks = data();
-    withChecks.prd.qualityChecks = ['npm test', 'npm run typecheck'];
+    withChecks.prd.qualityChecks = {
+      test: { checks: [{
+        id: 'tests', module: 'root', command: {
+          executable: 'npm', args: ['test'], cwd: '.', platforms: ['linux'], timeoutMs: 1000,
+        },
+      }] },
+      build: { notApplicable: '无需构建' },
+      static: { notApplicable: 'fixture' },
+      security: { notApplicable: 'fixture' },
+    };
     const html = renderReportHtml(withChecks);
-    expect(html).toContain('npm test');
-    expect(html).toContain('npm run typecheck');
+    expect(html).toContain('质量契约派生检查');
+    expect(html).toContain('<code>tests</code>');
+    expect(html).toContain('无需构建');
+    const legacy = data();
+    legacy.prd.qualityChecks = ['npm test'];
+    expect(renderReportHtml(legacy)).toContain('旧版字符串命令数组');
     const invalid = data();
     (invalid.prd as { qualityChecks?: unknown }).qualityChecks = 'npm test';
-    expect(renderReportHtml(invalid)).toContain('形状非法');
+    expect(renderReportHtml(invalid)).toContain('派生快照形状非法');
   });
 
   it('模型路由：未配置整行省略；配置则显示', () => {

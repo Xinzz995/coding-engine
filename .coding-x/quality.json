@@ -1,0 +1,273 @@
+{
+  "schemaVersion": 1,
+  "codingXVersion": "0.29.0",
+  "repository": {
+    "provider": "github",
+    "fullName": "Xinzz995/coding-engine",
+    "defaultBranch": "main"
+  },
+  "release": {
+    "protectedRefs": [
+      "v*"
+    ]
+  },
+  "sources": {
+    "specs": [
+      {
+        "kind": "path",
+        "path": "docs/specs/**"
+      },
+      {
+        "kind": "pull-request"
+      }
+    ],
+    "acceptanceCriteria": [
+      {
+        "kind": "pull-request"
+      }
+    ],
+    "engineeringStandards": [
+      "AGENTS.md",
+      "docs/golden-principles.md",
+      "docs/patterns.md",
+      "docs/architecture.md"
+    ]
+  },
+  "modules": [
+    {
+      "id": "root",
+      "path": "."
+    }
+  ],
+  "generatedPaths": [
+    "dist/**",
+    "coverage/**"
+  ],
+  "checks": {
+    "test": {
+      "checks": [
+        {
+          "id": "tests",
+          "module": "root",
+          "paths": [
+            "src/**",
+            "build/**",
+            "hooks/**"
+          ],
+          "command": {
+            "executable": "npm",
+            "args": [
+              "test",
+              "--",
+              "--run"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux",
+              "macos",
+              "windows"
+            ],
+            "timeoutMs": 600000
+          }
+        }
+      ]
+    },
+    "build": {
+      "checks": [
+        {
+          "id": "build",
+          "module": "root",
+          "command": {
+            "executable": "npm",
+            "args": [
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux",
+              "macos",
+              "windows"
+            ],
+            "timeoutMs": 600000
+          }
+        },
+        {
+          "id": "cli-smoke",
+          "module": "root",
+          "command": {
+            "executable": "node",
+            "args": [
+              "dist/cli.js",
+              "--help"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux",
+              "macos",
+              "windows"
+            ],
+            "timeoutMs": 60000
+          }
+        }
+      ]
+    },
+    "static": {
+      "checks": [
+        {
+          "id": "typecheck",
+          "module": "root",
+          "paths": [
+            "src/**",
+            "tsconfig.json"
+          ],
+          "command": {
+            "executable": "npm",
+            "args": [
+              "run",
+              "typecheck"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux",
+              "macos",
+              "windows"
+            ],
+            "timeoutMs": 600000
+          }
+        },
+        {
+          "id": "docs-health",
+          "module": "root",
+          "paths": [
+            "AGENTS.md",
+            "README.md",
+            "docs/**"
+          ],
+          "command": {
+            "executable": "node",
+            "args": [
+              "dist/cli.js",
+              "doctor"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux",
+              "macos",
+              "windows"
+            ],
+            "timeoutMs": 120000
+          }
+        }
+      ]
+    },
+    "security": {
+      "checks": [
+        {
+          "id": "production-audit",
+          "module": "root",
+          "command": {
+            "executable": "npm",
+            "args": [
+              "audit",
+              "--omit=dev",
+              "--audit-level=high"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux"
+            ],
+            "timeoutMs": 300000
+          }
+        }
+      ]
+    }
+  },
+  "risk": {
+    "defaultCategories": [
+      "policy",
+      "public-contract",
+      "state",
+      "migration",
+      "recovery",
+      "idempotency",
+      "concurrency",
+      "timeout",
+      "retry",
+      "subprocess",
+      "security",
+      "privacy",
+      "untrusted-input",
+      "cross-module",
+      "large-file",
+      "reviewer-request",
+      "release"
+    ],
+    "highRiskPaths": [
+      ".coding-x/**",
+      ".github/workflows/**",
+      "src/engine/**",
+      "src/quality/**",
+      "src/doctor/**",
+      "src/status/**",
+      "src/report/**",
+      "build/**",
+      "hooks/**",
+      "package.json",
+      "package-lock.json"
+    ],
+    "pathRules": [
+      {
+        "paths": [
+          ".coding-x/**",
+          ".github/workflows/**",
+          "docs/golden-principles.md"
+        ],
+        "categories": [
+          "policy",
+          "security"
+        ]
+      },
+      {
+        "paths": [
+          "src/engine/**"
+        ],
+        "categories": [
+          "state",
+          "recovery",
+          "concurrency",
+          "timeout",
+          "retry",
+          "subprocess"
+        ]
+      },
+      {
+        "paths": [
+          "package.json",
+          "package-lock.json",
+          ".github/workflows/publish.yml"
+        ],
+        "categories": [
+          "release",
+          "security"
+        ]
+      }
+    ]
+  },
+  "github": {
+    "requiredChecks": [
+      "quality-gate",
+      "policy-guard"
+    ]
+  },
+  "exceptions": {
+    "p1": {
+      "issueTemplate": ".github/ISSUE_TEMPLATE/quality-p1.yml",
+      "maxDays": 30
+    },
+    "policy": {
+      "issueTemplate": ".github/ISSUE_TEMPLATE/quality-policy.yml",
+      "maxDays": 7
+    }
+  }
+}
