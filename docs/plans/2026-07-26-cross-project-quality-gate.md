@@ -227,7 +227,11 @@ scope: root
 ## 当前状态
 
 - GitHub Bootstrap Issue #44 已创建；
-- coding-engine 默认分支最小 Ruleset 已启用并回读；
-- 本文档 PR 是 Phase 1 的第一项，尚未代表任何功能已实现；
+- Bootstrap PR #47 已由四个原生任务和 `quality-gate` 真实验证后合并；Windows 首轮失败曾让
+  总闸保持红色，路径兼容修复后 726 项测试、构建和成品冒烟在四个任务中通过；
+- Ruleset ID 19747271 已绑定由 GitHub Actions 在 PR 最新提交产生的 `quality-gate`，并完成
+  远端回读；当前 Activation PR 用于让默认分支旧工作流产生并绑定 `policy-guard`；
+- Phase 1、质量契约底座和分阶段 `init` 已完成；本地三层 Review、远端 doctor、安全 CI、
+  staged 发布和外部仓库 Dogfood 仍待后续独立 PR；
 - npm 本机当前没有交互登录，后续 stage 2FA 批准需要维护者介入；在到达该步骤前不构成实现
   阻碍。
