@@ -14,11 +14,11 @@ jobs:
       contents: write # 创建 GitHub Release 需要
       id-token: write # 供 npm provenance 使用
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # 需要完整历史 + tags 才能按提交生成 Release 说明
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'

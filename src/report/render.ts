@@ -15,11 +15,12 @@ export function escapeHtml(s: string): string {
 /**
  * 插值兜底 helper：来自 prd/state 落盘数据的字段类型层声明为 string，但 tryReadPrd
  * 无逐字段运行期校验（legacyStateOf 同理）——实际值可能是 undefined/数字/对象等
- * 非字符串形状。String(x ?? '') 统一收敛：缺失值渲染为空串而非让 escapeHtml 内部
- * 的 .replaceAll 在非字符串上抛错，其余值按 String() 语义转字符串后再转义。
+ * 非字符串形状。缺失值渲染为空串，其余非字符串值用 JSON 表达，避免对象退化成
+ * 无意义的 [object Object]，最后统一转义。
  */
 function text(x: unknown): string {
-  return escapeHtml(String(x ?? ''));
+  const value = typeof x === 'string' ? x : x == null ? '' : JSON.stringify(x);
+  return escapeHtml(value ?? '');
 }
 
 function inlineMd(s: string): string {
@@ -447,7 +448,7 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
   ).join('');
   // 存档已记名但工作区找不到对应文件（如归档目录未携带 tampered 文件、或人工清理过）：
   // 不能静默消失——单独成行提示「已不在工作区」，取证链断裂时红旗区不得只剩空 <ul>
-  const missing = tamperEvents.filter((t) => t.archive !== null && !tampered.includes(t.archive as string)).map((t) =>
+  const missing = tamperEvents.filter((t) => t.archive !== null && !tampered.includes(t.archive)).map((t) =>
     `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出，存档 <code>${text(t.archive)}</code> 已不在工作区</li>`,
   ).join('');
   const routeItems = stateRouteTampers.map((t) =>

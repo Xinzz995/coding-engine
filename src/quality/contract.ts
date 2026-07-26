@@ -128,6 +128,12 @@ export interface QualityContract {
     /** 明确表达系统、工具版本、准备命令和检查范围，工作流只从这里生成。 */
     jobs: QualityGitHubJob[];
     requiredChecks: string[];
+    /** 可选的仓库安全能力要求；声明后 doctor 必须回读真实 GitHub 状态。 */
+    securityFeatures?: {
+      dependabotSecurityUpdates: boolean;
+      secretScanning: boolean;
+      secretScanningPushProtection: boolean;
+    };
   };
   exceptions: {
     p1: { issueTemplate: string; maxDays: number };
@@ -397,7 +403,7 @@ function toolchain(value: unknown, path: string, errors: string[]): void {
     errors.push(`${path}.kind 必须是 node、go 或 python`);
   }
   if (nonEmptyString(item.version, `${path}.version`, errors)
-      && /[\r\n]/.test(item.version as string)) {
+      && /[\r\n]/.test(item.version)) {
     errors.push(`${path}.version 不能包含换行`);
   }
   if (Object.hasOwn(item, 'cache')) {
@@ -595,7 +601,13 @@ function validateContract(value: unknown): string[] {
     }
   }
 
-  const github = objectShape(root.github, 'github', ['jobs', 'requiredChecks'], [], errors);
+  const github = objectShape(
+    root.github,
+    'github',
+    ['jobs', 'requiredChecks'],
+    ['securityFeatures'],
+    errors,
+  );
   if (github) {
     if (!Array.isArray(github.jobs)) {
       errors.push('github.jobs 必须是数组');
@@ -647,7 +659,7 @@ function validateContract(value: unknown): string[] {
           });
         }
         if (stringArray(item.checkIds, `${path}.checkIds`, errors, { nonEmpty: true, unique: true })) {
-          for (const checkId of item.checkIds as string[]) {
+          for (const checkId of item.checkIds) {
             if (!checkIds.has(checkId)) {
               errors.push(`${path}.checkIds 引用未知检查 ${checkId}`);
               continue;
@@ -674,6 +686,29 @@ function validateContract(value: unknown): string[] {
         if (!github.requiredChecks.includes(required)) {
           errors.push(`github.requiredChecks 必须包含 ${required}`);
         }
+      }
+    }
+  }
+  if (github && Object.hasOwn(github, 'securityFeatures')) {
+    const features = objectShape(
+      github.securityFeatures,
+      'github.securityFeatures',
+      ['dependabotSecurityUpdates', 'secretScanning', 'secretScanningPushProtection'],
+      [],
+      errors,
+    );
+    if (features) {
+      for (const name of [
+        'dependabotSecurityUpdates',
+        'secretScanning',
+        'secretScanningPushProtection',
+      ] as const) {
+        if (typeof features[name] !== 'boolean') {
+          errors.push(`github.securityFeatures.${name} 必须是布尔值`);
+        }
+      }
+      if (features.secretScanningPushProtection === true && features.secretScanning !== true) {
+        errors.push('github.securityFeatures 启用推送保护时必须同时启用秘密扫描');
       }
     }
   }

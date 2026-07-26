@@ -122,7 +122,7 @@ export function runAgent(opts: {
       clearTimeout(timer);
       // 终止失败时保持 exit hook；趁根 pid 尚在同步补杀整树，避免 Windows 先杀根后遗失孙进程。
       forceKillProcessTreeOnExit(child);
-      reject(err);
+      reject(err instanceof Error ? err : new Error(String(err)));
     };
 
     const timer = setTimeout(() => {

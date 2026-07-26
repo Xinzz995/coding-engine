@@ -54,6 +54,7 @@ describe('renderQualityGateWorkflow', () => {
   it('creates unconditional native platform jobs and one always-run aggregate gate', () => {
     const yaml = renderQualityGateWorkflow(codingEngineContract());
     expect(yaml).toContain('on:\n  pull_request:');
+    expect(yaml).toContain("push:\n    branches: ['main']");
     expect(yaml).not.toMatch(/paths(?:-ignore)?:/);
     expect(yaml).toContain('checks_ubuntu-node-22:');
     expect(yaml).toContain('checks_ubuntu-node-24:');
@@ -65,6 +66,8 @@ describe('renderQualityGateWorkflow', () => {
       'needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-24, checks_windows-node-24]',
     );
     expect(yaml).toContain('must not fail, cancel, time out, or skip');
+    expect(yaml).toContain('github.event.pull_request.number || github.ref');
+    expect(yaml).not.toContain('github.event.pull_request.head.sha');
   });
 
   it('pins checkout by full commit and serializes structured commands for each native shell', () => {

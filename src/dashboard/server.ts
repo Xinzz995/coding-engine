@@ -171,7 +171,7 @@ export function start(opts: {
   });
 
   server.on('error', (err) => {
-    console.error(`dashboard server error: ${(err as Error).message}`);
+    console.error(`dashboard server error: ${err.message}`);
   });
 
   server.listen(port, '127.0.0.1');

@@ -3,12 +3,14 @@ name: Quality Gate
 # Generated from .coding-x/quality.json. Change the contract, then regenerate.
 on:
   pull_request:
+  push:
+    branches: ['main']
 
 permissions:
   contents: read
 
 concurrency:
-  group: quality-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  group: quality-gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -17,11 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - name: 'toolchain / node 22'
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22'
           cache: 'npm'
@@ -46,6 +48,16 @@ jobs:
         timeout-minutes: 1
         shell: bash
         run: '''node'' ''dist/cli.js'' ''--help'''
+      - name: 'static / format'
+        working-directory: '.'
+        timeout-minutes: 2
+        shell: bash
+        run: '''npm'' ''run'' ''format:check'''
+      - name: 'static / lint'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''run'' ''lint'''
       - name: 'static / typecheck'
         working-directory: '.'
         timeout-minutes: 10
@@ -56,21 +68,21 @@ jobs:
         timeout-minutes: 2
         shell: bash
         run: '''node'' ''dist/cli.js'' ''doctor'' ''--local'''
-      - name: 'security / production-audit'
+      - name: 'security / dependency-audit'
         working-directory: '.'
         timeout-minutes: 5
         shell: bash
-        run: '''npm'' ''audit'' ''--omit=dev'' ''--audit-level=high'''
+        run: '''npm'' ''audit'' ''--audit-level=high'''
   checks_ubuntu-node-24:
     name: checks / ubuntu-node-24
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - name: 'toolchain / node 24'
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
           cache: 'npm'
@@ -100,11 +112,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - name: 'toolchain / node 24'
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
           cache: 'npm'
@@ -134,11 +146,11 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - name: 'toolchain / node 24'
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
           cache: 'npm'
@@ -188,4 +200,3 @@ jobs:
             fi
           done
           exit "$failed"
-

@@ -1123,7 +1123,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // 等待期 Ctrl+C 完全走既有 waitForSigint 语义（真实退出码保留）
     lock.release();
     if (cfg.keepOpen) {
-      const url = `http://localhost:${server!.address().port}`;
+      const url = `http://localhost:${server.address().port}`;
       console.log(`\n✅ 运行结束（退出码 ${exitCode}）。仪表盘仍在 ${url} ，按 Ctrl+C 退出。`);
       await (cfg.interrupt ?? waitForSigint());
     }

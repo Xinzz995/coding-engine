@@ -22,7 +22,7 @@ function contentPrd(
       id, title: 't', description: 'd', acceptanceCriteria: [], priority: i + 1,
       ...(legacy[id] ?? {}),
     })),
-  } as Prd;
+  };
 }
 
 function tempDir(): string {

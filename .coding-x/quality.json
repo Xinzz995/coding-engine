@@ -115,6 +115,50 @@
     "static": {
       "checks": [
         {
+          "id": "format",
+          "module": "root",
+          "paths": [
+            "src/**",
+            "build/**",
+            "hooks/**",
+            "*.ts",
+            "*.js"
+          ],
+          "command": {
+            "executable": "npm",
+            "args": [
+              "run",
+              "format:check"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux"
+            ],
+            "timeoutMs": 120000
+          }
+        },
+        {
+          "id": "lint",
+          "module": "root",
+          "paths": [
+            "src/**",
+            "eslint.config.js",
+            "tsconfig.json"
+          ],
+          "command": {
+            "executable": "npm",
+            "args": [
+              "run",
+              "lint"
+            ],
+            "cwd": ".",
+            "platforms": [
+              "linux"
+            ],
+            "timeoutMs": 600000
+          }
+        },
+        {
           "id": "typecheck",
           "module": "root",
           "paths": [
@@ -165,13 +209,12 @@
     "security": {
       "checks": [
         {
-          "id": "production-audit",
+          "id": "dependency-audit",
           "module": "root",
           "command": {
             "executable": "npm",
             "args": [
               "audit",
-              "--omit=dev",
               "--audit-level=high"
             ],
             "cwd": ".",
@@ -207,6 +250,7 @@
     "highRiskPaths": [
       ".coding-x/**",
       ".github/workflows/**",
+      ".github/dependabot.yml",
       "src/engine/**",
       "src/quality/**",
       "src/doctor/**",
@@ -214,6 +258,8 @@
       "src/report/**",
       "build/**",
       "hooks/**",
+      "eslint.config.js",
+      ".prettierrc.json",
       "package.json",
       "package-lock.json"
     ],
@@ -222,6 +268,9 @@
         "paths": [
           ".coding-x/**",
           ".github/workflows/**",
+          ".github/dependabot.yml",
+          "eslint.config.js",
+          ".prettierrc.json",
           "docs/golden-principles.md"
         ],
         "categories": [
@@ -285,9 +334,11 @@
           "tests",
           "build",
           "cli-smoke",
+          "format",
+          "lint",
           "typecheck",
           "docs-health",
-          "production-audit"
+          "dependency-audit"
         ]
       },
       {
@@ -384,7 +435,12 @@
     "requiredChecks": [
       "quality-gate",
       "policy-guard"
-    ]
+    ],
+    "securityFeatures": {
+      "dependabotSecurityUpdates": true,
+      "secretScanning": true,
+      "secretScanningPushProtection": true
+    }
   },
   "exceptions": {
     "p1": {

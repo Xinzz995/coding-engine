@@ -229,9 +229,13 @@ scope: root
 - GitHub Bootstrap Issue #44 已创建；
 - Bootstrap PR #47 已由四个原生任务和 `quality-gate` 真实验证后合并；Windows 首轮失败曾让
   总闸保持红色，路径兼容修复后 726 项测试、构建和成品冒烟在四个任务中通过；
-- Ruleset ID 19747271 已绑定由 GitHub Actions 在 PR 最新提交产生的 `quality-gate`，并完成
-  远端回读；当前 Activation PR 用于让默认分支旧工作流产生并绑定 `policy-guard`；
-- Phase 1、质量契约底座和分阶段 `init` 已完成；本地三层 Review、远端 doctor、安全 CI、
-  staged 发布和外部仓库 Dogfood 仍待后续独立 PR；
+- Ruleset ID 19747271 已绑定由 GitHub Actions 在 PR 最新提交产生的 `quality-gate` 与
+  `policy-guard`，并完成远端回读；
+- Phase 1、质量契约底座、分阶段 `init`、本地三层 Review 和远端 doctor 已分别通过
+  PR #45–#49 合并；
+- Node 22 基线、Node 24 跨系统验证、增量格式检查、静态检查、全依赖高危审计、固定版本
+  Actions、Dependabot、秘密扫描和 CodeQL 正在独立 Phase 4 PR 中验证；CodeQL 必须先在
+  默认分支形成真实基线，再用后续 Activation PR 加入 Ruleset，避免首次启用自锁；
+- staged 发布、三个项目的同包 Dogfood 和结构治理仍待后续独立 PR；
 - npm 本机当前没有交互登录，后续 stage 2FA 批准需要维护者介入；在到达该步骤前不构成实现
   阻碍。
