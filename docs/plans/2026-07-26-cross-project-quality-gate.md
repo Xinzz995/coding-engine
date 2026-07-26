@@ -237,9 +237,10 @@ scope: root
   检查、高危依赖审计、固定版本 Actions、Dependabot、秘密扫描和 CodeQL 已在默认分支真实
   运行；
 - 默认分支首次 CodeQL 基线发现的 7 个现存问题已通过 PR #57 全部修复；合并提交
-  `8daf950` 的主分支扫描和总闸均通过，开放告警为 0；当前正通过独立 Activation PR 将
-  CodeQL 的 high 安全告警和 error 普通告警阈值纳入 Ruleset 与 doctor 漂移检查；本次
-  受保护政策变更已由 owner 明确授权，并登记限时政策例外 Issue #58；
+  `8daf950` 的主分支扫描和总闸均通过，开放告警为 0；Activation PR #59 已将 CodeQL 的
+  high 安全告警和 error 普通告警阈值写入 Ruleset #19747271，`init` 更新后完成远端回读，
+  `doctor` 状态为 ready；本次受保护政策变更已由 owner 明确授权，并登记限时政策例外
+  Issue #58，PR 最新提交仍必须在新规则下通过后才能合并；
 - staged 发布、三个项目的同包 Dogfood 和结构治理仍待后续独立 PR；
 - npm 本机当前没有交互登录，后续 stage 2FA 批准需要维护者介入；在到达该步骤前不构成实现
   阻碍。
