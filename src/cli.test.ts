@@ -232,7 +232,7 @@ describe('main — help', () => {
         'claude', 'codex', 'cursor',
         'init', 'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config', 'hooks cursor',
         '--max-iter', '--dev-timeout', '--val-timeout', '--builder-model',
-        '--validator-model', '--escalation-model', '--workspace', '--no-open',
+        '--validator-model', '--review-model', '--escalation-model', '--workspace', '--no-open',
         '--keep-open', '--port', '--stall-limit', '--stale-days', '--json',
         '--shadow', '--contract', '--yes', '--local',
         '--help', '-h',
@@ -282,7 +282,9 @@ describe('main — doctor JSON', () => {
   it('prints one parseable object including the quality contract digest', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      expect(await main(['doctor', '--json'])).toBe(0);
+      // 单元测试不依赖 CI 机器的 gh 登录；远端回读由 delivery 适配器测试
+      // 和真实 doctor 实证覆盖。
+      expect(await main(['doctor', '--local', '--json'])).toBe(0);
       expect(logSpy).toHaveBeenCalledTimes(1);
       expect(JSON.parse(String(logSpy.mock.calls[0][0]))).toMatchObject({
         schemaVersion: 1,
