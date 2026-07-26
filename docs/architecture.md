@@ -28,7 +28,8 @@ scope: root
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
 | 质量契约 | `src/quality/contract.ts` | 严格解析 `.coding-x/quality.json`，规范化摘要、精确版本约束和 PRD 检查快照派生/一致性核对；契约是项目检查唯一人工维护来源 |
-| GitHub 交付门禁 | `src/quality/github.ts`、`src/quality/ruleset.ts`、`src/doctor/delivery.ts` | 配置并回读默认分支 PR/状态检查规则；契约明确声明时精确管理代码扫描工具和两类阻断阈值，未声明时保留已有扫描规则；doctor 与最终 Review 对远端漂移 fail-closed |
+| GitHub 交付门禁 | `src/quality/github.ts`、`src/quality/ruleset.ts`、`src/quality/release-ruleset.ts`、`src/doctor/delivery.ts` | 配置并回读默认分支 PR/状态检查规则、发布标签禁止更新/删除规则及不可变 Release；契约明确声明时精确管理代码扫描工具和两类阻断阈值，未声明时保留已有扫描规则；doctor 与最终 Review 对远端漂移 fail-closed |
+| 候选发布证据 | `build/release-evidence.mjs`、`.github/workflows/stage-candidate.yml`、`.github/workflows/publish.yml` | 无发布身份的任务完成检查、构建和固定候选包；独立 stage-only OIDC 任务不安装依赖或执行项目脚本，只暂存同一摘要；标签流程只验证已公开 npm 制品并发布不可变 Release，不直接发布 npm |
 | 机械门禁与回写 | `src/engine/gate.ts` | 按 test→build→static→security 执行 PRD 中由契约冻结的结构化检查；默认不经 shell，只有契约显式声明时使用指定 shell；超时复用进程树终止单源并等待整棵树退出；门禁/异常轮回写及结构化 Validator pass/fail 的引擎状态转移共享 notes/重试/blocked 规则 |
 | TDD 门禁 | `src/engine/tdd-gate.ts` | 严格解析 `prd.json.tdd`；校验 Git 根/完整基线、项目内政策文件真实路径与 SHA-256、生产 pathspec 和基线后新增覆盖忽略标记；通过公共 command runner 执行项目原生 coverageCheck（ADR-017） |
 | 模型路由 | `src/engine/models.ts` | 严格校验 runner 绑定的五模型 schema；builder 按 story 难度/升级态/CLI 覆盖解析，validator 恒定，输出实际路由来源 |
@@ -55,6 +56,12 @@ cli → quality + engine（loop → quality / agent / prd / state / progress / t
 项目知识也分冷热生命周期：`/compound-docs` 默认只对本轮相关 active 文档做沉淀与增量熵 GC，用户显式要求全量时才逐条审计 patterns/glossary/architecture/golden-principles/prompt-writing；任务型文档先以证据收尾 status，再在用户明确授权物理归档后镜像原相对树移入 `docs/archive/`。冷档案继续由 doctor 检查 frontmatter 与相对链接，但不参与 updated 新鲜度，也不进入日常实现/沉淀上下文。
 
 `.coding-x/quality.json` 是项目检查唯一人工维护来源；prd-to-json 先用 doctor 取得规范化摘要和结构化派生快照，再把它们连同源 PRD（意图真相）一起冻结到 workspace `prd.json`（执行需求）并初始化 `state.json`。正式运行要求精确版本、摘要和快照全部一致；候选版本只能 shadow。builder 只实现一个 story并留下 `passes=true` 候选。契约检查与 TDD 政策/覆盖命令都通过后，引擎才把 story ID、有序 AC 快照/hash、一次性 request ID 与 Git HEAD 注入 Validator；Validator 只写逐 AC 结构化 claim，引擎核对绑定与 state 不变式后才写 retry/blocked/notes 或签发 `validated=true`。缺结果、错目标、旧结果、产物变化或 state 改写全部回滚候选态（ADR-009、013、015、017、018）。
+
+发布链把“构建候选”和“取得 npm 暂存身份”拆成两个权限域。前者执行完整项目代码但没有
+发布身份；后者只下载固定候选、重建不执行脚本的包目录并核对摘要，OIDC 只能执行
+`npm stage publish`。维护者 2FA 批准后仍需三个项目从 registry 验证精确版本，人工移动
+`latest` 后才创建标签；标签固定所选暂存任务、npm stage ID 与候选摘要，标签工作流不发布
+npm，只对账并创建不可变 Release（ADR-018）。
 
 workspace 是运行边界：progress 记录学习，evidence 追加普通/TDD 门禁、轮次、篡改、Validator claim、调用凭证、截图等事件；Agent stdout/stderr 实时 tee，异常时只留最近 2000 字符，成功 transcript 不落盘。引擎把绝对项目根和实际 workspace 注入 agent，宿主 hook 只在二者与当前 Git 根配对时使用外部 workspace。`validation-result.json` 只作为单轮瞬时 IPC，调用前清旧、消费后删除，崩溃残留由新 request ID 拒绝。report 从需求、状态与分源证据派生静态报告；`engine.lock` 让 run/repair 单写，关键覆盖写走原子替换。PRD guard 冻结运行期需求并恢复篡改；自动报告沿用该冻结快照，手动报告才读磁盘。state 缺失可迁移 legacy，存在但损坏则所有展示面统一 fail-closed 为未验证（ADR-007、008、014、015、016、017）。
 

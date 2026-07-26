@@ -171,9 +171,12 @@ scope: root
 
 - 删除 tag-trigger 直接 npm publish 和长期 `NPM_TOKEN` 路径；
 - 配置 Node 24、npm ≥11.15、OIDC Trusted Publisher 与 stage-only；
+- 将完整检查/构建与 OIDC 暂存拆成两个任务；后者不得安装项目依赖或执行项目脚本；
 - 暂存精确 main 提交，下载候选 tarball 并记录 SHA-256、stage ID、commit；
 - 标签 workflow 只校验 npm 版本/提交/来源并创建不可变 Release；
 - Tag Ruleset 只允许受控创建，禁止更新删除，并验证提交属于受保护 main；
+- 标签工作流本身损坏时，允许修复经受保护 PR 进入 main 后对既有不可改写标签手动恢复，
+  但仍必须通过同一候选、registry、提交和 provenance 核验；
 - 真实核验 npm provenance 在 stage 批准前后的呈现时机。
 
 ### Task 15：三项目候选 Dogfood

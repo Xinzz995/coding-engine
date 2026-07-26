@@ -12,9 +12,11 @@ import {
   type GitHubRuleset,
   type GitHubRulesetPayload,
   type GitHubSecurityFeatures,
+  type GitHubImmutableReleases,
 } from '../quality/github.js';
 import { renderManagedGitHubFiles } from '../quality/github-workflows.js';
 import { buildManagedRulesetPayload } from '../quality/ruleset.js';
+import { buildManagedReleaseRulesetPayload } from '../quality/release-ruleset.js';
 import { checkDeliveryGate } from './delivery.js';
 
 function contract(): QualityContract {
@@ -34,9 +36,10 @@ function rootWithManagedFiles(value: QualityContract): string {
 
 class FakeClient implements GitHubQualityClient {
   repository: GitHubRepositoryInfo;
-  ruleset: GitHubRuleset;
+  rulesets: GitHubRuleset[];
   issues: GitHubIssueInfo[] = [];
   securityFeatures: GitHubSecurityFeatures;
+  immutableReleases: GitHubImmutableReleases = { enabled: true, enforcedByOwner: false };
 
   constructor(value: QualityContract, integrationId = GITHUB_ACTIONS_APP_ID) {
     this.repository = {
@@ -44,12 +47,16 @@ class FakeClient implements GitHubQualityClient {
       defaultBranch: value.repository.defaultBranch,
       isPrivate: true,
     };
-    this.ruleset = {
+    const ruleset: GitHubRuleset = {
       id: 7,
       ...buildManagedRulesetPayload(null, value.github.requiredChecks.map((context) => ({
         context, integration_id: integrationId,
       })), value.github.requiredCodeScanning),
     };
+    this.rulesets = [
+      ruleset,
+      { id: 8, ...buildManagedReleaseRulesetPayload(null, value.release.protectedRefs) },
+    ];
     this.securityFeatures = structuredClone(value.github.securityFeatures ?? {
       dependabotSecurityUpdates: false,
       secretScanning: false,
@@ -59,8 +66,12 @@ class FakeClient implements GitHubQualityClient {
 
   discoverRepository(): GitHubRepositoryInfo { return this.repository; }
   verifyDefaultBranch(): void {}
-  listRulesets(): GitHubRuleset[] { return [this.ruleset]; }
-  getRuleset(): GitHubRuleset { return this.ruleset; }
+  listRulesets(): GitHubRuleset[] { return this.rulesets; }
+  getRuleset(_repository: string, id: number): GitHubRuleset {
+    const ruleset = this.rulesets.find((candidate) => candidate.id === id);
+    if (!ruleset) throw new Error(`missing ruleset ${id}`);
+    return ruleset;
+  }
   createRuleset(_repository: string, payload: GitHubRulesetPayload): GitHubRuleset {
     return { id: 7, ...payload };
   }
@@ -70,6 +81,8 @@ class FakeClient implements GitHubQualityClient {
   findOpenPullRequest(): GitHubPullRequestInfo | null { return null; }
   listCheckRuns() { return []; }
   getSecurityFeatures(): GitHubSecurityFeatures { return this.securityFeatures; }
+  getImmutableReleases(): GitHubImmutableReleases { return this.immutableReleases; }
+  enableImmutableReleases(): void { this.immutableReleases.enabled = true; }
   getIssue(_repository: string, number: number): GitHubIssueInfo {
     const issue = this.issues.find((candidate) => candidate.number === number);
     if (!issue) throw new Error(`missing issue ${number}`);
@@ -132,9 +145,10 @@ describe('checkDeliveryGate', () => {
       });
       expect(ready).toMatchObject({ status: 'ready', remoteChecked: true, rulesetId: 7, issues: [] });
 
-      client.ruleset = new FakeClient(value, 999).ruleset;
+      client.rulesets = new FakeClient(value, 999).rulesets;
       client.securityFeatures.secretScanningPushProtection = false;
-      const codeScanningRule = client.ruleset.rules.find((rule) => rule.type === 'code_scanning');
+      client.immutableReleases.enabled = false;
+      const codeScanningRule = client.rulesets[0].rules.find((rule) => rule.type === 'code_scanning');
       const codeScanningTools = codeScanningRule?.parameters?.code_scanning_tools as
         | Array<Record<string, unknown>>
         | undefined;
@@ -149,6 +163,7 @@ describe('checkDeliveryGate', () => {
         expect.stringContaining('未绑定预期 GitHub App'),
         expect.stringContaining('普通告警阈值为 all'),
         expect.stringContaining('秘密推送保护实际为关闭'),
+        '不可变 Release 实际为关闭',
         '延期 Issue 已过期',
       ]));
     } finally {

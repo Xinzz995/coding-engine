@@ -149,6 +149,8 @@ export interface QualityContract {
     requiredChecks: string[];
     /** 声明后由 Ruleset 强制指定工具及阈值；缺省表示 coding-x 不接管现有代码扫描规则。 */
     requiredCodeScanning?: QualityCodeScanningTool[];
+    /** 声明为 true 后，init 启用、doctor 回读 GitHub 不可变 Release。 */
+    immutableReleases?: true;
     /** 可选的仓库安全能力要求；声明后 doctor 必须回读真实 GitHub 状态。 */
     securityFeatures?: {
       dependabotSecurityUpdates: boolean;
@@ -483,7 +485,21 @@ function validateContract(value: unknown): string[] {
 
   const release = objectShape(root.release, 'release', ['protectedRefs'], ['notApplicable'], errors);
   if (release) {
-    stringArray(release.protectedRefs, 'release.protectedRefs', errors, { unique: true });
+    stringArray(release.protectedRefs, 'release.protectedRefs', errors, {
+      unique: true,
+      validate: (entry, path, target) => {
+        if (!nonEmptyString(entry, path, target)) return false;
+        if (entry !== entry.trim() || entry.startsWith('/') || entry.startsWith('refs/')
+            || /[\u0000-\u0020\u007f~^:?\[\\]/.test(entry)
+            || entry.includes('..') || entry.includes('//') || entry.includes('@{')
+            || entry.endsWith('/') || entry.endsWith('.') || entry.endsWith('.lock')
+            || entry === '*' || entry === '@') {
+          target.push(`${path} 必须是明确的 Git tag 模式，例如 v* 或 releases/v*`);
+          return false;
+        }
+        return true;
+      },
+    });
     const refs = Array.isArray(release.protectedRefs) ? release.protectedRefs : [];
     if (refs.length === 0) {
       if (!nonEmptyString(release.notApplicable, 'release.notApplicable', errors)) {
@@ -633,7 +649,7 @@ function validateContract(value: unknown): string[] {
     root.github,
     'github',
     ['jobs', 'requiredChecks'],
-    ['requiredCodeScanning', 'securityFeatures'],
+    ['requiredCodeScanning', 'immutableReleases', 'securityFeatures'],
     errors,
   );
   if (github) {
@@ -755,6 +771,10 @@ function validateContract(value: unknown): string[] {
         }
       });
     }
+  }
+  if (github && Object.hasOwn(github, 'immutableReleases')
+      && github.immutableReleases !== true) {
+    errors.push('github.immutableReleases 只能声明为 true');
   }
   if (github && Object.hasOwn(github, 'securityFeatures')) {
     const features = objectShape(

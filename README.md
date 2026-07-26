@@ -73,6 +73,10 @@ coding-x 同时包含两部分：
 12. **处理最终 Review。** 引擎会在所有 Story 验证后自动进入本地三层 Review。若返回 4，运行 `/review-loop` 逐项选择修复、提交反证、登记 P1 延期或知悉低等级 finding；修复必须形成新提交并重新运行 `coding-x`。
 13. **合并和收口。** `coding-x status` 只有在实现验证、本地 Review 和 GitHub 交付条件同时就绪时才返回 0；随后仍由人决定合并。合并后可运行 `/compound-docs` 沉淀长期经验。
 
+coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须遵守
+[候选发布与恢复手册](docs/release.md)，GitHub 只能暂存候选，2FA 批准、三仓验证、移动
+`latest` 和创建发布标签都由人分阶段完成。
+
 `init` 本来就是分阶段完成的：第一次只在远端最小规则回读成功后生成文件；你提交、推送并
 打开 Bootstrap PR 后再次运行，它才会把该 PR 最新提交上真实出现的 `quality-gate` 设为必需
 检查。Bootstrap 合并后还需一个 Activation PR，让已进入默认分支的旧 `policy-guard` 产生

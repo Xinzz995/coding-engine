@@ -29,6 +29,11 @@ import {
   requiredChecksFromRuleset,
   validateManagedRuleset,
 } from './ruleset.js';
+import {
+  buildManagedReleaseRulesetPayload,
+  findManagedReleaseRuleset,
+  validateManagedReleaseRuleset,
+} from './release-ruleset.js';
 
 export type QualityInitStatus =
   | 'cancelled'
@@ -45,6 +50,8 @@ export interface QualityInitResult {
   defaultBranch: string;
   branch: string;
   rulesetId: number | null;
+  releaseRulesetId: number | null;
+  immutableReleases: boolean | null;
   createdFiles: string[];
   updatedFiles: string[];
   activeRequiredChecks: string[];
@@ -195,13 +202,6 @@ async function resolveContract(
   return { contract, needsWrite: true };
 }
 
-function managedRuleset(
-  client: GitHubQualityClient,
-  repository: string,
-): GitHubRuleset | null {
-  return findManagedRuleset(client.listRulesets(repository));
-}
-
 async function ensureMinimumRules(
   options: QualityInitOptions,
   repository: GitHubRepositoryInfo,
@@ -234,6 +234,67 @@ async function ensureMinimumRules(
   const errors = validateManagedRuleset(readback, currentChecks, requiredCodeScanning);
   if (errors.length > 0) throw new GitHubQualityError('Ruleset 回读核验失败', errors.join('；'));
   return readback;
+}
+
+async function ensureReleaseProtection(
+  options: QualityInitOptions,
+  repository: GitHubRepositoryInfo,
+  existing: GitHubRuleset | null,
+  protectedRefs: string[],
+  requireImmutableReleases: boolean,
+): Promise<{ ruleset: GitHubRuleset | null; immutableReleases: boolean | null } | null> {
+  const manageRefs = protectedRefs.length > 0;
+  if (!manageRefs && !requireImmutableReleases) {
+    return { ruleset: null, immutableReleases: null };
+  }
+  const errors = manageRefs
+    ? existing
+      ? validateManagedReleaseRuleset(existing, protectedRefs)
+      : ['发布标签 Ruleset 不存在']
+    : [];
+  let immutableReleases: boolean | null = null;
+  if (requireImmutableReleases) {
+    if (!options.client!.getImmutableReleases || !options.client!.enableImmutableReleases) {
+      throw new GitHubQualityError('当前 GitHub 适配器无法配置不可变 Release');
+    }
+    immutableReleases = options.client!.getImmutableReleases(repository.fullName).enabled;
+    if (!immutableReleases) errors.push('GitHub 不可变 Release 尚未启用');
+  }
+  if (errors.length === 0) {
+    return { ruleset: manageRefs ? existing : null, immutableReleases };
+  }
+
+  const confirmed = await options.confirm([
+    ...(manageRefs ? [
+      `即将保护 GitHub 发布标签：${protectedRefs.join('、')}。`,
+      '有仓库写权限的人可以首次创建标签；创建后禁止更新和删除，且不配置日常绕过者。',
+    ] : []),
+    requireImmutableReleases
+      ? '发布后 GitHub Release、关联标签和资产不可修改。'
+      : '质量契约未要求 coding-x 管理 GitHub Release 不可变设置。',
+    `远端当前差异：${errors.join('；')}`,
+  ].join('\n'));
+  if (!confirmed) return null;
+
+  let readback: GitHubRuleset | null = null;
+  if (manageRefs) {
+    const payload = buildManagedReleaseRulesetPayload(existing, protectedRefs);
+    const changed = existing
+      ? options.client!.updateRuleset(repository.fullName, existing.id, payload)
+      : options.client!.createRuleset(repository.fullName, payload);
+    readback = options.client!.getRuleset(repository.fullName, changed.id);
+    const ruleErrors = validateManagedReleaseRuleset(readback, protectedRefs);
+    if (ruleErrors.length > 0) {
+      throw new GitHubQualityError('发布标签 Ruleset 回读核验失败', ruleErrors.join('；'));
+    }
+  }
+
+  if (requireImmutableReleases && !immutableReleases) {
+    options.client!.enableImmutableReleases!(repository.fullName);
+    immutableReleases = options.client!.getImmutableReleases!(repository.fullName).enabled;
+    if (!immutableReleases) throw new GitHubQualityError('不可变 Release 启用后回读仍为关闭');
+  }
+  return { ruleset: readback, immutableReleases };
 }
 
 function planManagedFiles(
@@ -306,6 +367,8 @@ function result(
     defaultBranch: repository.defaultBranch,
     branch,
     rulesetId: ruleset?.id ?? null,
+    releaseRulesetId: null,
+    immutableReleases: null,
     createdFiles: [],
     updatedFiles: [],
     activeRequiredChecks: active,
@@ -327,7 +390,9 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
     throw new Error(`当前位于默认分支 ${branch}；请先创建 Bootstrap 或 Policy 功能分支`);
   }
   const { contract, needsWrite } = await resolveContract(options, repository);
-  const initialRuleset = managedRuleset(options.client, repository.fullName);
+  const initialRulesets = options.client.listRulesets(repository.fullName);
+  const initialRuleset = findManagedRuleset(initialRulesets);
+  const initialReleaseRuleset = findManagedReleaseRuleset(initialRulesets);
   const currentChecks = requiredChecksFromRuleset(initialRuleset);
   const contractCheckNames = new Set(contract.github.requiredChecks);
   const unexpected = currentChecks.filter((check) => !contractCheckNames.has(check.context));
@@ -344,9 +409,27 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
   );
   if (!ruleset) {
     return result('cancelled', 6, repository, branch, initialRuleset, contract, {
+      releaseRulesetId: initialReleaseRuleset?.id ?? null,
       message: '用户取消 GitHub 最小规则配置；没有写本地初始化文件。',
     });
   }
+  const releaseProtection = await ensureReleaseProtection(
+    options,
+    repository,
+    initialReleaseRuleset,
+    contract.release.protectedRefs,
+    contract.github.immutableReleases === true,
+  );
+  if (!releaseProtection) {
+    return result('cancelled', 6, repository, branch, ruleset, contract, {
+      releaseRulesetId: initialReleaseRuleset?.id ?? null,
+      message: '用户取消发布标签或不可变 Release 配置；默认分支规则保持启用。',
+    });
+  }
+  const releaseState = {
+    releaseRulesetId: releaseProtection.ruleset?.id ?? null,
+    immutableReleases: releaseProtection.immutableReleases,
+  };
 
   const filePlan = planManagedFiles(options.root, contract, needsWrite);
   if (filePlan.create.length > 0 || filePlan.update.length > 0) {
@@ -358,12 +441,14 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
     ].join('\n'));
     if (!confirmed) {
       return result('cancelled', 6, repository, branch, ruleset, contract, {
+        ...releaseState,
         message: '用户取消本地质量文件生成；GitHub 最小规则保持启用。',
       });
     }
     writeManagedFiles(options.root, filePlan);
     ensureManagedLabels(options.client, repository.fullName);
     return result('files-created', 6, repository, branch, ruleset, contract, {
+      ...releaseState,
       createdFiles: filePlan.create,
       updatedFiles: filePlan.update,
       message: '本地初始化文件已生成。请提交、推送并打开 Bootstrap PR，然后重新运行 coding-x init。',
@@ -375,12 +460,14 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
   const pullRequest = options.client.findOpenPullRequest(repository, branch);
   if (!pullRequest) {
     return result('waiting-for-pr', 6, repository, branch, ruleset, contract, {
+      ...releaseState,
       message: '本地文件已就绪，但当前分支没有对应的打开 PR。推送并打开 PR 后重跑 init。',
     });
   }
   const head = git(options.root, ['rev-parse', 'HEAD']);
   if (pullRequest.headSha !== head) {
     return result('waiting-for-pr', 6, repository, branch, ruleset, contract, {
+      ...releaseState,
       pullRequest: pullRequest.number,
       message: `PR #${pullRequest.number} 的 head 不是当前提交；先推送 ${head} 后重跑 init。`,
     });
@@ -411,6 +498,7 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
     );
     if (!confirmed) {
       return result('cancelled', 6, repository, branch, ruleset, contract, {
+        ...releaseState,
         pullRequest: pullRequest.number,
         message: '用户取消必需检查升级。',
       });
@@ -435,6 +523,7 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
       finalRuleset,
       contract,
       {
+        ...releaseState,
         pullRequest: pullRequest.number,
         message: `仍等待默认分支可信工作流产生检查：${pending.join('、')}。` +
           'Bootstrap PR 可先启用 quality-gate；policy-guard 必须在工作流进入默认分支后的 Policy PR 中启用。',
@@ -444,6 +533,7 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
   const errors = validateManagedRuleset(finalRuleset, finalChecks, requiredCodeScanning);
   if (errors.length > 0) throw new GitHubQualityError('最终 Ruleset 核验失败', errors.join('；'));
   return result('ready', 0, repository, branch, finalRuleset, contract, {
+    ...releaseState,
     pullRequest: pullRequest.number,
     message: '质量契约、本地托管文件和 GitHub 默认分支 Ruleset 已全部回读确认。',
   });

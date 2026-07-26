@@ -6,6 +6,7 @@ import {
   type GitHubRuleset,
 } from '../quality/github.js';
 import { buildManagedRulesetPayload } from '../quality/ruleset.js';
+import { buildManagedReleaseRulesetPayload } from '../quality/release-ruleset.js';
 import { evaluateReviewRemoteState } from './remote.js';
 import type { ReviewPreflightContext } from './preflight.js';
 
@@ -20,8 +21,13 @@ function fixture(integrationId: number) {
       context, integration_id: integrationId,
     })), contract.github.requiredCodeScanning),
   };
+  const releaseRuleset: GitHubRuleset = {
+    id: 2,
+    ...buildManagedReleaseRulesetPayload(null, contract.release.protectedRefs),
+  };
   const client = {
-    listRulesets: () => [ruleset],
+    listRulesets: () => [ruleset, releaseRuleset],
+    getImmutableReleases: () => ({ enabled: true, enforcedByOwner: false }),
     listCheckRuns: () => contract.github.requiredChecks.map((name, index) => ({
       id: index + 1, name, headSha, status: 'completed', conclusion: 'success',
       app: { id: integrationId, slug: 'github-actions', name: 'GitHub Actions' },
@@ -30,6 +36,8 @@ function fixture(integrationId: number) {
   return {
     contract,
     client,
+    ruleset,
+    releaseRuleset,
     context: { headSha } as ReviewPreflightContext,
   };
 }
@@ -49,12 +57,25 @@ describe('evaluateReviewRemoteState', () => {
 
   it('fails closed when the required code scanning rule drifts', () => {
     const value = fixture(GITHUB_ACTIONS_APP_ID);
-    const ruleset = value.client.listRulesets('example/project')[0];
-    ruleset.rules = ruleset.rules.filter((rule) => rule.type !== 'code_scanning');
-    value.client.listRulesets = () => [ruleset];
+    value.ruleset.rules = value.ruleset.rules.filter((rule) => rule.type !== 'code_scanning');
+    value.client.listRulesets = () => [value.ruleset, value.releaseRuleset];
 
     const result = evaluateReviewRemoteState(value);
     expect(result.status).toBe('invalid');
     expect(result.rulesetErrors).toContain('缺少 code_scanning 规则');
+  });
+
+  it('fails closed when release tag protection or immutability drifts', () => {
+    const value = fixture(GITHUB_ACTIONS_APP_ID);
+    value.releaseRuleset.rules = value.releaseRuleset.rules
+      .filter((rule) => rule.type !== 'deletion');
+    value.client.getImmutableReleases = () => ({ enabled: false, enforcedByOwner: false });
+
+    const result = evaluateReviewRemoteState(value);
+    expect(result.status).toBe('invalid');
+    expect(result.rulesetErrors).toEqual(expect.arrayContaining([
+      '缺少 deletion 规则',
+      '不可变 Release 实际为关闭',
+    ]));
   });
 });
