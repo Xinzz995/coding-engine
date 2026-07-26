@@ -1913,6 +1913,7 @@ describe('runLoop keepOpen', () => {
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `
       import { writeFileSync } from 'node:fs';
+      await new Promise((resolve) => setTimeout(resolve, 200));
       writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
         'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
       }));
@@ -1922,16 +1923,34 @@ describe('runLoop keepOpen', () => {
     const port = 18100 + (process.pid % 1000);
     let release!: () => void;
     const interrupt = new Promise<void>((r) => { release = r; });
+    const running = runLoop({
+      kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
+      workspace, instructionsDir, port, openBrowser: false,
+      keepOpen: true, interrupt,
+    });
     try {
-      const running = runLoop({
-        kind: 'claude', maxIterations: 5, devTimeoutMs: 5000, valTimeoutMs: 5000,
-        workspace, instructionsDir, port, openBrowser: false,
-        keepOpen: true, interrupt,
-      });
+      // 等待真实完成信号，不能假定 Windows 等较慢环境会在固定 300ms 内完成两次 agent 调用。
+      let completedPhase: string | undefined;
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/api/state`);
+          if (response.ok) {
+            const state = await response.json() as { runtime: { phase: string } };
+            completedPhase = state.runtime.phase;
+            if (completedPhase === 'done') break;
+          }
+        } catch {
+          // 仪表盘可能还未开始监听；在期限内继续轮询。
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(completedPhase).toBe('done');
+
       // With keepOpen the loop must NOT resolve on its own after completion.
       const pending = await Promise.race([
         running.then(() => 'resolved'),
-        new Promise((r) => setTimeout(() => r('pending'), 300)),
+        new Promise((r) => setTimeout(() => r('pending'), 100)),
       ]);
       expect(pending).toBe('pending');
       // The dashboard must still answer while we wait.
@@ -1944,9 +1963,11 @@ describe('runLoop keepOpen', () => {
       expect(await running).toBe(0);
       await expect(fetch(`http://127.0.0.1:${port}/api/state`)).rejects.toThrow();
     } finally {
+      release();
+      await running.catch(() => undefined);
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, 15_000);
 
   it('closes immediately after completion when keepOpen is not set', async () => {
     const { workspace, instructionsDir } = setup([story()]);
