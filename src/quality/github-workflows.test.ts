@@ -100,13 +100,16 @@ describe('renderPolicyGuardWorkflow', () => {
   it('uses only default-branch pull_request_target API data and never checks out PR content', () => {
     const yaml = renderPolicyGuardWorkflow(codingEngineContract());
     expect(yaml).toContain('pull_request_target:');
-    expect(yaml).toContain('name: policy-guard');
+    expect(yaml).toContain('name: policy-guard-source');
     expect(yaml).toContain('pr = api(f"/repos/{repo}/pulls/{number}")');
     expect(yaml).toContain('/pulls/{number}/files');
     expect(yaml).toContain('quality-policy-approved');
     expect(yaml).toContain('Policy-Exception: #<issue>');
     expect(yaml).toContain('quality-policy-exception');
     expect(yaml).not.toContain('actions/checkout');
+    expect(yaml).not.toContain('checks: write');
+    expect(yaml).not.toContain('/check-runs');
+    expect(yaml).not.toContain('Publish policy-guard');
     expect(yaml).not.toContain('pull_request.head');
     expect(yaml).not.toContain('pr = event["pull_request"]');
   });

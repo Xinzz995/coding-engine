@@ -1,12 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { posix, resolve } from 'node:path';
-import type {
-  QualityCheck,
-  QualityCheckCategory,
-  QualityContract,
-  QualityPlatform,
-  QualityToolchain,
+import {
+  REQUIRED_GITHUB_CHECKS,
+  type QualityCheck,
+  type QualityCheckCategory,
+  type QualityContract,
+  type QualityPlatform,
+  type QualityToolchain,
 } from './contract.js';
 import type { GitHubRepositoryInfo } from './github.js';
 
@@ -316,7 +317,7 @@ export function discoverQualityContract(
       },
       github: {
         jobs,
-        requiredChecks: ['quality-gate', 'policy-guard'],
+        requiredChecks: [...REQUIRED_GITHUB_CHECKS],
       },
       exceptions: {
         p1: { issueTemplate: '.github/ISSUE_TEMPLATE/quality-p1.yml', maxDays: 30 },

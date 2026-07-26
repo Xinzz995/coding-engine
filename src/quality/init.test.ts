@@ -172,7 +172,7 @@ describe('runQualityInit', () => {
     const generated = await runQualityInit(options(root, client, [], summaries));
     expect(generated).toMatchObject({
       status: 'files-created', exitCode: 6, rulesetId: 101,
-      activeRequiredChecks: [], pendingRequiredChecks: ['quality-gate', 'policy-guard'],
+      activeRequiredChecks: [], pendingRequiredChecks: ['quality-gate', 'policy-guard-source'],
     });
     expect(client.rulesets[0].name).toBe(MANAGED_RULESET_NAME);
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([]);
@@ -203,17 +203,19 @@ describe('runQualityInit', () => {
     const qualityActive = await runQualityInit(options(root, client));
     expect(qualityActive).toMatchObject({
       status: 'checks-activated', exitCode: 6, pullRequest: 7,
-      activeRequiredChecks: ['quality-gate'], pendingRequiredChecks: ['policy-guard'],
+      activeRequiredChecks: ['quality-gate'], pendingRequiredChecks: ['policy-guard-source'],
     });
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([
       { context: 'quality-gate', integration_id: 15368 },
     ]);
 
-    client.runs.push(check('policy-guard', head));
+    client.runs.push(check('policy-guard-source', head));
     const ready = await runQualityInit(options(root, client));
     expect(ready.status).toBe('ready');
     expect(ready.exitCode).toBe(0);
-    expect(new Set(ready.activeRequiredChecks)).toEqual(new Set(['quality-gate', 'policy-guard']));
+    expect(new Set(ready.activeRequiredChecks)).toEqual(
+      new Set(['quality-gate', 'policy-guard-source']),
+    );
     expect(ready.pendingRequiredChecks).toEqual([]);
   });
 

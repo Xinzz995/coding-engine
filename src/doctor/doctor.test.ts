@@ -15,6 +15,7 @@ import {
 } from './doctor.js';
 import { deriveQualityChecks, readQualityContract } from '../quality/contract.js';
 import { renderManagedGitHubFiles } from '../quality/github-workflows.js';
+import { CODING_X_VERSION } from '../version.js';
 
 const FULL_FM = ['---', 'title: 示例', 'status: active', 'updated: 2026-07-03', 'scope: root', '---', '', '# 正文'].join('\n');
 const ORIGINAL_CODING_X_CONFIG = process.env.CODING_X_CONFIG;
@@ -26,7 +27,7 @@ const runDoctor = (root: string, options: DoctorOptions = {}) => runDoctorWithQu
   ...options,
 });
 
-function writeQualityContract(root: string, codingXVersion = '0.29.0'): string {
+function writeQualityContract(root: string, codingXVersion = CODING_X_VERSION): string {
   const source = JSON.parse(readFileSync(join(process.cwd(), '.coding-x', 'quality.json'), 'utf8'));
   source.codingXVersion = codingXVersion;
   mkdirSync(join(root, '.coding-x'), { recursive: true });
@@ -604,7 +605,7 @@ describe('runDoctor quality contract check', () => {
       const { text, exitCode } = renderDoctorReport(report);
       expect(exitCode).toBe(1);
       expect(text).toContain('固定版本 9.9.9');
-      expect(text).toContain('当前版本 0.29.0');
+      expect(text).toContain(`当前版本 ${CODING_X_VERSION}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

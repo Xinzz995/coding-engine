@@ -80,7 +80,8 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 `init` 本来就是分阶段完成的：第一次只在远端最小规则回读成功后生成文件；你提交、推送并
 打开 Bootstrap PR 后再次运行，它才会把该 PR 最新提交上真实出现的 `quality-gate` 设为必需
 检查。Bootstrap 合并后还需一个 Activation PR，让已进入默认分支的旧 `policy-guard` 产生
-绑定最新提交的检查，再运行一次完成最终绑定。中间返回 6 表示“尚未就绪”，不是执行失败。
+绑定最新提交的真实 `policy-guard-source` 任务，再运行一次完成最终绑定。中间返回 6
+表示“尚未就绪”，不是执行失败。
 
 最短可用路线是：**`coding-x init` → 已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop`**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
 

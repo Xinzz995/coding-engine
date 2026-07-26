@@ -139,8 +139,9 @@ GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式
    用户再次运行 `init`，将它连同 GitHub Actions 来源绑定到 Ruleset 并回读；Bootstrap PR
    通过该检查后才能合并；
 4. `ready`：`policy-guard` 工作流已进入默认分支后，再用一个 Activation PR 让默认分支旧
-   工作流为该 PR head 产生 `policy-guard`。`init` 将其绑定为必需检查并回读后，该 PR 才能
-   合并。Bootstrap PR 不伪造同名占位检查，也不能要求尚不存在于默认分支的政策检查。
+   工作流为该 PR head 产生真实 `policy-guard-source` 任务。`init` 将其绑定为必需检查并
+   回读后，该 PR 才能合并。Bootstrap PR 不伪造同名占位检查，也不能要求尚不存在于默认
+   分支的政策检查。
 
 初始化不自动 commit、push、开 PR 或合并。任一阶段中断后可以幂等重跑；`doctor` 在进入
 `ready` 前始终返回非就绪。私有仓库若账户套餐或权限不支持所需 Ruleset，初始化停止，不
@@ -319,13 +320,13 @@ PR/base/head、评审轮次和状态。
 默认分支旧 `policy-guard` 识别质量契约、工作流、工程原则和发布规则变更。若使用
 `pull_request_target`，只通过 API 读取文件列表、标签和 Issue 元数据；不签出、不执行、
 不拼接运行 PR 内容。一次性政策标签仅表示 owner 明确批准，必须关联有效 Issue，不称为
-第二方审批。安全评估完成后，默认分支工作流只额外创建一个绑定 PR 最新 head 的
-`policy-guard` Check Run；Ruleset 不依赖绑定 base SHA 的源 job。所有第三方 Action 固定完整
-提交 SHA，并采用最小权限。
+第二方审批。Ruleset 直接要求 GitHub 为该默认分支工作流产生、并关联 PR 最新 head 的真实
+`policy-guard-source` 任务；工作流不再通过 Checks API 额外写入一条结果，也不需要检查写
+权限。所有第三方 Action 固定完整提交 SHA，并采用最小权限。
 
 ### coding-engine 检查矩阵
 
-- Ubuntu / Node 22：类型检查、全量测试、构建、文档健康、成品命令冒烟、格式、静态检查、
+- Ubuntu / Node 22：类型检查、全量测试、构建、仓库机械健康、成品命令冒烟、格式、静态检查、
   依赖审计；
 - Ubuntu / Node 24：全量测试、构建、成品命令冒烟；
 - macOS / Node 24：关键测试、构建、成品命令冒烟；
@@ -336,6 +337,12 @@ PR/base/head、评审轮次和状态。
 安全更新、秘密扫描、推送保护和 TypeScript CodeQL；平台或套餐不支持的能力明确报告，
 不能静默写成已启用。coding-engine 的 CodeQL 规则要求安全告警达到 high 及以上时阻断，
 普通告警达到 error 时阻断。
+
+仓库机械健康只检查 coding-engine 的真实文档、质量契约和契约生成文件，不比较候选运行版本，
+也不产生可交付结论。完整 `doctor` 始终保留精确版本判断；GitHub 与候选暂存不得通过接受
+shadow 或忽略非零退出码来绕过它。首次 0.30.0 使用一次性的机械 CI 和 owner 人工 Bootstrap，
+不声称完成正式本地 AI Review；受保护 main 上的 0.29.0 只可独立复核仓库健康。发布并通过
+独立 Policy PR 固定 0.30.0 后，正式自托管 Review 才开始。
 
 ## 候选发布、自托管与回退
 

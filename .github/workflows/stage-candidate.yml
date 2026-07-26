@@ -58,7 +58,7 @@ jobs:
           npm run typecheck
           npm test
           npm run build
-          node dist/cli.js doctor --local
+          npm run repository-health
           node dist/cli.js --help >/dev/null
           npm audit --audit-level=high
 
