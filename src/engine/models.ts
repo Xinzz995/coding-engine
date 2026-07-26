@@ -4,9 +4,11 @@ export type ModelRouteSource =
   | 'cli-builder'
   | 'cli-escalation'
   | 'cli-validator'
+  | 'cli-review'
   | 'difficulty'
   | 'escalation'
   | 'validator'
+  | 'review'
   | 'runner-default';
 
 export type ModelRoutingReadResult =

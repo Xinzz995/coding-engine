@@ -167,26 +167,28 @@ describe('preflightModelRouting', () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it('excludes blocked stories and does not read the global catalog when no story can run', async () => {
+  it('excludes blocked stories but still validates the final reviewer model', async () => {
     let called = false;
     const result = await preflightModelRouting({
       prd: prd(), state: state({ blocked: true }), requestedRunner: 'codex', runnerExplicit: true,
-      catalog: async () => { called = true; return available(); },
+      catalog: async () => { called = true; return available('val-m'); },
     });
     expect(result.storyRoutes).toEqual([]);
-    expect(result.catalog.status).toBe('skipped');
-    expect(called).toBe(false);
+    expect(result.catalog.status).toBe('available');
+    expect(result.review.model).toBe('val-m');
+    expect(called).toBe(true);
   });
 
-  it('已收敛 workspace 仍校验 schema/runner，但不读无实际调用的模型目录', async () => {
+  it('已收敛 workspace 仍校验 schema、runner 与即将调用的 final reviewer', async () => {
     let called = false;
     const result = await preflightModelRouting({
       prd: prd(), state: state({ passes: true, validated: true }), requestedRunner: 'claude', runnerExplicit: false,
-      catalog: async () => { called = true; return available(); },
+      catalog: async () => { called = true; return available('val-m'); },
     });
     expect(result.runner).toBe('codex');
-    expect(result.catalog.status).toBe('skipped');
-    expect(called).toBe(false);
+    expect(result.catalog.status).toBe('available');
+    expect(result.review.model).toBe('val-m');
+    expect(called).toBe(true);
   });
 
   it('把 passes=true 但无验收凭证的 story 继续视为待执行', async () => {

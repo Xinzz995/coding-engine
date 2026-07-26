@@ -42,6 +42,7 @@ export interface CliConfig {
   valTimeoutMs: number;
   builderModel: string | undefined;
   validatorModel: string | undefined;
+  reviewModel: string | undefined;
   escalationModel: string | undefined;
   workspace: string;
   openBrowser: boolean;
@@ -91,6 +92,7 @@ runner:
   --val-timeout <分钟>           Validator 超时（默认 60）
   --builder-model <id>           临时覆盖初始 Builder 模型
   --validator-model <id>         临时覆盖 Validator 模型
+  --review-model <id>            临时固定最终三层 Review 模型（缺省复用 Validator）
   --escalation-model <id>        临时覆盖升级 Builder 模型
   --workspace <dir>              workspace 路径（默认 .workspace）
   --no-open                      不自动打开仪表盘
@@ -117,6 +119,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       'val-timeout': { type: 'string' },
       'builder-model': { type: 'string' },
       'validator-model': { type: 'string' },
+      'review-model': { type: 'string' },
       'escalation-model': { type: 'string' },
       workspace: { type: 'string' },
       'no-open': { type: 'boolean' },
@@ -227,6 +230,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     valTimeoutMs: min(values['val-timeout'], 60),
     builderModel: values['builder-model'],
     validatorModel: values['validator-model'],
+    reviewModel: values['review-model'],
     escalationModel: values['escalation-model'],
     workspace: values.workspace ?? '.workspace',
     openBrowser: !values['no-open'],
@@ -369,14 +373,21 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'doctor') {
-    const report = runDoctor(process.cwd(), { staleDays: cfg.staleDays, workspace: cfg.workspace });
+    const report = runDoctor(process.cwd(), {
+      staleDays: cfg.staleDays,
+      workspace: cfg.workspace,
+      local: cfg.local,
+    });
     const { text, exitCode } = cfg.json ? renderDoctorJson(report) : renderDoctorReport(report);
     console.log(text);
     return exitCode;
   }
 
   if (cfg.command === 'status') {
-    const report = collectStatus(cfg.workspace);
+    const report = collectStatus(cfg.workspace, {
+      projectRoot: process.cwd(),
+      refreshRemote: !cfg.local,
+    });
     // 警告走 stderr：--json 模式下不污染 stdout，人类可读模式同样适用
     if (report.status === 'ok' && report.stateCorrupted) {
       console.error('⚠️  state.json 已损坏，所有 story 已按未验证状态保守显示。建议运行 npx coding-x repair。');
@@ -482,6 +493,7 @@ export async function main(argv: string[]): Promise<number> {
     valTimeoutMs: cfg.valTimeoutMs,
     builderModel: cfg.builderModel,
     validatorModel: cfg.validatorModel,
+    reviewModel: cfg.reviewModel,
     escalationModel: cfg.escalationModel,
     workspace: cfg.workspace,
     instructionsDir,

@@ -40,9 +40,13 @@ import {
   assessQualityRuntime,
   qualityChecksMatchContract,
   readQualityContract,
+  type QualityContract,
   type QualityContractReadResult,
 } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
+import { runFinalReview } from '../review/final-review.js';
+import type { FinalReviewOutcome } from '../review/types.js';
+import { readFinalReviewState } from '../review/state.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -55,6 +59,8 @@ export interface LoopConfig {
   builderModel?: string;
   /** 临时覆盖 validator 阶段模型（压过 prd.json models.validator） */
   validatorModel?: string;
+  /** 临时固定最终三层 Review 模型；缺省复用 models.validator。 */
+  reviewModel?: string;
   /** 临时覆盖升级 builder 模型；只在 state.escalated=true 时生效。 */
   escalationModel?: string;
   /** 测试注入；生产缺省只读全局模型目录。 */
@@ -77,6 +83,17 @@ export interface LoopConfig {
   projectRoot?: string;
   /** 只供隔离测试注入；生产始终读取项目根 .coding-x/quality.json。 */
   qualityContractReader?: (projectRoot: string) => QualityContractReadResult;
+  /** 测试/嵌入注入；生产缺省执行真实本地三层 Review。 */
+  finalReviewRunner?: (options: {
+    root: string;
+    workspace: string;
+    currentContract: QualityContract;
+    runner: AgentKind;
+    model?: string;
+    codingXVersion: string;
+    shadow: boolean;
+    timeoutMs: number;
+  }) => Promise<FinalReviewOutcome>;
   /**
    * 仅供历史单测 fixture：允许旧 Validator 直接改 state。CLI 从不设置；生产默认
    * 必须提交结构化 validation result，禁止静默降级。
@@ -131,19 +148,14 @@ function readRunState(statePath: string, prd: Prd): RunState {
 
 // 收敛出口单源：两个 allStoriesResolved 出口（no-op 快路径/轮末完成判定）共用，
 // blocked>0 时 exit 3——「收敛但待人工」对所有出口成立（ADR-009/发现 D）
-const convergedExit = (prd: Prd, state: RunState, shadow = false): number => {
+const blockedConvergedExit = (prd: Prd, state: RunState): number | null => {
   const blockedIds = prd.userStories.filter((s) => state[s.id]?.blocked).map((s) => s.id);
   if (blockedIds.length > 0) {
     const passedCount = prd.userStories.length - blockedIds.length;
     console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
     return 3;
   }
-  if (shadow) {
-    console.log('\n🧪 Shadow 运行已完成。该结果只用于候选版本 Dogfood，不能表示可交付。');
-    return 7;
-  }
-  console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
-  return 0;
+  return null;
 };
 
 export async function runLoop(cfg: LoopConfig): Promise<number> {
@@ -206,6 +218,32 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     let bootState = bootPrd
       ? (tryReadState(statePath) ?? blankStateFor(bootPrd))
       : null;
+    // 最终 Review 后的任何新提交都会使旧 Review 失效。Story 与变更文件没有可靠的
+    // 多对多映射，因此首版保守重验全部已通过 Story，绝不猜测“只影响哪几个”。
+    // 这里同时撤销候选通过与引擎凭证，让既有 Developer → 门禁 → Validator 顺序完整重跑。
+    if (bootState) {
+      const previousReview = readFinalReviewState(cfg.workspace);
+      const currentHead = readGitHead(projectRoot);
+      if (previousReview.status === 'ready' && currentHead
+          && previousReview.state.binding.headSha !== currentHead) {
+        const invalidated: string[] = [];
+        const next = structuredClone(bootState);
+        for (const story of bootPrd!.userStories) {
+          const current = next[story.id];
+          if (!current || current.blocked || !current.passes || !current.validated) continue;
+          next[story.id] = { ...current, passes: false, validated: false };
+          invalidated.push(story.id);
+        }
+        if (invalidated.length > 0) {
+          bootState = next;
+          writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
+          console.warn(
+            `⚠️  最终 Review 后提交已变化，旧 Validator 凭证失效；` +
+            `将保守重验：${invalidated.join(', ')}`,
+          );
+        }
+      }
+    }
     // 进程可能在 builder 写 passes=true 后、validator 签发凭证前被杀。显式
     // validated=false 是 v0.25 的待验收残态；启动时回写成可被 builder 重新选中的状态。
     // 旧 state 缺字段时 tryReadState 已按历史 passes 兼容，不会在这里被误重验。
@@ -283,6 +321,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         builderOverride: cfg.builderModel,
         validatorOverride: cfg.validatorModel,
         escalationOverride: cfg.escalationModel,
+        reviewOverride: cfg.reviewModel,
         ...(cfg.modelCatalog ? { catalog: cfg.modelCatalog } : {}),
       });
     } catch (err) {
@@ -291,6 +330,15 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         return 2;
       }
       throw err;
+    }
+    // 生产最终 Review 必须绑定一个明确模型；测试可注入不调用模型的评审器。
+    // 在任何 Story agent 启动前拒绝，避免实现全部完成后才发现结果无法签发。
+    if (!preflight.review.model && !cfg.finalReviewRunner) {
+      console.error(
+        '❌ 模型路由预检失败：最终 Review 必须使用明确模型；' +
+        '请在 prd.json models.validator 中固定，或传 --review-model',
+      );
+      return 2;
     }
     if (!bootPrd) {
       console.error(`❌ 无法读取 ${prdPath}；请先从源 PRD 重新派生`);
@@ -412,9 +460,27 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       return true;
     };
     let exitCode = 1;
+    const completeResolvedRun = async (prd: Prd, state: RunState): Promise<number> => {
+      const blocked = blockedConvergedExit(prd, state);
+      if (blocked !== null) return blocked;
+      console.log('\n🔎 全部 story 已验证，开始针对当前 PR 最新提交执行本地最终 Review。');
+      const finalReview = await (cfg.finalReviewRunner ?? runFinalReview)({
+        root: projectRoot,
+        workspace: cfg.workspace,
+        currentContract: qualityRead.contract,
+        runner: runKind,
+        model: preflight.review.model,
+        codingXVersion: cfg.actualVersion ?? CODING_X_VERSION,
+        shadow: cfg.shadow ?? false,
+        timeoutMs: cfg.valTimeoutMs,
+      });
+      const emit = finalReview.exitCode === 0 || finalReview.exitCode === 7 ? console.log : console.error;
+      emit(`\n${finalReview.exitCode === 0 ? '✅' : finalReview.exitCode === 7 ? '🧪' : '⏸️'} ${finalReview.message}`);
+      return finalReview.exitCode;
+    };
     if (bootResolved) {
       dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-      exitCode = convergedExit(bootPrd, bootState!, cfg.shadow ?? false);
+      exitCode = await completeResolvedRun(bootPrd, bootState!);
     }
     for (let i = 1; !bootResolved && i <= cfg.maxIterations; i++) {
       lock.verify(); // 轮首自愈：agent 误删/改写锁时告警重建（同 prd-guard 的机械防护哲学）
@@ -630,7 +696,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           recordIteration({ builderOutcome: 'completed', noop: true });
           tamperCheckBeforeExit(i);
           dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-          exitCode = convergedExit(before, beforeState, cfg.shadow ?? false);
+          exitCode = await completeResolvedRun(before, beforeState);
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
@@ -1019,7 +1085,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-        exitCode = convergedExit(after, afterState, cfg.shadow ?? false);
+        exitCode = await completeResolvedRun(after, afterState);
         break;
       }
     }

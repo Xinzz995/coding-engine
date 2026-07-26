@@ -47,7 +47,7 @@ validation request → Validator claim → engine protocol verdict/receipt 的 r
 禁用：Validator IPC、结果文件协议（只描述媒介，掩盖目标绑定与状态机）
 
 **假绿**
-系统显示 story 通过，但实际上未完成指定 AC 或没有验证指定产物。正常控制流中的无结果、错目标、旧结果由结构化验收协议关闭；同权限 agent 伪造观察、共谋或敷衍验证仍需机械门禁与 review-loop 独立复核。
+系统显示 story 或交付通过，但实际上未完成指定 AC、没有验证指定产物，或必要检查被跳过。结构化验收协议关闭单 Story 的无结果、错目标和旧结果；最终 Review 负责 Spec/工程/结构判断，GitHub 总闸负责机械检查不可跳过，三者不能互相冒充。
 禁用：误报通过、虚假通过
 
 **质量契约**
@@ -70,12 +70,20 @@ validation request → Validator claim → engine protocol verdict/receipt 的 r
 决定 coverageCheck 结论的命令、阈值、排除、零测试策略、差异覆盖基线与委托脚本/配置的集合；派生时由用户批准，运行中受 PRD 快照与政策文件摘要保护。覆盖率只证明代码被执行，不证明断言有效。
 禁用：覆盖率证明、测试有效性政策
 
-**人审包**
-/review-loop 产出的审查交付物：红旗区（如有）+ 三层（改动导读、发现清单、风险聚焦），落盘 `.workspace/review-*.md` 供裁决回填（四态：已修/接受/推迟/驳回）；人审的加速器，不是替代品。
-禁用：审查报告
+**最终 Review**
+全部 Story 验证后，coding-x 针对当前 PR 最新提交顺序执行的本地三层判断：Spec、工程标准，以及风险触发的深度结构 Review。结果绑定 PR/base/head、规则、契约、runner/model 和风险输入；任一变化即失效。它是本地质量判断，不是 GitHub 共享凭证。
+禁用：人审包、GitHub AI Review
+
+**Review finding**
+最终 Review 发现的结构化问题：包含稳定 ID、评审轴、P0/P1/P2/Info、位置、规则来源、影响、建议、PR/base/head 和轮次。不同评审轴的 finding 不互相抵消，也不能由汇总者静默降级。
+禁用：review 建议、审查意见（用于正式状态时）
+
+**Review 裁决**
+用户通过 `/review-loop` 针对当前 head 上具体 finding 作出的结构化决定：授权修复、提交反证、登记 P1 延期或知悉 P2/Info。记录写入 `.workspace/review-decisions.json`；Markdown 和 PR 文本不能代替它，修复提交会让旧裁决失效。
+禁用：Markdown resolution、人工自由放行
 
 **收口**
-一轮循环或功能分支完成后的收尾动作：/review-loop 人审 + 合并 + /compound-docs 沉淀经验、清理活知识熵并收尾任务文档；物理归档须另有显式授权。
+一轮循环或功能分支完成后的收尾动作：处理最终 Review finding、确认 GitHub 交付状态、人工合并，再由 `/compound-docs` 沉淀经验、清理活知识熵并收尾任务文档；物理归档须另有显式授权。
 禁用：复盘、总结
 
 **熵 GC**
@@ -123,7 +131,7 @@ notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验�
 禁用：冲突标记、人工核实标记（统一用「仲裁标签」）
 
 **验证报告**
-一次运行的验证证据静态存档（`<workspace>/report.html`）：story 状态与验收标准、门禁配置、截图工件、人审包渲染、篡改红旗区汇总为零依赖单页。循环结束从引擎冻结的 PRD 快照自动生成，`coding-x report` 则从磁盘随时重生成；state 损坏时只生成“全部未验证”的红色诊断报告且手动命令退出 1。它是存档不是循环成败门禁——正常生成退出 0，循环成败的 CI 语义归 status。
+一次运行的验证证据静态存档（`<workspace>/report.html`）：Story 状态与验收标准、门禁配置、截图工件、本地最终 Review、所记录的 GitHub 交付状态和篡改红旗区汇总为零依赖单页。循环结束从引擎冻结的 PRD 快照自动生成，`coding-x report` 可从磁盘重生成；state 损坏时只生成“全部未验证”的红色诊断报告。它是阅读视图，不是共享凭证，也不能用 Story 绿色代替可交付结论。
 禁用：HTML 报告、静态报告（统一用「验证报告」）
 
 **异常轮**
@@ -186,9 +194,9 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 - 异常轮触发回写待复核并计入 stall 熔断；空转轮跳过门禁与 validator、同样计入熔断
 - 每次实际启动的 Builder/Validator 都产生 Agent 调用凭证；status/report 从证据索引恢复耗时、退出码和异常诊断，但不把输出内容当裁决依据
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
-- 收口包含人审（/review-loop 产出人审包）与 /compound-docs（沉淀、熵 GC、状态收尾及显式授权后的物理归档）
+- 收口包含最终 Review finding 裁决、GitHub 交付核验与 `/compound-docs`（沉淀、熵 GC、状态收尾及显式授权后的物理归档）
 - 物理归档把完成态阶段文档从 active 区移入历史冷档案；状态收尾只改 status，不自动构成移动授权
-- 验证报告收录人审包（review-*.md 渲染进报告的人审留痕区）；两者都落在 workspace
+- 验证报告展示 `final-review.json` 的本地质量判断与其中记录的远端状态；旧 `review-*.md` 只作为历史本地反馈，不能作为通过证明
 - 验证报告消费证据索引（门禁历史、Validator claim、协议裁决、轮次时间线、验收标准↔截图对账均由它派生）；证据索引缺失时报告退回文件名猜测截图归属
 - 难度档位决定初始路由；首次有效失败置升级状态，后续 builder 走 escalation，与 retryCount 独立
 - 全局模型目录限定显式模型策略可引用的 ID；项目 PRD 保存五项具体映射；某轮实际传给 runner 的模型只记录进证据索引

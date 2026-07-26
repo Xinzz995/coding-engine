@@ -41,12 +41,14 @@ describe('新功能黄金原则合同', () => {
     ]) expect(planning).toContain(anchor);
   });
 
-  it('review-loop 不接受计划自述，合并前独立复核原则', () => {
+  it('review-loop 只裁决当前提交的结构化 finding，不制造第二套 Review', () => {
     for (const anchor of [
       '黄金原则不是自述',
-      '必须逐条独立复核',
-      '逐条黄金原则',
-      '`principle:` 违反目标项目黄金原则',
+      '不得降级为普通 diff Review',
+      '.workspace/review-decisions.json',
+      'fix-requested',
+      '新提交会让旧 Validator 和最终 Review 失效',
+      '模型不能替人选择产品行为',
     ]) expect(reviewLoop).toContain(anchor);
   });
 });
