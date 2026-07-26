@@ -123,13 +123,14 @@ describe('resolveBinary', () => {
       process.env.PATH = dir;
       expect(resolveBinary('cursor')).toBe('agent');
 
-      const current = join(dir, 'agent');
-      writeFileSync(current, '#!/bin/sh\n');
+      const suffix = process.platform === 'win32' ? '.CMD' : '';
+      const current = join(dir, `agent${suffix}`);
+      writeFileSync(current, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n');
       chmodSync(current, 0o755);
       expect(resolveBinary('cursor')).toBe('agent');
 
-      const legacy = join(dir, 'cursor-agent');
-      writeFileSync(legacy, '#!/bin/sh\n');
+      const legacy = join(dir, `cursor-agent${suffix}`);
+      writeFileSync(legacy, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n');
       chmodSync(legacy, 0o755);
       expect(resolveBinary('cursor')).toBe('cursor-agent');
     } finally {

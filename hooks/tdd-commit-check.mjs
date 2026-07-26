@@ -2,7 +2,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 
 const MAX_INPUT_BYTES = 1024 * 1024;
@@ -29,6 +29,12 @@ function hasExactKeys(value, expected) {
   const wanted = [...expected].sort();
   return actual.length === wanted.length
     && wanted.every((key, index) => actual[index] === key);
+}
+
+function sameExistingPath(left, right) {
+  const a = statSync(left);
+  const b = statSync(right);
+  return a.dev === b.dev && a.ino === b.ino;
 }
 
 function isNonBlankString(value) {
@@ -437,7 +443,7 @@ async function main() {
   const injectedWorkspace = process.env.CODING_X_WORKSPACE;
   if (injectedRoot && injectedWorkspace && isAbsolute(injectedWorkspace)) {
     try {
-      if (realpathSync(injectedRoot) === root) workspace = injectedWorkspace;
+      if (sameExistingPath(injectedRoot, root)) workspace = injectedWorkspace;
     } catch {
       // 环境来自其他项目或已失效时只回退当前 Git 根，不跨项目误读。
     }

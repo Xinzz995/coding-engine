@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import {
@@ -82,8 +82,11 @@ function git(root: string, args: string[]): string {
 }
 
 function validateGitRoot(root: string): void {
-  const actual = realpathSync(resolve(git(root, ['rev-parse', '--show-toplevel'])));
-  if (actual !== realpathSync(resolve(root))) throw new Error(`请从 Git 项目根运行 init：${actual}`);
+  const prefix = git(root, ['rev-parse', '--show-prefix']);
+  if (prefix !== '') {
+    const actual = git(root, ['rev-parse', '--show-toplevel']);
+    throw new Error(`请从 Git 项目根运行 init：${actual}`);
+  }
 }
 
 function currentBranch(root: string): string {
