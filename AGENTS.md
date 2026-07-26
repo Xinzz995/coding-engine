@@ -6,7 +6,7 @@
 
 coding-x：Ralph 自动化编码 harness——把 Developer → Validator 循环固化成确定性程序。同一仓库既是 npm 包（TS 引擎，`npx coding-x`），也是多工具插件（skills + commands）。
 
-技术栈：TypeScript（strict, ESM）/ Node ≥18；tsup 构建、tsx 开发、Vitest 测试；引擎唯一运行时依赖 jsonrepair。
+技术栈：TypeScript（strict, ESM）/ Node ≥22；tsup 构建、tsx 开发、Vitest 测试；引擎唯一运行时依赖 jsonrepair。
 
 ## 关键命令
 
@@ -15,6 +15,8 @@ npm run dev         # tsx 直接运行 CLI
 npm run build       # tsup 打包到 dist/（onSuccess 拷贝 assets）
 npm test            # Vitest
 npm run typecheck   # tsc --noEmit
+npm run lint        # ESLint 静态检查
+npm run format:check # 新增代码格式与全部差异空白检查
 ```
 
 ## 文档索引
@@ -36,7 +38,7 @@ npm run typecheck   # tsc --noEmit
 
 ## 硬约束
 
-1. 提交前必须通过 `npm run typecheck` 与 `npm test`
+1. 提交前必须通过 `npm run format:check`、`npm run lint`、`npm run typecheck` 与 `npm test`
 2. `src/` 内相对导入必须写 `.js` 扩展名（ESM/NodeNext）
 3. `skills/`、`commands/` 是唯一源：各工具清单只指回，不复制内容
 4. 引擎运行时状态只读写 `--workspace` 目录（默认 `.workspace/`）

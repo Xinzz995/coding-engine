@@ -60,7 +60,7 @@ coding-x 同时包含两部分：
 下面是一条推荐的完整路线。不是每次都要执行所有可选步骤，后文会说明如何跳过。
 
 1. **准备目标项目。** 确认它是你信任的 Git 仓库，重要内容已经提交或备份，当前没有不明来源的改动。
-2. **安装插件和一个 runner。** Node.js 需要 ≥18；Claude Code、Codex 或 Cursor Agent 至少安装并登录一个。详细命令见「安装」。
+2. **安装插件和一个 runner。** Node.js 需要 ≥22；Claude Code、Codex 或 Cursor Agent 至少安装并登录一个。详细命令见「安装」。
 3. **进入目标项目根目录。** 后面的对话和终端命令都在这里进行，而不是在 coding-x 插件源码目录中进行。
 4. **第一次接入先初始化质量门禁，再运行 `/init-docs`。** `npx coding-x init` 先发现候选检查和规范，必须经你确认才配置 GitHub 最小规则并生成受 Git 管理的质量契约；`/init-docs` 只补缺失文档，不覆盖已有内容。
 5. **让当前会话理解项目。** 运行 `/priming`。它不改代码，只输出当前项目概览。
@@ -167,7 +167,7 @@ coding-x 同时包含两部分：
 
 ### 环境要求
 
-- **Node.js ≥ 18**
+- **Node.js ≥ 22**
 - 已安装、已认证并可在终端调用 **`claude`**（Claude Code CLI）、**`codex`** 或 Cursor 的 **`agent`** / **`cursor-agent`**（取决于你用哪个 runner）
 
 插件和 runner 是两件事：**插件**让交互式 AI 知道怎样做需求对齐、PRD、review 等工作流；**runner**才是 `npx coding-x` 在自动循环中启动的 AI 命令行程序。只装其中一个不能代替另一个。

@@ -135,6 +135,30 @@ export function checkDeliveryGate(options: {
       });
     }
     client.verifyDefaultBranch(repository);
+    if (contract.github.securityFeatures) {
+      if (!client.getSecurityFeatures) {
+        issues.push({
+          file: 'GitHub Security',
+          message: '当前 GitHub 适配器无法核验契约声明的仓库安全功能',
+        });
+      } else {
+        const actual = client.getSecurityFeatures(repository.fullName);
+        const labels = {
+          dependabotSecurityUpdates: 'Dependabot 自动安全更新',
+          secretScanning: '秘密扫描',
+          secretScanningPushProtection: '秘密推送保护',
+        } as const;
+        for (const name of Object.keys(labels) as Array<keyof typeof labels>) {
+          const expected = contract.github.securityFeatures[name];
+          if (actual[name] !== expected) {
+            issues.push({
+              file: 'GitHub Security',
+              message: `${labels[name]}实际为${actual[name] ? '启用' : '关闭'}，契约要求${expected ? '启用' : '关闭'}`,
+            });
+          }
+        }
+      }
+    }
     const ruleset = findManagedRuleset(client.listRulesets(repository.fullName));
     if (!ruleset) {
       issues.push({ file: 'GitHub Ruleset', message: '未找到 coding-x 管理的默认分支 Ruleset' });

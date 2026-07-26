@@ -30,11 +30,14 @@
     "dist"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/cli.ts",
+    "format": "node build/check-format.mjs --write --base origin/main",
+    "format:check": "node build/check-format.mjs --base origin/main",
+    "lint": "eslint src",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
@@ -42,13 +45,21 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "jsonrepair": "^3.6.0"
+    "jsonrepair": "^3.15.0"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "tsup": "^8.0.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.4.0",
-    "vitest": "^2.0.0"
+    "@types/node": "^22.20.1",
+    "eslint": "^10.8.0",
+    "prettier": "^3.9.6",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10"
+  },
+  "allowScripts": {
+    "esbuild@0.27.7": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
   }
 }

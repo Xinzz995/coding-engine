@@ -79,7 +79,7 @@ export function readQualityChecks(prd: Prd | null): string[] | 'invalid' | null 
   if (!prd || prd.qualityChecks === undefined) return null;
   const v: unknown = prd.qualityChecks;
   if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) return 'invalid';
-  return v.length === 0 ? null : (v as string[]);
+  return v.length === 0 ? null : v;
 }
 
 /** 每条门禁命令的执行超时（10 分钟）；超时按失败打回，notes 注明 */
@@ -126,7 +126,7 @@ function runSpawnedGate(spec: SpawnedGateSpec): Promise<GateFailure | null> {
       }, (err) => {
         if (settled) return;
         settled = true;
-        reject(err);
+        reject(err instanceof Error ? err : new Error(String(err)));
       });
     }, spec.timeoutMs);
     child.once('exit', (code) => {

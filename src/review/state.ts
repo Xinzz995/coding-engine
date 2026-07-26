@@ -217,7 +217,7 @@ function remote(value: unknown): ReviewRemoteState {
     return {
       name: string(check.name, `remote.checks[${index}].name`),
       status: string(check.status, `remote.checks[${index}].status`),
-      conclusion: check.conclusion as string | null,
+      conclusion: check.conclusion,
       appId: integer(check.appId, `remote.checks[${index}].appId`, 1),
       appSlug: string(check.appSlug, `remote.checks[${index}].appSlug`),
     };

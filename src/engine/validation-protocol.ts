@@ -174,7 +174,7 @@ function parseValidationResult(value: unknown, acCount: number): ValidationProto
 
   const checks: ValidationCheck[] = [];
   for (let index = 0; index < value.checks.length; index++) {
-    const check = value.checks[index];
+    const check: unknown = value.checks[index];
     if (!isRecord(check) || !hasExactKeys(check, ['acIndex', 'passed', 'evidence'])
         || check.acIndex !== index + 1
         || typeof check.passed !== 'boolean'

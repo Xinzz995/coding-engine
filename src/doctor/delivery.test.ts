@@ -11,6 +11,7 @@ import {
   type GitHubRepositoryInfo,
   type GitHubRuleset,
   type GitHubRulesetPayload,
+  type GitHubSecurityFeatures,
 } from '../quality/github.js';
 import { renderManagedGitHubFiles } from '../quality/github-workflows.js';
 import { buildManagedRulesetPayload } from '../quality/ruleset.js';
@@ -35,6 +36,7 @@ class FakeClient implements GitHubQualityClient {
   repository: GitHubRepositoryInfo;
   ruleset: GitHubRuleset;
   issues: GitHubIssueInfo[] = [];
+  securityFeatures: GitHubSecurityFeatures;
 
   constructor(value: QualityContract, integrationId = GITHUB_ACTIONS_APP_ID) {
     this.repository = {
@@ -48,6 +50,11 @@ class FakeClient implements GitHubQualityClient {
         context, integration_id: integrationId,
       }))),
     };
+    this.securityFeatures = structuredClone(value.github.securityFeatures ?? {
+      dependabotSecurityUpdates: false,
+      secretScanning: false,
+      secretScanningPushProtection: false,
+    });
   }
 
   discoverRepository(): GitHubRepositoryInfo { return this.repository; }
@@ -62,6 +69,7 @@ class FakeClient implements GitHubQualityClient {
   }
   findOpenPullRequest(): GitHubPullRequestInfo | null { return null; }
   listCheckRuns() { return []; }
+  getSecurityFeatures(): GitHubSecurityFeatures { return this.securityFeatures; }
   getIssue(_repository: string, number: number): GitHubIssueInfo {
     const issue = this.issues.find((candidate) => candidate.number === number);
     if (!issue) throw new Error(`missing issue ${number}`);
@@ -125,6 +133,7 @@ describe('checkDeliveryGate', () => {
       expect(ready).toMatchObject({ status: 'ready', remoteChecked: true, rulesetId: 7, issues: [] });
 
       client.ruleset = new FakeClient(value, 999).ruleset;
+      client.securityFeatures.secretScanningPushProtection = false;
       client.issues = [issue({ body: issue().body.replace('2026-08-01', '2026-07-20') })];
       const invalid = checkDeliveryGate({
         root, workspace: '.workspace', contract: value, local: false, client,
@@ -133,6 +142,7 @@ describe('checkDeliveryGate', () => {
       expect(invalid.status).toBe('invalid');
       expect(invalid.issues.map((entry) => entry.message)).toEqual(expect.arrayContaining([
         expect.stringContaining('未绑定预期 GitHub App'),
+        expect.stringContaining('秘密推送保护实际为关闭'),
         '延期 Issue 已过期',
       ]));
     } finally {

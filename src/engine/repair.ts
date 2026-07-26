@@ -5,7 +5,7 @@ import { writeFileAtomicSync } from './fs-atomic.js';
 
 export function repairJsonString(raw: string): string {
   const repaired = jsonrepair(raw);
-  const parsed = JSON.parse(repaired); // second validation pass
+  const parsed: unknown = JSON.parse(repaired); // second validation pass
   return JSON.stringify(parsed, null, 2);
 }
 

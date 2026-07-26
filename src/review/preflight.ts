@@ -12,7 +12,7 @@ import {
   type GitHubPullRequestInfo,
   type GitHubQualityClient,
 } from '../quality/github.js';
-import { digest, matchesAny, normalizeText } from './common.js';
+import { matchesAny, normalizeText } from './common.js';
 
 const REQUIRED_PR_SECTIONS = [
   '本次目标',

@@ -11,6 +11,12 @@ export interface GitHubRepositoryInfo {
   isPrivate: boolean;
 }
 
+export interface GitHubSecurityFeatures {
+  dependabotSecurityUpdates: boolean;
+  secretScanning: boolean;
+  secretScanningPushProtection: boolean;
+}
+
 export interface GitHubPullRequestInfo {
   number: number;
   headSha: string;
@@ -87,6 +93,7 @@ export interface GitHubQualityClient {
     branch: string,
   ): GitHubPullRequestInfo | null;
   listCheckRuns(repository: string, sha: string): GitHubCheckRun[];
+  getSecurityFeatures?(repository: string): GitHubSecurityFeatures;
   getIssue?(repository: string, number: number): GitHubIssueInfo;
   listOpenIssuesByLabel?(repository: string, label: string): GitHubIssueInfo[];
   ensureLabel(repository: string, name: string, color: string, description: string): void;
@@ -233,6 +240,25 @@ function parseCheckRun(value: unknown): GitHubCheckRun {
   };
 }
 
+function parseSecurityFeatures(value: unknown): GitHubSecurityFeatures {
+  if (!isRecord(value) || !isRecord(value.security_and_analysis)) {
+    throw new GitHubQualityError('GitHub 未返回仓库安全功能状态；请确认权限和套餐能力');
+  }
+  const security = value.security_and_analysis;
+  const enabled = (name: string): boolean => {
+    const feature = security[name];
+    if (!isRecord(feature) || (feature.status !== 'enabled' && feature.status !== 'disabled')) {
+      throw new GitHubQualityError(`GitHub 未返回 ${name} 状态；该功能可能不可用`);
+    }
+    return feature.status === 'enabled';
+  };
+  return {
+    dependabotSecurityUpdates: enabled('dependabot_security_updates'),
+    secretScanning: enabled('secret_scanning'),
+    secretScanningPushProtection: enabled('secret_scanning_push_protection'),
+  };
+}
+
 /** `gh` 复用用户现有登录，不把 token 写入项目或命令参数。 */
 export class GhGitHubQualityClient implements GitHubQualityClient {
   private run(args: string[], cwd?: string, input?: string): unknown {
@@ -319,6 +345,10 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
       throw new GitHubQualityError('GitHub 返回的 check runs 非法');
     }
     return value.check_runs.map(parseCheckRun);
+  }
+
+  getSecurityFeatures(repository: string): GitHubSecurityFeatures {
+    return parseSecurityFeatures(this.api(`repos/${repository}`));
   }
 
   getIssue(repository: string, number: number): GitHubIssueInfo {

@@ -116,6 +116,11 @@ function validContract(): unknown {
         },
       ],
       requiredChecks: ['quality-gate', 'policy-guard'],
+      securityFeatures: {
+        dependabotSecurityUpdates: true,
+        secretScanning: true,
+        secretScanningPushProtection: true,
+      },
     },
     exceptions: {
       p1: {
@@ -185,6 +190,28 @@ describe('parseQualityContract', () => {
     expect(parseQualityContract(input)).toMatchObject({ status: 'ready' });
     input.release.protectedRefs = ['v*'];
     expect(parseQualityContract(input)).toMatchObject({ status: 'invalid' });
+  });
+
+  it('validates optional GitHub security requirements without allowing a contradictory policy', () => {
+    const invalidType = clone();
+    invalidType.github.securityFeatures.secretScanning = 'enabled';
+    const typeResult = parseQualityContract(invalidType);
+    expect(typeResult.status).toBe('invalid');
+    if (typeResult.status === 'invalid') {
+      expect(typeResult.errors).toContain(
+        'github.securityFeatures.secretScanning 必须是布尔值',
+      );
+    }
+
+    const contradictory = clone();
+    contradictory.github.securityFeatures.secretScanning = false;
+    const policyResult = parseQualityContract(contradictory);
+    expect(policyResult.status).toBe('invalid');
+    if (policyResult.status === 'invalid') {
+      expect(policyResult.errors).toContain(
+        'github.securityFeatures 启用推送保护时必须同时启用秘密扫描',
+      );
+    }
   });
 
   it.each([

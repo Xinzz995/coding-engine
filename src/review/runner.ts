@@ -259,7 +259,9 @@ function parsedFinalJson(runner: AgentKind, stdout: string): unknown {
   }
   const record = outer as Record<string, unknown>;
   if (record.is_error === true || record.subtype === 'error' || record.terminal_reason === 'api_error') {
-    throw new Error(`${runner} 服务失败：${String(record.result ?? record.terminal_reason ?? 'unknown')}`);
+    const detail = record.result ?? record.terminal_reason ?? 'unknown';
+    const message = typeof detail === 'string' ? detail : JSON.stringify(detail) ?? 'unknown';
+    throw new Error(`${runner} 服务失败：${message}`);
   }
   if (record.structured_output !== undefined) return record.structured_output;
   if (typeof record.result !== 'string') throw new Error(`${runner} 返回 envelope 缺少 result`);
@@ -485,7 +487,6 @@ export async function runSafeReviewAxis(options: {
   reviewPackage: ReviewPackage;
   timeoutMs: number;
 }): Promise<SafeRunnerInvocation> {
-  const startedAt = Date.now();
   let lastError: unknown;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {

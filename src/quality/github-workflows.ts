@@ -14,11 +14,11 @@ export const PULL_REQUEST_TEMPLATE_PATH = '.github/PULL_REQUEST_TEMPLATE.md';
 export const P1_ISSUE_TEMPLATE_PATH = '.github/ISSUE_TEMPLATE/quality-p1.yml';
 export const POLICY_ISSUE_TEMPLATE_PATH = '.github/ISSUE_TEMPLATE/quality-policy.yml';
 
-/** actions/checkout v5 的完整提交标识；升级必须通过政策 PR。 */
-export const CHECKOUT_ACTION_SHA = 'fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09';
-export const SETUP_NODE_ACTION_SHA = 'a0853c24544627f65ddf259abe73b1d18a591444';
-export const SETUP_PYTHON_ACTION_SHA = 'ece7cb06caefa5fff74198d8649806c4678c61a1';
-export const SETUP_GO_ACTION_SHA = '924ae3a1cded613372ab5595356fb5720e22ba16';
+/** 官方 setup Actions v7 的完整提交标识；升级必须通过政策 PR。 */
+export const CHECKOUT_ACTION_SHA = '3d3c42e5aac5ba805825da76410c181273ba90b1';
+export const SETUP_NODE_ACTION_SHA = '820762786026740c76f36085b0efc47a31fe5020';
+export const SETUP_PYTHON_ACTION_SHA = '5fda3b95a4ea91299a34e894583c3862153e4b97';
+export const SETUP_GO_ACTION_SHA = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e';
 
 const CATEGORIES: QualityCheckCategory[] = ['test', 'build', 'static', 'security'];
 const RUNNER: Record<QualityPlatform, string> = {
@@ -120,12 +120,14 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     '# Generated from .coding-x/quality.json. Change the contract, then regenerate.',
     'on:',
     '  pull_request:',
+    '  push:',
+    `    branches: [${yamlString(contract.repository.defaultBranch)}]`,
     '',
     'permissions:',
     '  contents: read',
     '',
     'concurrency:',
-    '  group: quality-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}',
+    '  group: quality-gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}',
     '  cancel-in-progress: true',
     '',
     'jobs:',
@@ -184,7 +186,6 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     '            fi',
     '          done',
     '          exit "$failed"',
-    '',
   );
   return `${lines.join('\n')}\n`;
 }
@@ -249,7 +250,6 @@ jobs:
           max_days = ${maxDays}
           event = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))
           repo = event["repository"]["full_name"]
-          pr = event["pull_request"]
           number = event["number"]
           token = os.environ["GH_TOKEN"]
 
@@ -266,6 +266,9 @@ jobs:
               with urllib.request.urlopen(request, timeout=30) as response:
                   return json.load(response)
 
+          # opened/labeled can race: the event payload is an immutable snapshot, so policy
+          # decisions must read the current labels and body from GitHub.
+          pr = api(f"/repos/{repo}/pulls/{number}")
           files = []
           page = 1
           while True:

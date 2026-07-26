@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { appendEvidence, readEvidence, EVIDENCE_FILE, type EvidenceRecord } from './evidence.js';

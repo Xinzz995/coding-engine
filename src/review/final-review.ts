@@ -201,7 +201,7 @@ export async function runFinalReview(options: {
   if (preflight.status !== 'ready') {
     const exitCode = preflight.status === 'config-error' ? 2
       : preflight.status === 'remote-not-ready' ? 6 : 5;
-    return { exitCode, message: preflight.message } as FinalReviewOutcome;
+    return { exitCode, message: preflight.message };
   }
   const context = preflight.context;
   const round = initialRound(options.workspace);

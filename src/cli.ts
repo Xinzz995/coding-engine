@@ -524,5 +524,11 @@ export function isDirectInvocation(argv1: string | undefined, moduleUrl: string)
 }
 
 if (isDirectInvocation(process.argv[1], import.meta.url)) {
-  main(process.argv.slice(2)).then((code) => process.exit(code));
+  void main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (error: unknown) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    },
+  );
 }

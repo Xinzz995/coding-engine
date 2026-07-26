@@ -88,8 +88,8 @@ function discoverNode(
     ? (pkg as Record<string, unknown>).engines as Record<string, unknown>
     : {};
   const hasScript = (name: string) => typeof scripts[name] === 'string'
-    && (scripts[name] as string).trim() !== ''
-    && !(scripts[name] as string).includes('no test specified');
+    && scripts[name].trim() !== ''
+    && !scripts[name].includes('no test specified');
 
   let packageManager = 'npm';
   if (files.has('pnpm-lock.yaml')) packageManager = 'pnpm';

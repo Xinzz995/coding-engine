@@ -6,7 +6,7 @@ const story = (over: Record<string, unknown> = {}): Story => ({
   id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
   difficulty: 'medium', difficultyReason: '命中 medium-1：沿用 src/api.ts 的既有接线模式。',
   ...over,
-} as Story);
+});
 
 const storyWithoutRouting = (): Story => ({
   id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
