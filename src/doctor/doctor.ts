@@ -8,9 +8,16 @@ import {
 } from '../engine/model-catalog.js';
 import { readModelRouting } from '../engine/models.js';
 import { tryReadPrd } from '../engine/prd.js';
-import { readQualityChecks } from '../engine/gate.js';
 import { isPidAlive, readLockInfo, LOCK_FILE } from '../engine/lock.js';
 import { checkTddPolicy, readTddConfig } from '../engine/tdd-gate.js';
+import {
+  assessQualityRuntime,
+  deriveQualityChecks,
+  qualityChecksMatchContract,
+  readQualityContract,
+  type FrozenQualityChecks,
+} from '../quality/contract.js';
+import { CODING_X_VERSION } from '../version.js';
 
 export interface DoctorIssue {
   file: string;
@@ -51,15 +58,25 @@ export interface DoctorOptions {
   workspace?: string;
   /** 全局模型目录路径；测试/隔离环境可显式注入，缺省遵循 CODING_X_CONFIG 或固定用户目录。 */
   modelConfigPath?: string;
+  /** 实际 coding-x 版本；生产缺省构建内版本。 */
+  actualVersion?: string;
+  /** 独立单元测试可关闭本项；CLI 不设置，生产始终要求质量契约。 */
+  requireQualityContract?: boolean;
 }
 
-export interface GateConfigCheckResult {
-  /** 展示用的相对路径（如 .workspace/prd.json） */
+export interface QualityContractCheckResult {
+  contractPath: string;
   prdPath: string;
-  /** workspace/prd.json 是否存在；不存在时跳过本项检查，不计失败 */
+  status: 'skipped' | 'missing' | 'invalid' | 'version-mismatch' | 'ready';
+  digest: string | null;
+  /** prd-to-json 应原样写入 prd.json.qualityChecks 的机器派生快照。 */
+  derivedChecks: FrozenQualityChecks | null;
+  configuredChecks: number;
+  notApplicableCategories: string[];
   prdFound: boolean;
-  /** prd.json 存在时：顶层是否配置了非空合法 qualityChecks */
-  configured: boolean;
+  prdDigestMatches: boolean | null;
+  prdChecksMatch: boolean | null;
+  issues: DoctorIssue[];
 }
 
 export interface TddConfigCheckResult {
@@ -120,7 +137,7 @@ export interface DoctorReport {
   freshness: FreshnessCheckResult | null;
   agentsIndex: AgentsIndexCheckResult | null;
   links: LinksCheckResult | null;
-  gate: GateConfigCheckResult;
+  quality: QualityContractCheckResult;
   tdd: TddConfigCheckResult;
   modelCatalog: ModelCatalogCheckResult;
   workspaceGit: WorkspaceGitCheckResult;
@@ -439,15 +456,94 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   const modelConfigPath = options.modelConfigPath ?? resolveGlobalConfigPath();
   const modelCatalog = checkModelCatalog(prdPath, prdRel, modelConfigPath);
   const workspaceGit = checkWorkspaceGitIsolation(root, workspace);
-  let gate: GateConfigCheckResult = { prdPath: prdRel, prdFound: false, configured: false };
+  const requireQuality = options.requireQualityContract ?? true;
+  const contractRel = join('.coding-x', 'quality.json');
+  let quality: QualityContractCheckResult = {
+    contractPath: contractRel,
+    prdPath: prdRel,
+    status: requireQuality ? 'missing' : 'skipped',
+    digest: null,
+    derivedChecks: null,
+    configuredChecks: 0,
+    notApplicableCategories: [],
+    prdFound: existsSync(prdPath),
+    prdDigestMatches: null,
+    prdChecksMatch: null,
+    issues: [],
+  };
+  if (requireQuality) {
+    const contractRead = readQualityContract(root);
+    if (contractRead.status === 'missing') {
+      quality.issues.push({ file: contractRel, message: '质量契约不存在；请先运行 coding-x init' });
+    } else if (contractRead.status !== 'ready') {
+      const details = contractRead.status === 'invalid'
+        ? contractRead.errors
+        : [contractRead.error];
+      quality = {
+        ...quality,
+        status: 'invalid',
+        issues: details.map((message) => ({ file: contractRel, message })),
+      };
+    } else {
+      const runtime = assessQualityRuntime(
+        contractRead.contract,
+        options.actualVersion ?? CODING_X_VERSION,
+        false,
+      );
+      const categories = ['test', 'build', 'static', 'security'] as const;
+      const configuredChecks = categories.reduce((count, category) => {
+        const policy = contractRead.contract.checks[category];
+        return count + ('checks' in policy ? policy.checks.length : 0);
+      }, 0);
+      const notApplicableCategories = categories.filter((category) => (
+        'notApplicable' in contractRead.contract.checks[category]
+      ));
+      quality = {
+        ...quality,
+        status: runtime.mode === 'formal' ? 'ready' : 'version-mismatch',
+        digest: contractRead.digest,
+        derivedChecks: deriveQualityChecks(contractRead.contract),
+        configuredChecks,
+        notApplicableCategories,
+      };
+      if (runtime.mode !== 'formal') {
+        quality.issues.push({
+          file: contractRel,
+          message: `固定版本 ${runtime.expectedVersion} 与当前版本 ${runtime.actualVersion} 不一致`,
+        });
+      }
+      if (quality.prdFound) {
+        const prd = tryReadPrd(prdPath);
+        if (prd === null) {
+          quality.issues.push({ file: prdRel, message: 'prd.json 无法解析，不能核对质量契约摘要' });
+        } else {
+          quality.prdDigestMatches = prd.qualityContractDigest === contractRead.digest;
+          if (!quality.prdDigestMatches) {
+            quality.issues.push({
+              file: prdRel,
+              message: `质量契约摘要不匹配（期望 ${contractRead.digest}，收到 ${prd.qualityContractDigest ?? 'missing'}）`,
+            });
+          }
+          quality.prdChecksMatch = qualityChecksMatchContract(
+            prd.qualityChecks,
+            contractRead.contract,
+          );
+          if (!quality.prdChecksMatch) {
+            quality.issues.push({
+              file: prdRel,
+              message: 'qualityChecks 不是当前质量契约的完整派生快照；请重新派生 PRD',
+            });
+          }
+        }
+      }
+    }
+  }
   let tdd: TddConfigCheckResult = { prdPath: prdRel, status: 'missing', issues: [] };
   // resolve（非 join）：workspace 可能是绝对路径（如 --workspace 巡检异地目录）；join 会把
   // 已是绝对路径的第二段原样拼在 root 之下产生不存在的路径，resolve 则在遇到绝对路径段时
   // 正确丢弃 root，相对 workspace 的既有行为不变（终审 2026-07-16 发现 1）。
   if (existsSync(prdPath)) {
     const prd = tryReadPrd(prdPath);
-    const checks = readQualityChecks(prd);
-    gate = { prdPath: prdRel, prdFound: true, configured: Array.isArray(checks) };
     if (prd === null) {
       tdd = {
         prdPath: prdRel,
@@ -489,7 +585,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
     return {
       docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null,
-      gate, tdd, modelCatalog, workspaceGit, lock,
+      quality, tdd, modelCatalog, workspaceGit, lock,
     };
   }
   const files = walkMarkdownFiles(docsDir);
@@ -571,7 +667,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     },
     agentsIndex,
     links: { checked: linksChecked, issues: linkIssues },
-    gate,
+    quality,
     tdd,
     modelCatalog,
     workspaceGit,
@@ -579,14 +675,26 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   };
 }
 
-function renderGateLines(gate: GateConfigCheckResult): string[] {
-  const lines = ['⚙️  机械门禁配置'];
-  if (!gate.prdFound) {
-    lines.push(`  ℹ️  未找到 ${gate.prdPath}：已跳过门禁配置检查`);
-  } else if (gate.configured) {
-    lines.push('  ✅ 已配置 qualityChecks（引擎每轮 builder 后确定性执行）');
+function renderQualityLines(result: QualityContractCheckResult): string[] {
+  const lines = ['⚙️  项目质量契约'];
+  if (result.status === 'skipped') {
+    lines.push('  ℹ️  本次独立检查未启用质量契约校验');
+    return lines;
+  }
+  if (result.issues.length > 0) {
+    for (const issue of result.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
+    return lines;
+  }
+  lines.push(
+    `  ✅ 契约有效；已声明 ${result.configuredChecks} 项机械检查，摘要 ${result.digest}`,
+  );
+  if (result.notApplicableCategories.length > 0) {
+    lines.push(`  ℹ️  明确不适用：${result.notApplicableCategories.join('、')}`);
+  }
+  if (!result.prdFound) {
+    lines.push(`  ℹ️  未找到 ${result.prdPath}：当前没有待运行 PRD，无需核对摘要`);
   } else {
-    lines.push('  💡 建议在 prd.json 顶层配置 qualityChecks（如 ["npm run typecheck", "npm test"]）：引擎将在每轮 builder 之后机械执行、失败确定性打回（建议项，不计失败）');
+    lines.push(`  ✅ ${result.prdPath} 已绑定当前契约摘要`);
   }
   return lines;
 }
@@ -669,11 +777,12 @@ function renderWorkspaceGitLines(result: WorkspaceGitCheckResult): string[] {
 
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
-    const total = report.modelCatalog.issues.length + report.tdd.issues.length;
+    const total = report.modelCatalog.issues.length + report.tdd.issues.length
+      + report.quality.issues.length;
     return {
       text: [
         'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
-        '', ...renderGateLines(report.gate),
+        '', ...renderQualityLines(report.quality),
         '', ...renderTddLines(report.tdd),
         '', ...renderModelCatalogLines(report.modelCatalog),
         '', ...renderWorkspaceGitLines(report.workspaceGit),
@@ -717,13 +826,22 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   } else {
     for (const issue of links.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
-  lines.push('', ...renderGateLines(report.gate));
+  lines.push('', ...renderQualityLines(report.quality));
   lines.push('', ...renderTddLines(report.tdd));
   lines.push('', ...renderModelCatalogLines(report.modelCatalog));
   lines.push('', ...renderWorkspaceGitLines(report.workspaceGit));
   lines.push('', ...renderLockLines(report.lock));
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
-    + report.modelCatalog.issues.length + report.tdd.issues.length;
+    + report.modelCatalog.issues.length + report.tdd.issues.length + report.quality.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
+}
+
+/** 机器读取与人类报告共享同一退出判定；stdout 只包含一个 JSON 对象。 */
+export function renderDoctorJson(report: DoctorReport): { text: string; exitCode: number } {
+  const { exitCode } = renderDoctorReport(report);
+  return {
+    text: JSON.stringify({ schemaVersion: 1, ...report }, null, 2),
+    exitCode,
+  };
 }

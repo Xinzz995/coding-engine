@@ -8,13 +8,37 @@ import {
   parseFrontmatter,
   extractAgentsIndexPaths,
   extractInlineLinkTargets,
-  runDoctor,
+  runDoctor as runDoctorWithQuality,
+  renderDoctorJson,
   renderDoctorReport,
+  type DoctorOptions,
 } from './doctor.js';
+import { deriveQualityChecks, readQualityContract } from '../quality/contract.js';
 
 const FULL_FM = ['---', 'title: 示例', 'status: active', 'updated: 2026-07-03', 'scope: root', '---', '', '# 正文'].join('\n');
 const ORIGINAL_CODING_X_CONFIG = process.env.CODING_X_CONFIG;
 const ISOLATED_MISSING_CONFIG = join(tmpdir(), `coding-x-doctor-${process.pid}-missing-config.json`);
+
+const runDoctor = (root: string, options: DoctorOptions = {}) => runDoctorWithQuality(root, {
+  requireQualityContract: false,
+  ...options,
+});
+
+function writeQualityContract(root: string, codingXVersion = '0.29.0'): string {
+  const source = JSON.parse(readFileSync(join(process.cwd(), '.coding-x', 'quality.json'), 'utf8'));
+  source.codingXVersion = codingXVersion;
+  mkdirSync(join(root, '.coding-x'), { recursive: true });
+  writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify(source));
+  const result = readQualityContract(root);
+  if (result.status !== 'ready') throw new Error(`fixture contract invalid: ${result.status}`);
+  return result.digest;
+}
+
+function qualitySnapshot(root: string) {
+  const result = readQualityContract(root);
+  if (result.status !== 'ready') throw new Error(`fixture contract invalid: ${result.status}`);
+  return deriveQualityChecks(result.contract);
+}
 
 beforeEach(() => {
   process.env.CODING_X_CONFIG = ISOLATED_MISSING_CONFIG;
@@ -495,72 +519,104 @@ describe('renderDoctorReport — 输出与退出码', () => {
   });
 });
 
-describe('runDoctor quality gate config check', () => {
-  it('reports prd missing as skipped (not a failure)', () => {
+describe('runDoctor quality contract check', () => {
+  it('fails when the contract is missing and directs the user to init', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
     try {
       mkdirSync(join(root, 'docs'));
-      const report = runDoctor(root);
-      expect(report.gate).toEqual({
-        prdPath: join('.workspace', 'prd.json'), prdFound: false, configured: false,
-      });
-      expect(renderDoctorReport(report).exitCode).toBe(0);
+      const report = runDoctorWithQuality(root);
+      expect(report.quality).toMatchObject({ status: 'missing', prdFound: false });
+      const rendered = renderDoctorReport(report);
+      expect(rendered.exitCode).toBe(1);
+      expect(rendered.text).toContain('coding-x init');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('suggests configuring qualityChecks without failing the check', () => {
+  it('accepts a valid contract when no transient PRD exists', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
     try {
       mkdirSync(join(root, 'docs'));
+      const digest = writeQualityContract(root);
+      const report = runDoctorWithQuality(root);
+      expect(report.quality).toMatchObject({
+        status: 'ready', digest, prdFound: false, prdDigestMatches: null,
+      });
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(text).toContain('当前没有待运行 PRD');
+      expect(exitCode).toBe(0);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('fails on a stale PRD digest or a qualityChecks snapshot that is not contract-derived', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
+    try {
+      writeQualityContract(root);
       mkdirSync(join(root, '.workspace'));
       writeFileSync(join(root, '.workspace', 'prd.json'), JSON.stringify({
         project: 'p', branchName: 'b', description: 'd', userStories: [],
-      }));
-      const report = runDoctor(root);
-      expect(report.gate.prdFound).toBe(true);
-      expect(report.gate.configured).toBe(false);
-      const { text, exitCode } = renderDoctorReport(report);
-      expect(text).toContain('建议在 prd.json 顶层配置 qualityChecks');
-      expect(exitCode).toBe(0); // 建议级：不影响退出码
-    } finally { rmSync(root, { recursive: true, force: true }); }
-  });
-
-  it('reports configured, honoring a custom workspace, and still works without docs/', () => {
-    const root = mkdtempSync(join(tmpdir(), 'doc-gate-'));
-    try {
-      mkdirSync(join(root, 'run'));
-      writeFileSync(join(root, 'run', 'prd.json'), JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
+        qualityContractDigest: `sha256:${'b'.repeat(64)}`,
         qualityChecks: ['npm test'],
       }));
-      // 故意不建 docs/：gate 检查独立于知识库存在与否
-      const report = runDoctor(root, { workspace: 'run' });
-      expect(report.docsFound).toBe(false);
-      expect(report.gate).toEqual({
-        prdPath: join('run', 'prd.json'), prdFound: true, configured: true,
-      });
-      expect(renderDoctorReport(report).text).toContain('机械门禁');
+      const report = runDoctorWithQuality(root);
+      expect(report.quality.prdDigestMatches).toBe(false);
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(exitCode).toBe(1);
+      expect(text).toContain('摘要不匹配');
+      expect(text).toContain('完整派生快照');
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  it('finds prd.json when workspace is an absolute path pointing elsewhere on disk', () => {
-    // 绝对路径 workspace 巡检异地目录（终审 2026-07-16 发现 1）：旧实现 join(root, prdRel) 把
-    // 已绝对化的 prdRel 错误拼在 root 之下，existsSync 恒假；resolve 则正确丢弃 root。
+  it('binds a matching PRD in an absolute custom workspace and works without docs/', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-gate-abs-root-'));
     const workspaceAbs = mkdtempSync(join(tmpdir(), 'doc-gate-abs-ws-'));
     try {
+      const digest = writeQualityContract(root);
       writeFileSync(join(workspaceAbs, 'prd.json'), JSON.stringify({
         project: 'p', branchName: 'b', description: 'd', userStories: [],
-        qualityChecks: ['npm test'],
+        qualityContractDigest: digest,
+        qualityChecks: qualitySnapshot(root),
       }));
-      const report = runDoctor(root, { workspace: workspaceAbs });
-      expect(report.gate.prdFound).toBe(true);
-      expect(report.gate.configured).toBe(true);
+      const report = runDoctorWithQuality(root, { workspace: workspaceAbs });
+      expect(report.docsFound).toBe(false);
+      expect(report.quality).toMatchObject({
+        prdFound: true, prdDigestMatches: true, prdChecksMatch: true,
+      });
       expect(report.modelCatalog.configPath).toBe(ISOLATED_MISSING_CONFIG);
+      expect(renderDoctorReport(report).exitCode).toBe(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(workspaceAbs, { recursive: true, force: true });
     }
+  });
+
+  it('fails when the running version does not match the exact pinned version', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-version-'));
+    try {
+      writeQualityContract(root, '9.9.9');
+      const report = runDoctorWithQuality(root);
+      expect(report.quality.status).toBe('version-mismatch');
+      const { text, exitCode } = renderDoctorReport(report);
+      expect(exitCode).toBe(1);
+      expect(text).toContain('固定版本 9.9.9');
+      expect(text).toContain('当前版本 0.29.0');
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('emits one machine-readable object with the same exit decision', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-json-'));
+    try {
+      const digest = writeQualityContract(root);
+      const report = runDoctorWithQuality(root);
+      const json = renderDoctorJson(report);
+      expect(json.exitCode).toBe(renderDoctorReport(report).exitCode);
+      expect(JSON.parse(json.text)).toMatchObject({
+        schemaVersion: 1,
+        quality: {
+          status: 'ready', digest,
+          derivedChecks: expect.objectContaining({ test: expect.any(Object) }),
+        },
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
 

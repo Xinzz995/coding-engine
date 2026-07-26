@@ -1,0 +1,308 @@
+import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import {
+  QUALITY_CONTRACT_SCHEMA_VERSION,
+  assessQualityRuntime,
+  deriveQualityChecks,
+  digestQualityContract,
+  parseQualityContract,
+  qualityChecksMatchContract,
+  readQualityContract,
+  type QualityContract,
+} from './contract.js';
+
+function validContract(): unknown {
+  return {
+    schemaVersion: 1,
+    codingXVersion: '0.29.0',
+    repository: {
+      provider: 'github',
+      fullName: 'Xinzz995/example',
+      defaultBranch: 'main',
+    },
+    release: {
+      protectedRefs: ['v*'],
+    },
+    sources: {
+      specs: [
+        { kind: 'path', path: 'docs/specs/feature.md' },
+        { kind: 'pull-request' },
+      ],
+      acceptanceCriteria: [{ kind: 'pull-request' }],
+      engineeringStandards: ['AGENTS.md', 'docs/golden-principles.md'],
+    },
+    modules: [
+      { id: 'root', path: '.' },
+      { id: 'api', path: 'packages/api' },
+    ],
+    generatedPaths: ['dist/**', 'coverage/**'],
+    checks: {
+      test: {
+        checks: [{
+          id: 'unit',
+          module: 'root',
+          paths: ['src/**'],
+          command: {
+            executable: 'npm',
+            args: ['test', '--', '--run'],
+            cwd: '.',
+            platforms: ['linux', 'macos', 'windows'],
+            timeoutMs: 600_000,
+          },
+        }],
+      },
+      build: {
+        checks: [{
+          id: 'build',
+          module: 'root',
+          command: {
+            executable: 'npm',
+            args: ['run', 'build'],
+            cwd: '.',
+            platforms: ['linux', 'macos', 'windows'],
+            timeoutMs: 600_000,
+          },
+        }],
+      },
+      static: {
+        checks: [{
+          id: 'shell-static',
+          module: 'api',
+          command: {
+            shell: 'bash',
+            script: 'npm run typecheck | tee typecheck.log',
+            cwd: 'packages/api',
+            platforms: ['linux', 'macos'],
+            timeoutMs: 600_000,
+          },
+        }],
+      },
+      security: {
+        notApplicable: '示例仓库没有第三方生产依赖。',
+      },
+    },
+    risk: {
+      defaultCategories: ['policy', 'public-contract', 'state', 'concurrency', 'security'],
+      highRiskPaths: ['src/engine/**', '.github/workflows/**'],
+      pathRules: [{ paths: ['packages/api/**'], categories: ['public-contract', 'security'] }],
+    },
+    github: {
+      requiredChecks: ['quality-gate', 'policy-guard'],
+    },
+    exceptions: {
+      p1: {
+        issueTemplate: '.github/ISSUE_TEMPLATE/quality-p1.yml',
+        maxDays: 30,
+      },
+      policy: {
+        issueTemplate: '.github/ISSUE_TEMPLATE/quality-policy.yml',
+        maxDays: 7,
+      },
+    },
+  };
+}
+
+function clone(): Record<string, any> {
+  return structuredClone(validContract()) as Record<string, any>;
+}
+
+describe('parseQualityContract', () => {
+  it('accepts a complete cross-platform contract with structured and explicit shell commands', () => {
+    const result = parseQualityContract(validContract());
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') return;
+    expect(result.contract.schemaVersion).toBe(QUALITY_CONTRACT_SCHEMA_VERSION);
+    expect(result.contract.checks.static).toMatchObject({
+      checks: [{ command: { shell: 'bash' } }],
+    });
+    expect(result.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it.each([
+    [null, '根必须是对象'],
+    [{}, '缺少字段 schemaVersion'],
+    [{ ...clone(), schemaVersion: 2 }, '不支持 schemaVersion 2'],
+    [{ ...clone(), extra: true }, '未知字段 extra'],
+  ])('rejects an invalid root: %#', (value, expected) => {
+    const result = parseQualityContract(value);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') expect(result.errors.join('\n')).toContain(expected);
+  });
+
+  it.each([
+    ['codingXVersion', '', 'codingXVersion 必须是精确 X.Y.Z 版本'],
+    ['codingXVersion', '^0.29.0', 'codingXVersion 必须是精确 X.Y.Z 版本'],
+    ['repository.fullName', 'only-owner', 'repository.fullName'],
+    ['repository.defaultBranch', '', 'repository.defaultBranch'],
+    ['release.protectedRefs', [], 'release.protectedRefs 为空时必须提供 notApplicable'],
+    ['release.notApplicable', '', 'release.notApplicable'],
+    ['sources.engineeringStandards', [], 'sources.engineeringStandards'],
+    ['generatedPaths', ['/absolute/**'], 'generatedPaths[0]'],
+    ['github.requiredChecks', [], 'github.requiredChecks'],
+    ['exceptions.p1.maxDays', 0, 'exceptions.p1.maxDays'],
+  ])('rejects invalid field %s', (path, value, expected) => {
+    const input = clone();
+    const segments = path.split('.');
+    let owner: Record<string, any> = input;
+    for (const segment of segments.slice(0, -1)) owner = owner[segment];
+    owner[segments.at(-1)!] = value;
+    const result = parseQualityContract(input);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') expect(result.errors.join('\n')).toContain(expected);
+  });
+
+  it('accepts an explicit release exemption only when protected refs are empty', () => {
+    const input = clone();
+    input.release = { protectedRefs: [], notApplicable: '该项目不发布版本。' };
+    expect(parseQualityContract(input)).toMatchObject({ status: 'ready' });
+    input.release.protectedRefs = ['v*'];
+    expect(parseQualityContract(input)).toMatchObject({ status: 'invalid' });
+  });
+
+  it.each([
+    ['non-array args', (input: Record<string, any>) => { input.checks.test.checks[0].command.args = 'test'; }],
+    ['empty platforms', (input: Record<string, any>) => { input.checks.test.checks[0].command.platforms = []; }],
+    ['duplicate platforms', (input: Record<string, any>) => { input.checks.test.checks[0].command.platforms = ['linux', 'linux']; }],
+    ['invalid platform', (input: Record<string, any>) => { input.checks.test.checks[0].command.platforms = ['aix']; }],
+    ['timeout too large', (input: Record<string, any>) => { input.checks.test.checks[0].command.timeoutMs = 3_600_001; }],
+    ['both executable and shell', (input: Record<string, any>) => { input.checks.test.checks[0].command.shell = 'bash'; input.checks.test.checks[0].command.script = 'npm test'; }],
+    ['cwd escapes', (input: Record<string, any>) => { input.checks.test.checks[0].command.cwd = '../outside'; }],
+    ['unknown command field', (input: Record<string, any>) => { input.checks.test.checks[0].command.env = { TOKEN: 'x' }; }],
+  ])('rejects unsafe or ambiguous command form: %s', (_name, mutate) => {
+    const input = clone();
+    mutate(input);
+    expect(parseQualityContract(input)).toMatchObject({ status: 'invalid' });
+  });
+
+  it('requires every quality category to contain checks or a non-empty reason, never both', () => {
+    const missing = clone();
+    missing.checks.security = { checks: [] };
+    expect(parseQualityContract(missing)).toMatchObject({ status: 'invalid' });
+
+    const both = clone();
+    both.checks.security = { checks: clone().checks.test.checks, notApplicable: 'no' };
+    expect(parseQualityContract(both)).toMatchObject({ status: 'invalid' });
+  });
+
+  it('rejects duplicate module ids, check ids, required checks, and unknown module references', () => {
+    const input = clone();
+    input.modules.push({ id: 'api', path: 'packages/other' });
+    input.checks.build.checks[0].id = 'unit';
+    input.checks.build.checks[0].module = 'missing';
+    input.github.requiredChecks.push('quality-gate');
+    const result = parseQualityContract(input);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      const errors = result.errors.join('\n');
+      expect(errors).toContain('重复 module id api');
+      expect(errors).toContain('重复 check id unit');
+      expect(errors).toContain('引用未知 module missing');
+      expect(errors).toContain('github.requiredChecks 含重复值 quality-gate');
+    }
+  });
+
+  it('rejects path traversal, backslashes, empty source sets, and invalid source variants', () => {
+    const input = clone();
+    input.sources.specs = [];
+    input.sources.acceptanceCriteria = [{ kind: 'url', url: 'https://example.com' }];
+    input.modules[1].path = 'packages\\api';
+    input.risk.highRiskPaths.push('../secrets/**');
+    const result = parseQualityContract(input);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      const errors = result.errors.join('\n');
+      expect(errors).toContain('sources.specs');
+      expect(errors).toContain('sources.acceptanceCriteria[0].kind');
+      expect(errors).toContain('modules[1].path');
+      expect(errors).toContain('risk.highRiskPaths[2]');
+    }
+  });
+});
+
+describe('quality contract identity and runtime mode', () => {
+  it('produces the same digest for object-key reorder and a different digest for semantic changes', () => {
+    const ready = parseQualityContract(validContract());
+    expect(ready.status).toBe('ready');
+    if (ready.status !== 'ready') return;
+    const reordered = {
+      ...ready.contract,
+      repository: {
+        defaultBranch: ready.contract.repository.defaultBranch,
+        fullName: ready.contract.repository.fullName,
+        provider: ready.contract.repository.provider,
+      },
+    } as QualityContract;
+    expect(digestQualityContract(reordered)).toBe(ready.digest);
+    const changed = structuredClone(ready.contract);
+    changed.repository.defaultBranch = 'trunk';
+    expect(digestQualityContract(changed)).not.toBe(ready.digest);
+  });
+
+  it('allows formal mode only on an exact version match and makes shadow permanently non-deliverable', () => {
+    const ready = parseQualityContract(validContract());
+    expect(ready.status).toBe('ready');
+    if (ready.status !== 'ready') return;
+    expect(assessQualityRuntime(ready.contract, '0.29.0', false)).toEqual({
+      mode: 'formal', expectedVersion: '0.29.0', actualVersion: '0.29.0',
+      versionMatches: true, deliveryReadyAllowed: true,
+    });
+    expect(assessQualityRuntime(ready.contract, '0.30.0', false)).toMatchObject({
+      mode: 'version-mismatch', versionMatches: false, deliveryReadyAllowed: false,
+    });
+    expect(assessQualityRuntime(ready.contract, '0.30.0', true)).toEqual({
+      mode: 'shadow', expectedVersion: '0.29.0', actualVersion: '0.30.0',
+      versionMatches: false, deliveryReadyAllowed: false,
+    });
+    expect(assessQualityRuntime(ready.contract, '0.29.0', true)).toMatchObject({
+      mode: 'shadow', versionMatches: true, deliveryReadyAllowed: false,
+    });
+  });
+
+  it('derives an independent PRD check snapshot and detects any drift from the contract', () => {
+    const ready = parseQualityContract(validContract());
+    expect(ready.status).toBe('ready');
+    if (ready.status !== 'ready') return;
+    const snapshot = deriveQualityChecks(ready.contract);
+    expect(qualityChecksMatchContract(snapshot, ready.contract)).toBe(true);
+    expect(snapshot).not.toBe(ready.contract.checks);
+    if ('checks' in snapshot.test) snapshot.test.checks[0].id = 'changed';
+    expect(qualityChecksMatchContract(snapshot, ready.contract)).toBe(false);
+    expect('checks' in ready.contract.checks.test
+      ? ready.contract.checks.test.checks[0].id
+      : null).toBe('unit');
+  });
+});
+
+describe('readQualityContract', () => {
+  it('keeps the coding-engine dogfood contract valid', () => {
+    expect(readQualityContract(process.cwd())).toMatchObject({
+      status: 'ready',
+      contract: {
+        repository: { fullName: 'Xinzz995/coding-engine', defaultBranch: 'main' },
+        codingXVersion: '0.29.0',
+      },
+      digest: expect.stringMatching(/^sha256:/),
+    });
+  });
+
+  it('distinguishes missing, invalid JSON, invalid schema, and ready contract', () => {
+    const root = mkdtempSync(join(tmpdir(), 'quality-contract-'));
+    try {
+      expect(readQualityContract(root)).toMatchObject({ status: 'missing' });
+      mkdirSync(join(root, '.coding-x'));
+      writeFileSync(join(root, '.coding-x', 'quality.json'), '{');
+      expect(readQualityContract(root)).toMatchObject({ status: 'invalid-json' });
+      writeFileSync(join(root, '.coding-x', 'quality.json'), '{}');
+      expect(readQualityContract(root)).toMatchObject({ status: 'invalid' });
+      writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify(validContract()));
+      expect(readQualityContract(root)).toMatchObject({
+        status: 'ready', path: join(root, '.coding-x', 'quality.json'),
+        digest: expect.stringMatching(/^sha256:/),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

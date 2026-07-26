@@ -12,7 +12,7 @@ import {
   INITIAL_STORY_STATE, type RunState,
 } from './state.js';
 import {
-  runQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback,
+  runQualityChecks, runContractQualityChecks, readQualityChecks, applyGateFailure, applyAbortRollback,
   abortDesc, MAX_RETRIES, ARBITRATION_PREFIXES, applyValidatorFailure,
   applyValidatorSuccess,
 } from './gate.js';
@@ -36,6 +36,13 @@ import {
   type ValidationRequest,
 } from './validation-protocol.js';
 import { checkTddPolicy, readTddConfig, runTddGate, type TddConfig } from './tdd-gate.js';
+import {
+  assessQualityRuntime,
+  qualityChecksMatchContract,
+  readQualityContract,
+  type QualityContractReadResult,
+} from '../quality/contract.js';
+import { CODING_X_VERSION } from '../version.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -62,6 +69,14 @@ export interface LoopConfig {
   interrupt?: Promise<void>;
   /** 连续无进展轮（no-op/超时/异常退出）熔断上限；缺省 3 */
   stallLimit?: number;
+  /** 候选版本 Dogfood；只有原本成功的收敛出口改为 7，失败码保持原义。 */
+  shadow?: boolean;
+  /** 实际运行版本；生产由 CLI 注入，API 缺省使用构建内常量。 */
+  actualVersion?: string;
+  /** 项目根；生产缺省当前目录，测试/嵌入环境可显式指定。 */
+  projectRoot?: string;
+  /** 只供隔离测试注入；生产始终读取项目根 .coding-x/quality.json。 */
+  qualityContractReader?: (projectRoot: string) => QualityContractReadResult;
   /**
    * 仅供历史单测 fixture：允许旧 Validator 直接改 state。CLI 从不设置；生产默认
    * 必须提交结构化 validation result，禁止静默降级。
@@ -116,12 +131,16 @@ function readRunState(statePath: string, prd: Prd): RunState {
 
 // 收敛出口单源：两个 allStoriesResolved 出口（no-op 快路径/轮末完成判定）共用，
 // blocked>0 时 exit 3——「收敛但待人工」对所有出口成立（ADR-009/发现 D）
-const convergedExit = (prd: Prd, state: RunState): number => {
+const convergedExit = (prd: Prd, state: RunState, shadow = false): number => {
   const blockedIds = prd.userStories.filter((s) => state[s.id]?.blocked).map((s) => s.id);
   if (blockedIds.length > 0) {
     const passedCount = prd.userStories.length - blockedIds.length;
     console.log(`\n⏸️  ${passedCount} 个 story 通过，${blockedIds.length} 个 blocked 待人工处理（${blockedIds.join(', ')}）。处理后重跑引擎收敛剩余项；人审入口见 .workspace/report.html 与 state.json notes。`);
     return 3;
+  }
+  if (shadow) {
+    console.log('\n🧪 Shadow 运行已完成。该结果只用于候选版本 Dogfood，不能表示可交付。');
+    return 7;
   }
   console.log('\n💡 全部 story 已通过。建议先运行 /review-loop 审查本轮产物（人审后合并），再用 /compound-docs 收口沉淀。');
   return 0;
@@ -147,6 +166,36 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
 
   let server: ReturnType<typeof dashboard.start> | null = null;
   try {
+    const projectRoot = resolve(cfg.projectRoot ?? process.cwd());
+    const qualityReader = cfg.qualityContractReader ?? readQualityContract;
+    const qualityRead = qualityReader(projectRoot);
+    if (qualityRead.status !== 'ready') {
+      const detail = qualityRead.status === 'missing'
+        ? '质量契约不存在；请先运行 coding-x init'
+        : qualityRead.status === 'invalid'
+          ? qualityRead.errors.join('；')
+          : qualityRead.error;
+      console.error(`❌ 质量契约不可用（${qualityRead.path}）：${detail}`);
+      return 2;
+    }
+    const runtime = assessQualityRuntime(
+      qualityRead.contract,
+      cfg.actualVersion ?? CODING_X_VERSION,
+      cfg.shadow ?? false,
+    );
+    if (runtime.mode === 'version-mismatch') {
+      console.error(
+        `❌ coding-x 版本与质量契约不一致：契约要求 ${runtime.expectedVersion}，` +
+        `当前为 ${runtime.actualVersion}。请使用固定版本，或只为候选 Dogfood 显式加 --shadow。`,
+      );
+      return 2;
+    }
+    if (runtime.mode === 'shadow') {
+      console.log(
+        `🧪 Shadow 模式：契约版本 ${runtime.expectedVersion}，当前版本 ${runtime.actualVersion}；` +
+        '本次运行永远不会产生可交付结论。',
+      );
+    }
     // 启动时保证 state.json 存在：v0.4 及更早的 prd.json 把状态写在 story 上，
     // ensureStateFile 会把它们抽取成 state.json（一次性迁移）。
     const bootPrd = guard.read().prd;
@@ -168,7 +217,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         console.warn(`⚠️  检测到未完成 validator 的待验收状态，已回写待复核：${recovered.storyIds.join(', ')}`);
       }
     }
-    const agentCwd = resolve(process.cwd());
+    const agentCwd = projectRoot;
     const agentEnv: NodeJS.ProcessEnv = {
       CODING_X_WORKSPACE: resolve(cfg.workspace),
       CODING_X_PROJECT_ROOT: agentCwd,
@@ -243,6 +292,36 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
       throw err;
     }
+    if (!bootPrd) {
+      console.error(`❌ 无法读取 ${prdPath}；请先从源 PRD 重新派生`);
+      return 2;
+    }
+    if (bootPrd.qualityContractDigest !== qualityRead.digest) {
+      const received = typeof bootPrd.qualityContractDigest === 'string'
+        ? bootPrd.qualityContractDigest
+        : 'missing';
+      console.error(
+        `❌ PRD 的质量契约摘要无效：期望 ${qualityRead.digest}，收到 ${received}。` +
+        '请停止运行并从当前质量契约重新派生 PRD。',
+      );
+      return 2;
+    }
+    if (!cfg.legacyValidatorProtocolForTests
+        && !qualityChecksMatchContract(bootPrd.qualityChecks, qualityRead.contract)) {
+      console.error(
+        '❌ prd.json 的 qualityChecks 不是当前质量契约的完整派生快照。' +
+        '请重新派生 PRD；不要手写或单独维护项目检查。',
+      );
+      return 2;
+    }
+    // 正式模式执行 PRD 中已经过逐字段核对的冻结快照；历史测试兼容路径没有新快照时
+    // 才回退测试注入契约，生产不会走该分支。
+    const frozenQualityChecks = qualityChecksMatchContract(
+      bootPrd.qualityChecks,
+      qualityRead.contract,
+    )
+      ? structuredClone(bootPrd.qualityChecks)
+      : structuredClone(qualityRead.contract.checks);
     const runKind = preflight.runner;
     const bootResolved = !!(bootPrd && bootState && allStoriesResolved(bootPrd, bootState));
     for (const warning of preflight.warnings) console.warn(`⚠️  ${warning}`);
@@ -296,6 +375,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         }
       }
     };
+    const qualityContractStillCurrent = (): boolean => {
+      const current = qualityReader(projectRoot);
+      if (current.status === 'ready' && current.digest === qualityRead.digest) return true;
+      const observed = current.status === 'ready' ? current.digest : current.status;
+      console.error(
+        `❌ 运行期间质量契约发生变化或不可读（启动 ${qualityRead.digest}，当前 ${observed}）。` +
+        '本次运行按配置错误停止；请确认变更后重新派生 PRD。',
+      );
+      return false;
+    };
     // 每次 guard.read() 都可能检出新篡改事件——三处读取点共用（archive 记文件名，与报告红旗区文件清单对齐）
     const recordTamper = (read: PrdReadResult, iteration: number) => {
       if (read.tamperedArchive !== undefined) {
@@ -325,10 +414,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     let exitCode = 1;
     if (bootResolved) {
       dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-      exitCode = convergedExit(bootPrd!, bootState!);
+      exitCode = convergedExit(bootPrd, bootState!, cfg.shadow ?? false);
     }
     for (let i = 1; !bootResolved && i <= cfg.maxIterations; i++) {
       lock.verify(); // 轮首自愈：agent 误删/改写锁时告警重建（同 prd-guard 的机械防护哲学）
+      if (!qualityContractStillCurrent()) {
+        exitCode = 2;
+        break;
+      }
       let stateRawBefore = rawOf(statePath);
       const progressRawBefore = rawOf(progressPath);
       const beforeRead = guard.read();
@@ -518,6 +611,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // no-op 空转检测：builder 正常结束但 state 与 progress 双无变化（机械信号）——
       // 跳过门禁与验收（省一次强模型调用），计入 stall。
       if (builder && builderOutcome === 'completed'
+          && !qualityContractStillCurrent()) {
+        recordIteration({ builderOutcome: 'completed' });
+        exitCode = 2;
+        tamperCheckBeforeExit(i);
+        break;
+      }
+
+      if (builder && builderOutcome === 'completed'
           && rawOf(statePath) === stateRawBefore && rawOf(progressPath) === progressRawBefore) {
         // 双无变化不等于「无事发生」：本轮开始时可能已经全部 resolved（如 legacy 迁移在
         // bootstrap 就把 passes 写进 state.json，或断点续跑接手一个已完成的工作区）——
@@ -529,7 +630,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           recordIteration({ builderOutcome: 'completed', noop: true });
           tamperCheckBeforeExit(i);
           dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-          exitCode = convergedExit(before, beforeState);
+          exitCode = convergedExit(before, beforeState, cfg.shadow ?? false);
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
@@ -557,15 +658,36 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       if (agentBlocked) {
         console.log(`⏭️  ${currentStory} 已被置 blocked（待人工处理），本轮跳过门禁与验收`);
       }
-      const checks = readQualityChecks(gateRead.prd);
-      if (checks === 'invalid') {
+      const legacyChecks = cfg.legacyValidatorProtocolForTests
+        && Array.isArray(gateRead.prd?.qualityChecks)
+        ? readQualityChecks(gateRead.prd)
+        : null;
+      const derivedSnapshot = qualityChecksMatchContract(
+        gateRead.prd?.qualityChecks,
+        qualityRead.contract,
+      );
+      if (cfg.legacyValidatorProtocolForTests
+          && gateRead.prd?.qualityChecks !== undefined
+          && !derivedSnapshot
+          && (legacyChecks === 'invalid' || !Array.isArray(gateRead.prd.qualityChecks))) {
         console.warn('⚠️  prd.json 的 qualityChecks 形状非法（应为字符串数组），机械门禁未启用');
-      } else if (!agentBlocked && checks && currentStory) {
+      } else if (!agentBlocked && currentStory
+          && (!cfg.legacyValidatorProtocolForTests
+            || (legacyChecks !== 'invalid' && legacyChecks !== null)
+            || derivedSnapshot)) {
         dashboard.setState({
           phase: 'gating', model: null, routeSource: null,
           storyDifficulty: currentStoryObj?.difficulty ?? null,
         });
-        const gate = await runQualityChecks(checks, agentCwd);
+        const gate = legacyChecks && legacyChecks !== 'invalid'
+          ? await runQualityChecks(legacyChecks, agentCwd)
+          : await runContractQualityChecks(frozenQualityChecks, agentCwd);
+        const skippedChecks = 'skipped' in gate && Array.isArray(gate.skipped)
+          ? gate.skipped.filter((value): value is string => typeof value === 'string')
+          : [];
+        if (skippedChecks.length > 0) {
+          console.log(`⏭️  当前系统不适用的质量检查：${skippedChecks.join('、')}`);
+        }
         const gateDiagnostic = gate.failure
           ? clipEvidenceDiagnostic(gate.failure.outputTail).trim()
           : '';
@@ -877,6 +999,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(validatorDiagnostic ? { validatorDiagnostic } : {}),
       });
 
+      if (!qualityContractStillCurrent()) {
+        exitCode = 2;
+        tamperCheckBeforeExit(i);
+        break;
+      }
+
       if (validatorOutcome === 'timeout' || validatorOutcome === 'error' || validationRollback) {
         if (stalled()) { tamperCheckBeforeExit(i); break; }
       } else {
@@ -891,7 +1019,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const afterState = after ? readRunState(statePath, after) : null;
       if (after && afterState && allStoriesResolved(after, afterState)) {
         dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-        exitCode = convergedExit(after, afterState);
+        exitCode = convergedExit(after, afterState, cfg.shadow ?? false);
         break;
       }
     }

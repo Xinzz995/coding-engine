@@ -35,6 +35,8 @@ describe('version consistency', () => {
       'package.json': readJson(join(ROOT, 'package.json')).version,
       'package-lock.json': lock.version,
       'package-lock.json packages[""]': lock.packages[''].version,
+      'src/version.ts': readFileSync(join(ROOT, 'src/version.ts'), 'utf8')
+        .match(/CODING_X_VERSION\s*=\s*'([^']+)'/)?.[1],
     };
     for (const rel of PLUGIN_MANIFESTS) {
       entries[rel] = readJson(join(ROOT, rel)).version;

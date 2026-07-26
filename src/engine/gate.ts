@@ -2,9 +2,16 @@ import type { Prd } from './prd.js';
 import type { RunState } from './state.js';
 import { INITIAL_STORY_STATE } from './state.js';
 import { spawn } from 'node:child_process';
+import { realpathSync } from 'node:fs';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { terminateProcessTree } from './process-tree.js';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 import type { ValidationCheck } from './validation-protocol.js';
+import type {
+  FrozenQualityChecks,
+  QualityCheck,
+  QualityPlatform,
+} from '../quality/contract.js';
 
 /** 打回上限的单一真相源：门禁与结构化 Validator failed claim 都由引擎应用。 */
 export const MAX_RETRIES = 5;
@@ -58,6 +65,11 @@ export interface GateResult {
   ms: number;
 }
 
+export interface ContractGateResult extends GateResult {
+  /** 因当前操作系统不适用而未运行的 check id；不是失败，也不会计入 total。 */
+  skipped: string[];
+}
+
 /**
  * 读取并校验 qualityChecks：未配置或空数组返回 null（门禁不启用，静默）；
  * 形状非法（非数组/含非字符串）返回 'invalid'——调用方警告后按未配置处理，
@@ -77,16 +89,20 @@ export const GATE_TIMEOUT_MS = 600_000;
  * 执行一条用户批准的完整 shell 命令。普通 qualityChecks 与 TDD coverageCheck
  * 必须共用这一实现，避免超时、进程树收口和诊断截尾语义漂移。
  */
-export function runGateCommand(
-  command: string,
-  cwd: string,
-  timeoutMs: number = GATE_TIMEOUT_MS,
-): Promise<GateFailure | null> {
+interface SpawnedGateSpec {
+  label: string;
+  executable: string;
+  args: string[];
+  cwd: string;
+  timeoutMs: number;
+  shell: boolean;
+}
+
+/** legacy shell 命令和结构化契约命令共用超时、进程树终止、tee 与有界诊断语义。 */
+function runSpawnedGate(spec: SpawnedGateSpec): Promise<GateFailure | null> {
   return new Promise((resolve, reject) => {
-    // shell 语义：qualityChecks 是用户在 prd.json 亲手声明的完整命令行（如 `npm test -- --run`）。
-    // patterns.md 的「不经 shell」约定针对代码拼接固定命令+变量参数的场景，不适用于此。
-    const child = spawn(command, {
-      cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'],
+    const child = spawn(spec.executable, spec.args, {
+      cwd: spec.cwd, shell: spec.shell, stdio: ['ignore', 'pipe', 'pipe'],
       // detached: 命令自成进程组——shell:true 下 child.kill 只达 shell 本身，
       // 超时必须对整组发信号，否则挂起的孙进程（npm 包裹的测试进程等）会泄漏
       detached: process.platform !== 'win32',
@@ -106,25 +122,43 @@ export function runGateCommand(
       void terminateProcessTree(child).then(() => {
         if (settled) return;
         settled = true;
-        resolve({ command, exitCode: null, timedOut: true, outputTail: tail });
+        resolve({ command: spec.label, exitCode: null, timedOut: true, outputTail: tail });
       }, (err) => {
         if (settled) return;
         settled = true;
         reject(err);
       });
-    }, timeoutMs);
+    }, spec.timeoutMs);
     child.once('exit', (code) => {
       if (settled || terminating) return;
       settled = true;
       clearTimeout(timer);
-      resolve(code === 0 ? null : { command, exitCode: code, timedOut: false, outputTail: tail });
+      resolve(code === 0 ? null : {
+        command: spec.label, exitCode: code, timedOut: false, outputTail: tail,
+      });
     });
     child.once('error', (err) => {
       if (settled || terminating) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ command, exitCode: null, timedOut: false, outputTail: err.message });
+      resolve({ command: spec.label, exitCode: null, timedOut: false, outputTail: err.message });
     });
+  });
+}
+
+export function runGateCommand(
+  command: string,
+  cwd: string,
+  timeoutMs: number = GATE_TIMEOUT_MS,
+): Promise<GateFailure | null> {
+  // 仅保留给历史 PRD fixture 与 TDD coverageCheck；正式质量契约默认不经 shell。
+  return runSpawnedGate({
+    label: command,
+    executable: command,
+    args: [],
+    cwd,
+    timeoutMs,
+    shell: true,
   });
 }
 
@@ -142,6 +176,127 @@ export async function runQualityChecks(
     if (failed) return { ok: false, failure: failed, total: checks.length, ran, ms: Date.now() - started };
   }
   return { ok: true, failure: null, total: checks.length, ran, ms: Date.now() - started };
+}
+
+function nodeQualityPlatform(platform: NodeJS.Platform): QualityPlatform | null {
+  if (platform === 'linux') return 'linux';
+  if (platform === 'darwin') return 'macos';
+  if (platform === 'win32') return 'windows';
+  return null;
+}
+
+function allFrozenChecks(snapshot: FrozenQualityChecks): QualityCheck[] {
+  const declared: QualityCheck[] = [];
+  for (const category of ['test', 'build', 'static', 'security'] as const) {
+    const policy = snapshot[category];
+    if ('checks' in policy) declared.push(...policy.checks);
+  }
+  return declared;
+}
+
+function resolveContractCwd(projectRoot: string, cwd: string): string {
+  const root = realpathSync(projectRoot);
+  const target = realpathSync(resolve(root, cwd));
+  const rel = relative(root, target);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(`命令工作目录解析到项目根之外：${cwd}`);
+  }
+  return target;
+}
+
+function shellArgs(shell: string, script: string): string[] {
+  const name = basename(shell).toLowerCase();
+  if (name === 'cmd' || name === 'cmd.exe') return ['/d', '/s', '/c', script];
+  if (name === 'powershell' || name === 'powershell.exe' || name === 'pwsh' || name === 'pwsh.exe') {
+    return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script];
+  }
+  return ['-c', script];
+}
+
+/**
+ * 按固定类别顺序执行质量契约中适用于当前系统的检查。结构化命令 shell=false；只有契约
+ * 明确选择 shell 时才以该 executable 的原生 -c/-Command 入口执行。
+ */
+export async function runContractQualityChecks(
+  checks: FrozenQualityChecks,
+  projectRoot: string,
+  platform: QualityPlatform | null = nodeQualityPlatform(process.platform),
+): Promise<ContractGateResult> {
+  const started = Date.now();
+  if (platform === null) {
+    return {
+      ok: false,
+      failure: {
+        command: '[platform]', exitCode: null, timedOut: false,
+        outputTail: `当前 Node 平台 ${process.platform} 未被质量契约支持`,
+      },
+      total: 0,
+      ran: 0,
+      ms: Date.now() - started,
+      skipped: [],
+    };
+  }
+  const declared = allFrozenChecks(checks);
+  const skipped = declared
+    .filter((check) => !check.command.platforms.includes(platform))
+    .map((check) => check.id);
+  const applicable = declared.filter((check) => check.command.platforms.includes(platform));
+  let ran = 0;
+  for (const check of applicable) {
+    ran += 1;
+    let cwd: string;
+    try {
+      cwd = resolveContractCwd(projectRoot, check.command.cwd);
+    } catch (error) {
+      return {
+        ok: false,
+        failure: {
+          command: `[${check.id}]`, exitCode: null, timedOut: false,
+          outputTail: error instanceof Error ? error.message : String(error),
+        },
+        total: applicable.length,
+        ran,
+        ms: Date.now() - started,
+        skipped,
+      };
+    }
+    const spec: SpawnedGateSpec = 'executable' in check.command
+      ? {
+          label: `[${check.id}]`,
+          executable: check.command.executable,
+          args: check.command.args,
+          cwd,
+          timeoutMs: check.command.timeoutMs,
+          shell: false,
+        }
+      : {
+          label: `[${check.id}]`,
+          executable: check.command.shell,
+          args: shellArgs(check.command.shell, check.command.script),
+          cwd,
+          timeoutMs: check.command.timeoutMs,
+          shell: false,
+        };
+    const failure = await runSpawnedGate(spec);
+    if (failure) {
+      return {
+        ok: false,
+        failure,
+        total: applicable.length,
+        ran,
+        ms: Date.now() - started,
+        skipped,
+      };
+    }
+  }
+  return {
+    ok: true,
+    failure: null,
+    total: applicable.length,
+    ran,
+    ms: Date.now() - started,
+    skipped,
+  };
 }
 
 function pad2(n: number): string {

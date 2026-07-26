@@ -62,25 +62,25 @@ coding-x 同时包含两部分：
 1. **准备目标项目。** 确认它是你信任的 Git 仓库，重要内容已经提交或备份，当前没有不明来源的改动。
 2. **安装插件和一个 runner。** Node.js 需要 ≥18；Claude Code、Codex 或 Cursor Agent 至少安装并登录一个。详细命令见「安装」。
 3. **进入目标项目根目录。** 后面的对话和终端命令都在这里进行，而不是在 coding-x 插件源码目录中进行。
-4. **第一次接入时运行 `/init-docs`。** 它只补缺失文件，不覆盖已有文档；然后人工确认生成的黄金原则和架构占位。
+4. **第一次接入先初始化质量门禁，再运行 `/init-docs`。** `npx coding-x init` 先发现候选检查和规范，必须经你确认才配置 GitHub 最小规则并生成受 Git 管理的质量契约；`/init-docs` 只补缺失文档，不覆盖已有内容。
 5. **让当前会话理解项目。** 运行 `/priming`。它不改代码，只输出当前项目概览。
 6. **整理需求。** 需求很乱时说 `align: <你的需求>`；涉及数据库、公开接口、状态机、权限或迁移时，再说 `tech: <功能或对齐稿>`。需求已经清楚可以跳过对应步骤。
 7. **规划和生成正式 PRD。** 推荐先运行 `/planning <功能描述或对齐稿>`，再说“基于这些材料创建一个 PRD”。逐项确认 AI 提出、且无法从项目中查证的业务问题。
 8. **生成引擎执行清单。** 说“将 `docs/prds/prd-xxx.md` 转成 `prd.json`”。检查它展示的 story/AC 对照表；有异议时改源 PRD 后重新转换，不要直接手改 `.workspace/prd.json`。
-9. **先体检，再启动。** 运行 `npx coding-x doctor`。初次使用建议保留 `qualityChecks`，模型路由则可以先不启用，直接使用 runner 默认模型。
+9. **先体检，再启动。** 运行 `npx coding-x doctor`。质量契约、固定版本、PRD 摘要或派生检查快照任一不一致都会停止；模型路由可以先不启用，直接使用 runner 默认模型。
 10. **运行引擎。** 例如 `npx coding-x codex`。浏览器会打开仪表盘；终端也会持续显示当前 story、阶段和实际模型。
 11. **观察和处理异常。** 随时运行 `npx coding-x status`；需要完整证据时打开 `.workspace/report.html`。退出码 3 或 story 显示 blocked 时，先看 `state.json` 的 notes 和报告，再做人工裁决。
 12. **合并前审查。** 运行 `/review-loop`，逐条给出“已修/接受/推迟/驳回”裁决。它不会自动修复；要修的项需要你明确授权。
 13. **合并和收口。** 所有发现闭环、检查重新通过后，由人决定合并。随后可运行 `/compound-docs`，把仍然成立的经验沉淀到长期文档；物理归档只有在你明确授权时才发生。
 
-最短可用路线是：**已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop`**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
+最短可用路线是：**`coding-x init` → 已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop`**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
 
 ### 首次运行前的安全红线
 
 > ⚠️ coding-x 会以跳过 runner 权限确认的模式运行 AI agent。它可以读写目标项目、执行命令、创建/切换分支并提交代码。
 
 - 只在你信任的仓库中运行；先提交或备份自己的未完成工作。
-- 确认目标项目的测试/typecheck 基线本来就是绿色，否则循环会把旧失败误当成本轮问题反复处理。
+- 确认质量契约中的测试、构建、静态检查和安全检查基线本来就是绿色，否则循环会把旧失败误当成本轮问题反复处理。
 - `.workspace/` 应被 Git 忽略；让 `prd-to-json` 和 `doctor` 检查，不要把运行状态混入产品提交。
 - 不要在引擎运行时修改 `prd.json`、运行 `repair` 或重新派生需求；先停止引擎并确认锁已释放。
 - 不要把密码、密钥写进 PRD、progress、截图或模型目录。全局模型目录只保存模型 ID，不保存账号凭据。
@@ -120,8 +120,8 @@ coding-x 同时包含两部分：
    │   │ 5. 再写 passes=true 候选并追加 progress.md           │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
-   │   ┌── 机械门禁（qualityChecks，可选）──────────────────┐ │
-   │   │ 引擎逐条 shell 执行质量检查命令（fail-fast）        │ │
+   │   ┌── 质量契约机械门禁（必需）────────────────────────┐ │
+   │   │ 按冻结快照执行结构化项目检查（fail-fast）          │ │
    │   │ 失败 → 确定性打回 story、跳过本轮 Validator         │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
@@ -150,7 +150,7 @@ coding-x 同时包含两部分：
 - **完成即退出**：全部 story 同时满足 `passes && validated`（无 blocked）→ 退出码 0；全部收敛但存在 blocked 待人工 → 退出码 3；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断 → 退出码 1（完整对照见「命令行参数」后的「退出码」表）。
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。每次真实调用记录完整收口耗时与退出码，异常时另保留最近 2000 字符诊断，终端输出仍实时可见。
-- **机械门禁（可选）**：`prd.json` 顶层配置 `qualityChecks`（完整 shell 命令数组）后，引擎在每轮开发之后、验证之前逐条确定性执行（fail-fast，单条超时 10 分钟）；失败即机械打回（`retryCount` +1，累计 5 次 `blocked`）并跳过该轮 validator——builder 谎报「检查通过」会被零成本戳穿。门禁配置受快照保护：运行期改写 prd.json（含删改 `qualityChecks` / 验收标准）会被检测、恢复并存档，无法架空门禁与验收（ADR-007）。未配置时行为不变，`npx coding-x doctor` 会给出配置建议。
+- **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止（ADR-007、018）。
 - **TDD 门禁（可选）**：启用 `prd.json.tdd` 后，Builder 按 `tdd` skill 对每个公共行为做真实 RED→同命令 GREEN→绿色重构；宿主 hook 在 agent commit 前提前检查，引擎仍在 Validator 前独立校验 Git 基线、政策摘要、新增覆盖忽略标记并运行项目原生 `coverageCheck`。hook 通过不能跳过引擎重跑；覆盖率证明代码被执行，不证明断言有效或历史上一定先写测试（ADR-017）。
 - **可信目标绑定**：每轮 Validator 都收到一次性 request ID、精确 story、AC 快照/hash 和调用前 Git HEAD，必须提交版本化、逐 AC、自洽的结构化 claim。缺结果、旧结果、错 story/hash/commit、漏 AC、产物变化或改写 `state.json` 全部 fail closed，不签发凭证（ADR-015）。该协议消除正常控制流中的错目标/无结果假绿，但同权限 agent 仍能伪造观察，不能替代机械门禁和人审。
 - **workspace 写入避让与 Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 在任何变更前及首次真实写入前各用 `doctor` 检查工作区锁，发现引擎运行中或无法判定就保持零写入，且绝不删除 `engine.lock`；随后检查目录是否被忽略、是否已有文件进入 Git 索引。它不会擅自修改 `.gitignore` 或 Git 索引。锁检查是尽力避让，不替代引擎的机械互斥。
@@ -284,7 +284,7 @@ prd-generate ──────────────────────�
 prd-to-json ──────────────────────────────▶ .workspace/prd.json
                                               │  本地执行派生物，不进入 Git
                                               ▼
-npx coding-x ───────────────▶ Developer → 普通门禁 → TDD 门禁 → Validator → 下一 story
+npx coding-x ───────────────▶ Developer → 契约检查 → TDD 门禁 → Validator → 下一 story
                                               │
                                               ├─ state/progress/evidence/screenshots
                                               ├─ dashboard / status
@@ -421,7 +421,25 @@ coding-x 的信息分三层保存：
   "project": "我的项目",
   "branchName": "ralph/my-feature",
   "sourcePrd": "docs/prds/prd-my-feature.md",  // 意图真相源（源 PRD）路径，冲突时以它为准重新派生
-  "qualityChecks": ["npm run typecheck", "npm test"],  // 机械门禁（可选）：每轮 builder 后引擎逐条执行，失败确定性打回
+  "qualityContractDigest": "sha256:<当前质量契约摘要>",
+  "qualityChecks": {                         // 由 doctor 输出原样派生，不能手写另一套
+    "test": {
+      "checks": [{
+        "id": "tests",
+        "module": "root",
+        "command": {
+          "executable": "npm",
+          "args": ["test", "--", "--run"],
+          "cwd": ".",
+          "platforms": ["linux", "macos", "windows"],
+          "timeoutMs": 600000
+        }
+      }]
+    },
+    "build": { "notApplicable": "本项目没有构建步骤" },
+    "static": { "notApplicable": "本项目没有独立静态检查" },
+    "security": { "notApplicable": "本项目没有第三方生产依赖" }
+  },
   "tdd": {                                     // TDD 门禁整段可选；出现时五个字段必须完整
     "coverageCheck": "node scripts/tdd-coverage-gate.mjs",
     "sourcePathspecs": [":(glob)src/**"],       // 用户批准的生产代码 Git 范围
@@ -572,12 +590,14 @@ npx coding-x --escalation-model model-e  # 临时覆盖升级 builder 模型
 npx coding-x --no-open          # 不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所在目录
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
+npx coding-x --shadow           # 候选版本真实 Dogfood；成功也固定返回 7，不表示可交付
 npx coding-x --stall-limit 5    # 连续无进展轮（空转/超时/异常退出）达 5 次才熔断（缺省 3）
 npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
 npx coding-x status             # 终端一屏速览工作区执行状态（退出码 0/1/2 可作 CI 门禁）
 npx coding-x status --json      # 同上，stdout 输出单个 JSON 对象供脚本与 agent 消费
 npx coding-x doctor             # docs/、workspace Git 隔离等健康检查（硬错误以退出码 1 结束）
+npx coding-x doctor --json      # 单个 JSON；含契约摘要及 PRD 应原样冻结的结构化检查快照
 npx coding-x doctor --stale-days 14  # 新鲜度阈值改为 14 天（缺省 30）
 npx coding-x report             # 手动（重）生成 .workspace/report.html；state 损坏时产出红色诊断报告并退出 1
 ```
@@ -647,6 +667,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：active 区文件的 git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期，`docs/archive/` 冷档案不参与 |
 | `--json` | 关闭 | `status`：输出 story 状态、配置/实际路由（含调用 outcome/duration/exit/异常诊断）与最近结构化验收；`models`：输出 `available` 或 `error` 的单个 JSON 对象 |
+| `--shadow` | 关闭 | 只供候选版本 Dogfood；原本成功的收敛固定退出 7，不能表示正式通过；真实失败仍保留原失败码 |
 
 ### 退出码
 
@@ -658,6 +679,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `1` | 跑满 `--max-iter` 仍未全部收敛；或连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 `--stall-limit` 提前熔断 |
 | `2` | workspace 锁（`engine.lock`）被占用，本次 `run`/`repair` 直接拒绝（ADR-008） |
 | `3` | 全部 story 已收敛（`passes && validated`，或 `blocked`），但存在 `blocked` story 待人工处理 |
+| `7` | shadow 运行完成；只表示候选验证跑完，永远不能表示可交付 |
 
 `repair`/`doctor`/`status`/`report`/`models`/`config`/`hooks` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
 
@@ -715,7 +737,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **Agent 调用凭证**：每次真实 Builder/Validator 子进程都记录 outcome、退出码与调用收口耗时；异常 stdout/stderr 尾部有界进入 evidence/status/report，成功 transcript 不落盘。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
-- **机械门禁（qualityChecks）**：引擎在 Developer 与 Validator 之间确定性执行项目质量检查（`prd.json` 顶层配置），失败机械打回并跳过该轮验证；超时会终止并确认整棵门禁进程树退出后才进入下一轮——LLM 验证链之下不可共谋、不可绕过的确定性防线。
+- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。引擎在 Developer 与 Validator 之间逐项执行，失败机械打回并跳过该轮验证；版本、摘要、快照或运行中契约漂移都会停止，超时会等整棵进程树退出后才继续。
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 写入避让与 Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 双次检查活跃工作区锁、写前阻止静默污染，`doctor` 只读报告锁与 Git 隔离状态，不替用户删锁或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
@@ -773,7 +795,7 @@ my-project/
 | --- | --- | --- |
 | 找不到 `/init-docs`、`/planning` 等命令 | 插件是否加载、当前 AI 工具是否支持 commands、是否在目标项目会话 | 重新加载插件或按宿主的插件方式指向 coding-x 仓库；不要在目标项目里复制一份 command 内容 |
 | `prd-to-json` 说 `.workspace/` 未忽略或已有文件被 Git 跟踪 | `npx coding-x doctor`、`.gitignore`、`git ls-files .workspace` | 先决定是否修正 Git 隔离；skill 不会自动改 `.gitignore` 或执行 `git rm --cached` |
-| `doctor` 发现 qualityChecks 基线失败 | 直接运行它列出的 typecheck/lint/test | 先修复项目原有失败或重新确认门禁，基线全绿后再跑引擎 |
+| 契约中的项目检查失败 | 按失败 check ID 在对应模块运行同一命令 | 先修复项目原有失败或重新确认质量契约，基线全绿后再跑引擎 |
 | `doctor` 报 TDD 配置非法、基线不可达或政策摘要变化 | `.workspace/prd.json` 的 `tdd`、对应政策文件、当前 Git 根 | 不要直接重算摘要；停止运行，由 `prd-to-json` 重新确认政策、跑真实基线并派生 |
 | agent 执行 `git commit` 被 TDD hook 阻断 | hook 的有限错误摘要、手工运行 `coverageCheck` | 修测试、实现或政策漂移后重跑；不要关闭 hook 规避。即使绕过，coding-x 引擎仍会独立打回 |
 | Cursor 没有提前检查，或 `hooks cursor status` 报缺失/过期 | 项目根的 `.cursor/hooks.json`、`.cursor/coding-x/`、status 输出 | 在 Git 项目根运行 `npx coding-x hooks cursor install`，升级 coding-x 后也重跑；若报冲突，先人工处理被修改或不合法的文件，不要强行覆盖 |
