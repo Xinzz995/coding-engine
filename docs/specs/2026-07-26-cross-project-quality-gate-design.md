@@ -109,14 +109,17 @@ coding-engine 首版仍位于个人 GitHub 仓库。Ruleset 能可靠阻止日�
 - 默认分支、GitHub `owner/repo` 和受保护发布引用；
 - Spec、验收标准和工程规范来源；
 - 测试、构建、静态检查、安全检查以及每个不适用项的理由；
-- 多模块范围、适用路径、工作目录、运行系统、超时和生成产物目录；
+- 多模块范围、适用路径、工作目录、运行系统、工具链精确版本、任务检查范围、超时和生成产物目录；
 - 高风险目录、默认风险类别和项目覆盖项；
 - GitHub 必需检查名称；
 - P1 延期和紧急政策例外的模板、字段与到期规则。
 
 机械命令默认使用 `executable`、`args`、`cwd`、`platforms`、`timeoutMs` 和适用路径的结构化
-形式。只有确需管道或重定向时才允许显式 `shell` 与脚本内容；shell 模式必须在初始化时向
-用户展示并确认。
+形式。GitHub `jobs` 另行明确任务 ID、系统、Node/Go/Python 工具版本、准备命令和实际执行的
+检查 ID，因此能表达同一系统的多版本任务，也不会把 coding-engine 的 Node 矩阵偷偷套给
+Go/Python 项目。只有确需管道或重定向时才允许显式 `shell` 与脚本内容；shell 模式必须在
+初始化时向用户展示并确认。工具链只生成 coding-x 内置且固定完整提交标识的官方 setup
+action，不允许契约注入任意 action。
 
 PRD 中的 `qualityChecks` 由契约冻结派生，并记录契约摘要，不再要求用户维护第二份命令。
 GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式运行版本与固定版本不一致，
@@ -126,14 +129,18 @@ GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式
 ### 初始化状态机
 
 完全空的远端没有可保护的默认分支，因此用户先创建一个最小初始提交；这是唯一仓库创建
-例外。之后初始化分为三个状态：
+例外。之后初始化分为四个可回读状态：
 
 1. `minimum-protected`：`init` 探测项目与 GitHub 能力，用户确认命令、规范和最小规则后，
    先配置“必须 PR、禁强推、禁删除”并回读；
 2. `bootstrap-generated`：回读成功后生成契约、CI、PR 模板和政策例外 Issue 模板，用户自行
    提交、推送并打开 Bootstrap PR；
-3. `ready`：首次 `quality-gate` check-run 已在 Bootstrap PR 出现后，用户再次运行 `init`，
-   将它加入必需检查并回读；Bootstrap PR 通过全部检查后才能合并。
+3. `bootstrap-protected`：首次 `quality-gate` check-run 已在 Bootstrap PR 的最新提交出现后，
+   用户再次运行 `init`，将它连同 GitHub Actions 来源绑定到 Ruleset 并回读；Bootstrap PR
+   通过该检查后才能合并；
+4. `ready`：`policy-guard` 工作流已进入默认分支后，再用一个 Activation PR 让默认分支旧
+   工作流为该 PR head 产生 `policy-guard`。`init` 将其绑定为必需检查并回读后，该 PR 才能
+   合并。Bootstrap PR 不伪造同名占位检查，也不能要求尚不存在于默认分支的政策检查。
 
 初始化不自动 commit、push、开 PR 或合并。任一阶段中断后可以幂等重跑；`doctor` 在进入
 `ready` 前始终返回非就绪。私有仓库若账户套餐或权限不支持所需 Ruleset，初始化停止，不
@@ -306,7 +313,9 @@ PR/base/head、评审轮次和状态。
 默认分支旧 `policy-guard` 识别质量契约、工作流、工程原则和发布规则变更。若使用
 `pull_request_target`，只通过 API 读取文件列表、标签和 Issue 元数据；不签出、不执行、
 不拼接运行 PR 内容。一次性政策标签仅表示 owner 明确批准，必须关联有效 Issue，不称为
-第二方审批。所有第三方 Action 固定完整提交 SHA，并采用最小权限。
+第二方审批。安全评估完成后，默认分支工作流只额外创建一个绑定 PR 最新 head 的
+`policy-guard` Check Run；Ruleset 不依赖绑定 base SHA 的源 job。所有第三方 Action 固定完整
+提交 SHA，并采用最小权限。
 
 ### coding-engine 检查矩阵
 

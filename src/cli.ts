@@ -1,4 +1,5 @@
 import { parseArgs } from 'node:util';
+import { createInterface } from 'node:readline/promises';
 import { join, dirname } from 'node:path';
 import { existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -25,9 +26,10 @@ import {
 } from './cursor-hooks.js';
 import * as dashboard from './dashboard/server.js';
 import { CODING_X_VERSION } from './version.js';
+import { runQualityInit } from './quality/init.js';
 
 export interface CliConfig {
-  command: 'run' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config' | 'hooks';
+  command: 'run' | 'init' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config' | 'hooks';
   /** 全局帮助请求；先于任何子命令校验与副作用处理。 */
   help: boolean;
   configAction: 'path' | 'init' | 'validate' | null;
@@ -50,6 +52,12 @@ export interface CliConfig {
   stallLimit: number;
   /** 候选版本 Dogfood；成功也固定返回 7，不能表示可交付。 */
   shadow: boolean;
+  /** init 从用户确认过的文件读取契约；相对路径基于项目根。 */
+  contractFile: string | undefined;
+  /** init 明确跳过是/否提示；不会替用户填写不适用理由。 */
+  yes: boolean;
+  /** doctor 只检查本地状态，不查询 GitHub。 */
+  local: boolean;
 }
 
 export const CLI_HELP = `coding-x — Ralph 自动化编码 harness
@@ -65,6 +73,7 @@ runner:
   cursor                         使用 Cursor Agent
 
 命令:
+  init                           初始化质量契约与 GitHub 交付门禁
   repair                         修复 workspace 中的 prd.json/state.json
   dashboard                      启动只读离线仪表盘
   doctor                         检查文档、门禁、模型与 workspace 健康度
@@ -91,6 +100,9 @@ runner:
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（doctor/status/models）
   --shadow                       候选版本 Dogfood；永远不产生可交付结论
+  --contract <file>              init 使用已确认的质量契约文件
+  --yes                          init 接受已展示的远端和文件变更
+  --local                        doctor 只检查本地状态，不查询 GitHub
   -h, --help                     显示本帮助并退出
 
 更多说明: https://github.com/Xinzz995/coding-engine#readme`;
@@ -114,6 +126,9 @@ export function parseCliArgs(argv: string[]): CliConfig {
       json: { type: 'boolean' },
       'stall-limit': { type: 'string' },
       shadow: { type: 'boolean' },
+      contract: { type: 'string' },
+      yes: { type: 'boolean' },
+      local: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -121,7 +136,8 @@ export function parseCliArgs(argv: string[]): CliConfig {
   const first = positionals[0];
   const help = values.help === true || first === 'help';
   const command: CliConfig['command'] =
-    first === 'repair' ? 'repair'
+    first === 'init' ? 'init'
+    : first === 'repair' ? 'repair'
     : first === 'dashboard' ? 'dashboard'
     : first === 'doctor' ? 'doctor'
     : first === 'status' ? 'status'
@@ -130,6 +146,18 @@ export function parseCliArgs(argv: string[]): CliConfig {
     : first === 'config' ? 'config'
     : first === 'hooks' ? 'hooks'
     : 'run';
+  if (!help && command === 'init' && positionals.length > 1) {
+    throw new Error('❌ init 不接受额外位置参数');
+  }
+  if (!help && values.contract !== undefined && command !== 'init') {
+    throw new Error('❌ --contract 只能用于 init');
+  }
+  if (!help && values.yes === true && command !== 'init') {
+    throw new Error('❌ --yes 只能用于 init');
+  }
+  if (!help && values.local === true && command !== 'doctor') {
+    throw new Error('❌ --local 只能用于 doctor');
+  }
   let configAction: CliConfig['configAction'] = null;
   if (command === 'config') {
     const rawAction = positionals[1];
@@ -208,6 +236,9 @@ export function parseCliArgs(argv: string[]): CliConfig {
     json: values.json ?? false,
     stallLimit,
     shadow: values.shadow ?? false,
+    contractFile: values.contract,
+    yes: values.yes ?? false,
+    local: values.local ?? false,
   };
 }
 
@@ -267,6 +298,53 @@ export async function main(argv: string[]): Promise<number> {
     if (hookResult.exitCode === 0) console.log(hookResult.message);
     else console.error(hookResult.message);
     return hookResult.exitCode;
+  }
+
+  if (cfg.command === 'init') {
+    if (!cfg.yes && !process.stdin.isTTY) {
+      const message = '❌ init 需要交互确认；无终端环境请先核对契约，再显式使用 --yes';
+      if (cfg.json) console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
+      else console.error(message);
+      return 2;
+    }
+    const prompt = cfg.yes
+      ? null
+      : createInterface({ input: process.stdin, output: process.stderr });
+    const emit = (message: string) => {
+      if (cfg.json) console.error(message);
+      else console.log(message);
+    };
+    try {
+      const initResult = await runQualityInit({
+        root: process.cwd(),
+        actualVersion: CODING_X_VERSION,
+        contractFile: cfg.contractFile,
+        emit,
+        confirm: async (summary) => {
+          emit(summary);
+          if (cfg.yes) return true;
+          const answer = await prompt!.question('确认继续？[y/N] ');
+          return /^(?:y|yes)$/i.test(answer.trim());
+        },
+        ask: async (question) => {
+          if (cfg.yes) {
+            throw new Error(`${question} --yes 不会替用户填写理由；请交互运行或提供 --contract`);
+          }
+          return prompt!.question(`${question} `);
+        },
+      });
+      if (cfg.json) console.log(JSON.stringify(initResult, null, 2));
+      else if (initResult.exitCode === 0) console.log(`✅ ${initResult.message}`);
+      else console.error(`⏳ ${initResult.message}`);
+      return initResult.exitCode;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (cfg.json) console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
+      else console.error(`❌ 初始化失败：${message}`);
+      return 2;
+    } finally {
+      prompt?.close();
+    }
   }
 
   if (cfg.command === 'repair') {

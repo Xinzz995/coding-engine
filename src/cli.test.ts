@@ -76,6 +76,21 @@ describe('parseCliArgs', () => {
   it('recognizes the doctor subcommand', () => {
     expect(parseCliArgs(['doctor']).command).toBe('doctor');
   });
+  it('recognizes init-only contract and confirmation options', () => {
+    const c = parseCliArgs(['init', '--contract', 'quality.json', '--yes', '--json']);
+    expect(c.command).toBe('init');
+    expect(c.contractFile).toBe('quality.json');
+    expect(c.yes).toBe(true);
+    expect(c.json).toBe(true);
+    expect(() => parseCliArgs(['init', 'extra'])).toThrow('额外位置参数');
+    expect(() => parseCliArgs(['doctor', '--contract', 'quality.json'])).toThrow('--contract');
+    expect(() => parseCliArgs(['status', '--yes'])).toThrow('--yes');
+  });
+  it('limits --local to doctor', () => {
+    expect(parseCliArgs(['doctor', '--local']).local).toBe(true);
+    expect(parseCliArgs(['doctor']).local).toBe(false);
+    expect(() => parseCliArgs(['status', '--local'])).toThrow('--local');
+  });
   it('recognizes the status subcommand with default workspace', () => {
     const c = parseCliArgs(['status']);
     expect(c.command).toBe('status');
@@ -215,11 +230,11 @@ describe('main — help', () => {
       const output = String(logSpy.mock.calls[0][0]);
       for (const token of [
         'claude', 'codex', 'cursor',
-        'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config', 'hooks cursor',
+        'init', 'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config', 'hooks cursor',
         '--max-iter', '--dev-timeout', '--val-timeout', '--builder-model',
         '--validator-model', '--escalation-model', '--workspace', '--no-open',
         '--keep-open', '--port', '--stall-limit', '--stale-days', '--json',
-        '--shadow',
+        '--shadow', '--contract', '--yes', '--local',
         '--help', '-h',
       ]) {
         expect(output, `help 缺少 ${token}`).toContain(token);

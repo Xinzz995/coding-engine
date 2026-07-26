@@ -119,17 +119,21 @@ scope: root
 
 ## Phase 3：初始化与 GitHub 门禁
 
-### Task 9：三阶段 `init`
+### Task 9：可回读的分阶段 `init`
 
 - 能力探测：Git 仓库、默认分支、GitHub repo、认证、Ruleset/私库套餐；
 - 发现候选命令与规范后逐项让用户确认，不自行写入猜测；
 - 最小规则展示→确认→应用→回读，成功后生成契约、CI、PR/Issue 模板；
 - 识别 Bootstrap PR 首次 `quality-gate` check-run，二次确认后升级 required checks 并回读；
+- Bootstrap 合并后用 Activation PR 触发默认分支旧 `policy-guard`，绑定 PR head 和 GitHub
+  Actions 来源、加入 required checks 并回读；不在 Bootstrap PR 伪造同名检查；
 - 中断状态落本地可恢复记录，重复运行幂等；不足能力返回配置错误，不降级。
 
 ### Task 10：原生 CI 生成器与总闸
 
 - 从质量契约为目标生态生成原生 job，不要求 CI 安装 Node/coding-x；
+- 每个 job 在契约中明确系统、Node/Go/Python 工具链版本、准备命令和检查 ID；同一系统的
+  多版本矩阵不得在 workflow 另写一份；
 - 稳定 `quality-gate` 使用始终执行语义并枚举全部 job 结果；
 - 无适用模块由 job 输出原因后成功；工作流级路径过滤禁用；
 - 为失败、取消、超时、skip、missing、`[skip ci]` 和 job 条件写合同/临时远端测试；
@@ -139,6 +143,7 @@ scope: root
 
 - 使用默认分支上的工作流检查契约、workflow、工程原则、Reviewer、发布规则变更；
 - `pull_request_target` 只读 API 元数据，不 checkout、不 eval、不写入 PR 文本；
+- 评估后只创建绑定 PR 最新 head 的 `policy-guard` Check Run，源 job 不作为 required check；
 - 政策例外标签必须关联字段完整、未过期的 Issue；
 - 第三方 Actions 固定完整 SHA，workflow 权限逐 job 最小化；
 - 用恶意 PR 标题、文件名、内容和 fork 验证不会执行不可信输入。

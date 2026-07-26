@@ -64,6 +64,37 @@ export interface QualityCheck {
   command: QualityCommand;
 }
 
+export type QualityToolchain =
+  | {
+      kind: 'node';
+      version: string;
+      cache?: 'npm' | 'yarn' | 'pnpm';
+      cacheDependencyPath?: string;
+    }
+  | {
+      kind: 'go';
+      version: string;
+      cache?: boolean;
+      cacheDependencyPath?: string;
+    }
+  | {
+      kind: 'python';
+      version: string;
+      cache?: 'pip' | 'pipenv' | 'poetry';
+      cacheDependencyPath?: string;
+    };
+
+export interface QualityGitHubJob {
+  id: string;
+  platform: QualityPlatform;
+  /** 只允许生成器内置并固定版本的官方 setup action。 */
+  toolchains: QualityToolchain[];
+  /** 工具链就绪后、项目检查前执行的项目原生命令。 */
+  setup: QualityCommand[];
+  /** 本任务实际执行的检查 ID；同一检查可在多个版本或系统重复。 */
+  checkIds: string[];
+}
+
 export type QualityCheckPolicy =
   | { checks: QualityCheck[] }
   | { notApplicable: string };
@@ -94,6 +125,8 @@ export interface QualityContract {
     pathRules: Array<{ paths: string[]; categories: QualityRiskCategory[] }>;
   };
   github: {
+    /** 明确表达系统、工具版本、准备命令和检查范围，工作流只从这里生成。 */
+    jobs: QualityGitHubJob[];
     requiredChecks: string[];
   };
   exceptions: {
@@ -350,6 +383,38 @@ function riskCategories(value: unknown, path: string, errors: string[]): void {
   });
 }
 
+function toolchain(value: unknown, path: string, errors: string[]): void {
+  const item = objectShape(
+    value,
+    path,
+    ['kind', 'version'],
+    ['cache', 'cacheDependencyPath'],
+    errors,
+  );
+  if (!item) return;
+  const kind = item.kind;
+  if (kind !== 'node' && kind !== 'go' && kind !== 'python') {
+    errors.push(`${path}.kind 必须是 node、go 或 python`);
+  }
+  if (nonEmptyString(item.version, `${path}.version`, errors)
+      && /[\r\n]/.test(item.version as string)) {
+    errors.push(`${path}.version 不能包含换行`);
+  }
+  if (Object.hasOwn(item, 'cache')) {
+    const cache = item.cache;
+    if (kind === 'node' && cache !== 'npm' && cache !== 'yarn' && cache !== 'pnpm') {
+      errors.push(`${path}.cache 对 node 必须是 npm、yarn 或 pnpm`);
+    } else if (kind === 'go' && typeof cache !== 'boolean') {
+      errors.push(`${path}.cache 对 go 必须是布尔值`);
+    } else if (kind === 'python' && cache !== 'pip' && cache !== 'pipenv' && cache !== 'poetry') {
+      errors.push(`${path}.cache 对 python 必须是 pip、pipenv 或 poetry`);
+    }
+  }
+  if (Object.hasOwn(item, 'cacheDependencyPath')) {
+    repoPath(item.cacheDependencyPath, `${path}.cacheDependencyPath`, errors);
+  }
+}
+
 function validateContract(value: unknown): string[] {
   const errors: string[] = [];
   const root = objectShape(value, '', [
@@ -441,6 +506,8 @@ function validateContract(value: unknown): string[] {
 
   const checks = objectShape(root.checks, 'checks', CHECK_CATEGORIES, [], errors);
   const checkIds = new Set<string>();
+  const checkPlatformsById = new Map<string, Set<QualityPlatform>>();
+  let configuredCheckCount = 0;
   if (checks) {
     for (const category of CHECK_CATEGORIES) {
       const groupPath = `checks.${category}`;
@@ -461,13 +528,16 @@ function validateContract(value: unknown): string[] {
         continue;
       }
       group.checks.forEach((entry, index) => {
+        configuredCheckCount += 1;
         const checkPath = `${groupPath}.checks[${index}]`;
         const item = objectShape(entry, checkPath, ['id', 'module', 'command'], ['paths'], errors);
         if (!item) return;
+        let checkId: string | null = null;
         if (nonEmptyString(item.id, `${checkPath}.id`, errors)) {
           if (!/^[a-z0-9][a-z0-9._-]*$/.test(item.id)) errors.push(`${checkPath}.id 格式非法`);
           if (checkIds.has(item.id)) errors.push(`重复 check id ${item.id}`);
           checkIds.add(item.id);
+          checkId = item.id;
         }
         if (nonEmptyString(item.module, `${checkPath}.module`, errors)
             && !moduleIds.has(item.module)) {
@@ -481,8 +551,18 @@ function validateContract(value: unknown): string[] {
           });
         }
         command(item.command, `${checkPath}.command`, errors);
+        if (checkId && isRecord(item.command) && Array.isArray(item.command.platforms)) {
+          checkPlatformsById.set(checkId, new Set(
+            item.command.platforms.filter((platform): platform is QualityPlatform => (
+              typeof platform === 'string' && PLATFORMS.has(platform as QualityPlatform)
+            )),
+          ));
+        }
       });
     }
+  }
+  if (configuredCheckCount === 0) {
+    errors.push('checks 至少必须声明一项可重复执行的项目检查');
   }
 
   const risk = objectShape(
@@ -515,7 +595,76 @@ function validateContract(value: unknown): string[] {
     }
   }
 
-  const github = objectShape(root.github, 'github', ['requiredChecks'], [], errors);
+  const github = objectShape(root.github, 'github', ['jobs', 'requiredChecks'], [], errors);
+  if (github) {
+    if (!Array.isArray(github.jobs)) {
+      errors.push('github.jobs 必须是数组');
+    } else {
+      if (github.jobs.length === 0) errors.push('github.jobs 不能为空');
+      const jobIds = new Set<string>();
+      const coveredChecks = new Set<string>();
+      github.jobs.forEach((entry, index) => {
+        const path = `github.jobs[${index}]`;
+        const item = objectShape(
+          entry,
+          path,
+          ['id', 'platform', 'toolchains', 'setup', 'checkIds'],
+          [],
+          errors,
+        );
+        if (!item) return;
+        if (nonEmptyString(item.id, `${path}.id`, errors)) {
+          if (!/^[a-z0-9][a-z0-9_-]*$/.test(item.id)) errors.push(`${path}.id 格式非法`);
+          if (jobIds.has(item.id)) errors.push(`重复 GitHub job id ${item.id}`);
+          jobIds.add(item.id);
+        }
+        const platform = item.platform;
+        if (typeof platform !== 'string' || !PLATFORMS.has(platform as QualityPlatform)) {
+          errors.push(`${path}.platform 必须是 linux、macos 或 windows`);
+        }
+        if (!Array.isArray(item.toolchains)) {
+          errors.push(`${path}.toolchains 必须是数组`);
+        } else {
+          const kinds = new Set<string>();
+          item.toolchains.forEach((entryValue, toolIndex) => {
+            toolchain(entryValue, `${path}.toolchains[${toolIndex}]`, errors);
+            if (isRecord(entryValue) && typeof entryValue.kind === 'string') {
+              if (kinds.has(entryValue.kind)) errors.push(`${path}.toolchains 含重复 ${entryValue.kind}`);
+              kinds.add(entryValue.kind);
+            }
+          });
+        }
+        if (!Array.isArray(item.setup)) {
+          errors.push(`${path}.setup 必须是数组`);
+        } else {
+          item.setup.forEach((entryValue, setupIndex) => {
+            command(entryValue, `${path}.setup[${setupIndex}]`, errors);
+            if (typeof platform === 'string' && PLATFORMS.has(platform as QualityPlatform)
+                && isRecord(entryValue) && Array.isArray(entryValue.platforms)
+                && !entryValue.platforms.includes(platform)) {
+              errors.push(`${path}.setup[${setupIndex}] 不适用于任务系统 ${platform}`);
+            }
+          });
+        }
+        if (stringArray(item.checkIds, `${path}.checkIds`, errors, { nonEmpty: true, unique: true })) {
+          for (const checkId of item.checkIds as string[]) {
+            if (!checkIds.has(checkId)) {
+              errors.push(`${path}.checkIds 引用未知检查 ${checkId}`);
+              continue;
+            }
+            coveredChecks.add(checkId);
+            if (typeof platform === 'string' && PLATFORMS.has(platform as QualityPlatform)
+                && !checkPlatformsById.get(checkId)?.has(platform as QualityPlatform)) {
+              errors.push(`${path} 在 ${platform} 运行不适用的检查 ${checkId}`);
+            }
+          }
+        }
+      });
+      for (const checkId of checkIds) {
+        if (!coveredChecks.has(checkId)) errors.push(`项目检查 ${checkId} 未被任何 GitHub job 覆盖`);
+      }
+    }
+  }
   if (github && stringArray(github.requiredChecks, 'github.requiredChecks', errors, {
     nonEmpty: true,
     unique: true,

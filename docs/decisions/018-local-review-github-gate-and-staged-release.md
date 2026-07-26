@@ -41,10 +41,12 @@ Bootstrap 裁决；之后稳定版 N 评估候选 N+1，发布后再通过旧规
 ## GitHub 与发布约束
 
 - 初始化先配置最小 Ruleset 并回读，再生成 Bootstrap PR 文件；首次 `quality-gate` 出现后
-  才把它设为必需检查；
+  才把它设为必需检查。Bootstrap 合并后再由 Activation PR 触发默认分支旧
+  `policy-guard`，将其绑定为必需检查后才完成初始化；
 - required check 只使用一个始终执行的总闸；任一必需 job 失败、取消、超时、跳过或缺失时
   总闸失败；
-- 政策变更由默认分支旧 `policy-guard` 读取元数据检查；带凭据任务不执行 PR 代码或文本；
+- 政策变更由默认分支旧 `policy-guard` 读取元数据检查；带凭据任务不执行 PR 代码或文本，
+  只把结论写成绑定 PR 最新提交的 Check Run；
 - coding-engine 检查 Node 22/24 与 Ubuntu/macOS/Windows，运行时最低 Node 22；
 - npm 使用 OIDC staged publish，先批准到 `next`、完成公开精确版本冒烟，再人工移动
   `latest`；staging 不可用时只能由用户明确批准临时 OIDC-to-next 退路；
