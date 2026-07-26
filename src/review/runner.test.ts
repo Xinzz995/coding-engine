@@ -134,6 +134,13 @@ describe('parseCodexReviewJsonl', () => {
     const stdout = JSON.stringify({ type: 'item.started' });
     expect(() => parseCodexReviewJsonl(stdout)).toThrow('item.started 缺少 item');
   });
+
+  it('rejects a passive top-level event that unexpectedly carries a tool item', () => {
+    const stdout = JSON.stringify({
+      type: 'turn.completed', item: { type: 'command_execution', command: 'whoami' },
+    });
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('turn.completed 含非预期 item');
+  });
 });
 
 describe('codexReviewPermissionOverrides', () => {

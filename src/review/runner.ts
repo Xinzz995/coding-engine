@@ -19,7 +19,7 @@ import type { ReviewPackage } from './package.js';
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
 const MAX_RUNNER_OUTPUT_BYTES = 4 * 1024 * 1024;
-const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v3';
+const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v4';
 const CODEX_PASSIVE_ENVELOPE_TYPES = new Set(['thread.started', 'turn.started', 'turn.completed']);
 const CODEX_ITEM_ENVELOPE_TYPES = new Set(['item.started', 'item.updated', 'item.completed']);
 const CODEX_PASSIVE_ITEM_TYPES = new Set(['reasoning', 'agent_message', 'todo_list']);
@@ -232,7 +232,12 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
     if (envelopeType === 'error' || envelopeType === 'turn.failed') {
       throw new Error(`codex Review 事件失败：${JSON.stringify(envelope).slice(-2000)}`);
     }
-    if (CODEX_PASSIVE_ENVELOPE_TYPES.has(envelopeType)) continue;
+    if (CODEX_PASSIVE_ENVELOPE_TYPES.has(envelopeType)) {
+      if (Object.hasOwn(envelope, 'item')) {
+        throw new RunnerPolicyViolation(`codex ${envelopeType} 含非预期 item`);
+      }
+      continue;
+    }
     if (!CODEX_ITEM_ENVELOPE_TYPES.has(envelopeType)) {
       throw new RunnerPolicyViolation(`codex Review 产生了未知顶层事件：${envelopeType}`);
     }
