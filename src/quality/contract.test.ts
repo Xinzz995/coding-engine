@@ -115,7 +115,7 @@ function validContract(): unknown {
           checkIds: ['unit', 'build'],
         },
       ],
-      requiredChecks: ['quality-gate', 'policy-guard'],
+      requiredChecks: ['quality-gate', 'policy-guard-source'],
       requiredCodeScanning: [{
         tool: 'CodeQL',
         alertsThreshold: 'errors',

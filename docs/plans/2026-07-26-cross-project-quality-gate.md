@@ -125,8 +125,9 @@ scope: root
 - 发现候选命令与规范后逐项让用户确认，不自行写入猜测；
 - 最小规则展示→确认→应用→回读，成功后生成契约、CI、PR/Issue 模板；
 - 识别 Bootstrap PR 首次 `quality-gate` check-run，二次确认后升级 required checks 并回读；
-- Bootstrap 合并后用 Activation PR 触发默认分支旧 `policy-guard`，绑定 PR head 和 GitHub
-  Actions 来源、加入 required checks 并回读；不在 Bootstrap PR 伪造同名检查；
+- Bootstrap 合并后用 Activation PR 触发默认分支旧 `policy-guard`，将真实
+  `policy-guard-source` 任务及 GitHub Actions 来源加入 required checks 并回读；不在
+  Bootstrap PR 伪造同名检查；
 - 中断状态落本地可恢复记录，重复运行幂等；不足能力返回配置错误，不降级。
 
 ### Task 10：原生 CI 生成器与总闸
@@ -137,13 +138,14 @@ scope: root
 - 稳定 `quality-gate` 使用始终执行语义并枚举全部 job 结果；
 - 无适用模块由 job 输出原因后成功；工作流级路径过滤禁用；
 - 为失败、取消、超时、skip、missing、`[skip ci]` 和 job 条件写合同/临时远端测试；
-- Ruleset 只要求 `quality-gate` 和必要的 `policy-guard`，并回读实际来源。
+- Ruleset 只要求 `quality-gate` 和真实 `policy-guard-source` 任务，并回读实际来源。
 
-### Task 11：旧规则 `policy-guard`
+### Task 11：旧规则 `policy-guard` 工作流
 
 - 使用默认分支上的工作流检查契约、workflow、工程原则、Reviewer、发布规则变更；
 - `pull_request_target` 只读 API 元数据，不 checkout、不 eval、不写入 PR 文本；
-- 评估后只创建绑定 PR 最新 head 的 `policy-guard` Check Run，源 job 不作为 required check；
+- 直接把工作流真实的 `policy-guard-source` 任务作为 required check，不再通过 Checks API
+  额外写入结果；
 - 政策例外标签必须关联字段完整、未过期的 Issue；
 - 第三方 Actions 固定完整 SHA，workflow 权限逐 job 最小化；
 - 用恶意 PR 标题、文件名、内容和 fork 验证不会执行不可信输入。
@@ -232,8 +234,8 @@ scope: root
 - GitHub Bootstrap Issue #44 已创建；
 - Bootstrap PR #47 已由四个原生任务和 `quality-gate` 真实验证后合并；Windows 首轮失败曾让
   总闸保持红色，路径兼容修复后 726 项测试、构建和成品冒烟在四个任务中通过；
-- Ruleset ID 19747271 已绑定由 GitHub Actions 在 PR 最新提交产生的 `quality-gate` 与
-  `policy-guard`，并完成远端回读；
+- Ruleset ID 19747271 已绑定由 GitHub Actions 在 PR 最新提交产生的 `quality-gate` 与真实
+  `policy-guard-source` 任务，并完成远端回读；
 - Phase 1、质量契约底座、分阶段 `init`、本地三层 Review 和远端 doctor 已分别通过
   PR #45–#49 合并；
 - Phase 4 基础设施 PR #55 已合并；Node 22/24、Linux/macOS/Windows、增量格式检查、静态

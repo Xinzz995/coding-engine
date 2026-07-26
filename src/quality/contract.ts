@@ -4,6 +4,12 @@ import { join } from 'node:path';
 
 export const QUALITY_CONTRACT_SCHEMA_VERSION = 1 as const;
 export const QUALITY_CONTRACT_RELATIVE_PATH = '.coding-x/quality.json';
+export const QUALITY_GATE_REQUIRED_CHECK = 'quality-gate';
+export const POLICY_GUARD_REQUIRED_CHECK = 'policy-guard-source';
+export const REQUIRED_GITHUB_CHECKS = [
+  QUALITY_GATE_REQUIRED_CHECK,
+  POLICY_GUARD_REQUIRED_CHECK,
+] as const;
 
 export type QualityPlatform = 'linux' | 'macos' | 'windows';
 export type QualityCheckCategory = 'test' | 'build' | 'static' | 'security';
@@ -726,7 +732,7 @@ function validateContract(value: unknown): string[] {
     unique: true,
   })) {
     if (Array.isArray(github.requiredChecks)) {
-      for (const required of ['quality-gate', 'policy-guard']) {
+      for (const required of REQUIRED_GITHUB_CHECKS) {
         if (!github.requiredChecks.includes(required)) {
           errors.push(`github.requiredChecks 必须包含 ${required}`);
         }

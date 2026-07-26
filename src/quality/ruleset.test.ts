@@ -38,7 +38,7 @@ function ruleset(over: Partial<GitHubRuleset> = {}): GitHubRuleset {
 
 const checks: RequiredStatusCheck[] = [
   { context: 'quality-gate', integration_id: 15368 },
-  { context: 'policy-guard', integration_id: 15368 },
+  { context: 'policy-guard-source', integration_id: 15368 },
 ];
 
 const codeScanning = [{
@@ -76,7 +76,7 @@ describe('managed GitHub ruleset', () => {
     const payload = buildManagedRulesetPayload(ruleset(), checks);
     const remote = { id: 1, ...payload };
     expect(requiredChecksFromRuleset(remote)).toEqual([
-      { context: 'policy-guard', integration_id: 15368 },
+      { context: 'policy-guard-source', integration_id: 15368 },
       { context: 'quality-gate', integration_id: 15368 },
     ]);
     expect(validateManagedRuleset(remote, checks)).toEqual([]);
@@ -149,7 +149,7 @@ describe('managed GitHub ruleset', () => {
     expect(errors).toContain('缺少 non_fast_forward');
     expect(errors).toContain('未要求分支包含最新默认分支');
     expect(errors).toContain('quality-gate 未绑定预期 GitHub App 15368');
-    expect(errors).toContain('policy-guard 未绑定预期 GitHub App 15368');
+    expect(errors).toContain('policy-guard-source 未绑定预期 GitHub App 15368');
     expect(errors).toContain('契约外必需检查 unexpected');
   });
 });

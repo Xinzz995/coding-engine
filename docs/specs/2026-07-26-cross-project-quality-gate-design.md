@@ -139,8 +139,9 @@ GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式
    用户再次运行 `init`，将它连同 GitHub Actions 来源绑定到 Ruleset 并回读；Bootstrap PR
    通过该检查后才能合并；
 4. `ready`：`policy-guard` 工作流已进入默认分支后，再用一个 Activation PR 让默认分支旧
-   工作流为该 PR head 产生 `policy-guard`。`init` 将其绑定为必需检查并回读后，该 PR 才能
-   合并。Bootstrap PR 不伪造同名占位检查，也不能要求尚不存在于默认分支的政策检查。
+   工作流为该 PR head 产生真实 `policy-guard-source` 任务。`init` 将其绑定为必需检查并
+   回读后，该 PR 才能合并。Bootstrap PR 不伪造同名占位检查，也不能要求尚不存在于默认
+   分支的政策检查。
 
 初始化不自动 commit、push、开 PR 或合并。任一阶段中断后可以幂等重跑；`doctor` 在进入
 `ready` 前始终返回非就绪。私有仓库若账户套餐或权限不支持所需 Ruleset，初始化停止，不
@@ -319,9 +320,9 @@ PR/base/head、评审轮次和状态。
 默认分支旧 `policy-guard` 识别质量契约、工作流、工程原则和发布规则变更。若使用
 `pull_request_target`，只通过 API 读取文件列表、标签和 Issue 元数据；不签出、不执行、
 不拼接运行 PR 内容。一次性政策标签仅表示 owner 明确批准，必须关联有效 Issue，不称为
-第二方审批。安全评估完成后，默认分支工作流只额外创建一个绑定 PR 最新 head 的
-`policy-guard` Check Run；Ruleset 不依赖绑定 base SHA 的源 job。所有第三方 Action 固定完整
-提交 SHA，并采用最小权限。
+第二方审批。Ruleset 直接要求 GitHub 为该默认分支工作流产生、并关联 PR 最新 head 的真实
+`policy-guard-source` 任务；工作流不再通过 Checks API 额外写入一条结果，也不需要检查写
+权限。所有第三方 Action 固定完整提交 SHA，并采用最小权限。
 
 ### coding-engine 检查矩阵
 

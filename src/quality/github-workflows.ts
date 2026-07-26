@@ -1,11 +1,12 @@
 import { basename } from 'node:path';
-import type {
-  QualityCheck,
-  QualityCheckCategory,
-  QualityCommand,
-  QualityContract,
-  QualityToolchain,
-  QualityPlatform,
+import {
+  POLICY_GUARD_REQUIRED_CHECK,
+  type QualityCheck,
+  type QualityCheckCategory,
+  type QualityCommand,
+  type QualityContract,
+  type QualityToolchain,
+  type QualityPlatform,
 } from './contract.js';
 
 export const QUALITY_WORKFLOW_PATH = '.github/workflows/quality-gate.yml';
@@ -223,11 +224,10 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
-  checks: write
 
 jobs:
   policy-guard:
-    name: policy-guard-source
+    name: ${POLICY_GUARD_REQUIRED_CHECK}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -329,50 +329,6 @@ jobs:
 
           print("Approved protected policy change:", ", ".join(changed))
           print(f"Exception issue #{issue_number}; owner={owner}; expires={expires}")
-          PY
-      - name: Publish policy-guard on the pull request head
-        if: \${{ always() }}
-        shell: bash
-        env:
-          GH_TOKEN: \${{ github.token }}
-          EVALUATION_OUTCOME: \${{ steps.evaluate.outcome }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import urllib.request
-
-          event = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8"))
-          repo = event["repository"]["full_name"]
-          head = event["pull_request"]["head"]["sha"]
-          passed = os.environ["EVALUATION_OUTCOME"] == "success"
-          payload = json.dumps({
-              "name": "policy-guard",
-              "head_sha": head,
-              "status": "completed",
-              "conclusion": "success" if passed else "failure",
-              "output": {
-                  "title": "Policy guard passed" if passed else "Policy guard failed",
-                  "summary": "Default-branch policy evaluation completed without executing pull request content.",
-              },
-          }).encode()
-          request = urllib.request.Request(
-              f"https://api.github.com/repos/{repo}/check-runs",
-              data=payload,
-              method="POST",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": "Bearer " + os.environ["GH_TOKEN"],
-                  "Content-Type": "application/json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-                  "User-Agent": "coding-x-policy-guard",
-              },
-          )
-          with urllib.request.urlopen(request, timeout=30) as response:
-              result = json.load(response)
-          if result.get("head_sha") != head or result.get("name") != "policy-guard":
-              raise SystemExit("GitHub did not bind policy-guard to the expected head SHA")
-          print(f"policy-guard={result['conclusion']} head={head}")
           PY
 `;
 }

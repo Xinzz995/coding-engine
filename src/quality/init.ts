@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import {
+  POLICY_GUARD_REQUIRED_CHECK,
   QUALITY_CONTRACT_RELATIVE_PATH,
   parseQualityContract,
   readQualityContract,
@@ -526,7 +527,8 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
         ...releaseState,
         pullRequest: pullRequest.number,
         message: `仍等待默认分支可信工作流产生检查：${pending.join('、')}。` +
-          'Bootstrap PR 可先启用 quality-gate；policy-guard 必须在工作流进入默认分支后的 Policy PR 中启用。',
+          `Bootstrap PR 可先启用 quality-gate；${POLICY_GUARD_REQUIRED_CHECK} ` +
+          '必须在工作流进入默认分支后的 Activation PR 中启用。',
       },
     );
   }
