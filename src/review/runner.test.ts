@@ -113,6 +113,13 @@ describe('parseCodexReviewJsonl', () => {
       expect(() => parseCodexReviewJsonl(stdout)).toThrow(`禁用工具事件：${type}`);
     },
   );
+
+  it('rejects an unrecognized item type so future capabilities fail closed', () => {
+    const stdout = JSON.stringify({
+      type: 'item.started', item: { type: 'future_capability' },
+    });
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件：future_capability');
+  });
 });
 
 describe('codexReviewPermissionOverrides', () => {
