@@ -59,8 +59,9 @@ cli → quality + engine（loop → quality / agent / prd / state / progress / t
 `.coding-x/quality.json` 是项目检查唯一人工维护来源；prd-to-json 先用 doctor 取得规范化摘要和结构化派生快照，再把它们连同源 PRD（意图真相）一起冻结到 workspace `prd.json`（执行需求）并初始化 `state.json`。正式运行要求精确版本、摘要和快照全部一致；候选版本只能 shadow。builder 只实现一个 story并留下 `passes=true` 候选。契约检查与 TDD 政策/覆盖命令都通过后，引擎才把 story ID、有序 AC 快照/hash、一次性 request ID 与 Git HEAD 注入 Validator；Validator 只写逐 AC 结构化 claim，引擎核对绑定与 state 不变式后才写 retry/blocked/notes 或签发 `validated=true`。缺结果、错目标、旧结果、产物变化或 state 改写全部回滚候选态（ADR-009、013、015、017、018）。
 
 coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。它们运行仓库机械健康检查，
-只验证文档、契约结构和契约生成文件；正式 doctor 的版本一致性结论仅由固定稳定版在本地签发。
-因此远端总闸成功不表示候选取得正式裁判资格（ADR-018）。
+只验证文档、契约结构和契约生成文件；完整 doctor 继续拒绝候选版本与固定版本不一致。
+首次 0.30.0 由机械检查和 owner 人工 Bootstrap 裁决，不声称取得正式本地 Review；因此远端
+总闸成功不表示候选取得正式裁判资格（ADR-018）。
 
 发布链把“构建候选”和“取得 npm 暂存身份”拆成两个权限域。前者执行完整项目代码但没有
 发布身份；后者只下载固定候选、重建不执行脚本的包目录并核对摘要，OIDC 只能执行

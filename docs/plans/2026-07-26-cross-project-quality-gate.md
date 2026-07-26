@@ -247,6 +247,7 @@ scope: root
 - 候选暂存与不可变发布流程已通过 PR #61 合并；发布标签 Ruleset、不可变 Release、
   `npm-staging` environment 和 stage-only Trusted Publisher 均已回读，真实 OIDC 暂存尚未执行；
 - 0.30.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
-  检查，已获 owner 授权拆出 coding-engine 仓库健康测试；固定裁判继续保持 0.29.0；
+  检查，已获 owner 授权拆出 coding-engine 仓库健康测试；PR #63 按已约定的一次性“机械
+  CI + owner 人工 Bootstrap”裁决，不声称完成正式本地 AI Review，固定裁判继续保持 0.29.0；
 - 首次真实 staged publish、三个项目的同包 Dogfood、发布后固定 0.30.0 的 Policy PR 和结构
   治理仍待后续独立步骤。
