@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { resolve } from 'node:path';
 import {
   codexReviewPermissionOverrides,
   parseCodexReviewJsonl,
@@ -75,7 +76,7 @@ describe('codexReviewPermissionOverrides', () => {
     const cwd = '/tmp/review package';
     expect(codexReviewPermissionOverrides(cwd)).toEqual([
       '-c', 'default_permissions="coding_x_review"',
-      '-c', 'permissions.coding_x_review.filesystem={ ":minimal" = "read", "/tmp/review package" = "read" }',
+      '-c', `permissions.coding_x_review.filesystem={ ":minimal" = "read", ${JSON.stringify(resolve(cwd))} = "read" }`,
       '-c', 'permissions.coding_x_review.network.enabled=true',
     ]);
   });

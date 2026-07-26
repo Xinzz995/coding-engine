@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { AgentKind } from '../engine/agent.js';
-import { digest } from './common.js';
+import { digest, isOwnedTempDirectory } from './common.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { REVIEW_RULES_DIGEST, rulesForAxis } from './rules.js';
 import type { ReviewAxis, ReviewRiskAssessment } from './types.js';
@@ -150,10 +150,11 @@ export function createReviewPackage(options: {
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', mode: 0o444 });
   chmodSync(root, 0o555);
   const before = fileSnapshot(root);
-  const expectedPrefix = resolve(tmpdir()) + '/coding-x-review-';
   const cleanup = () => {
     const target = resolve(root);
-    if (!target.startsWith(expectedPrefix)) throw new Error(`拒绝清理非审查临时目录：${target}`);
+    if (!isOwnedTempDirectory(target, 'coding-x-review-')) {
+      throw new Error(`拒绝清理非审查临时目录：${target}`);
+    }
     chmodSync(root, 0o755);
     rmSync(root, { recursive: true, force: true });
   };

@@ -42,6 +42,10 @@ function validateIssue(
     : validatePolicyExceptionIssue(issue, contract.exceptions.policy.maxDays, now);
 }
 
+function normalizeLineEndings(value: string): string {
+  return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+}
+
 function localIssues(root: string, workspace: string, contract: QualityContract): DeliveryGateIssue[] {
   const issues: DeliveryGateIssue[] = [];
   for (const [relativePath, expected] of Object.entries(renderManagedGitHubFiles(contract))) {
@@ -58,7 +62,7 @@ function localIssues(root: string, workspace: string, contract: QualityContract)
       });
       continue;
     }
-    if (actual !== expected) {
+    if (normalizeLineEndings(actual) !== normalizeLineEndings(expected)) {
       issues.push({ file: relativePath, message: '内容与当前质量契约的确定性生成结果不一致' });
     }
   }

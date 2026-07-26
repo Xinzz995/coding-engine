@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { digest, globMatches, normalizeText } from './common.js';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { digest, globMatches, isOwnedTempDirectory, normalizeText } from './common.js';
 
 describe('review common helpers', () => {
   it('matches repository globs without letting star cross path separators', () => {
@@ -14,6 +16,13 @@ describe('review common helpers', () => {
     expect(normalizeText('a\r\n')).toBe('a');
     expect(digest({ b: 2, a: 1 })).toBe(digest({ a: 1, b: 2 }));
     expect(digest({ a: 2 })).not.toBe(digest({ a: 1 }));
+  });
+
+  it('recognizes only direct engine-owned children of the platform temp directory', () => {
+    expect(isOwnedTempDirectory(join(tmpdir(), 'coding-x-review-abc'), 'coding-x-review-')).toBe(true);
+    expect(isOwnedTempDirectory(join(tmpdir(), 'coding-x-review-abc', 'nested'), 'coding-x-review-')).toBe(false);
+    expect(isOwnedTempDirectory(join(tmpdir(), 'other-review-abc'), 'coding-x-review-')).toBe(false);
+    expect(isOwnedTempDirectory(join(tmpdir(), '..', 'coding-x-review-abc'), 'coding-x-review-')).toBe(false);
   });
 });
 

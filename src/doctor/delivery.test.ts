@@ -98,6 +98,10 @@ describe('checkDeliveryGate', () => {
       expect(ready).toMatchObject({ status: 'local-ready', remoteChecked: false, issues: [] });
 
       const path = join(root, '.github/workflows/quality-gate.yml');
+      writeFileSync(path, readFileSync(path, 'utf8').replaceAll('\n', '\r\n'));
+      const windowsCheckout = checkDeliveryGate({ root, workspace: '.workspace', contract: value, local: true });
+      expect(windowsCheckout).toMatchObject({ status: 'local-ready', issues: [] });
+
       writeFileSync(path, `${readFileSync(path, 'utf8')}# drift\n`);
       const drift = checkDeliveryGate({ root, workspace: '.workspace', contract: value, local: true });
       expect(drift.status).toBe('invalid');

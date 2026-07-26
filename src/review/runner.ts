@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { resolveBinary, type AgentKind } from '../engine/agent.js';
 import { forceKillProcessTreeOnExit, terminateProcessTree } from '../engine/process-tree.js';
+import { isOwnedTempDirectory } from './common.js';
 import type { ReviewPackage } from './package.js';
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
@@ -460,8 +461,9 @@ export async function probeRunnerIsolation(options: {
   } finally {
     chmodSync(packageRoot, 0o755);
     const target = resolve(probeRoot);
-    const expectedPrefix = resolve(tmpdir()) + '/coding-x-review-probe-';
-    if (!target.startsWith(expectedPrefix)) throw new Error(`拒绝清理非探测临时目录：${target}`);
+    if (!isOwnedTempDirectory(target, 'coding-x-review-probe-')) {
+      throw new Error(`拒绝清理非探测临时目录：${target}`);
+    }
     rmSync(probeRoot, { recursive: true, force: true });
   }
   return {
