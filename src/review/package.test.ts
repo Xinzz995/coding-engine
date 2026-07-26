@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readQualityContract } from '../quality/contract.js';
-import { createReviewPackage } from './package.js';
+import { createReviewPackage, reviewOutputSchema } from './package.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { assessReviewRisk } from './risk.js';
 
@@ -33,6 +33,23 @@ function context(): ReviewPreflightContext {
 }
 
 describe('createReviewPackage', () => {
+  it('makes every structured-output property required and represents optional values as null', () => {
+    const schema = reviewOutputSchema();
+    const properties = schema.properties as Record<string, Record<string, unknown>>;
+    expect(schema.required).toEqual(Object.keys(properties));
+    expect(properties.unverifiableReason.type).toEqual(['string', 'null']);
+
+    const finding = (properties.findings.items as Record<string, unknown>);
+    const findingProperties = finding.properties as Record<string, Record<string, unknown>>;
+    expect(finding.required).toEqual(Object.keys(findingProperties));
+
+    const location = findingProperties.location;
+    const locationProperties = location.properties as Record<string, Record<string, unknown>>;
+    expect(location.required).toEqual(Object.keys(locationProperties));
+    expect(locationProperties.line.type).toEqual(['integer', 'null']);
+    expect(locationProperties.symbol.type).toEqual(['string', 'null']);
+  });
+
   it('contains the bound old quality contract and only engine-selected review data', () => {
     const ctx = context();
     const reviewPackage = createReviewPackage({
