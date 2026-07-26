@@ -35,6 +35,22 @@ describe('parseModelReviewOutput', () => {
     expect(parseModelReviewOutput(output).status).toBe('passed');
   });
 
+  it('normalizes nullable structured-output fields to absent optional values', () => {
+    expect(parseModelReviewOutput({
+      status: 'passed', summary: '没有问题', requestDeepReview: false,
+      unverifiableReason: null, findings: [],
+    })).toEqual({
+      status: 'passed', summary: '没有问题', requestDeepReview: false, findings: [],
+    });
+    expect(parseModelReviewOutput(valid({
+      unverifiableReason: null,
+      findings: [{
+        ...valid().findings[0],
+        location: { path: 'src/a.ts', line: null, symbol: null },
+      }],
+    })).findings[0].location).toEqual({ path: 'src/a.ts' });
+  });
+
   it('rejects malformed, unbound or ambiguous output shapes', () => {
     expect(() => parseModelReviewOutput(valid({ extra: true }))).toThrow('未知字段');
     expect(() => parseModelReviewOutput(valid({ status: 'unverifiable', findings: [] })))

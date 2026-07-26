@@ -314,7 +314,9 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
     exactKeys(location, ['path'], ['line', 'symbol'], `findings[${index}].location`);
     const path = boundedString(location.path, `findings[${index}].location.path`, 1000);
     if (path.startsWith('/') || path.split('/').includes('..')) throw new Error(`findings[${index}].location.path 必须是仓库相对路径`);
-    if (location.line !== undefined && (!Number.isInteger(location.line) || (location.line as number) < 1)) {
+    if (location.line !== undefined && location.line !== null && (
+      !Number.isInteger(location.line) || (location.line as number) < 1
+    )) {
       throw new Error(`findings[${index}].location.line 必须是正整数`);
     }
     return {
@@ -322,8 +324,8 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
       title: boundedString(item.title, `findings[${index}].title`, 300),
       location: {
         path,
-        ...(location.line !== undefined ? { line: location.line as number } : {}),
-        ...(location.symbol !== undefined ? {
+        ...(location.line !== undefined && location.line !== null ? { line: location.line as number } : {}),
+        ...(location.symbol !== undefined && location.symbol !== null ? {
           symbol: boundedString(location.symbol, `findings[${index}].location.symbol`, 500),
         } : {}),
       },
@@ -334,7 +336,7 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
     };
   });
   const modelStatus = root.status as ReviewStatus;
-  const unverifiableReason = root.unverifiableReason === undefined
+  const unverifiableReason = root.unverifiableReason === undefined || root.unverifiableReason === null
     ? undefined
     : boundedString(root.unverifiableReason, 'unverifiableReason', 2000);
   if (modelStatus === 'unverifiable') {
