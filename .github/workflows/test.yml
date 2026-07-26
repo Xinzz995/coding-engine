@@ -35,4 +35,4 @@ jobs:
       # 过期文档检测常态化（0.7.0 起 doctor 具备该能力，此前仅本地手动跑）：
       # frontmatter 完整性 / updated 新鲜度 / AGENTS.md 索引 / 相对链接，问题即红。
       - name: Docs doctor
-        run: npm run dev -- doctor
+        run: npm run dev -- doctor --local
