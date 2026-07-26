@@ -11,6 +11,10 @@ import {
 import { renderManagedGitHubFiles } from '../quality/github-workflows.js';
 import { findManagedRuleset, validateManagedRuleset } from '../quality/ruleset.js';
 import {
+  findManagedReleaseRuleset,
+  validateManagedReleaseRuleset,
+} from '../quality/release-ruleset.js';
+import {
   validateP1DeferralIssue,
   validatePolicyExceptionIssue,
 } from '../review/decisions.js';
@@ -26,6 +30,8 @@ export interface DeliveryGateCheckResult {
   remoteChecked: boolean;
   repository: string | null;
   rulesetId: number | null;
+  releaseRulesetId: number | null;
+  immutableReleases: boolean | null;
   managedFilesChecked: number;
   exceptionIssuesChecked: number;
   issues: DeliveryGateIssue[];
@@ -105,6 +111,7 @@ export function checkDeliveryGate(options: {
   if (!options.contract) {
     return {
       status: 'skipped', remoteChecked: false, repository: null, rulesetId: null,
+      releaseRulesetId: null, immutableReleases: null,
       managedFilesChecked: 0, exceptionIssuesChecked: 0, issues: [],
     };
   }
@@ -115,6 +122,8 @@ export function checkDeliveryGate(options: {
     remoteChecked: false,
     repository: contract.repository.fullName,
     rulesetId: null,
+    releaseRulesetId: null,
+    immutableReleases: null,
     managedFilesChecked: Object.keys(renderManagedGitHubFiles(contract)).length,
     exceptionIssuesChecked: 0,
     issues,
@@ -159,7 +168,8 @@ export function checkDeliveryGate(options: {
         }
       }
     }
-    const ruleset = findManagedRuleset(client.listRulesets(repository.fullName));
+    const rulesets = client.listRulesets(repository.fullName);
+    const ruleset = findManagedRuleset(rulesets);
     if (!ruleset) {
       issues.push({ file: 'GitHub Ruleset', message: '未找到 coding-x 管理的默认分支 Ruleset' });
     } else {
@@ -174,6 +184,34 @@ export function checkDeliveryGate(options: {
         contract.github.requiredCodeScanning,
       )) {
         issues.push({ file: `GitHub Ruleset #${ruleset.id}`, message });
+      }
+    }
+
+    if (contract.release.protectedRefs.length > 0) {
+      const releaseRuleset = findManagedReleaseRuleset(rulesets);
+      if (!releaseRuleset) {
+        issues.push({ file: 'GitHub Release Ruleset', message: '未找到 coding-x 管理的发布标签 Ruleset' });
+      } else {
+        base.releaseRulesetId = releaseRuleset.id;
+        for (const message of validateManagedReleaseRuleset(
+          releaseRuleset,
+          contract.release.protectedRefs,
+        )) {
+          issues.push({ file: `GitHub Release Ruleset #${releaseRuleset.id}`, message });
+        }
+      }
+    }
+    if (contract.github.immutableReleases === true) {
+      if (!client.getImmutableReleases) {
+        issues.push({
+          file: 'GitHub Releases',
+          message: '当前 GitHub 适配器无法核验不可变 Release 状态',
+        });
+      } else {
+        base.immutableReleases = client.getImmutableReleases(repository.fullName).enabled;
+        if (!base.immutableReleases) {
+          issues.push({ file: 'GitHub Releases', message: '不可变 Release 实际为关闭' });
+        }
       }
     }
 

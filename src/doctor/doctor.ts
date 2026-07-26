@@ -730,9 +730,13 @@ function renderDeliveryLines(result: DeliveryGateCheckResult): string[] {
   if (result.issues.length === 0) {
     lines.push(
       result.remoteChecked
-        ? `  ✅ 本地 ${result.managedFilesChecked} 个托管文件与 GitHub Ruleset 均一致`
+        ? `  ✅ 本地 ${result.managedFilesChecked} 个托管文件与 GitHub ` +
+          `${result.releaseRulesetId === null ? '默认分支 Ruleset' : '默认分支、发布标签 Ruleset'} 均一致`
         : `  ✅ 本地 ${result.managedFilesChecked} 个托管文件一致（--local 已跳过 GitHub）`,
     );
+    if (result.remoteChecked && result.immutableReleases === true) {
+      lines.push('  ✅ GitHub Release 已启用不可变保护');
+    }
   }
   if (result.remoteChecked) {
     lines.push(`  ℹ️  已核对 ${result.exceptionIssuesChecked} 份开放或当前引用的例外记录`);

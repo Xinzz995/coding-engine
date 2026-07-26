@@ -50,6 +50,10 @@ Bootstrap 裁决；之后稳定版 N 评估候选 N+1，发布后再通过旧规
 - coding-engine 检查 Node 22/24 与 Ubuntu/macOS/Windows，运行时最低 Node 22；
 - npm 使用 OIDC staged publish，先批准到 `next`、完成公开精确版本冒烟，再人工移动
   `latest`；staging 不可用时只能由用户明确批准临时 OIDC-to-next 退路；
+- 候选检查/构建任务没有 OIDC 权限；stage-only OIDC 任务不安装依赖、不执行项目脚本，只
+  重建固定候选并强制核对 npm 返回摘要；
+- annotated tag 必须固定人工批准的 workflow run、npm stage ID 与候选 SHA-256，避免同一提交
+  多次暂存时由发布任务猜测；
 - 标签不再触发直接 npm 发布，只验证已发布制品并创建不可变 Release。
 
 ## 后果

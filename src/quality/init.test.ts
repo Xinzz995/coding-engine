@@ -19,10 +19,12 @@ import {
   type GitHubRepositoryInfo,
   type GitHubRuleset,
   type GitHubRulesetPayload,
+  MANAGED_RELEASE_RULESET_NAME,
 } from './github.js';
 import { QUALITY_WORKFLOW_PATH } from './github-workflows.js';
 import { runQualityInit } from './init.js';
 import { codeScanningToolsFromRuleset, requiredChecksFromRuleset } from './ruleset.js';
+import { findManagedReleaseRuleset, validateManagedReleaseRuleset } from './release-ruleset.js';
 
 const roots: string[] = [];
 
@@ -76,6 +78,8 @@ class FakeGitHubClient implements GitHubQualityClient {
   labels = new Set<string>();
   events: string[] = [];
   corruptReadback = false;
+  immutableReleases = false;
+  nextRulesetId = 101;
 
   discoverRepository(): GitHubRepositoryInfo {
     this.events.push('discover');
@@ -100,15 +104,17 @@ class FakeGitHubClient implements GitHubQualityClient {
 
   createRuleset(_repository: string, payload: GitHubRulesetPayload): GitHubRuleset {
     this.events.push('create-ruleset');
-    const value: GitHubRuleset = { id: 101, ...structuredClone(payload) };
-    this.rulesets = [value];
+    const value: GitHubRuleset = { id: this.nextRulesetId++, ...structuredClone(payload) };
+    this.rulesets.push(value);
     return structuredClone(value);
   }
 
   updateRuleset(_repository: string, id: number, payload: GitHubRulesetPayload): GitHubRuleset {
     this.events.push('update-ruleset');
     const value: GitHubRuleset = { id, ...structuredClone(payload) };
-    this.rulesets = [value];
+    const index = this.rulesets.findIndex((ruleset) => ruleset.id === id);
+    if (index < 0) throw new Error(`missing ruleset ${id}`);
+    this.rulesets[index] = value;
     return structuredClone(value);
   }
 
@@ -118,6 +124,15 @@ class FakeGitHubClient implements GitHubQualityClient {
 
   listCheckRuns(): GitHubCheckRun[] {
     return structuredClone(this.runs);
+  }
+
+  getImmutableReleases() {
+    return { enabled: this.immutableReleases, enforcedByOwner: false };
+  }
+
+  enableImmutableReleases(): void {
+    this.events.push('enable-immutable-releases');
+    this.immutableReleases = true;
   }
 
   ensureLabel(_repository: string, name: string): void {
@@ -164,7 +179,13 @@ describe('runQualityInit', () => {
     expect(codeScanningToolsFromRuleset(client.rulesets[0])).toEqual(
       codingEngineContract().github.requiredCodeScanning,
     );
+    const releaseRuleset = findManagedReleaseRuleset(client.rulesets);
+    expect(releaseRuleset?.name).toBe(MANAGED_RELEASE_RULESET_NAME);
+    expect(validateManagedReleaseRuleset(releaseRuleset!, ['v*'])).toEqual([]);
+    expect(client.immutableReleases).toBe(true);
+    expect(generated).toMatchObject({ releaseRulesetId: 102, immutableReleases: true });
     expect(summaries[0]).toContain('CodeQL（安全 high_or_higher；普通 errors）');
+    expect(summaries[1]).toContain('即将保护 GitHub 发布标签：v*');
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(true);
     expect(readFileSync(join(root, QUALITY_WORKFLOW_PATH), 'utf8')).toContain('name: quality-gate');
     expect(client.labels).toEqual(new Set([
@@ -203,6 +224,19 @@ describe('runQualityInit', () => {
     expect(result).toMatchObject({ status: 'cancelled', exitCode: 6 });
     expect(client.rulesets).toEqual([]);
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(false);
+  });
+
+  it('can require immutable Releases without inventing a release tag Ruleset', async () => {
+    const contract = codingEngineContract();
+    contract.release = { protectedRefs: [], notApplicable: '该项目不创建发布标签。' };
+    const root = repositoryFixture(contract);
+    const client = new FakeGitHubClient();
+    const result = await runQualityInit(options(root, client));
+    expect(result).toMatchObject({
+      status: 'files-created', releaseRulesetId: null, immutableReleases: true,
+    });
+    expect(client.rulesets.map((ruleset) => ruleset.name)).toEqual([MANAGED_RULESET_NAME]);
+    expect(client.events).toContain('enable-immutable-releases');
   });
 
   it('rejects a same-name check from any source other than one unique GitHub Actions app', async () => {

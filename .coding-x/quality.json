@@ -295,6 +295,7 @@
         "paths": [
           "package.json",
           "package-lock.json",
+          ".github/workflows/stage-candidate.yml",
           ".github/workflows/publish.yml"
         ],
         "categories": [
@@ -443,6 +444,7 @@
         "securityAlertsThreshold": "high_or_higher"
       }
     ],
+    "immutableReleases": true,
     "securityFeatures": {
       "dependabotSecurityUpdates": true,
       "secretScanning": true,

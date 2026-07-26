@@ -33,6 +33,7 @@ npm run format:check # 新增代码格式与全部差异空白检查
 | 领域词汇表 | `docs/glossary.md` | 共享语言：核心术语定义与禁用同义词，命名与表述以它为准 |
 | Prompt 编写原则 | `docs/prompt-writing.md` | skills/commands/引擎指令的编写与修订判据（no-op 检验、完成判据、锚定词） |
 | Dogfood 回归 | `docs/dogfood-regression.md` | 真实引擎运行需要逐条复查的行为级回归断言 |
+| 发布手册 | `docs/release.md` | npm 候选暂存、三仓 Dogfood、2FA 批准、稳定发布与失败恢复 |
 | 历史冷档案 | `docs/archive/` | 完成态历史文档，仅追溯时读取；日常实现与熵 GC 排除 |
 | 用户文档 | `README.md` | 安装、快速开始、CLI 参数、目录结构 |
 

@@ -121,6 +121,7 @@ function validContract(): unknown {
         alertsThreshold: 'errors',
         securityAlertsThreshold: 'high_or_higher',
       }],
+      immutableReleases: true,
       securityFeatures: {
         dependabotSecurityUpdates: true,
         secretScanning: true,
@@ -173,6 +174,11 @@ describe('parseQualityContract', () => {
     ['repository.fullName', 'only-owner', 'repository.fullName'],
     ['repository.defaultBranch', '', 'repository.defaultBranch'],
     ['release.protectedRefs', [], 'release.protectedRefs 为空时必须提供 notApplicable'],
+    ['release.protectedRefs', ['*'], '必须是明确的 Git tag 模式'],
+    ['release.protectedRefs', [''], '必须是非空字符串'],
+    ['release.protectedRefs', [' releases/v*'], '必须是明确的 Git tag 模式'],
+    ['release.protectedRefs', ['refs/tags/v*'], '必须是明确的 Git tag 模式'],
+    ['release.protectedRefs', ['release//v*'], '必须是明确的 Git tag 模式'],
     ['release.notApplicable', '', 'release.notApplicable'],
     ['sources.engineeringStandards', [], 'sources.engineeringStandards'],
     ['generatedPaths', ['/absolute/**'], 'generatedPaths[0]'],
@@ -246,6 +252,20 @@ describe('parseQualityContract', () => {
         'github.requiredCodeScanning[1].alertsThreshold 是未知阈值',
         'github.requiredCodeScanning[1].securityAlertsThreshold 是未知阈值',
       ]));
+    }
+  });
+
+  it('only accepts an explicit true requirement for immutable GitHub releases', () => {
+    const optional = clone();
+    delete optional.github.immutableReleases;
+    expect(parseQualityContract(optional)).toMatchObject({ status: 'ready' });
+
+    const invalid = clone();
+    invalid.github.immutableReleases = false;
+    const result = parseQualityContract(invalid);
+    expect(result.status).toBe('invalid');
+    if (result.status === 'invalid') {
+      expect(result.errors).toContain('github.immutableReleases 只能声明为 true');
     }
   });
 

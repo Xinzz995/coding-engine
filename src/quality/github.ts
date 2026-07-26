@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 
 export const MANAGED_RULESET_NAME = 'coding-x quality gate';
 export const LEGACY_BOOTSTRAP_RULESET_NAME = 'coding-x bootstrap minimum';
+export const MANAGED_RELEASE_RULESET_NAME = 'coding-x protected release tags';
 /** github.com 的 GitHub Actions 官方 App integration ID。 */
 export const GITHUB_ACTIONS_APP_ID = 15_368;
 
@@ -15,6 +16,11 @@ export interface GitHubSecurityFeatures {
   dependabotSecurityUpdates: boolean;
   secretScanning: boolean;
   secretScanningPushProtection: boolean;
+}
+
+export interface GitHubImmutableReleases {
+  enabled: boolean;
+  enforcedByOwner: boolean;
 }
 
 export interface GitHubPullRequestInfo {
@@ -72,7 +78,7 @@ export interface GitHubRuleset {
 
 export interface GitHubRulesetPayload {
   name: string;
-  target: 'branch';
+  target: 'branch' | 'tag';
   enforcement: 'active';
   bypass_actors: unknown[];
   conditions: {
@@ -94,6 +100,8 @@ export interface GitHubQualityClient {
   ): GitHubPullRequestInfo | null;
   listCheckRuns(repository: string, sha: string): GitHubCheckRun[];
   getSecurityFeatures?(repository: string): GitHubSecurityFeatures;
+  getImmutableReleases?(repository: string): GitHubImmutableReleases;
+  enableImmutableReleases?(repository: string): void;
   getIssue?(repository: string, number: number): GitHubIssueInfo;
   listOpenIssuesByLabel?(repository: string, label: string): GitHubIssueInfo[];
   ensureLabel(repository: string, name: string, color: string, description: string): void;
@@ -259,6 +267,14 @@ function parseSecurityFeatures(value: unknown): GitHubSecurityFeatures {
   };
 }
 
+function parseImmutableReleases(value: unknown): GitHubImmutableReleases {
+  if (!isRecord(value) || typeof value.enabled !== 'boolean'
+      || typeof value.enforced_by_owner !== 'boolean') {
+    throw new GitHubQualityError('GitHub 未返回合法的不可变 Release 状态');
+  }
+  return { enabled: value.enabled, enforcedByOwner: value.enforced_by_owner };
+}
+
 /** `gh` 复用用户现有登录，不把 token 写入项目或命令参数。 */
 export class GhGitHubQualityClient implements GitHubQualityClient {
   private run(args: string[], cwd?: string, input?: string): unknown {
@@ -349,6 +365,14 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
 
   getSecurityFeatures(repository: string): GitHubSecurityFeatures {
     return parseSecurityFeatures(this.api(`repos/${repository}`));
+  }
+
+  getImmutableReleases(repository: string): GitHubImmutableReleases {
+    return parseImmutableReleases(this.api(`repos/${repository}/immutable-releases`));
+  }
+
+  enableImmutableReleases(repository: string): void {
+    this.api(`repos/${repository}/immutable-releases`, 'PUT');
   }
 
   getIssue(repository: string, number: number): GitHubIssueInfo {

@@ -1,6 +1,10 @@
 import type { QualityContract } from '../quality/contract.js';
 import { GITHUB_ACTIONS_APP_ID, type GitHubQualityClient } from '../quality/github.js';
 import { findManagedRuleset, requiredChecksFromRuleset, validateManagedRuleset } from '../quality/ruleset.js';
+import {
+  findManagedReleaseRuleset,
+  validateManagedReleaseRuleset,
+} from '../quality/release-ruleset.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import type { ReviewRemoteState } from './types.js';
 
@@ -12,9 +16,8 @@ export function evaluateReviewRemoteState(options: {
 }): ReviewRemoteState {
   const checkedAt = (options.now ?? new Date()).toISOString();
   try {
-    const ruleset = findManagedRuleset(options.client.listRulesets(
-      options.contract.repository.fullName,
-    ));
+    const allRulesets = options.client.listRulesets(options.contract.repository.fullName);
+    const ruleset = findManagedRuleset(allRulesets);
     if (!ruleset) {
       return {
         status: 'invalid', checks: [], rulesetErrors: ['没有 coding-x 管理的 Ruleset'], checkedAt,
@@ -30,6 +33,26 @@ export function evaluateReviewRemoteState(options: {
       expected,
       options.contract.github.requiredCodeScanning,
     );
+    if (options.contract.release.protectedRefs.length > 0) {
+      const releaseRuleset = findManagedReleaseRuleset(allRulesets);
+      if (!releaseRuleset) {
+        rulesetErrors.push('没有 coding-x 管理的发布标签 Ruleset');
+      } else {
+        rulesetErrors.push(...validateManagedReleaseRuleset(
+          releaseRuleset,
+          options.contract.release.protectedRefs,
+        ));
+      }
+    }
+    if (options.contract.github.immutableReleases === true) {
+      if (!options.client.getImmutableReleases) {
+        rulesetErrors.push('当前 GitHub 适配器无法核验不可变 Release 状态');
+      } else if (!options.client.getImmutableReleases(
+        options.contract.repository.fullName,
+      ).enabled) {
+        rulesetErrors.push('不可变 Release 实际为关闭');
+      }
+    }
     const runs = options.client.listCheckRuns(
       options.contract.repository.fullName,
       options.context.headSha,
