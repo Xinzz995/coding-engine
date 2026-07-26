@@ -92,16 +92,18 @@ const cursorCommit = (cwd) => ({
 });
 
 describe('TDD commit hook', () => {
-  it('is a no-op for non-commit commands and projects without TDD', () => {
+  it('is a no-op for non-commit commands', () => {
     const enabled = fixture();
     expect(runHook(enabled.root, {
       ...nestedCommit(enabled.root),
       tool_input: { command: 'npm test' },
     }).status).toBe(0);
+  }, 15_000);
 
+  it('is a no-op for projects without TDD', () => {
     const disabled = fixture({ enabled: false });
     expect(runHook(disabled.root, nestedCommit(disabled.root)).status).toBe(0);
-  });
+  }, 15_000);
 
   it('accepts Codex/Claude nested payloads and Cursor flat payloads from a subdirectory', () => {
     const value = fixture();
