@@ -244,6 +244,9 @@ scope: root
   high 安全告警和 error 普通告警阈值写入 Ruleset #19747271，`init` 更新后完成远端回读，
   `doctor` 状态为 ready；本次受保护政策变更已由 owner 明确授权，并登记限时政策例外
   Issue #58，PR 最新提交仍必须在新规则下通过后才能合并；
-- staged 发布、三个项目的同包 Dogfood 和结构治理仍待后续独立 PR；
-- npm 本机当前没有交互登录，后续 stage 2FA 批准需要维护者介入；在到达该步骤前不构成实现
-  阻碍。
+- 候选暂存与不可变发布流程已通过 PR #61 合并；发布标签 Ruleset、不可变 Release、
+  `npm-staging` environment 和 stage-only Trusted Publisher 均已回读，真实 OIDC 暂存尚未执行；
+- 0.30.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
+  检查，已获 owner 授权拆出 coding-engine 仓库健康测试；固定裁判继续保持 0.29.0；
+- 首次真实 staged publish、三个项目的同包 Dogfood、发布后固定 0.30.0 的 Policy PR 和结构
+  治理仍待后续独立步骤。

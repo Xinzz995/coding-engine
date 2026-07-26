@@ -63,11 +63,11 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''typecheck'''
-      - name: 'static / docs-health'
+      - name: 'static / repository-health'
         working-directory: '.'
         timeout-minutes: 2
         shell: bash
-        run: '''node'' ''dist/cli.js'' ''doctor'' ''--local'''
+        run: '''npm'' ''run'' ''repository-health'''
       - name: 'security / dependency-audit'
         working-directory: '.'
         timeout-minutes: 5

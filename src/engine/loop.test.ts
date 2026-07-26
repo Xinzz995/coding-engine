@@ -282,7 +282,7 @@ describe('quality contract preflight and shadow mode', () => {
 
   it('rejects a formal version mismatch and a stale PRD contract digest before any agent', async () => {
     const { workspace, instructionsDir } = setup([story()]);
-    const mismatch = { ...TEST_QUALITY_CONTRACT, codingXVersion: '0.30.0' } as QualityContract;
+    const mismatch = { ...TEST_QUALITY_CONTRACT, codingXVersion: '9.9.9' } as QualityContract;
     expect(await runProductionLoop({
       ...strictConfig(workspace, instructionsDir),
       qualityContractReader: () => readyQualityContract(mismatch),
@@ -300,7 +300,7 @@ describe('quality contract preflight and shadow mode', () => {
     writeFileSync(join(workspace, 'state.json'), JSON.stringify({
       'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
     }));
-    const candidate = { ...TEST_QUALITY_CONTRACT, codingXVersion: '0.30.0' } as QualityContract;
+    const candidate = { ...TEST_QUALITY_CONTRACT, codingXVersion: '9.9.9' } as QualityContract;
     expect(await runProductionLoop({
       ...strictConfig(workspace, instructionsDir),
       shadow: true,

@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
+import { renderManagedGitHubFiles } from './quality/github-workflows.js';
+import { parseQualityContract } from './quality/contract.js';
+import { CODING_X_VERSION } from './version.js';
 
 afterEach(() => {
   delete process.env.CODING_X_CODEX_BIN;
@@ -280,6 +283,26 @@ describe('main — invalid --stale-days', () => {
 
 describe('main — doctor JSON', () => {
   it('prints one parseable object including the quality contract digest', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'cli-doctor-'));
+    const raw = JSON.parse(
+      readFileSync(join(process.cwd(), '.coding-x', 'quality.json'), 'utf8'),
+    ) as unknown;
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('repository quality contract fixture must be an object');
+    }
+    const source = { ...raw, codingXVersion: CODING_X_VERSION };
+    const parsed = parseQualityContract(source);
+    if (parsed.status !== 'ready') throw new Error(`invalid doctor fixture: ${parsed.status}`);
+    mkdirSync(join(root, '.coding-x'), { recursive: true });
+    writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify(source));
+    for (const [relativePath, content] of Object.entries(
+      renderManagedGitHubFiles(parsed.contract),
+    )) {
+      mkdirSync(join(root, relativePath, '..'), { recursive: true });
+      writeFileSync(join(root, relativePath), content);
+    }
+    process.env.CODING_X_CONFIG = join(root, 'missing-model-config.json');
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(root);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       // 单元测试不依赖 CI 机器的 gh 登录；远端回读由 delivery 适配器测试
@@ -295,6 +318,8 @@ describe('main — doctor JSON', () => {
       });
     } finally {
       logSpy.mockRestore();
+      cwdSpy.mockRestore();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

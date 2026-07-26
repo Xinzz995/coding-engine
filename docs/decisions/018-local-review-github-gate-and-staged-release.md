@@ -38,6 +38,11 @@ GitHub 不调用模型，也不证明本地 Review。`.coding-x/quality.json` �
 Bootstrap 裁决；之后稳定版 N 评估候选 N+1，发布后再通过旧规则审查 Policy PR 更新固定
 版本。
 
+完整 `doctor` 回答“当前运行版本能否作为正式裁判”，因此正式版本不匹配必须继续失败。
+GitHub 和候选暂存不得把这个结论冒充仓库机械健康；coding-engine 单独运行只检查真实文档、
+契约结构和契约生成文件的仓库测试。首次 Bootstrap 可从版本变更前的受保护 main 提交运行
+0.29.0 本地裁判，GitHub 仍不运行模型。下游项目不获得该仓库专用测试或 Node 依赖。
+
 ## GitHub 与发布约束
 
 - 初始化先配置最小 Ruleset 并回读，再生成 Bootstrap PR 文件；首次 `quality-gate` 出现后
