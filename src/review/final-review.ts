@@ -229,6 +229,12 @@ export async function runFinalReview(options: {
         `${failure?.timedOut ? '（超时）' : failure?.exitCode !== null && failure?.exitCode !== undefined ? `（退出码 ${failure.exitCode}）` : ''}`,
     };
   }
+  const mechanicalEvidence = {
+    status: 'passed' as const,
+    headSha: context.headSha,
+    qualityContractDigest: context.baseContractDigest,
+    scope: 'all-current-platform-applicable-contract-checks' as const,
+  };
 
   let runnerVersion: string;
   try { runnerVersion = options.runnerVersion ?? readRunnerVersion(options.runner); } catch (error) {
@@ -288,7 +294,7 @@ export async function runFinalReview(options: {
     let reviewPackage: ReturnType<typeof createReviewPackage> | null = null;
     try {
       reviewPackage = createReviewPackage({
-        context, risk, axis, runner: options.runner, model,
+        context, risk, axis, runner: options.runner, model, mechanicalEvidence,
       });
       const invocation = await axisRunner({
         runner: options.runner,

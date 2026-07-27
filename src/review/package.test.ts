@@ -58,6 +58,12 @@ describe('createReviewPackage', () => {
       axis: 'engineering',
       runner: 'codex',
       model: 'gpt-5.6-terra',
+      mechanicalEvidence: {
+        status: 'passed',
+        headSha: ctx.headSha,
+        qualityContractDigest: ctx.baseContractDigest,
+        scope: 'all-current-platform-applicable-contract-checks',
+      },
     });
     try {
       const input = JSON.parse(reviewPackage.input) as Record<string, unknown>;
@@ -66,11 +72,46 @@ describe('createReviewPackage', () => {
         axis: 'engineering',
         binding: { baseSha: ctx.baseSha, headSha: ctx.headSha },
         changedFiles: ['README.md'],
+        verificationBoundary: {
+          mechanicalChecks: {
+            status: 'passed',
+            headSha: ctx.headSha,
+            qualityContractDigest: ctx.baseContractDigest,
+            scope: 'all-current-platform-applicable-contract-checks',
+          },
+          allReviewAxes: { owner: 'engine' },
+          githubDelivery: { owner: 'engine' },
+          reviewerScope: 'judge-repository-changes-not-process-completion',
+        },
       });
       expect(input).not.toHaveProperty('workspace');
       reviewPackage.assertUnchanged();
     } finally {
       reviewPackage.cleanup();
     }
+  });
+
+  it('rejects mechanical evidence copied from another commit or scope', () => {
+    const ctx = context();
+    const create = (over: Partial<Parameters<typeof createReviewPackage>[0]['mechanicalEvidence']>) => (
+      createReviewPackage({
+        context: ctx,
+        risk: assessReviewRisk(ctx),
+        axis: 'spec',
+        runner: 'codex',
+        model: 'gpt-5.6-terra',
+        mechanicalEvidence: {
+          status: 'passed',
+          headSha: ctx.headSha,
+          qualityContractDigest: ctx.baseContractDigest,
+          scope: 'all-current-platform-applicable-contract-checks',
+          ...over,
+        },
+      })
+    );
+    expect(() => create({ headSha: 'c'.repeat(40) })).toThrow('未绑定当前 Review 上下文');
+    expect(() => create({
+      scope: 'different-scope' as 'all-current-platform-applicable-contract-checks',
+    })).toThrow('未绑定当前 Review 上下文');
   });
 });
