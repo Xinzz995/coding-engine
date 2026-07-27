@@ -12,6 +12,7 @@ import {
   readQualityContract,
   type QualityContract,
 } from './contract.js';
+import { CODING_X_VERSION } from '../version.js';
 
 function validContract(): unknown {
   return {
@@ -430,7 +431,7 @@ describe('readQualityContract', () => {
       status: 'ready',
       contract: {
         repository: { fullName: 'Xinzz995/coding-engine', defaultBranch: 'main' },
-        codingXVersion: '0.29.0',
+        codingXVersion: CODING_X_VERSION,
       },
       digest: expect.stringMatching(/^sha256:/),
     });

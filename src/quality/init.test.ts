@@ -25,6 +25,7 @@ import { QUALITY_WORKFLOW_PATH } from './github-workflows.js';
 import { runQualityInit } from './init.js';
 import { codeScanningToolsFromRuleset, requiredChecksFromRuleset } from './ruleset.js';
 import { findManagedReleaseRuleset, validateManagedReleaseRuleset } from './release-ruleset.js';
+import { CODING_X_VERSION } from '../version.js';
 
 const roots: string[] = [];
 
@@ -149,7 +150,7 @@ function options(
 ) {
   return {
     root,
-    actualVersion: '0.29.0',
+    actualVersion: CODING_X_VERSION,
     client,
     confirm: async (summary: string) => {
       summaries.push(summary);
@@ -282,6 +283,6 @@ describe('runQualityInit', () => {
     const versionRoot = repositoryFixture();
     await expect(runQualityInit({
       ...options(versionRoot, new FakeGitHubClient()), actualVersion: '0.30.0',
-    })).rejects.toThrow('质量契约固定 0.29.0');
+    })).rejects.toThrow(`质量契约固定 ${CODING_X_VERSION}`);
   }, 15_000);
 });
