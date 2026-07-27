@@ -1,6 +1,6 @@
 ---
 title: "coding-x 0.33.1 首次正式自托管收口"
-status: active
+status: done
 updated: 2026-07-28
 scope: root
 ---

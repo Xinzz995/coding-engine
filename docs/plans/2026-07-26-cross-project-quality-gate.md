@@ -26,10 +26,12 @@ scope: root
 5. GitHub 只有机械 CI，一个总闸能捕获失败、取消、超时、跳过和缺失；政策变化由旧规则
    安全检查；
 6. coding-engine 的 Node 22/24、三系统、CodeQL、依赖和文档检查真实运行；
-7. npm 候选 tarball 在 coding-engine、私有 Go 多模块和私有 Python Monorepo 完成真实 PR；
+7. npm 候选 tarball 在 coding-engine、owner 确认的公开 Go 多模块试点和公开 Python Monorepo
+   试点完成真实 PR；
 8. 最终 npm、tag、Release、main 与三个项目安装摘要一致，回退路径至少演练到不会误移动
    `latest`；
-9. Bootstrap Issue #44 只在三个真实 PR 与正式自托管闭环后关闭；
+9. Bootstrap Issue #44 在三个真实 PR 与正式自托管闭环完成后仍保持开放，只在本次事实收口
+   PR 合并并完成最终回读后关闭；
 10. `loop.ts` 和超大测试文件最后以独立 PR 治理。
 
 ## 黄金原则对照
@@ -189,11 +191,13 @@ scope: root
 
 - coding-engine、Go、Python 在创建 npm stage 前安装同一个候选 tarball；coding-engine 运行
   shadow 全链；
-- 创建私有 Go 多模块仓库，至少两个 module，CI 只用 Go 原生命令；
-- 创建私有 Python Monorepo，至少两个 package，CI 只用 Python 原生命令；
-- 两个私库先探测 Ruleset 能力，不满足就停止等待权限，不降级；
+- 使用经 owner 确认的公开 Go 多模块试点仓库，至少两个 module，CI 只用 Go 原生命令；
+- 使用经 owner 确认的公开 Python Monorepo 试点仓库，至少两个 package，CI 只用 Python
+  原生命令；
+- 公开是本次两个试点的明确选择，不改变通用私有仓库规则：私有仓库先探测 Ruleset 能力，
+  账户套餐或权限不满足就停止等待，不降级；
 - 三个仓库各完成真实 PR，记录候选 tarball 摘要、check-runs 和 Ruleset 回读；
-- 保留两个私库直到最终验收，不删除。
+- 保留两个外部试点仓库直到最终验收，不删除。
 
 ### Task 16：批准、稳定发布与正式自托管
 
@@ -201,10 +205,11 @@ scope: root
 - 内容摘要一致后，npm `latest` 与 `next` 已指向 0.33.1，`v0.33.1` 标签和不可变 GitHub
   Release 已创建；
 - npm `gitHead`/provenance、peeled tag、Release asset、main 和工作树同步已独立核验；
-- 旧规则审查的 Policy PR #76 已把正式裁判固定为 0.33.1；再由固定的 0.33.1 完成本 PR，
-  作为首次正式 coding-engine 自托管实例，此步骤仍待本 PR 验证并合并；
-- Bootstrap Issue #44 仍保持开放；本 PR 合并后须重新核对三个 PR、Ruleset、npm、tag、
-  Release 和摘要证据，才能决定是否关闭。
+- 旧规则审查的 Policy PR #76 已把正式裁判固定为 0.33.1；固定的 0.33.1 已完成
+  coding-engine PR #77 的首次正式自托管，该 PR 已合并；
+- 两个外部试点 PR 也已合并；三个主分支合并提交和成功检查运行记录见“当前状态”；
+- Bootstrap Issue #44 仍保持开放；本次事实收口 PR 合并后须重新核对三个 PR、Ruleset、npm、
+  tag、Release 和摘要证据，才能决定是否关闭。
 
 ## Phase 6：结构治理与收口
 
@@ -264,11 +269,18 @@ scope: root
 - 最终 0.33.1 候选来自提交 `a57e8d3cf666c5293d28c2a3f5921be43044c1a7`；候选构建运行
   #30286427973 产出的 tarball SHA-256 为
   `b27cab53e7d18ba6b1cd8ccf9421b99804524b531624dbddbb496ea29d9e9a73`；
-- coding-engine、Go 与 Python 已完成同一 0.33.1 候选和 registry 精确版本验证；Go/Python
-  Dogfood PR #3 的原生检查均已通过，但两个 PR 仍开放，不能记为已经合并；
+- coding-engine、Go 与 Python 已完成同一 0.33.1 候选和 registry 精确版本验证；两个外部
+  仓库经 owner 确认作为公开试点，这不改变通用能力对私有仓库在套餐或 Ruleset 权限不足时
+  停止且不降级的规则；
 - npm staging 运行 #30288714477 创建 stage
   `9e343f65-8588-40f1-8473-a047bf5c6e1d`；发布运行 #30290999148 已完成，npm `latest` 与
   `next` 均指向 0.33.1，`v0.33.1` 标签与不可变 GitHub Release 已创建；
-- Policy PR #76 已按旧规则通过并合并，把正式裁判固定为 0.33.1；本 PR 是首次正式
-  coding-engine 自托管步骤，仍须完成验证并合并。Bootstrap Issue #44 在本 PR 合并并完成
-  最终复核前保持开放。
+- Policy PR #76 已按旧规则通过并合并，把正式裁判固定为 0.33.1；coding-engine PR #77 已
+  完成首次正式自托管并合并，`main` 合并提交为
+  `0365262ed7706124658ee419a7563376f8645c8c`，该提交的 Quality Gate 运行 #30308770168 和
+  CodeQL 运行 #30308770166 均成功；
+- Go 公开试点 PR #3 已合并，`main` 合并提交为
+  `c6188742c3ade06391f90c593536b23c224ccad7`，Quality Gate 运行 #30310021499 成功；Python
+  公开试点 PR #3 已合并，`main` 合并提交为
+  `c2f5b3ba5cdabd6d9016c18821e67bc2432a4fa5`，Quality Gate 运行 #30310021340 成功；
+- Bootstrap Issue #44 在本次事实收口 PR 合并并完成最终回读前保持开放，不提前宣称关闭。
