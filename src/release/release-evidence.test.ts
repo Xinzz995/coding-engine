@@ -228,7 +228,7 @@ describe('release evidence script', () => {
         '1.2.3',
         '--commit',
         'a'.repeat(40),
-        '--workflow-run-id',
+        '--candidate-workflow-run-id',
         '123',
         '--min-npm',
         '0.0.0',
@@ -243,6 +243,18 @@ describe('release evidence script', () => {
     );
     expect(packed.status, packed.stderr).toBe(0);
     expect(readFileSync(packedEvidence, 'utf8')).toContain(sums.sha256);
+
+    const legacyEvidence = join(root, 'legacy-packed.json');
+    json(legacyEvidence, {
+      ...JSON.parse(readFileSync(packedEvidence, 'utf8')),
+      schemaVersion: 1,
+    });
+    const legacy = run(
+      ['verify-tarball', '--evidence', legacyEvidence, '--tarball', tarball],
+      root,
+    );
+    expect(legacy.status).toBe(1);
+    expect(legacy.stderr).toContain('候选证据格式或包身份非法');
 
     json(stageJson, {
       name: 'coding-x',
@@ -260,8 +272,10 @@ describe('release evidence script', () => {
         stageJson,
         '--commit',
         'a'.repeat(40),
-        '--workflow-run-id',
+        '--candidate-workflow-run-id',
         '123',
+        '--stage-workflow-run-id',
+        '456',
         '--min-npm',
         '0.0.0',
         '--output',
@@ -271,6 +285,29 @@ describe('release evidence script', () => {
     );
     expect(mismatch.status).toBe(1);
     expect(mismatch.stderr).toContain('不是同一字节内容');
+
+    const wrongCandidateRun = run(
+      [
+        'record-stage',
+        '--candidate',
+        packedEvidence,
+        '--stage-json',
+        stageJson,
+        '--commit',
+        'a'.repeat(40),
+        '--candidate-workflow-run-id',
+        '999',
+        '--stage-workflow-run-id',
+        '456',
+        '--min-npm',
+        '0.0.0',
+        '--output',
+        stagedEvidence,
+      ],
+      root,
+    );
+    expect(wrongCandidateRun.status).toBe(1);
+    expect(wrongCandidateRun.stderr).toContain('candidate workflow run ID 不一致');
 
     json(stageJson, {
       name: 'coding-x',
@@ -288,8 +325,10 @@ describe('release evidence script', () => {
         stageJson,
         '--commit',
         'a'.repeat(40),
-        '--workflow-run-id',
+        '--candidate-workflow-run-id',
         '123',
+        '--stage-workflow-run-id',
+        '456',
         '--min-npm',
         '0.0.0',
         '--output',
@@ -317,16 +356,18 @@ describe('release evidence script', () => {
     const attestationsPath = join(root, 'attestations.json');
     writeFileSync(tarball, bytes);
     json(evidencePath, {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: 'staged',
       packageName: 'coding-x',
       version: '1.2.3',
       commit,
       sourceRef: 'refs/heads/main',
-      sourceWorkflow: '.github/workflows/stage-candidate.yml',
+      sourceWorkflow: '.github/workflows/build-candidate.yml',
       sourceRepository: 'https://github.com/Xinzz995/coding-engine',
-      workflowRunId: '123',
+      candidateWorkflowRunId: '123',
       requestedTag: 'next',
+      stageWorkflow: '.github/workflows/stage-candidate.yml',
+      stageWorkflowRunId: '456',
       stageId: '123e4567-e89b-42d3-a456-426614174000',
       stagedAt: '2026-07-26T00:00:00.000Z',
       stageToolchain: { node: '24.0.0', npm: '11.15.0' },
@@ -383,8 +424,8 @@ describe('release evidence script', () => {
       evidencePath,
       '--commit',
       commit,
-      '--workflow-run-id',
-      '123',
+      '--stage-workflow-run-id',
+      '456',
       '--stage-id',
       '123e4567-e89b-42d3-a456-426614174000',
       '--tarball-sha256',
@@ -402,7 +443,7 @@ describe('release evidence script', () => {
     expect(valid.status, valid.stderr).toBe(0);
 
     const wrongRun = [...registryArgs];
-    wrongRun[wrongRun.indexOf('123')] = '999';
+    wrongRun[wrongRun.indexOf('456')] = '999';
     const unbound = run(wrongRun, root);
     expect(unbound.status).toBe(1);
     expect(unbound.stderr).toContain('选定的 stage workflow run 不一致');

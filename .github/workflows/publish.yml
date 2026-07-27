@@ -86,14 +86,6 @@ jobs:
             .path == ".github/workflows/stage-candidate.yml"
           ' "$RUNNER_TEMP/stage-run.json" >/dev/null
 
-      - name: Download the pre-stage candidate artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: npm-candidate-${{ steps.source.outputs.version }}
-          path: ${{ runner.temp }}/candidate
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.source.outputs.stage_run_id }}
-
       - name: Download the stage identity artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -101,6 +93,51 @@ jobs:
           path: ${{ runner.temp }}/stage
           github-token: ${{ github.token }}
           run-id: ${{ steps.source.outputs.stage_run_id }}
+
+      - name: Read the immutable candidate source selected by staging
+        id: candidate
+        env:
+          RELEASE_COMMIT: ${{ steps.source.outputs.commit }}
+          STAGE_RUN_ID: ${{ steps.source.outputs.stage_run_id }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          jq -e --arg commit "$RELEASE_COMMIT" --arg version "$VERSION" '
+            .schemaVersion == 2 and
+            .status == "staged" and
+            .version == $version and
+            .commit == $commit and
+            .stageWorkflow == ".github/workflows/stage-candidate.yml" and
+            .stageWorkflowRunId == $ENV.STAGE_RUN_ID and
+            (.candidateWorkflowRunId | test("^[0-9]+$"))
+          ' "$RUNNER_TEMP/stage/candidate.json" >/dev/null
+          CANDIDATE_RUN_ID="$(jq -r .candidateWorkflowRunId "$RUNNER_TEMP/stage/candidate.json")"
+          echo "candidate_run_id=$CANDIDATE_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the exact candidate build run recorded by staging
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.source.outputs.commit }}
+          CANDIDATE_RUN_ID: ${{ steps.candidate.outputs.candidate_run_id }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" \
+            > "$RUNNER_TEMP/candidate-run.json"
+          jq -e --arg sha "$RELEASE_COMMIT" '
+            .id == ($ENV.CANDIDATE_RUN_ID | tonumber) and
+            .head_sha == $sha and
+            .head_branch == "main" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .path == ".github/workflows/build-candidate.yml"
+          ' "$RUNNER_TEMP/candidate-run.json" >/dev/null
+
+      - name: Download the original pre-stage candidate artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-candidate-${{ steps.source.outputs.version }}
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.candidate.outputs.candidate_run_id }}
 
       - name: Verify candidate artifact and public npm state
         env:
@@ -125,7 +162,7 @@ jobs:
           node build/release-evidence.mjs verify-registry \
             --evidence "$RUNNER_TEMP/stage/candidate.json" \
             --commit "$RELEASE_COMMIT" \
-            --workflow-run-id "$STAGE_RUN_ID" \
+            --stage-workflow-run-id "$STAGE_RUN_ID" \
             --stage-id "$NPM_STAGE_ID" \
             --tarball-sha256 "$CANDIDATE_SHA256" \
             --metadata "$RUNNER_TEMP/registry/metadata.json" \

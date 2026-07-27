@@ -1,7 +1,7 @@
 ---
 title: coding-x 候选发布与恢复手册
 status: active
-updated: 2026-07-26
+updated: 2026-07-27
 scope: root
 ---
 
@@ -9,13 +9,15 @@ scope: root
 
 ## 边界
 
-发布不是“推一个标签就把当前目录发出去”。固定顺序是：受保护 PR 合并版本 → 暂存同一候选包
-→ 三个真实项目验证 → 维护者用 2FA 批准到 `next` → 公开精确版本再次验证 → 维护者移动
-`latest` → 创建不可改写的标签和 GitHub Release。
+发布不是“推一个标签就把当前目录发出去”。固定顺序是：受保护 PR 合并版本 → 无发布身份地
+构建固定候选包 → 三个真实项目验证 → 显式选择该候选进入 npm staging → 维护者用 2FA 批准
+到 `next` → 公开精确版本再次验证 → 维护者移动 `latest` → 创建不可改写的标签和 GitHub
+Release。
 
-GitHub Actions 只能把候选提交到 npm 暂存区，不能批准、不能直接公开、不能移动 `latest`。
-本机也不运行 `npm publish`。发布身份只存在于独立的暂存任务；该任务不安装项目依赖，也不
-运行项目脚本。
+`build-candidate.yml` 只能构建和保存候选，没有 npm 身份。`stage-candidate.yml` 只能把明确
+选择且已经验证的候选提交到 npm 暂存区，不能批准、不能直接公开、不能移动 `latest`。本机
+也不运行 `npm publish`。发布身份只存在于独立的暂存任务；该任务不安装项目依赖，也不运行
+项目脚本。
 
 候选版本与质量契约固定的稳定裁判版本不同是预期状态。GitHub 和暂存流程只运行
 `repository-health` 机械检查，不运行候选版本的完整 `doctor`，也不把 shadow 结果转换成成功。
@@ -53,22 +55,18 @@ CI + owner 人工 Bootstrap”：PR 最新提交必须通过全部仓库检查�
 Review，也不得用候选版本为自己签发正式结果。0.33.0 发布并由独立 Policy PR 固定后，后续
 版本恢复稳定版评估候选版的常规流程。
 
-### 2. 暂存固定候选
+### 2. 构建固定候选
 
-从 GitHub Actions 手动运行 `Stage npm candidate`，分支必须选 `main`，输入精确稳定版本，例如
-`0.33.0`。工作流会先在无发布身份的任务中执行完整检查、构建并保存候选包；只有该任务成功，
-独立暂存任务才取得短期 OIDC 身份。
+从 GitHub Actions 手动运行 `Build release candidate`，分支必须选 `main`，输入精确稳定版本，
+例如 `0.33.0`。该工作流在没有 npm 身份的环境中执行完整检查、构建并保存候选包。
 
-下载同一次运行的两个制品：
+下载该次运行的制品：
 
-- `npm-candidate-X.Y.Z`：暂存前保存的压缩包、打包结果和摘要；
-- `npm-stage-X.Y.Z`：npm stage ID，以及证明 npm 接收内容与候选包完全一致的记录。
+- `npm-candidate-X.Y.Z`：压缩包、打包结果和 schema v2 候选证据；证据记录 commit、candidate
+  run ID、文件大小、SHA-1、SHA-256 和 SHA-512 integrity。
 
-若第二个制品不存在，不得推测暂存成功。查看日志和 npm Staged Packages；若 npm 已创建 stage
-但后续摘要核验失败，必须用 2FA 拒绝该 stage。
-
-若 npm 报告版本曾经发布，停止重试该版本。npm 的版本标识不可复用，即使公开内容已经撤回；
-必须通过新的受保护版本 PR 选择新版本，再从新的 `main` 提交重新构建候选。
+构建或检查失败时 npm 尚未收到任何内容。通过受保护 PR 修复后，从新的 main 重新构建候选。
+不要重跑旧候选并把它解释成包含后续修复。
 
 ### 3. 批准前 Dogfood
 
@@ -80,7 +78,26 @@ Review，也不得用候选版本为自己签发正式结果。0.33.0 发布并�
 
 三个真实 PR、候选摘要和远端总闸均通过后，才进入批准。
 
-### 4. 用 2FA 批准到 `next`
+### 4. 提升已验证候选到 npm staging
+
+从 GitHub Actions 手动运行 `Stage verified npm candidate`，分支必须选 `main`，输入：
+
+- 候选的精确版本；
+- `Build release candidate` 页面显示的 candidate run ID。
+
+不需要手工复制文件摘要。工作流自动回读候选运行，要求它来自
+`.github/workflows/build-candidate.yml`、已成功结束、对应提交仍是当前远端 main，并重新核对
+tarball 摘要。任一条件不满足都会在联系 npm 前停止；此时应从新 main 重新构建并重跑三仓
+Dogfood。
+
+成功后下载该次 staging 运行的 `npm-stage-X.Y.Z`。它记录 candidate run、stage run、npm
+stage ID 和同一候选摘要。若该制品不存在，不得推测暂存成功。查看日志和 npm Staged
+Packages；若 npm 已创建 stage 但后续摘要核验或证据上传失败，必须用 2FA 拒绝该 stage。
+
+若 npm 报告版本曾经发布，停止重试该版本。npm 的版本标识不可复用，即使公开内容已经撤回；
+必须通过新的受保护版本 PR 选择新版本，再从新的 main 构建和验证候选。
+
+### 5. 用 2FA 批准到 `next`
 
 在 npmjs.com 的 Staged Packages 页面检查并批准，或在已交互登录的终端执行：
 
@@ -93,7 +110,7 @@ npm stage approve <stage-id>
 批准会把暂存时固定的 `next` 标签一并公开；不能在批准时改标签。重新下载公开的精确版本，
 在三个项目执行安装冒烟，并核对候选摘要、npm `gitHead` 和 provenance 都指向候选提交。
 
-### 5. 提升稳定版本
+### 6. 提升稳定版本
 
 公开精确版本验证通过后，维护者用 2FA 把同一版本提升为 `latest`：
 
@@ -121,7 +138,7 @@ git push origin vX.Y.Z
 及候选证据放入 draft Release，最后一次性发布为不可变 Release。即使同一提交重跑过多次暂存，
 标签也只允许选择人工实际批准的那一次，不会猜测“最新一次”或“任意一次”。
 
-### 6. 最终核对
+### 7. 最终核对
 
 以下状态必须同时成立：
 
@@ -135,8 +152,9 @@ git push origin vX.Y.Z
 
 | 失败点 | 处理方式 |
 |---|---|
-| 构建或检查失败 | npm 尚未收到候选。通过新 PR 修复，再以新提交重跑。 |
-| 暂存任务在 npm 调用前失败 | 没有 stage；查明 OIDC、environment 或工作流配置后重跑。 |
+| 候选构建或 Dogfood 失败 | npm 尚未收到候选。通过新 PR 修复，从新 main 构建新候选并重跑 Dogfood。 |
+| 选择的候选运行非法、失败或已落后 main | 没有 stage；不要猜测后续改动是否影响发布物，构建并验证新候选。 |
+| 暂存任务在 npm 调用前失败 | 没有 stage；查明候选身份、OIDC、environment 或工作流配置后重跑。 |
 | npm 已返回 stage，但摘要核验或证据上传失败 | 不批准。用 `npm stage reject <stage-id>` 和 2FA 拒绝；查明原因后重跑。 |
 | 批准到 `next` 后，公开冒烟失败 | 不移动 `latest`，不创建标签；保留版本并发布新的补丁版本。 |
 | 已移动 `latest`，标签创建前发现问题 | 立即把 `latest` 移回前一个稳定版本，再发布补丁；不删除已发布版本。 |
@@ -149,6 +167,7 @@ npm staged publishing 不可用时不自动降级。只有用户明确批准新�
 
 ## 证据保留
 
-Actions 候选制品保留 30 天，供批准前检查和发布工作流消费；npm stage、公开 registry、GitHub
+Actions 候选制品保留 30 天，供批准前 Dogfood、staging 和发布工作流消费；stage 证据沿
+candidate run ID 回到原候选，不复制或重建一个替代候选。npm stage、公开 registry、GitHub
 不可变 Release 和对应 attestation 是共享记录。workspace 里的 Review 文件仍只是本地反馈，
 不能替代这些交付记录。
