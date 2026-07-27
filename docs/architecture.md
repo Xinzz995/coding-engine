@@ -19,7 +19,9 @@ scope: root
 | 模块 | 路径 | 职责 |
 |---|---|---|
 | CLI 入口 | `src/cli.ts`、`src/cursor-hooks.ts` | 参数解析、启动循环/仪表盘，提供模型/全局配置与 Cursor 项目检查安装、状态、卸载入口；Cursor 安装器只在 Git 根安全管理 `.cursor/` 中归属明确的内容；`help`/`-h`/`--help` 在子命令校验与任何 workspace/runner 副作用前统一短路 |
-| 主循环 | `src/engine/loop.ts` | Developer ⇄ Validator 迭代；正式运行先核对质量契约、固定版本、PRD 摘要和派生检查快照，候选版本只能 shadow；agent 结局机械三分与异常轮处理（no-op 检测、stall 熔断、终轮篡改收口）；按契约检查→TDD 门禁→Validator 排序；生成 Validator 精确目标、消费结构化 claim 后写 verdict/签发凭证；每个真实子进程调用附加调用凭证；完成判定与收敛出口（ADR-009、013、015、016、017、018） |
+| 主循环 | `src/engine/loop.ts` | 直接拥有 workspace 锁、仪表盘、Developer ⇄ Validator 逐轮状态机、最终 Review、报告与资源释放；agent 结局机械三分与异常轮处理（no-op 检测、stall 熔断、终轮篡改收口）；按契约检查→TDD 门禁→Validator 排序；生成 Validator 精确目标、消费结构化 claim 后写 verdict/签发凭证；每个真实子进程调用附加调用凭证；完成判定与收敛出口（ADR-009、013、015、016、017、018）。逐轮状态机保留在这里，因为提前退出、证据写入、状态所有权与完成判定共享同一控制流，继续拆成回调会掩盖退出路径 |
+| 循环启动预检 | `src/engine/loop-preflight.ts` | 仪表盘和任何 agent 启动前，按既有顺序核对质量契约与固定版本，完成 PRD/State 恢复、TDD 政策、模型目录、最终 Review 模型与冻结检查快照校验；失败只返回既有退出码，成功交回收窄的就绪上下文 |
+| 循环指令装配 | `src/engine/loop-instructions.ts` | 读取 Builder/Validator 指令，维护 TDD 工作流片段并渲染 workspace、重试、仲裁与 TDD 占位符；`loop.ts` 继续兼容转出 `renderInstruction` |
 | Agent 进程 | `src/engine/agent.ts` | 拉起 claude/codex/cursor headless 子进程、模型参数与超时控制；stdout/stderr 实时 tee 并滚动保留有界尾部，正常路径等 pipe 关闭再返回 duration/exit/output，超时路径计入整棵进程树终止等待 |
 | 进程树终止 | `src/engine/process-tree.ts` | agent 与机械门禁共享的跨平台超时收口：POSIX 进程组 SIGTERM→SIGKILL 并确认退出；Windows 等待 `taskkill /T /F`，调用方只在整棵树停止后继续写 workspace |
 | PRD 读取 | `src/engine/prd.ts` | 读 prd.json（需求内容） |
@@ -50,7 +52,7 @@ scope: root
 
 ## 分层与依赖方向
 
-cli → quality + engine（loop → quality / agent / prd / state / progress / tdd-gate / models / model-preflight / model-catalog / repair）；cli 另调用独立的 cursor-hooks 项目适配器。doctor 与 loop 共用 quality 契约解析和摘要核对。agent 与 gate 共同依赖 process-tree 的终止单源，tdd-gate 复用 gate 的命令 runner。report 模块被 cli 与 loop 调用，反向只读 engine 的 prd/state/progress/tdd-gate 与 gate 的仲裁判定，loop 另把 guard 快照注入自动报告——与 dashboard 同为消费端。loop 启停 dashboard 并推送迭代状态，dashboard 反向只读 `engine/prd.ts`、`engine/state.ts`、`engine/progress.ts` 取数据供 API 使用——两者是双向数据耦合，而非单向依赖。`assets/` 与共同 hook 脚本构建时拷进 `dist/`；引擎经 `import.meta.url` 读取资产，Cursor 适配器读取 `dist/hooks` 后复制到目标项目。`templates/`、`skills/`、`commands/` 与 Codex/Claude hook 配置只随插件仓库分发。
+cli → quality + engine（loop → loop-preflight / agent / state / gate / tdd-gate / models / validation-protocol，loop-preflight → quality / prd / state / model-preflight / loop-instructions）；cli 另调用独立的 cursor-hooks 项目适配器。doctor 与 loop-preflight 共用 quality 契约解析和摘要核对。agent 与 gate 共同依赖 process-tree 的终止单源，tdd-gate 复用 gate 的命令 runner。report 模块被 cli 与 loop 调用，反向只读 engine 的 prd/state/progress/tdd-gate 与 gate 的仲裁判定，loop 另把 guard 快照注入自动报告——与 dashboard 同为消费端。loop 启停 dashboard 并推送迭代状态，dashboard 反向只读 `engine/prd.ts`、`engine/state.ts`、`engine/progress.ts` 取数据供 API 使用——两者是双向数据耦合，而非单向依赖。`assets/` 与共同 hook 脚本构建时拷进 `dist/`；CLI 以自身 `import.meta.url` 定位构建后的指令目录，再交给循环指令模块读取，Cursor 适配器读取 `dist/hooks` 后复制到目标项目。`templates/`、`skills/`、`commands/` 与 Codex/Claude hook 配置只随插件仓库分发。
 
 ## 数据流
 
