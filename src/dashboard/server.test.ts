@@ -201,7 +201,8 @@ describe('start', () => {
 
     const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
     cleanup.push(() => srv.close());
-    const addr = srv.address();
+    const addr = await srv.ready;
+    expect(srv.address()).toEqual(addr);
     const res = await fetch(`http://127.0.0.1:${addr.port}/api/state`);
     const body = await res.json();
     expect(body.runtime.max_iterations).toBe(50);
@@ -217,7 +218,7 @@ describe('start', () => {
 
     const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
     cleanup.push(() => srv.close());
-    const addr = srv.address();
+    const addr = await srv.ready;
     const res = await fetch(`http://127.0.0.1:${addr.port}/`);
     const body = await res.text();
 
@@ -227,5 +228,21 @@ describe('start', () => {
     expect(body).not.toContain(pub);
     expect(body).not.toContain('ENOENT');
     expect(log).toHaveBeenCalledOnce();
+  });
+
+  it('lets the OS allocate unique ephemeral ports for concurrent dashboards', async () => {
+    const ws = tempWorkspace();
+    const pub = mkdtempSync(join(tmpdir(), 'pub-concurrent-'));
+    cleanup.push(() => rmSync(pub, { recursive: true, force: true }));
+    writeFileSync(join(pub, 'dashboard.html'), '<html>main</html>');
+    writeFileSync(join(pub, 'dashboard-p.html'), '<html>pixel</html>');
+
+    const servers = Array.from({ length: 12 }, () =>
+      start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false }),
+    );
+    cleanup.push(() => servers.forEach((server) => server.close()));
+    const addresses = await Promise.all(servers.map((server) => server.ready));
+
+    expect(new Set(addresses.map(({ port }) => port)).size).toBe(servers.length);
   });
 });

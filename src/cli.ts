@@ -264,6 +264,7 @@ export async function runDashboard(
     port: opts.port,
     openBrowser: opts.openBrowser,
   });
+  await server.ready;
   console.log('📊 离线查看模式（未在运行循环），按 Ctrl+C 退出。');
   try {
     await (interrupt ?? new Promise<void>((r) => process.once('SIGINT', () => r())));

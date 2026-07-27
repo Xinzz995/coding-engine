@@ -382,6 +382,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       port: cfg.port,
       openBrowser: cfg.openBrowser ?? true,
     });
+    await server.ready;
     dashboard.setState({ runner: runKind });
     // Agents must run at the project root (the engine process's cwd), NOT at
     // cfg.workspace. The engine reads prd.json at join(cfg.workspace,
