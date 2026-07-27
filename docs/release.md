@@ -70,14 +70,15 @@ Review，也不得用候选版本为自己签发正式结果。0.33.0 发布并�
 
 ### 3. 批准前 Dogfood
 
-coding-engine 的候选影子运行必须针对真实的开放 PR：运行位置必须是包含最新 `main` 的干净功能
-分支，GitHub 上必须存在绑定该分支当前提交的开放 PR。模型只在本地运行，GitHub 不调用模型。
+开始 coding-engine 候选影子运行前，工作树必须位于包含最新 `main` 的干净功能分支；GitHub
+上必须存在绑定该分支当前提交的开放 PR。模型只在本地运行，GitHub 不调用模型。
 
 如果版本 PR 已合并，只能用一项真实、最小的后续修正，从最新 `main` 建立独立开放 PR。
 不得复用已合并 PR、添加空标记，或伪造本地和远端状态来制造“通过”证明。
 
-三个项目都从同一个 candidate run 下载 `npm-candidate-X.Y.Z` 中的同一个压缩包。每项 Dogfood
-记录都必须包含相同的 candidate run ID、候选来源 commit 和压缩包 SHA-256：
+三个项目都从同一个候选构建运行（candidate run）下载 `npm-candidate-X.Y.Z` 中的同一个
+压缩包。每个项目的批准前 Dogfood 记录都必须包含相同的 candidate run ID、候选来源 commit
+和压缩包 SHA-256：
 
 - coding-engine 使用候选版本运行 `--shadow`；影子成功固定返回 7，只表示影子验证走完，绝不表示
   候选可交付、已发布或正式通过；
