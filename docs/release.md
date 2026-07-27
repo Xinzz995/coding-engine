@@ -76,14 +76,16 @@ coding-engine 的候选影子运行必须针对真实的开放 PR：运行位置
 如果版本 PR 已合并，只能用一项真实、最小、非业务的文档或流程修正，从最新 `main` 建立独立
 开放 PR。不得复用已合并 PR、添加空标记，或伪造本地和远端状态来制造“通过”证明。
 
-三个项目都安装 `npm-candidate-X.Y.Z` 中同一个压缩包并记录 SHA-256：
+三个项目都从同一个 candidate run 下载 `npm-candidate-X.Y.Z` 中的同一个压缩包。每项 Dogfood
+记录都必须包含相同的 candidate run ID、候选来源 commit 和压缩包 SHA-256：
 
 - coding-engine 使用候选版本运行 `--shadow`；影子成功固定返回 7，只表示影子验证走完，绝不表示
   候选可交付、已发布或正式通过；
 - Go 多模块项目运行自身 Go 检查，GitHub CI 不安装 Node 或 coding-x；
 - Python Monorepo 运行自身 Python 检查，GitHub CI 不安装 Node 或 coding-x。
 
-三个真实 PR、候选摘要和远端总闸均通过后，才进入批准。
+三个真实项目的 Dogfood、对应 PR 和远端总闸全部通过，并确认上述三项候选身份一致后，才可
+手动启动 npm staging。任一真实验证尚未完成时，不得运行 `stage-candidate.yml`。
 
 ### 4. 提升已验证候选到 npm staging
 
