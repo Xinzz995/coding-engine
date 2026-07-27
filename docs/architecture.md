@@ -1,7 +1,7 @@
 ---
 title: 架构地图
 status: active
-updated: 2026-07-27
+updated: 2026-07-28
 scope: root
 ---
 
@@ -60,8 +60,9 @@ cli → quality + engine（loop → quality / agent / prd / state / progress / t
 
 coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。它们运行仓库机械健康检查，
 只验证文档、契约结构和契约生成文件；完整 doctor 继续拒绝候选版本与固定版本不一致。
-首次 0.33.0 由机械检查和 owner 人工 Bootstrap 裁决，不声称取得正式本地 Review；因此远端
-总闸成功不表示候选取得正式裁判资格（ADR-018）。
+首次稳定自举实际使用 0.33.1（0.33.0 已被 npm 判定不可复用），发布前由机械检查和 owner
+人工 Bootstrap 裁决，不声称取得正式本地 Review；发布后通过独立 Policy PR 固定 0.33.1，
+正式自托管才开始。因此首发阶段的远端总闸成功不表示候选取得正式裁判资格（ADR-018）。
 
 发布链把“构建候选”和“取得 npm 暂存身份”拆成两个独立工作流与权限域。前者执行完整项目
 代码但没有发布身份，产物先供三个项目 Dogfood；后者由维护者选择已经验证的候选运行，回读
