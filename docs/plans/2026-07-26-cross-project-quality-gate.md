@@ -1,7 +1,7 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁实施计划"
 status: active
-updated: 2026-07-27
+updated: 2026-07-28
 scope: root
 ---
 
@@ -37,7 +37,7 @@ scope: root
 | 原则 | 适用性与裁决 | 必须保留的证据 |
 |---|---|---|
 | 1. 完成必须可证伪 | 适用。每个本地、远端、发布状态都有失败路径和唯一结论；“AI 评过”“CI 绿了”“包已发布”均不能单独代表完成。 | 契约/状态合同测试；真实 PR check-run；候选与 registry tarball SHA-256；Ruleset 回读；最终 ref 对齐。 |
-| 2. 生成者不能自签 | 适用。Developer 不签 Validator；本地 Review 不签 GitHub；候选 N+1 只能 shadow，由稳定 N 和机械 CI 裁决。首次 0.33.0 使用人工 Bootstrap。 | Validator receipt；Review binding；shadow exit 7；旧版本运行记录；Bootstrap Issue/PR 历史。 |
+| 2. 生成者不能自签 | 适用。Developer 不签 Validator；本地 Review 不签 GitHub；候选 N+1 只能 shadow，由稳定 N 和机械 CI 裁决。首次稳定版 0.33.1 使用人工 Bootstrap；0.33.0 没有成为正式裁判。 | Validator receipt；Review binding；shadow exit 7；旧版本运行记录；Bootstrap Issue/PR 历史。 |
 | 3. 自主性与风险对称 | 适用。`init` 每次远端变更先展示、确认、应用、回读；不自动 merge/rebase/commit/push/开 PR/发布。Reviewer 只读、最小环境、一次重试。发布和例外保留人工批准。 | 幂等/中断恢复测试；远端失败回读；runner 攻击反测；2FA/stage 审批记录；过期例外 doctor 失败。 |
 | 4. 复用原生执行面 | 适用。下游 GitHub CI 只运行 Go/Python 等项目原生命令，不安装 Node/coding-x。核心契约跨语言，GitHub 和三个 runner 只在适配层分叉。 | Go/Python workflow 扫描和真实 run；核心类型无生态专属字段；三 runner 同一输出 schema。 |
 | 5. 先度量失败与恢复 | 适用。先实现缺契约、脏树、落后分支、缺 PR、跳过 job、模型损坏、秘密读取、stage 失败和 latest 回退测试，再开放成功路径。 | failure-first 自动化；临时远端破坏场景；失败后 ref/dist-tag 保持或恢复；doctor 漂移告警。 |
@@ -197,11 +197,14 @@ scope: root
 
 ### Task 16：批准、稳定发布与正式自托管
 
-- 用户用 2FA 批准 stage 到 `next`；三个项目从 registry 按精确版本重跑安装冒烟；
-- 内容摘要一致后人工移动 `latest`；创建对应 `v*` 标签和 GitHub Release；
-- 独立核验 npm `gitHead`/provenance、peeled tag、Release asset、main 和工作树同步；
-- 通过旧规则 Policy PR 固定 0.33.0，再由 0.33.0 完成一个正式 coding-engine PR；
-- 关闭 Bootstrap Issue #44 前附三个 PR、Ruleset、npm、tag、Release 和摘要证据。
+- 0.33.1 stage 已由用户用 2FA 批准到 `next`，三个项目已从 registry 按精确版本重跑安装冒烟；
+- 内容摘要一致后，npm `latest` 与 `next` 已指向 0.33.1，`v0.33.1` 标签和不可变 GitHub
+  Release 已创建；
+- npm `gitHead`/provenance、peeled tag、Release asset、main 和工作树同步已独立核验；
+- 旧规则审查的 Policy PR #76 已把正式裁判固定为 0.33.1；再由固定的 0.33.1 完成本 PR，
+  作为首次正式 coding-engine 自托管实例，此步骤仍待本 PR 验证并合并；
+- Bootstrap Issue #44 仍保持开放；本 PR 合并后须重新核对三个 PR、Ruleset、npm、tag、
+  Release 和摘要证据，才能决定是否关闭。
 
 ## Phase 6：结构治理与收口
 
@@ -253,13 +256,19 @@ scope: root
   Issue #58，PR 最新提交仍必须在新规则下通过后才能合并；
 - 候选暂存与不可变发布流程已通过 PR #61 合并；发布标签 Ruleset、不可变 Release、
   `npm-staging` environment 和 stage-only Trusted Publisher 均已回读；运行 #30212975390 已证明
-  OIDC 身份和来源声明有效，但 npm 以 0.30.0 曾被使用为由拒绝暂存，未创建 stage，公开
-  `latest` 仍为 0.29.0；owner 已明确改用 0.33.0，不重试不可复用的 0.30.0；
+  OIDC 身份和来源声明有效，但 npm 以 0.30.0 曾被使用为由拒绝暂存，未创建 stage；
 - 0.33.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
   检查，已获 owner 授权拆出 coding-engine 仓库健康测试；PR #63 按已约定的一次性“机械
-  CI + owner 人工 Bootstrap”裁决，不声称完成正式本地 AI Review，固定裁判继续保持 0.29.0；
-- 首次真实 0.33.0 staged publish 已证明 npm staging 可用；随后多轮真实 Dogfood 在 stage
-  创建后才发现产品问题，旧候选均不能吸收新修复。ADR-019 与
-  `2026-07-27-prestage-candidate-promotion.md` 因此把候选构建、三仓验证和 npm staging
-  改成三个顺序阶段；新候选验证、正式发布、固定 0.33.0 的 Policy PR 和结构治理仍待后续
-  独立步骤。
+  CI + owner 人工 Bootstrap”裁决，不声称完成正式本地 AI Review。随后多轮真实 Dogfood
+  在 stage 创建后发现产品问题，旧候选不能吸收新修复，因此 0.33.0 没有成为正式裁判；
+- 最终 0.33.1 候选来自提交 `a57e8d3cf666c5293d28c2a3f5921be43044c1a7`；候选构建运行
+  #30286427973 产出的 tarball SHA-256 为
+  `b27cab53e7d18ba6b1cd8ccf9421b99804524b531624dbddbb496ea29d9e9a73`；
+- coding-engine、Go 与 Python 已完成同一 0.33.1 候选和 registry 精确版本验证；Go/Python
+  Dogfood PR #3 的原生检查均已通过，但两个 PR 仍开放，不能记为已经合并；
+- npm staging 运行 #30288714477 创建 stage
+  `9e343f65-8588-40f1-8473-a047bf5c6e1d`；发布运行 #30290999148 已完成，npm `latest` 与
+  `next` 均指向 0.33.1，`v0.33.1` 标签与不可变 GitHub Release 已创建；
+- Policy PR #76 已按旧规则通过并合并，把正式裁判固定为 0.33.1；本 PR 是首次正式
+  coding-engine 自托管步骤，仍须完成验证并合并。Bootstrap Issue #44 在本 PR 合并并完成
+  最终复核前保持开放。
