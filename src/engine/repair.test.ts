@@ -33,7 +33,9 @@ describe('repairWorkspaceFiles', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('落盘走 rename 语义（inode 必变）：中途被杀不留半截目标文件', () => {
+  it.runIf(process.platform !== 'win32')(
+    'POSIX 落盘走 rename 替换语义（inode 必变）：中途被杀不留半截目标文件',
+    () => {
     const dir = mkdtempSync(join(tmpdir(), 'repair-ws-'));
     const file = join(dir, 'prd.json');
     writeFileSync(file, '{ "userStories": [], }');
@@ -42,7 +44,8 @@ describe('repairWorkspaceFiles', () => {
     // 覆盖写保留 inode；tmp+rename 替换必换 inode——rename 语义的可观测面
     expect(statSync(file).ino).not.toBe(inoBefore);
     rmSync(dir, { recursive: true, force: true });
-  });
+    },
+  );
 
   it('全有或全无：state.json 不可修复时抛出且 prd.json 原样不动', () => {
     const dir = mkdtempSync(join(tmpdir(), 'repair-ws-'));

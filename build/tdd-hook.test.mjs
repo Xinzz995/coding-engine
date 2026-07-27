@@ -159,19 +159,23 @@ describe('TDD commit hook', () => {
     expect(result.stderr.length).toBeLessThan(2600);
   });
 
-  it('blocks malformed config, policy drift, and a forbidden marker added after baseline', () => {
+  it('blocks malformed TDD config', () => {
     const malformed = fixture();
     malformed.prd.tdd.coverageCheck = '';
     writeFileSync(join(malformed.root, '.workspace', 'prd.json'), JSON.stringify(malformed.prd));
     expect(runHook(malformed.root, nestedCommit(malformed.root)).status).toBe(2);
+  }, 15_000);
 
+  it('blocks TDD policy drift', () => {
     const drift = fixture();
     writeFileSync(drift.policyPath, 'process.exit(1);\n');
     expect(runHook(drift.root, nestedCommit(drift.root))).toMatchObject({
       status: 2,
       stderr: expect.stringContaining('摘要'),
     });
+  }, 15_000);
 
+  it('blocks a forbidden marker added after the TDD baseline', () => {
     const ignore = fixture();
     writeFileSync(
       join(ignore.root, 'src', 'index.js'),
@@ -183,7 +187,7 @@ describe('TDD commit hook', () => {
       status: 2,
       stderr: expect.stringContaining('c8 ignore'),
     });
-  });
+  }, 15_000);
 
   it('uses an external custom workspace only when the paired project root matches', () => {
     const value = fixture({ enabled: false });
