@@ -265,6 +265,37 @@ describe('quality contract preflight and shadow mode', () => {
       .toMatchObject({ passes: true, validated: true });
   });
 
+  it('does not repeat Story validation after the new head only waits for the remote PR', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false,
+      },
+    }));
+    writeFinalReviewState(workspace, previousFinalReview('a'.repeat(40)));
+    const fake = fakeBoundValidator(workspace, 'passed');
+    const calls = join(workspace, 'bound-calls.txt');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    let finalReviewCalls = 0;
+    const config: LoopConfig = {
+      ...strictConfig(workspace, instructionsDir),
+      finalReviewRunner: async () => {
+        finalReviewCalls += 1;
+        return finalReviewCalls === 1
+          ? { exitCode: 6, message: 'fixture remote PR 尚未就绪' }
+          : { exitCode: 0, message: 'fixture final review passed' };
+      },
+    };
+
+    expect(await runProductionLoop(config)).toBe(6);
+    expect(readFileSync(calls, 'utf8')).toBe('2');
+    expect(existsSync(join(workspace, 'final-review.json'))).toBe(false);
+
+    expect(await runProductionLoop(config)).toBe(0);
+    expect(readFileSync(calls, 'utf8')).toBe('2');
+    expect(finalReviewCalls).toBe(2);
+  });
+
   it.each([
     ['missing', { status: 'missing', path: '/fixture/.coding-x/quality.json' }],
     ['invalid-json', { status: 'invalid-json', path: '/fixture/.coding-x/quality.json', error: 'bad json' }],

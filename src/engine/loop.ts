@@ -46,7 +46,7 @@ import {
 import { CODING_X_VERSION } from '../version.js';
 import { runFinalReview } from '../review/final-review.js';
 import type { FinalReviewOutcome } from '../review/types.js';
-import { readFinalReviewState } from '../review/state.js';
+import { invalidateFinalReviewState, readFinalReviewState } from '../review/state.js';
 
 export interface LoopConfig {
   kind: AgentKind;
@@ -226,6 +226,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const currentHead = readGitHead(projectRoot);
       if (previousReview.status === 'ready' && currentHead
           && previousReview.state.binding.headSha !== currentHead) {
+        // 失效必须同时落到 Story 凭证与 Review 文件。否则本轮重验 Story 后若只因
+        // PR 尚未同步而退出，下一次启动仍会读到旧 head 的 Review，并重复重验同一提交。
+        invalidateFinalReviewState(cfg.workspace);
         const invalidated: string[] = [];
         const next = structuredClone(bootState);
         for (const story of bootPrd!.userStories) {
