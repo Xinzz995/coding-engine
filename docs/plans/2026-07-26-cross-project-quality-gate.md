@@ -1,7 +1,7 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁实施计划"
 status: active
-updated: 2026-07-26
+updated: 2026-07-27
 scope: root
 ---
 
@@ -103,6 +103,8 @@ scope: root
 ### Task 7：三层 Review 与风险判断
 
 - Spec 与工程标准分别构造上下文、分别运行和保留 findings；
+- 明确区分实现验收与交付后置条件：Spec 只评改动行为；机械检查、全部 Review 轴和 GitHub
+  状态由引擎判定，并把绑定当前 head 的前置检查事实写入审查包，禁止 Reviewer 循环自证；
 - 默认分支旧规则裁决工程标准、质量契约和 Reviewer；当前 PR 可提供产品 Spec；
 - 实现风险触发器与项目覆盖项，排除生成物/锁文件/快照的千行误报；
 - 深度 Review 只在触发时运行，或由用户/Reviewer 主动升级；

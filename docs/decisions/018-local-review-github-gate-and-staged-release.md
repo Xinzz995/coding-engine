@@ -1,7 +1,7 @@
 ---
 title: 018-local-review-github-gate-and-staged-release
 status: active
-updated: 2026-07-26
+updated: 2026-07-27
 scope: root
 ---
 
@@ -33,6 +33,11 @@ GitHub 不调用模型，也不证明本地 Review。`.coding-x/quality.json` �
 版本、runner/model/规则版本与风险结论。Reviewer 在临时只读审查包中运行，不能使用项目
 工作目录、秘密、MCP、hooks、插件或危险 bypass 参数。任何输入变化使结果失效；无法保证
 完整上下文或只读隔离时返回 `unverifiable`。
+
+Spec Reviewer 只判断仓库改动是否满足行为意图，不负责证明本轮交付流程已经完成。完整机械
+检查由引擎在 Reviewer 前执行并绑定当前 head；全部 Review 轴、GitHub CI/Ruleset 和发布状态
+由引擎在 Reviewer 后独立收口。这样既不把缺失证据猜成通过，也不要求单个 Reviewer 循环
+证明“包含自己在内的三轴 Review 已经完成”。
 
 候选版本只能以 `--shadow` 运行并固定返回非交付结论。首次 0.33.0 由现有机械 CI 和人工
 Bootstrap 裁决；之后稳定版 N 评估候选 N+1，发布后再通过旧规则审查 Policy PR 更新固定

@@ -126,6 +126,18 @@ describe('runFinalReview', () => {
       ...options(ws, context()),
       axisRunner: async (request) => {
         calls.push(request.axis);
+        const input = JSON.parse(request.reviewPackage.input) as Record<string, unknown>;
+        expect(input).toMatchObject({
+          verificationBoundary: {
+            mechanicalChecks: {
+              status: 'passed',
+              headSha: context().headSha,
+              scope: 'all-current-platform-applicable-contract-checks',
+            },
+            allReviewAxes: { owner: 'engine' },
+            githubDelivery: { owner: 'engine' },
+          },
+        });
         return output(request.axis, request.axis === 'engineering' ? 'p2' : 'passed');
       },
     });

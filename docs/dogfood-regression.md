@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-07-26
+updated: 2026-07-27
 scope: root
 
 ---
@@ -41,3 +41,4 @@ scope: root
 | 22 | Codex/Claude 插件 hook 与显式安装的 Cursor 项目检查只在 agent commit 前提前运行 TDD 检查；失败阻断、成功放行，且不安装目标 Git hook、不写持久日志。Cursor 首次/升级安装幂等，卸载保留用户原配置；真实验收不得用桌面应用代替 | ADR-017 跨宿主适配 | 三种真实 payload 对账共同脚本；Codex/Claude 真实插件 smoke；用构建产物执行 `hooks cursor install/status/remove`，再由真实 Cursor Agent 验证失败时 Git 历史不变、成功时提交产生 |
 | 23 | 无论宿主 hook 是否触发或曾通过，引擎都在契约派生检查后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |
 | 24 | 候选 coding-x 只有显式 `--shadow` 才能越过固定版本不匹配；原本成功的收敛固定退出 7，失败仍保留真实失败码，任何 shadow 结果都不能显示为交付就绪 | ADR-018 | 用契约版本 N 运行候选 N+1 的成功、配置失败和门禁失败三条链，对账退出码与终端/状态文案 |
+| 25 | Spec Review 只判断改动行为，不循环证明本轮三轴 Review、GitHub 门禁或发布已经完成；这些后置条件由引擎独立判定 | 0.33.0 / ADR-018 | 在 PR 验证计划中声明本地 Review 与 GitHub 检查，确认审查包带当前 head 的机械检查事实和明确责任边界，Spec 轴不会因未来状态缺席而误报不可验证 |
