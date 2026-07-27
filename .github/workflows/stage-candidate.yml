@@ -1,15 +1,20 @@
-name: Stage npm candidate
-run-name: Stage coding-x@${{ inputs.version }} from ${{ github.sha }}
+name: Stage verified npm candidate
+run-name: Stage coding-x@${{ inputs.version }} from candidate run ${{ inputs.candidate_run_id }}
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact stable version already merged to main (for example 0.33.0)
+        description: Exact version in the verified candidate artifact (for example 0.33.0)
+        required: true
+        type: string
+      candidate_run_id:
+        description: Successful Build release candidate run already used by all Dogfood projects
         required: true
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -17,98 +22,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
-    name: verify and pack exact npm candidate
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      EXPECTED_VERSION: ${{ inputs.version }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24
-          registry-url: 'https://registry.npmjs.org'
-          package-manager-cache: false
-
-      - name: Bind candidate to the current protected main commit
-        env:
-          SELECTED_REF: ${{ github.ref }}
-          CANDIDATE_COMMIT: ${{ github.sha }}
-        run: |
-          git fetch --no-tags origin main
-          node build/release-evidence.mjs verify-source \
-            --expected-version "$EXPECTED_VERSION" \
-            --commit "$CANDIDATE_COMMIT" \
-            --ref "$SELECTED_REF" \
-            --main-ref refs/remotes/origin/main \
-            --require-node-major 24 \
-            --min-npm 11.15.0
-
-      - name: Install dependencies without release cache
-        run: npm ci
-
-      - name: Run complete release checks
-        run: |
-          npm run format:check
-          npm run lint
-          npm run typecheck
-          npm test
-          npm run build
-          npm run repository-health
-          node dist/cli.js --help >/dev/null
-          npm audit --audit-level=high
-
-      - name: Pack and record the exact candidate bytes
-        env:
-          CANDIDATE_COMMIT: ${{ github.sha }}
-          WORKFLOW_RUN_ID: ${{ github.run_id }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/npm-candidate"
-          npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP/npm-candidate" \
-            > "$RUNNER_TEMP/npm-candidate/pack.json"
-          node build/release-evidence.mjs record-pack \
-            --expected-version "$EXPECTED_VERSION" \
-            --commit "$CANDIDATE_COMMIT" \
-            --workflow-run-id "$WORKFLOW_RUN_ID" \
-            --require-node-major 24 \
-            --min-npm 11.15.0 \
-            --pack-json "$RUNNER_TEMP/npm-candidate/pack.json" \
-            --tarball "$RUNNER_TEMP/npm-candidate/coding-x-$EXPECTED_VERSION.tgz" \
-            --output "$RUNNER_TEMP/npm-candidate/packed.json"
-          git diff --exit-code
-          test -z "$(git status --porcelain=v1 --untracked-files=all)"
-
-      - name: Preserve candidate before contacting npm staging
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: npm-candidate-${{ inputs.version }}
-          path: |
-            ${{ runner.temp }}/npm-candidate/coding-x-${{ inputs.version }}.tgz
-            ${{ runner.temp }}/npm-candidate/packed.json
-            ${{ runner.temp }}/npm-candidate/pack.json
-          if-no-files-found: error
-          retention-days: 30
-          compression-level: 0
-
   stage:
-    name: submit verified candidate through stage-only OIDC
-    needs: prepare
+    name: submit selected candidate through stage-only OIDC
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: npm-staging
     permissions:
+      actions: read
       contents: read
       id-token: write
     env:
       EXPECTED_VERSION: ${{ inputs.version }}
+      CANDIDATE_WORKFLOW_RUN_ID: ${{ inputs.candidate_run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
           sparse-checkout: |
@@ -122,39 +50,79 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
-      - name: Download the verified candidate without project dependencies
+      - name: Verify selected candidate run and current main identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_REF: ${{ github.ref }}
+          CURRENT_MAIN_COMMIT: ${{ github.sha }}
+        run: |
+          case "$CANDIDATE_WORKFLOW_RUN_ID" in
+            ''|*[!0-9]*) echo "::error::Candidate run ID must contain digits only"; exit 1 ;;
+          esac
+          if [ "$SELECTED_REF" != refs/heads/main ]; then
+            echo "::error::Staging must run from refs/heads/main"
+            exit 1
+          fi
+          REMOTE_MAIN_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$CURRENT_MAIN_COMMIT" != "$REMOTE_MAIN_COMMIT" ]; then
+            echo "::error::Selected workflow commit is no longer the current remote main"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_WORKFLOW_RUN_ID" \
+            > "$RUNNER_TEMP/candidate-run.json"
+          jq -e --arg sha "$CURRENT_MAIN_COMMIT" '
+            .id == ($ENV.CANDIDATE_WORKFLOW_RUN_ID | tonumber) and
+            .head_sha == $sha and
+            .head_branch == "main" and
+            .event == "workflow_dispatch" and
+            .status == "completed" and
+            .conclusion == "success" and
+            .path == ".github/workflows/build-candidate.yml"
+          ' "$RUNNER_TEMP/candidate-run.json" >/dev/null
+
+      - name: Download the selected candidate without project dependencies
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-candidate-${{ inputs.version }}
           path: ${{ runner.temp }}/npm-candidate
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.candidate_run_id }}
 
-      - name: Reconstruct a non-executable package directory with exact git identity
+      - name: Verify and reconstruct the non-executable candidate
         env:
-          CANDIDATE_COMMIT: ${{ github.sha }}
+          CURRENT_MAIN_COMMIT: ${{ github.sha }}
         run: |
           node build/release-evidence.mjs verify-tarball \
             --evidence "$RUNNER_TEMP/npm-candidate/packed.json" \
             --tarball "$RUNNER_TEMP/npm-candidate/coding-x-$EXPECTED_VERSION.tgz"
+          jq -e --arg version "$EXPECTED_VERSION" --arg commit "$CURRENT_MAIN_COMMIT" '
+            .schemaVersion == 2 and
+            .status == "packed" and
+            .version == $version and
+            .commit == $commit and
+            .candidateWorkflowRunId == $ENV.CANDIDATE_WORKFLOW_RUN_ID
+          ' "$RUNNER_TEMP/npm-candidate/packed.json" >/dev/null
           mkdir -p "$RUNNER_TEMP/stage-package"
           tar -xzf "$RUNNER_TEMP/npm-candidate/coding-x-$EXPECTED_VERSION.tgz" \
             -C "$RUNNER_TEMP/stage-package"
           test -f "$RUNNER_TEMP/stage-package/package/package.json"
           mkdir -p "$RUNNER_TEMP/stage-package/package/.git"
-          printf '%s\n' "$CANDIDATE_COMMIT" > "$RUNNER_TEMP/stage-package/package/.git/HEAD"
+          printf '%s\n' "$CURRENT_MAIN_COMMIT" > "$RUNNER_TEMP/stage-package/package/.git/HEAD"
 
-      - name: Submit the same bytes through stage-only npm OIDC
+      - name: Submit the verified bytes through stage-only npm OIDC
         env:
-          CANDIDATE_COMMIT: ${{ github.sha }}
-          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          CURRENT_MAIN_COMMIT: ${{ github.sha }}
+          STAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
-          # No project code or dependency script runs in this OIDC-enabled job.
+          # No project dependency or lifecycle script runs in this OIDC-enabled job.
           npm stage publish "$RUNNER_TEMP/stage-package/package" \
             --ignore-scripts --tag next --access public --provenance --json \
             > "$RUNNER_TEMP/npm-candidate/stage.json"
           node build/release-evidence.mjs record-stage \
             --candidate "$RUNNER_TEMP/npm-candidate/packed.json" \
-            --commit "$CANDIDATE_COMMIT" \
-            --workflow-run-id "$WORKFLOW_RUN_ID" \
+            --commit "$CURRENT_MAIN_COMMIT" \
+            --candidate-workflow-run-id "$CANDIDATE_WORKFLOW_RUN_ID" \
+            --stage-workflow-run-id "$STAGE_WORKFLOW_RUN_ID" \
             --require-node-major 24 \
             --min-npm 11.15.0 \
             --stage-json "$RUNNER_TEMP/npm-candidate/stage.json" \
@@ -178,15 +146,17 @@ jobs:
           const [evidencePath, summaryPath] = process.argv.slice(2)
           const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'))
           fs.appendFileSync(summaryPath, [
-            '## npm candidate staged',
+            '## verified npm candidate staged',
             '',
             `- package: ${evidence.packageName}@${evidence.version}`,
             `- commit: ${evidence.commit}`,
+            `- candidate run ID: ${evidence.candidateWorkflowRunId}`,
+            `- stage run ID: ${evidence.stageWorkflowRunId}`,
             `- stage ID: ${evidence.stageId}`,
             `- tarball SHA-256: ${evidence.tarball.sha256}`,
             `- requested tag after 2FA approval: ${evidence.requestedTag}`,
             '',
-            'Download both workflow artifacts and verify the tarball before 2FA approval.',
+            'Verify the stage identity before 2FA approval.',
             '',
           ].join('\n'))
           NODE

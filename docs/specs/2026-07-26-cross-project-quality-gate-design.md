@@ -356,11 +356,12 @@ shadow 或忽略非零退出码来绕过它。首次 0.33.0 使用一次性的�
 ### 发布顺序
 
 1. 版本更新通过受保护 PR 合并到 `main`；
-2. 暂存工作流从精确 main 提交构建并执行全部检查；
-3. npm OIDC Trusted Publisher 只允许 staged publish；
-4. 最终稳定版本先进入 staging，批准目标为 `next`；
-5. 下载精确候选 tarball，记录提交、stage ID 和文件 SHA-256；
-6. coding-engine、Go、Python 都安装该 tarball，以 `--shadow` 运行候选能力；
+2. 无发布身份的候选构建流程从精确 main 提交执行全部检查，保存固定 tarball、提交和
+   SHA-256；
+3. coding-engine、Go、Python 都安装该 tarball，以 `--shadow` 运行候选能力；
+4. 三仓验证通过后，维护者选择候选运行；独立流程回读成功状态并要求候选仍是当前 main；
+5. npm OIDC Trusted Publisher 只允许 staged publish，把同一个候选暂存到 `next`；
+6. npm 返回的 SHA-1/SHA-512 必须与候选一致，并记录 candidate run、stage run 和 stage ID；
 7. 维护者用 2FA 批准到 `next`；
 8. 三个项目从公开 registry 按精确版本执行关键安装冒烟；
 9. 人工把同一版本提升为 `latest`；
@@ -374,7 +375,8 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 
 ### 失败与恢复
 
-- staging 前失败：修复 PR，使用新提交重新暂存；
+- 候选构建或三仓 Dogfood 失败：修复 PR，从新 main 构建候选；不创建 npm stage；
+- 提升时发现候选来源错误、运行失败或已落后 main：停止 staging，重新构建并验证候选；
 - stage 长期未批准：doctor 告警，由维护者批准或拒绝；
 - 已进入 `next` 后失败：保留原版本，不移动 `latest`，发布新补丁；
 - 已移动 `latest` 后失败：立即把 `latest` 恢复到前一个稳定版本，标记问题版本并发布补丁；
