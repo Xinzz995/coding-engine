@@ -136,6 +136,8 @@ describe('renderManagedGitHubFiles', () => {
     ]));
     expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('明确的非目标');
     expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('Spec 与验收标准来源');
+    expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('验收标准只写改动应具备的行为');
+    expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('不要写成实现验收标准');
     expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('Policy-Exception: 无');
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 负责人');
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 到期日');

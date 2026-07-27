@@ -1,7 +1,7 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁实施计划"
 status: active
-updated: 2026-07-26
+updated: 2026-07-27
 scope: root
 ---
 
@@ -103,6 +103,8 @@ scope: root
 ### Task 7：三层 Review 与风险判断
 
 - Spec 与工程标准分别构造上下文、分别运行和保留 findings；
+- 明确区分实现验收与交付后置条件：Spec 只评改动行为；机械检查、全部 Review 轴和 GitHub
+  状态由引擎判定，并把绑定当前 head 的前置检查事实写入审查包，禁止 Reviewer 循环自证；
 - 默认分支旧规则裁决工程标准、质量契约和 Reviewer；当前 PR 可提供产品 Spec；
 - 实现风险触发器与项目覆盖项，排除生成物/锁文件/快照的千行误报；
 - 深度 Review 只在触发时运行，或由用户/Reviewer 主动升级；
@@ -173,8 +175,10 @@ scope: root
 
 - 删除 tag-trigger 直接 npm publish 和长期 `NPM_TOKEN` 路径；
 - 配置 Node 24、npm ≥11.15、OIDC Trusted Publisher 与 stage-only；
-- 将完整检查/构建与 OIDC 暂存拆成两个任务；后者不得安装项目依赖或执行项目脚本；
-- 暂存精确 main 提交，下载候选 tarball 并记录 SHA-256、stage ID、commit；
+- 将完整检查/构建与 OIDC 暂存拆成两个独立工作流；前者没有发布身份，后者不得安装项目
+  依赖或执行项目脚本；
+- 从精确 main 构建候选 tarball 并记录 SHA-256、commit 和 candidate run；三仓 Dogfood
+  通过后，stage-only 流程回读来源/成功状态/当前 main，再记录 stage run 与 stage ID；
 - 标签 workflow 只校验 npm 版本/提交/来源并创建不可变 Release；
 - Tag Ruleset 只允许受控创建，禁止更新删除，并验证提交属于受保护 main；
 - 标签工作流本身损坏时，允许修复经受保护 PR 进入 main 后对既有不可改写标签手动恢复，
@@ -183,7 +187,8 @@ scope: root
 
 ### Task 15：三项目候选 Dogfood
 
-- coding-engine 安装候选 tarball 并运行 shadow 全链；
+- coding-engine、Go、Python 在创建 npm stage 前安装同一个候选 tarball；coding-engine 运行
+  shadow 全链；
 - 创建私有 Go 多模块仓库，至少两个 module，CI 只用 Go 原生命令；
 - 创建私有 Python Monorepo，至少两个 package，CI 只用 Python 原生命令；
 - 两个私库先探测 Ruleset 能力，不满足就停止等待权限，不降级；
@@ -253,5 +258,8 @@ scope: root
 - 0.33.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
   检查，已获 owner 授权拆出 coding-engine 仓库健康测试；PR #63 按已约定的一次性“机械
   CI + owner 人工 Bootstrap”裁决，不声称完成正式本地 AI Review，固定裁判继续保持 0.29.0；
-- 首次真实 staged publish、三个项目的同包 Dogfood、发布后固定 0.33.0 的 Policy PR 和结构
-  治理仍待后续独立步骤。
+- 首次真实 0.33.0 staged publish 已证明 npm staging 可用；随后多轮真实 Dogfood 在 stage
+  创建后才发现产品问题，旧候选均不能吸收新修复。ADR-019 与
+  `2026-07-27-prestage-candidate-promotion.md` 因此把候选构建、三仓验证和 npm staging
+  改成三个顺序阶段；新候选验证、正式发布、固定 0.33.0 的 Policy PR 和结构治理仍待后续
+  独立步骤。

@@ -6,11 +6,12 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PLUGIN_MANIFESTS, RUNTIME_VERSION_SOURCE } from './sync-plugin-versions.mjs';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const PACKAGE_NAME = 'coding-x';
 const STAGE_TAG = 'next';
 const STABLE_TAG = 'latest';
-const SOURCE_WORKFLOW = '.github/workflows/stage-candidate.yml';
+const CANDIDATE_WORKFLOW = '.github/workflows/build-candidate.yml';
+const STAGE_WORKFLOW = '.github/workflows/stage-candidate.yml';
 const SOURCE_REPOSITORY = 'https://github.com/Xinzz995/coding-engine';
 const EXACT_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -180,12 +181,15 @@ function verifyEvidenceIdentity(evidence) {
   if (!GIT_SHA.test(evidence.commit ?? '')) fail('候选证据没有合法的 Git commit');
   if (
     evidence.sourceRef !== 'refs/heads/main' ||
-    evidence.sourceWorkflow !== SOURCE_WORKFLOW ||
+    evidence.sourceWorkflow !== CANDIDATE_WORKFLOW ||
     evidence.sourceRepository !== SOURCE_REPOSITORY
   ) {
     fail('候选证据的仓库、工作流或来源分支非法');
   }
-  if (!/^\d+$/.test(evidence.workflowRunId ?? '')) fail('候选证据没有合法的 workflow run ID');
+  if (!/^\d+$/.test(evidence.candidateWorkflowRunId ?? '')) {
+    fail('候选证据没有合法的 candidate workflow run ID');
+  }
+  if (!['packed', 'staged'].includes(evidence.status)) fail('候选证据状态非法');
   if (evidence.requestedTag !== STAGE_TAG) fail('候选证据没有绑定 next 标签');
   if (
     evidence.tarball?.filename !== `${PACKAGE_NAME}-${evidence.version}.tgz` ||
@@ -204,6 +208,8 @@ function verifyEvidenceIdentity(evidence) {
     evidence.status === 'staged' &&
     (typeof evidence.stageToolchain?.node !== 'string' ||
       typeof evidence.stageToolchain?.npm !== 'string' ||
+      evidence.stageWorkflow !== STAGE_WORKFLOW ||
+      !/^\d+$/.test(evidence.stageWorkflowRunId ?? '') ||
       !UUID.test(evidence.stageId ?? '') ||
       Number.isNaN(Date.parse(evidence.stagedAt ?? '')))
   ) {
@@ -230,7 +236,7 @@ function commandVerifySource(args) {
   const mainRef = required(args, 'main-ref');
   if (!GIT_SHA.test(commit)) fail(`候选 commit 非法：${commit}`);
   if (selectedRef !== 'refs/heads/main')
-    fail(`暂存工作流只能从 refs/heads/main 运行，实际为 ${selectedRef}`);
+    fail(`候选构建只能从 refs/heads/main 运行，实际为 ${selectedRef}`);
   verifyVersions(root, version);
   const head = git(root, ['rev-parse', 'HEAD']);
   if (head !== commit) fail(`工作树 HEAD ${head} 与候选提交 ${commit} 不一致`);
@@ -252,9 +258,11 @@ function commandRecordPack(args) {
   const root = resolve(args.root ?? process.cwd());
   const version = required(args, 'expected-version');
   const commit = required(args, 'commit');
-  const workflowRunId = required(args, 'workflow-run-id');
+  const candidateWorkflowRunId = required(args, 'candidate-workflow-run-id');
   if (!GIT_SHA.test(commit)) fail(`候选 commit 非法：${commit}`);
-  if (!/^\d+$/.test(workflowRunId)) fail(`workflow run ID 非法：${workflowRunId}`);
+  if (!/^\d+$/.test(candidateWorkflowRunId)) {
+    fail(`candidate workflow run ID 非法：${candidateWorkflowRunId}`);
+  }
   const pack = onePackEntry(readJson(required(args, 'pack-json')));
   const tarballPath = resolve(required(args, 'tarball'));
   verifyVersions(root, version);
@@ -271,9 +279,9 @@ function commandRecordPack(args) {
     version,
     commit,
     sourceRef: 'refs/heads/main',
-    sourceWorkflow: SOURCE_WORKFLOW,
+    sourceWorkflow: CANDIDATE_WORKFLOW,
     sourceRepository: SOURCE_REPOSITORY,
-    workflowRunId,
+    candidateWorkflowRunId,
     requestedTag: STAGE_TAG,
     tarball: { filename: basename(tarballPath), ...actual },
     toolchain: releaseToolchain(args),
@@ -289,9 +297,16 @@ function commandRecordStage(args) {
   if (packed.status !== 'packed') fail('暂存前候选证据不是 packed 状态');
   const commit = required(args, 'commit');
   if (packed.commit !== commit || !GIT_SHA.test(commit)) fail('暂存任务与候选 commit 不一致');
-  const workflowRunId = required(args, 'workflow-run-id');
-  if (packed.workflowRunId !== workflowRunId || !/^\d+$/.test(workflowRunId)) {
-    fail('暂存任务与候选 workflow run ID 不一致');
+  const candidateWorkflowRunId = required(args, 'candidate-workflow-run-id');
+  if (
+    packed.candidateWorkflowRunId !== candidateWorkflowRunId ||
+    !/^\d+$/.test(candidateWorkflowRunId)
+  ) {
+    fail('暂存任务与候选 candidate workflow run ID 不一致');
+  }
+  const stageWorkflowRunId = required(args, 'stage-workflow-run-id');
+  if (!/^\d+$/.test(stageWorkflowRunId)) {
+    fail(`stage workflow run ID 非法：${stageWorkflowRunId}`);
   }
   if (!UUID.test(staged.stageId)) fail(`npm 返回非法 stageId：${String(staged.stageId)}`);
   if (staged.name !== packed.packageName || staged.version !== packed.version) {
@@ -306,6 +321,8 @@ function commandRecordStage(args) {
   const evidence = {
     ...packed,
     status: 'staged',
+    stageWorkflow: STAGE_WORKFLOW,
+    stageWorkflowRunId,
     stageId: staged.stageId,
     stagedAt: new Date().toISOString(),
     stageToolchain: releaseToolchain(args),
@@ -338,7 +355,7 @@ function commandVerifyRegistry(args) {
     fail('候选证据没有有效的 staged 身份');
   }
   if (evidence.commit !== required(args, 'commit')) fail('发布标签与候选 commit 不一致');
-  if (evidence.workflowRunId !== required(args, 'workflow-run-id')) {
+  if (evidence.stageWorkflowRunId !== required(args, 'stage-workflow-run-id')) {
     fail('下载候选与选定的 stage workflow run 不一致');
   }
   if (evidence.stageId !== required(args, 'stage-id')) {
@@ -379,7 +396,7 @@ function commandVerifyRegistry(args) {
   const workflow = statement.predicate?.buildDefinition?.externalParameters?.workflow;
   if (
     workflow?.repository !== SOURCE_REPOSITORY ||
-    workflow?.path !== SOURCE_WORKFLOW ||
+    workflow?.path !== STAGE_WORKFLOW ||
     workflow?.ref !== 'refs/heads/main'
   ) {
     fail('npm provenance 的仓库、工作流或来源分支不正确');

@@ -22,6 +22,25 @@ export interface ReviewPackage {
   assertUnchanged(): void;
 }
 
+export interface ReviewMechanicalEvidence {
+  status: 'passed';
+  headSha: string;
+  qualityContractDigest: string;
+  scope: 'all-current-platform-applicable-contract-checks';
+}
+
+function assertMechanicalEvidence(
+  context: ReviewPreflightContext,
+  evidence: ReviewMechanicalEvidence,
+): void {
+  if (evidence.status !== 'passed'
+      || evidence.headSha !== context.headSha
+      || evidence.qualityContractDigest !== context.baseContractDigest
+      || evidence.scope !== 'all-current-platform-applicable-contract-checks') {
+    throw new Error('前置机械检查证据未绑定当前 Review 上下文');
+  }
+}
+
 function modelInputLimit(runner: AgentKind, model: string): number {
   if (/\b1m\b|gpt-5\.6|gpt-5\.5|claude-(?:opus|fable|sonnet)-5/i.test(model)) {
     return LARGE_CONTEXT_REVIEW_INPUT_LIMIT_BYTES;
@@ -78,6 +97,7 @@ function axisInput(
   context: ReviewPreflightContext,
   risk: ReviewRiskAssessment,
   axis: ReviewAxis,
+  mechanicalEvidence: ReviewMechanicalEvidence,
 ): Record<string, unknown> {
   const common = {
     schemaVersion: 1,
@@ -97,6 +117,18 @@ function axisInput(
     files: context.files,
     diff: context.diff,
     history: context.history,
+    verificationBoundary: {
+      mechanicalChecks: mechanicalEvidence,
+      allReviewAxes: {
+        owner: 'engine',
+        timing: 'evaluated-after-every-required-axis-finishes',
+      },
+      githubDelivery: {
+        owner: 'engine',
+        timing: 'evaluated-after-local-review-finishes',
+      },
+      reviewerScope: 'judge-repository-changes-not-process-completion',
+    },
     qualityContract: context.baseContract,
     rules: rulesForAxis(axis),
     reviewRulesDigest: REVIEW_RULES_DIGEST,
@@ -122,8 +154,15 @@ export function createReviewPackage(options: {
   axis: ReviewAxis;
   runner: AgentKind;
   model: string;
+  mechanicalEvidence: ReviewMechanicalEvidence;
 }): ReviewPackage {
-  const input = `${JSON.stringify(axisInput(options.context, options.risk, options.axis))}\n`;
+  assertMechanicalEvidence(options.context, options.mechanicalEvidence);
+  const input = `${JSON.stringify(axisInput(
+    options.context,
+    options.risk,
+    options.axis,
+    options.mechanicalEvidence,
+  ))}\n`;
   const inputBytes = Buffer.byteLength(input);
   const limit = modelInputLimit(options.runner, options.model);
   if (inputBytes > limit) {

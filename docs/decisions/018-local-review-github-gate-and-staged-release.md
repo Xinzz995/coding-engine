@@ -1,7 +1,7 @@
 ---
 title: 018-local-review-github-gate-and-staged-release
 status: active
-updated: 2026-07-26
+updated: 2026-07-27
 scope: root
 ---
 
@@ -23,8 +23,9 @@ coding-x 同时是一个会被下游项目使用的工具。候选版本若直�
 
 1. coding-x 在本地执行 Spec、工程标准和风险触发的深度结构 Review；
 2. GitHub 只执行目标项目原生机械检查，用受保护 PR 和不可跳过的 `quality-gate` 阻断交付；
-3. 发布以一个固定候选 tarball 依次完成 coding-engine、Go 和 Python Dogfood，人工批准后才
-   移动稳定标签并创建 Git 标签与 Release。
+3. 发布先构建一个没有 npm 身份的固定候选 tarball，依次完成 coding-engine、Go 和 Python
+   Dogfood；验证通过后才显式提升到 npm stage，人工批准后再移动稳定标签并创建 Git 标签与
+   Release（候选与 staging 的进一步拆分见 ADR-019）。
 
 GitHub 不调用模型，也不证明本地 Review。`.coding-x/quality.json` 成为项目质量规则唯一来源，
 派生 PRD 检查快照和原生 CI。缺契约、schema 不兼容或正式运行版本不匹配时 fail closed。
@@ -33,6 +34,11 @@ GitHub 不调用模型，也不证明本地 Review。`.coding-x/quality.json` �
 版本、runner/model/规则版本与风险结论。Reviewer 在临时只读审查包中运行，不能使用项目
 工作目录、秘密、MCP、hooks、插件或危险 bypass 参数。任何输入变化使结果失效；无法保证
 完整上下文或只读隔离时返回 `unverifiable`。
+
+Spec Reviewer 只判断仓库改动是否满足行为意图，不负责证明本轮交付流程已经完成。完整机械
+检查由引擎在 Reviewer 前执行并绑定当前 head；全部 Review 轴、GitHub CI/Ruleset 和发布状态
+由引擎在 Reviewer 后独立收口。这样既不把缺失证据猜成通过，也不要求单个 Reviewer 循环
+证明“包含自己在内的三轴 Review 已经完成”。
 
 候选版本只能以 `--shadow` 运行并固定返回非交付结论。首次 0.33.0 由现有机械 CI 和人工
 Bootstrap 裁决；之后稳定版 N 评估候选 N+1，发布后再通过旧规则审查 Policy PR 更新固定
@@ -55,8 +61,9 @@ Review。GitHub 仍不运行模型；下游项目不获得该仓库专用测试�
 - 政策变更由默认分支旧 `policy-guard` 读取元数据检查；带凭据任务不执行 PR 代码或文本，
   Ruleset 直接要求该工作流的真实 `policy-guard-source` 任务，不再额外写入一条同名结果；
 - coding-engine 检查 Node 22/24 与 Ubuntu/macOS/Windows，运行时最低 Node 22；
-- npm 使用 OIDC staged publish，先批准到 `next`、完成公开精确版本冒烟，再人工移动
-  `latest`；staging 不可用时只能由用户明确批准临时 OIDC-to-next 退路；
+- npm 使用 OIDC staged publish；固定候选先完成三仓 Dogfood，再提交 stage、批准到 `next`、
+  完成公开精确版本冒烟，最后人工移动 `latest`；staging 不可用时只能由用户明确批准临时
+  OIDC-to-next 退路；
 - 候选检查/构建任务没有 OIDC 权限；stage-only OIDC 任务不安装依赖、不执行项目脚本，只
   重建固定候选并强制核对 npm 返回摘要；
 - annotated tag 必须固定人工批准的 workflow run、npm stage ID 与候选 SHA-256，避免同一提交

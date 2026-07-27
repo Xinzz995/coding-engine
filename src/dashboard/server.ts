@@ -105,19 +105,6 @@ function defaultPublicDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'public');
 }
 
-// Node binds the listening socket asynchronously: server.address() is null until
-// the 'listening' event fires on the next tick. Tests read address().port
-// synchronously right after start() returns, so we resolve the actual port up
-// front. For an explicit port we use it directly; for port 0 (ephemeral) we draw
-// a random port from the IANA ephemeral range ourselves to keep address()
-// synchronous (the OS would otherwise assign one only after listen completes).
-function ephemeralPort(): number {
-  const base = 49152;
-  const span = 65535 - base + 1;
-  const r = (Math.floor(Math.random() * span) + (process.pid & 0x7fff)) % span;
-  return base + r;
-}
-
 /**
  * Pure mapping from platform → the shell command that opens a URL in the user's
  * default browser. Exported so tests can assert behavior without spawning.
@@ -134,11 +121,10 @@ export function start(opts: {
   port?: number;
   publicDir?: string;
   openBrowser?: boolean;
-}): { close(): void; address(): { port: number } } {
+}): { close(): void; address(): { port: number }; ready: Promise<{ port: number }> } {
   configureWorkspace(opts.workspace, opts.maxIterations);
   const publicDir = opts.publicDir ?? defaultPublicDir();
   const requestedPort = opts.port ?? 7331;
-  const port = requestedPort === 0 ? ephemeralPort() : requestedPort;
 
   const serveHtml = (res: import('node:http').ServerResponse, file: string) => {
     try {
@@ -171,34 +157,57 @@ export function start(opts: {
     }
   });
 
+  const ready = new Promise<{ port: number }>((resolve, reject) => {
+    server.once('error', reject);
+    server.once('listening', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('dashboard server did not expose a TCP port'));
+        return;
+      }
+      const bound = { port: address.port };
+      const url = `http://localhost:${bound.port}`;
+      console.log(`🖥️  Dashboard: ${url}`);
+      // Restore the original Python harness behavior: pop the dashboard open in the
+      // user's default browser unless explicitly suppressed (opts.openBrowser === false).
+      // The opener is best-effort — a missing `open`/`xdg-open` must never crash the harness.
+      if (opts.openBrowser !== false) {
+        try {
+          const { cmd, args } = browserOpenCommand(process.platform, url);
+          const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
+          // spawn reports a missing binary (ENOENT — e.g. no `xdg-open` on a headless
+          // box) as an asynchronous 'error' event, which the surrounding try/catch
+          // does NOT catch. With no 'error' listener Node throws an uncaught
+          // exception and crashes the harness — so swallow it here.
+          child.on('error', () => {
+            /* opener missing or failed — non-fatal */
+          });
+          child.unref();
+        } catch {
+          // swallow — browser launch failures are non-fatal
+        }
+      }
+      resolve(bound);
+    });
+  });
+
   server.on('error', (err) => {
     console.error(`dashboard server error: ${err.message}`);
   });
 
-  server.listen(port, '127.0.0.1');
-
-  const url = `http://localhost:${port}`;
-  console.log(`🖥️  Dashboard: ${url}`);
-  // Restore the original Python harness behavior: pop the dashboard open in the
-  // user's default browser unless explicitly suppressed (opts.openBrowser === false).
-  // The opener is best-effort — a missing `open`/`xdg-open` must never crash the harness.
-  if (opts.openBrowser !== false) {
-    try {
-      const { cmd, args } = browserOpenCommand(process.platform, url);
-      const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
-      // spawn reports a missing binary (ENOENT — e.g. no `xdg-open` on a headless
-      // box) as an asynchronous 'error' event, which the surrounding try/catch
-      // does NOT catch. With no 'error' listener Node throws an uncaught
-      // exception and crashes the harness — so swallow it here.
-      child.on('error', () => { /* opener missing or failed — non-fatal */ });
-      child.unref();
-    } catch {
-      // swallow — browser launch failures are non-fatal
-    }
-  }
+  // Port 0 delegates ephemeral-port allocation to the OS. Choosing a random
+  // number in user space races every other process on the runner.
+  server.listen(requestedPort, '127.0.0.1');
 
   return {
     close: () => server.close(),
-    address: () => ({ port }),
+    address: () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('dashboard server is not listening');
+      }
+      return { port: address.port };
+    },
+    ready,
   };
 }
