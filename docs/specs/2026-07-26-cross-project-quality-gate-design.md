@@ -27,7 +27,8 @@ GitHub 不调用模型，也不证明本地 AI Review 曾经运行。AI Review �
 本能力只有同时满足以下条件才算完成：
 
 1. coding-engine 通过受保护 PR 使用正式门禁完成一次真实变更；
-2. 一个私有 Go 多模块项目和一个私有 Python Monorepo 分别通过真实 PR 完成相同闭环；
+2. 一个经 owner 确认的公开 Go 多模块试点和一个公开 Python Monorepo 试点分别通过真实 PR
+   完成相同闭环；
 3. GitHub 工作流中不存在模型调用、AI 密钥或八分片模型任务；
 4. 任一机械任务失败、取消、超时或未运行时，稳定名称 `quality-gate` 必须失败；
 5. 本地最终 Review 绑定最新 PR、提交、意图、规则、runner 和实际模型，任一绑定项变化后
@@ -40,8 +41,8 @@ GitHub 不调用模型，也不证明本地 AI Review 曾经运行。AI Review �
 10. `loop.ts` 与超大测试文件的结构治理在门禁闭环之后使用独立 PR 完成，不混入首批功能
     变更。
 
-Bootstrap 过程由 GitHub Issue #44 跟踪；该 Issue 只能在三个真实 PR 和发布闭环全部完成后
-关闭。
+Bootstrap 过程由 GitHub Issue #44 跟踪；该 Issue 在三个真实 PR 和发布闭环全部完成后仍保持
+开放，只有本次事实收口 PR 合并并完成最终回读后才能关闭。
 
 ## 参考材料与取舍
 
@@ -351,7 +352,7 @@ shadow 或忽略非零退出码来绕过它。首次稳定 Bootstrap 实际使�
 在 npm stage 后发现产品问题，不可变候选无法吸收修复，因此没有成为正式裁判。0.33.1 使用
 一次性的机械 CI 和 owner 人工 Bootstrap，不声称完成正式本地 AI Review；受保护 main 上的
 0.29.0 只可独立复核仓库健康。0.33.1 发布并由独立 Policy PR #76 固定后，本次 0.33.1
-正式自托管 Review 才开始，且在本 PR 完成前仍未完成。
+正式自托管 Review 才开始；coding-engine PR #77 现已完成该步骤并合并。
 
 ## 候选发布、自托管与回退
 
@@ -392,6 +393,19 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 0.33.1 PR 开始。之后稳定版 N 正式评估候选 N+1；N+1 发布后，再用旧规则审查的 Policy PR
 更新固定版本。候选版本不能为自身签发正式结果。
 
+### Bootstrap 最终事实
+
+- coding-engine PR #77 已合并到 `main`，合并提交为
+  `0365262ed7706124658ee419a7563376f8645c8c`；该提交的 Quality Gate 运行 #30308770168 和
+  CodeQL 运行 #30308770166 均成功；
+- Go 公开试点 PR #3 已合并到 `main`，合并提交为
+  `c6188742c3ade06391f90c593536b23c224ccad7`，Quality Gate 运行 #30310021499 成功；
+- Python 公开试点 PR #3 已合并到 `main`，合并提交为
+  `c2f5b3ba5cdabd6d9016c18821e67bc2432a4fa5`，Quality Gate 运行 #30310021340 成功；
+- 两个外部仓库作为公开试点是 owner 对本次试点的明确选择。通用能力对私有仓库仍按初始化
+  能力探测结果裁决，账户套餐或 Ruleset 权限不足时停止，不降级；
+- Bootstrap Issue #44 在本次事实收口 PR 合并并完成最终回读前保持开放，不提前宣称关闭。
+
 ## 明确非目标
 
 - 不在 GitHub 调用模型或存放 AI 密钥；
@@ -426,5 +440,5 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 - staging 下载物、三个项目安装物、`next` 和最终稳定物摘要一致；
 - `latest` 在三个公开精确版本冒烟前不变；npm、标签、Release 指向同一提交；
 - 回退演练能恢复前一个稳定版本；
-- Go 和 Python GitHub CI 不安装 Node 或 coding-x；两个外部仓库保持私有；
-- 三个真实 PR 完成后才关闭 Bootstrap Issue。
+- Go 和 Python GitHub CI 不安装 Node 或 coding-x；两个外部仓库是 owner 确认的公开试点；
+- 三个真实 PR 已完成；Bootstrap Issue 仍须等待本次事实收口 PR 合并后的最终回读才能关闭。
