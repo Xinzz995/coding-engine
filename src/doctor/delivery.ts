@@ -4,6 +4,8 @@ import type { QualityContract } from '../quality/contract.js';
 import {
   GITHUB_ACTIONS_APP_ID,
   GhGitHubQualityClient,
+  GitHubQualityError,
+  type GitHubQualityErrorKind,
   type GitHubIssueInfo,
   type GitHubQualityClient,
   type RequiredStatusCheck,
@@ -28,6 +30,7 @@ export interface DeliveryGateIssue {
 export interface DeliveryGateCheckResult {
   status: 'skipped' | 'local-ready' | 'ready' | 'invalid';
   remoteChecked: boolean;
+  remoteFailure: { kind: GitHubQualityErrorKind; attempts: number } | null;
   repository: string | null;
   rulesetId: number | null;
   releaseRulesetId: number | null;
@@ -111,6 +114,7 @@ export function checkDeliveryGate(options: {
   if (!options.contract) {
     return {
       status: 'skipped', remoteChecked: false, repository: null, rulesetId: null,
+      remoteFailure: null,
       releaseRulesetId: null, immutableReleases: null,
       managedFilesChecked: 0, exceptionIssuesChecked: 0, issues: [],
     };
@@ -120,6 +124,7 @@ export function checkDeliveryGate(options: {
   const base: DeliveryGateCheckResult = {
     status: issues.length === 0 ? 'local-ready' : 'invalid',
     remoteChecked: false,
+    remoteFailure: null,
     repository: contract.repository.fullName,
     rulesetId: null,
     releaseRulesetId: null,
@@ -133,6 +138,7 @@ export function checkDeliveryGate(options: {
   const client = options.client ?? new GhGitHubQualityClient();
   const now = options.now ?? new Date();
   let exceptionIssuesChecked = 0;
+  let remoteFailure: DeliveryGateCheckResult['remoteFailure'] = null;
   try {
     const repository = client.discoverRepository(options.root);
     if (repository.fullName !== contract.repository.fullName
@@ -246,12 +252,29 @@ export function checkDeliveryGate(options: {
       }
     }
   } catch (error) {
-    issues.push({ file: 'GitHub', message: error instanceof Error ? error.message : String(error) });
+    if (error instanceof GitHubQualityError) {
+      remoteFailure = { kind: error.kind, attempts: error.attempts };
+      const prefix = error.kind === 'transient'
+        ? `GitHub 远端暂时不可用，${error.attempts} 次尝试后仍无法完成核验`
+        : error.kind === 'unauthenticated'
+          ? 'GitHub CLI 未认证，无法完成远端核验'
+          : error.kind === 'forbidden'
+            ? 'GitHub 权限不足，无法完成远端核验'
+            : 'GitHub 返回结果无法完成远端核验';
+      issues.push({ file: 'GitHub Probe', message: `${prefix}：${error.detail ?? error.message}` });
+    } else {
+      remoteFailure = { kind: 'unknown', attempts: 1 };
+      issues.push({
+        file: 'GitHub Probe',
+        message: `GitHub 远端核验异常：${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
   }
   return {
     ...base,
     status: issues.length === 0 ? 'ready' : 'invalid',
-    remoteChecked: true,
+    remoteChecked: remoteFailure === null,
+    remoteFailure,
     exceptionIssuesChecked,
     issues,
   };
