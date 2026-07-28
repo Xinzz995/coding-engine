@@ -28,10 +28,11 @@ scope: root
 6. coding-engine 的 Node 22/24、三系统、CodeQL、依赖和文档检查真实运行；
 7. npm 候选 tarball 在 coding-engine、owner 确认的公开 Go 多模块试点和公开 Python Monorepo
    试点完成真实 PR；
-8. 最终 npm、tag、Release、main 与三个项目安装摘要一致，回退路径至少演练到不会误移动
-   `latest`；
-9. Bootstrap Issue #44 在三个真实 PR 与正式自托管闭环完成后仍保持开放，只在本次事实收口
-   PR 合并并完成最终回读后关闭；
+8. 最终 npm、tag、Release 与三个项目安装物绑定同一发布提交和制品摘要；受保护 `main`
+   包含该发布提交且自身检查通过；回退路径至少演练到不会误移动 `latest`，并能恢复前一个
+   稳定版本；
+9. Bootstrap Issue #44 在三个真实 PR 与正式自托管闭环完成后仍保持开放，已在事实收口
+   PR #78 合并并完成最终回读后关闭；
 10. `loop.ts` 和超大测试文件最后以独立 PR 治理。
 
 ## 黄金原则对照
@@ -224,7 +225,8 @@ scope: root
 
 - `npm run typecheck`、全量测试、构建、成品 doctor/CLI smoke、文档检查、diff check；
 - coding-engine dogfood regression 全量；Go/Python 真实 CI；GitHub 规则漂移检查；
-- 失败恢复演练：stage 拒绝、`next` 冒烟失败、`latest` 回退计划；
+- 失败恢复演练：拒绝过期 stage；隔离验证 `next` 冒烟失败不会移动 `latest`，且 `latest`
+  已移动时能够恢复前一个稳定版本；
 - 最终确认远端规则仍启用，当前默认分支包含发布提交且自身检查通过；npm、tag、Release 和
   三个安装物绑定同一发布提交与制品摘要，工作树 clean/synced。
 
@@ -309,9 +311,16 @@ scope: root
   一致，SHA-256 为 `b27cab53e7d18ba6b1cd8ccf9421b99804524b531624dbddbb496ea29d9e9a73`。
 - 上述本地 Review、GitHub 机械检查与发布物摘要分别证明审查结论、远端执行状态与制品身份，
   彼此不能替代。当前 `main` 已包含 0.33.1 发布提交，但不等于该历史发布提交。
-- 失败恢复边界已复核：0.30.0 的 E409 和后续旧候选拒绝均未提前移动 `latest`；候选来源过期、
-  schema 错误、运行身份或制品摘要不一致继续由回归测试失败关闭。`latest` 已移动后的事故按既定
-  手工回退计划处理，本次最终回归不为演练而破坏稳定标签。
+- 失败恢复边界已完成演练：三个 0.33.0 stage
+  `c02b6696-3a4b-4a5e-a58c-c697afcee006`、
+  `2be2a6f1-4a10-44b7-992f-98b9361d607d` 与
+  `7a4e4795-f43c-4e8e-af65-8d8157797931` 均已拒绝；最后一个过期 stage 于 2026-07-28
+  使用 2FA 拒绝后，npm 暂存页回读为没有待审核版本，公开 `latest` 与 `next` 仍保持 0.33.1。
+  隔离 npm registry 中先以 1.0.0 作为 `latest`、1.1.0 作为 `next`：停止候选提升模拟公开冒烟
+  失败时，`latest` 保持 1.0.0；再把 `latest` 提升到 1.1.0 并执行回退后，dist-tag 和默认版本
+  解析均恢复为 1.0.0，而 `next` 保持 1.1.0。演练使用 npm 11.17.0 与 Verdaccio 6.9.0，未改动
+  公开 npm 的稳定标签。候选来源过期、schema 错误、运行身份或制品摘要不一致继续由回归测试
+  失败关闭。
 
 ## 状态变更清单（2026-07-28）
 
@@ -324,3 +333,4 @@ scope: root
 | GitHub Issue #44 | `open` → `closed` | PR #78 合并后完成三个仓库、Ruleset、发布与制品摘要的最终回读 |
 | GitHub Issue #62 | `open` → `closed` | 0.33.0 过渡候选的跟踪与后续裁决已经完成 |
 | GitHub Issue #69 | `open` → `closed` | 暂存前固定候选验证的跟进事项已经完成 |
+| npm 0.33.0 过期 stage `7a4e4795-...-7931` | `pending` → `rejected` | 2FA 拒绝后暂存页回读为空；公开 `latest`/`next` 保持 0.33.1 |
