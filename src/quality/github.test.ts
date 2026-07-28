@@ -78,12 +78,13 @@ describe('GhGitHubQualityClient read retries', () => {
 
   it('fails closed after three transient read attempts', () => {
     let calls = 0;
+    const delays: number[] = [];
     const client = new GhGitHubQualityClient({
       executor: () => {
         calls++;
         throw commandFailure('Get "https://api.github.com/repos/owner/repository": EOF');
       },
-      sleep: () => {},
+      sleep: (ms) => delays.push(ms),
     });
 
     try {
@@ -94,6 +95,7 @@ describe('GhGitHubQualityClient read retries', () => {
       expect(error).toMatchObject({ kind: 'transient', retryable: true, attempts: 3 });
     }
     expect(calls).toBe(3);
+    expect(delays).toEqual([250, 500]);
   });
 
   it.each([
@@ -106,6 +108,8 @@ describe('GhGitHubQualityClient read retries', () => {
     ['gh: HTTP 429: Too Many Requests', 'rate-limit'],
     ['gh: HTTP 404: Not Found', 'not-found'],
     ['gh: HTTP 422: Validation Failed', 'validation'],
+    ['gh: HTTP 501: Not Implemented', 'unknown'],
+    ['gh: HTTP 505: HTTP Version Not Supported', 'unknown'],
   ] as const)('does not retry permanent read failure %s', (detail, kind) => {
     let calls = 0;
     const client = new GhGitHubQualityClient({
@@ -210,7 +214,15 @@ describe('GhGitHubQualityClient read retries', () => {
       expect.objectContaining({ kind: 'transient', retryable: false, attempts: 1 }),
     );
     expect(writeInvocations).toHaveLength(1);
+    expect(writeInvocations[0]?.args).toContain('POST');
     expect(writeInvocations[0]?.timeoutMs).toBeUndefined();
+
+    expect(() => writeClient.updateRuleset('owner/repository', 7, rulesetPayload())).toThrowError(
+      expect.objectContaining({ kind: 'transient', retryable: false, attempts: 1 }),
+    );
+    expect(writeInvocations).toHaveLength(2);
+    expect(writeInvocations[1]?.args).toContain('PUT');
+    expect(writeInvocations[1]?.timeoutMs).toBeUndefined();
   });
 
   it('uses the structured 404 status when creating a missing label', () => {
