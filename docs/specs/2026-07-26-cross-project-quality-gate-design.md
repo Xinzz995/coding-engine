@@ -1,6 +1,6 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁设计"
-status: active
+status: done
 updated: 2026-07-28
 scope: root
 ---
@@ -37,12 +37,14 @@ GitHub 不调用模型，也不证明本地 AI Review 曾经运行。AI Review �
    插件、浏览器或危险工具；无法保证时返回 `unverifiable`；
 7. 候选版本只能以 `--shadow` 验证，永远不能为自己签发正式交付结果；
 8. 三个项目安装并验证同一个候选 tarball；最终 npm 版本必须与该 tarball 内容一致；
-9. 默认分支规则、CI、npm 版本、Git 标签和 GitHub Release 最终指向同一提交；
+9. npm 版本、Git 标签、GitHub Release 与最终候选制品必须绑定同一发布提交；该提交的发布
+   检查通过并属于受保护 `main` 的历史。当前 `main` 继续满足自身规则与 CI，但允许在发布后
+   通过受保护 PR 向前演进；
 10. `loop.ts` 与超大测试文件的结构治理在门禁闭环之后使用独立 PR 完成，不混入首批功能
     变更。
 
 Bootstrap 过程由 GitHub Issue #44 跟踪；该 Issue 在三个真实 PR 和发布闭环全部完成后仍保持
-开放，只有本次事实收口 PR 合并并完成最终回读后才能关闭。
+开放，已在事实收口 PR #78 合并并完成最终回读后关闭。
 
 ## 参考材料与取舍
 
@@ -404,7 +406,11 @@ Release。发布任务还必须确认标签提交属于受保护 main。
   `c2f5b3ba5cdabd6d9016c18821e67bc2432a4fa5`，Quality Gate 运行 #30310021340 成功；
 - 两个外部仓库作为公开试点是 owner 对本次试点的明确选择。通用能力对私有仓库仍按初始化
   能力探测结果裁决，账户套餐或 Ruleset 权限不足时停止，不降级；
-- Bootstrap Issue #44 在本次事实收口 PR 合并并完成最终回读前保持开放，不提前宣称关闭。
+- Bootstrap Issue #44 已在事实收口 PR #78 合并并完成三个仓库、Ruleset、npm、标签、Release
+  与制品摘要的最终回读后关闭。
+- 三个过期的 0.33.0 stage 均已拒绝，npm 暂存页回读为空，公开 `latest`/`next` 保持 0.33.1；
+  另在隔离 npm registry 中验证 `next` 冒烟失败不移动 `latest`，并把已经提升的 `latest` 从
+  1.1.0 恢复到前一个稳定版本 1.0.0，默认版本解析也恢复为 1.0.0。演练未改动公开 npm。
 
 ## 明确非目标
 
@@ -438,7 +444,8 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 ### 发布和外部项目
 
 - staging 下载物、三个项目安装物、`next` 和最终稳定物摘要一致；
-- `latest` 在三个公开精确版本冒烟前不变；npm、标签、Release 指向同一提交；
+- `latest` 在三个公开精确版本冒烟前不变；npm、标签、Release 与候选制品绑定同一发布提交，
+  该提交属于受保护 `main` 的历史；当前 `main` 可在发布后继续通过受保护 PR 向前演进；
 - 回退演练能恢复前一个稳定版本；
 - Go 和 Python GitHub CI 不安装 Node 或 coding-x；两个外部仓库是 owner 确认的公开试点；
-- 三个真实 PR 已完成；Bootstrap Issue 仍须等待本次事实收口 PR 合并后的最终回读才能关闭。
+- 三个真实 PR 已完成；Bootstrap Issue #44 已在事实收口 PR #78 合并后的最终回读完成后关闭。

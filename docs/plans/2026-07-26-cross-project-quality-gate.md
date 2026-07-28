@@ -1,6 +1,6 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁实施计划"
-status: active
+status: done
 updated: 2026-07-28
 scope: root
 ---
@@ -28,10 +28,11 @@ scope: root
 6. coding-engine 的 Node 22/24、三系统、CodeQL、依赖和文档检查真实运行；
 7. npm 候选 tarball 在 coding-engine、owner 确认的公开 Go 多模块试点和公开 Python Monorepo
    试点完成真实 PR；
-8. 最终 npm、tag、Release、main 与三个项目安装摘要一致，回退路径至少演练到不会误移动
-   `latest`；
-9. Bootstrap Issue #44 在三个真实 PR 与正式自托管闭环完成后仍保持开放，只在本次事实收口
-   PR 合并并完成最终回读后关闭；
+8. 最终 npm、tag、Release 与三个项目安装物绑定同一发布提交和制品摘要；受保护 `main`
+   包含该发布提交且自身检查通过；回退路径至少演练到不会误移动 `latest`，并能恢复前一个
+   稳定版本；
+9. Bootstrap Issue #44 在三个真实 PR 与正式自托管闭环完成后仍保持开放，已在事实收口
+   PR #78 合并并完成最终回读后关闭；
 10. `loop.ts` 和超大测试文件最后以独立 PR 治理。
 
 ## 黄金原则对照
@@ -208,8 +209,8 @@ scope: root
 - 旧规则审查的 Policy PR #76 已把正式裁判固定为 0.33.1；固定的 0.33.1 已完成
   coding-engine PR #77 的首次正式自托管，该 PR 已合并；
 - 两个外部试点 PR 也已合并；三个主分支合并提交和成功检查运行记录见“当前状态”；
-- Bootstrap Issue #44 仍保持开放；本次事实收口 PR 合并后须重新核对三个 PR、Ruleset、npm、
-  tag、Release 和摘要证据，才能决定是否关闭。
+- Bootstrap Issue #44 已在事实收口 PR #78 合并后重新核对三个 PR、Ruleset、npm、tag、
+  Release 和摘要证据，并于 2026-07-27 关闭。
 
 ## Phase 6：结构治理与收口
 
@@ -224,8 +225,10 @@ scope: root
 
 - `npm run typecheck`、全量测试、构建、成品 doctor/CLI smoke、文档检查、diff check；
 - coding-engine dogfood regression 全量；Go/Python 真实 CI；GitHub 规则漂移检查；
-- 失败恢复演练：stage 拒绝、`next` 冒烟失败、`latest` 回退计划；
-- 最终确认默认分支、远端规则、npm、tag、Release 和三个安装物一致，工作树 clean/synced。
+- 失败恢复演练：拒绝过期 stage；隔离验证 `next` 冒烟失败不会移动 `latest`，且 `latest`
+  已移动时能够恢复前一个稳定版本；
+- 最终确认远端规则仍启用，当前默认分支包含发布提交且自身检查通过；npm、tag、Release 和
+  三个安装物绑定同一发布提交与制品摘要，工作树 clean/synced。
 
 ## 实施拆分与停线条件
 
@@ -262,7 +265,7 @@ scope: root
 - 候选暂存与不可变发布流程已通过 PR #61 合并；发布标签 Ruleset、不可变 Release、
   `npm-staging` environment 和 stage-only Trusted Publisher 均已回读；运行 #30212975390 已证明
   OIDC 身份和来源声明有效，但 npm 以 0.30.0 曾被使用为由拒绝暂存，未创建 stage；
-- 0.33.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
+- 0.33.0 版本准备曾由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
   检查，已获 owner 授权拆出 coding-engine 仓库健康测试；PR #63 按已约定的一次性“机械
   CI + owner 人工 Bootstrap”裁决，不声称完成正式本地 AI Review。随后多轮真实 Dogfood
   在 stage 创建后发现产品问题，旧候选不能吸收新修复，因此 0.33.0 没有成为正式裁判；
@@ -283,4 +286,51 @@ scope: root
   `c6188742c3ade06391f90c593536b23c224ccad7`，Quality Gate 运行 #30310021499 成功；Python
   公开试点 PR #3 已合并，`main` 合并提交为
   `c2f5b3ba5cdabd6d9016c18821e67bc2432a4fa5`，Quality Gate 运行 #30310021340 成功；
-- Bootstrap Issue #44 在本次事实收口 PR 合并并完成最终回读前保持开放，不提前宣称关闭。
+- Bootstrap Issue #44 已在事实收口 PR #78 合并并完成最终回读后关闭；过渡期政策例外
+  Issue #62 与 #69 也在各自跟进事项全部完成后关闭。
+
+## 最终回归事实（2026-07-28）
+
+- 结构治理 PR #80 的正式本地 Review 由 coding-x 0.33.1 绑定 PR 最新提交
+  `633c8a7651cc438e7ea518b27aae9c2f16651449`，重新验收两个 Story；Spec、工程标准与深度结构
+  Review 均通过且没有遗留 finding。PR #80 随后合并，`main` 合并提交为
+  `39ed19d46ce819326c4ce6c938c274c4d521cefd`；合并后的 Quality Gate #30316452669 与 CodeQL
+  #30316452674 均成功。
+- 本地最终检查通过：类型检查、825 项全量测试、构建、成品 CLI、doctor、格式、静态检查、
+  仓库健康、高危依赖审计与 diff check；doctor 回读质量契约和远端交付状态均为 `ready`，
+  工作树与 `origin/main` 同步。
+- `docs/dogfood-regression.md` 的 25 条断言已逐条复查。PR #80 不含 UI、PRD 再派生或 TDD/hook
+  变更，对应断言不适用；其余断言由本次正式运行工件、Validator/Review 绑定、结构化 evidence、
+  报告和失败路径回归覆盖，未发现行为回退。
+- coding-engine Ruleset #19747271、Go Ruleset #19773424 与 Python Ruleset #19773582 均启用、
+  无绕过者，并要求最新提交上的 `policy-guard-source` 与 `quality-gate`；三个仓库的发布标签规则
+  也均启用且禁止更新、删除。Go `main` #30310021499、Python `main` #30310021340 保持成功，
+  两个外部工作流只使用各自原生 Go/Python 工具，不安装 Node 或 coding-x。
+- npm `latest` 与 `next` 均为 0.33.1，`gitHead`、注解标签 `v0.33.1` 和不可变 Release 均绑定
+  候选提交 `a57e8d3cf666c5293d28c2a3f5921be43044c1a7`；registry 与 Release tarball 重新下载后字节
+  一致，SHA-256 为 `b27cab53e7d18ba6b1cd8ccf9421b99804524b531624dbddbb496ea29d9e9a73`。
+- 上述本地 Review、GitHub 机械检查与发布物摘要分别证明审查结论、远端执行状态与制品身份，
+  彼此不能替代。当前 `main` 已包含 0.33.1 发布提交，但不等于该历史发布提交。
+- 失败恢复边界已完成演练：三个 0.33.0 stage
+  `c02b6696-3a4b-4a5e-a58c-c697afcee006`、
+  `2be2a6f1-4a10-44b7-992f-98b9361d607d` 与
+  `7a4e4795-f43c-4e8e-af65-8d8157797931` 均已拒绝；最后一个过期 stage 于 2026-07-28
+  使用 2FA 拒绝后，npm 暂存页回读为没有待审核版本，公开 `latest` 与 `next` 仍保持 0.33.1。
+  隔离 npm registry 中先以 1.0.0 作为 `latest`、1.1.0 作为 `next`：停止候选提升模拟公开冒烟
+  失败时，`latest` 保持 1.0.0；再把 `latest` 提升到 1.1.0 并执行回退后，dist-tag 和默认版本
+  解析均恢复为 1.0.0，而 `next` 保持 1.1.0。演练使用 npm 11.17.0 与 Verdaccio 6.9.0，未改动
+  公开 npm 的稳定标签。候选来源过期、schema 错误、运行身份或制品摘要不一致继续由回归测试
+  失败关闭。
+
+## 状态变更清单（2026-07-28）
+
+| 对象 | 状态变更 | 成立依据 |
+|---|---|---|
+| `docs/specs/2026-07-26-cross-project-quality-gate-design.md` | `active` → `done` | 双层门禁、三仓验证、正式发布与 Bootstrap 收口均已完成 |
+| `docs/plans/2026-07-26-cross-project-quality-gate.md` | `active` → `done` | Task 18 最终回归完成，结构治理 PR #80 已合并并完成合并后检查 |
+| `docs/plans/2026-07-27-prestage-candidate-promotion.md` | `active` → `done` | 暂存前候选验证已交付，并用于 0.33.1 候选、暂存与稳定发布 |
+| `docs/prds/prd-loop-structure-governance.md` | `active` → `done` | 两个 Story 已由正式 Review 验收，PR #80 已合并且主分支检查成功 |
+| GitHub Issue #44 | `open` → `closed` | PR #78 合并后完成三个仓库、Ruleset、发布与制品摘要的最终回读 |
+| GitHub Issue #62 | `open` → `closed` | 0.33.0 过渡候选的跟踪与后续裁决已经完成 |
+| GitHub Issue #69 | `open` → `closed` | 暂存前固定候选验证的跟进事项已经完成 |
+| npm 0.33.0 过期 stage `7a4e4795-...-7931` | `pending` → `rejected` | 2FA 拒绝后暂存页回读为空；公开 `latest`/`next` 保持 0.33.1 |
