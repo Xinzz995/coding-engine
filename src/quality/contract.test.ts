@@ -14,6 +14,9 @@ import {
 } from './contract.js';
 import { CODING_X_VERSION } from '../version.js';
 
+// 独立于候选源码版本；仅在已发布版本通过旧裁判审查的 Policy PR 中更新。
+const CODING_ENGINE_STABLE_REFEREE_VERSION = '0.33.1';
+
 function validContract(): unknown {
   return {
     schemaVersion: 1,
@@ -432,15 +435,15 @@ describe('readQualityContract', () => {
       status: 'ready',
       contract: {
         repository: { fullName: 'Xinzz995/coding-engine', defaultBranch: 'main' },
-        codingXVersion: expect.stringMatching(/^\d+\.\d+\.\d+$/),
+        codingXVersion: CODING_ENGINE_STABLE_REFEREE_VERSION,
       },
       digest: expect.stringMatching(/^sha256:/),
     });
     if (result.status !== 'ready') return;
-    const versionMatches = result.contract.codingXVersion === CODING_X_VERSION;
+    const versionMatches = CODING_ENGINE_STABLE_REFEREE_VERSION === CODING_X_VERSION;
     expect(assessQualityRuntime(result.contract, CODING_X_VERSION, false)).toMatchObject({
       mode: versionMatches ? 'formal' : 'version-mismatch',
-      expectedVersion: result.contract.codingXVersion,
+      expectedVersion: CODING_ENGINE_STABLE_REFEREE_VERSION,
       actualVersion: CODING_X_VERSION,
       versionMatches,
       deliveryReadyAllowed: versionMatches,
