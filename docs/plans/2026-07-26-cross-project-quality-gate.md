@@ -225,7 +225,8 @@ scope: root
 - `npm run typecheck`、全量测试、构建、成品 doctor/CLI smoke、文档检查、diff check；
 - coding-engine dogfood regression 全量；Go/Python 真实 CI；GitHub 规则漂移检查；
 - 失败恢复演练：stage 拒绝、`next` 冒烟失败、`latest` 回退计划；
-- 最终确认默认分支、远端规则、npm、tag、Release 和三个安装物一致，工作树 clean/synced。
+- 最终确认远端规则仍启用，当前默认分支包含发布提交且自身检查通过；npm、tag、Release 和
+  三个安装物绑定同一发布提交与制品摘要，工作树 clean/synced。
 
 ## 实施拆分与停线条件
 

@@ -37,7 +37,9 @@ GitHub 不调用模型，也不证明本地 AI Review 曾经运行。AI Review �
    插件、浏览器或危险工具；无法保证时返回 `unverifiable`；
 7. 候选版本只能以 `--shadow` 验证，永远不能为自己签发正式交付结果；
 8. 三个项目安装并验证同一个候选 tarball；最终 npm 版本必须与该 tarball 内容一致；
-9. 默认分支规则、CI、npm 版本、Git 标签和 GitHub Release 最终指向同一提交；
+9. npm 版本、Git 标签、GitHub Release 与最终候选制品必须绑定同一发布提交；该提交的发布
+   检查通过并属于受保护 `main` 的历史。当前 `main` 继续满足自身规则与 CI，但允许在发布后
+   通过受保护 PR 向前演进；
 10. `loop.ts` 与超大测试文件的结构治理在门禁闭环之后使用独立 PR 完成，不混入首批功能
     变更。
 
@@ -439,7 +441,8 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 ### 发布和外部项目
 
 - staging 下载物、三个项目安装物、`next` 和最终稳定物摘要一致；
-- `latest` 在三个公开精确版本冒烟前不变；npm、标签、Release 指向同一提交；
+- `latest` 在三个公开精确版本冒烟前不变；npm、标签、Release 与候选制品绑定同一发布提交，
+  该提交属于受保护 `main` 的历史；当前 `main` 可在发布后继续通过受保护 PR 向前演进；
 - 回退演练能恢复前一个稳定版本；
 - Go 和 Python GitHub CI 不安装 Node 或 coding-x；两个外部仓库是 owner 确认的公开试点；
 - 三个真实 PR 已完成；Bootstrap Issue #44 已在事实收口 PR #78 合并后的最终回读完成后关闭。

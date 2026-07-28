@@ -78,15 +78,15 @@ PR 闭环。实施计划 Phase 6 Task 17 约定在门禁闭环之后，单独治
 
 #### Acceptance Criteria
 
-- [ ] `loop-instructions.ts` 单独负责指令读取、TDD 片段和占位符渲染，`loop.ts` 仍兼容导出 `renderInstruction`。
-- [ ] `loop-preflight.ts` 单独负责质量契约、固定版本、PRD/State 恢复、TDD、模型目录与冻结检查快照的启动阶段。
-- [ ] `loop.ts` 仍直接拥有锁、仪表盘、逐轮状态机、最终 Review、报告和资源释放，不引入单实现接口或回调层级。
-- [ ] 预检失败发生在 agent 与仪表盘启动之前，既有退出码和可观察文案保持不变。
-- [ ] `docs/architecture.md` 记录三个模块的职责边界以及逐轮状态机保留在 `loop.ts` 的原因。
-- [ ] 没有新增运行依赖、配置、持久化字段或公开调用方式。
-- [ ] Typecheck passes
-- [ ] Tests pass
-- [ ] Build and built CLI smoke pass
+- [x] `loop-instructions.ts` 单独负责指令读取、TDD 片段和占位符渲染，`loop.ts` 仍兼容导出 `renderInstruction`。
+- [x] `loop-preflight.ts` 单独负责质量契约、固定版本、PRD/State 恢复、TDD、模型目录与冻结检查快照的启动阶段。
+- [x] `loop.ts` 仍直接拥有锁、仪表盘、逐轮状态机、最终 Review、报告和资源释放，不引入单实现接口或回调层级。
+- [x] 预检失败发生在 agent 与仪表盘启动之前，既有退出码和可观察文案保持不变。
+- [x] `docs/architecture.md` 记录三个模块的职责边界以及逐轮状态机保留在 `loop.ts` 的原因。
+- [x] 没有新增运行依赖、配置、持久化字段或公开调用方式。
+- [x] Typecheck passes
+- [x] Tests pass
+- [x] Build and built CLI smoke pass
 
 ### US-002: 按行为领域拆分主循环测试
 
@@ -95,14 +95,14 @@ PR 闭环。实施计划 Phase 6 Task 17 约定在门禁闭环之后，单独治
 
 #### Acceptance Criteria
 
-- [ ] 原 `loop.test.ts` 的 95 个 `it` 用例全部迁移，测试标题集合与拆分前一致，不删除或弱化断言。
-- [ ] 测试至少分为预检、生命周期、门禁、验收协议、模型路由、安全恢复和指令合同七个行为领域。
-- [ ] 共用契约、临时 workspace、假 agent 与固定 Review 结果只有一个测试支持来源；支持文件不包含 `describe`、`it` 或断言。
-- [ ] 原 `loop.test.ts` 被移除，不留下重复执行的测试。
-- [ ] 全仓测试总数不少于拆分前的 825 项，所有测试通过。
-- [ ] Typecheck passes
-- [ ] Lint and format checks pass
-- [ ] Repository health check passes
+- [x] 原 `loop.test.ts` 的 95 个 `it` 用例全部迁移，测试标题集合与拆分前一致，不删除或弱化断言。
+- [x] 测试至少分为预检、生命周期、门禁、验收协议、模型路由、安全恢复和指令合同七个行为领域。
+- [x] 共用契约、临时 workspace、假 agent 与固定 Review 结果只有一个测试支持来源；支持文件不包含 `describe`、`it` 或断言。
+- [x] 原 `loop.test.ts` 被移除，不留下重复执行的测试。
+- [x] 全仓测试总数不少于拆分前的 825 项，所有测试通过。
+- [x] Typecheck passes
+- [x] Lint and format checks pass
+- [x] Repository health check passes
 
 ## Verification
 
