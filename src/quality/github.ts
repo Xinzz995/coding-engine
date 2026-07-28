@@ -3,6 +3,13 @@ import { execFileSync } from 'node:child_process';
 const DEFAULT_GITHUB_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_GITHUB_READ_ATTEMPTS = 3;
 const GITHUB_RETRY_BASE_DELAY_MS = 250;
+const RETRYABLE_GITHUB_READ_HTTP_STATUSES: ReadonlySet<number> = new Set([
+  408,
+  500,
+  502,
+  503,
+  504,
+]);
 
 export interface GitHubCommandInvocation {
   args: readonly string[];
@@ -348,11 +355,15 @@ function classifyCommandError(
   operationCanRetry: boolean,
 ): GitHubQualityError {
   if (error instanceof GitHubQualityError) {
-    if (operationCanRetry || !error.retryable) return error;
+    const retryable = operationCanRetry
+      && error.retryable
+      && (error.httpStatus === undefined
+        || RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(error.httpStatus));
+    if (retryable === error.retryable && error.attempts === attempts) return error;
     return new GitHubQualityError('GitHub 远端操作失败', error.detail ?? error.message, {
       kind: error.kind,
       httpStatus: error.httpStatus,
-      retryable: false,
+      retryable,
       attempts,
     });
   }
@@ -360,13 +371,14 @@ function classifyCommandError(
   const code = commandErrorCode(error);
   const httpStatus = httpStatusFromError(detail);
   const rateLimited = httpStatus === 429 || /(?:secondary |API )?rate limit/i.test(detail);
-  const transient = new Set([408, 500, 502, 503, 504]).has(httpStatus ?? 0)
-    || [
-      'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETDOWN',
-      'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT',
-    ].includes(code ?? '')
-    || /(?:\bEOF\b|connection reset|connection refused|connection attempt failed|socket hang up|TLS handshake timeout|i\/o timeout|operation timed out|context deadline exceeded|temporary failure|network is unreachable|no such host|could not resolve host|error connecting to|check your internet connection)/i
-      .test(detail);
+  const transient = httpStatus === undefined
+    ? [
+        'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETDOWN',
+        'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT',
+      ].includes(code ?? '')
+      || /(?:\bEOF\b|connection reset|connection refused|connection attempt failed|socket hang up|TLS handshake timeout|i\/o timeout|operation timed out|context deadline exceeded|temporary failure|network is unreachable|no such host|could not resolve host|error connecting to|check your internet connection)/i
+        .test(detail)
+    : RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(httpStatus);
 
   if (httpStatus === 401
       || /bad credentials|not logged in|gh auth login|populate (?:the )?GH_TOKEN|authentication token/i

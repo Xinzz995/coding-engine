@@ -109,7 +109,10 @@ describe('GhGitHubQualityClient read retries', () => {
     ['gh: HTTP 404: Not Found', 'not-found'],
     ['gh: HTTP 422: Validation Failed', 'validation'],
     ['gh: HTTP 501: Not Implemented', 'unknown'],
+    ['gh: HTTP 501: temporary failure', 'unknown'],
     ['gh: HTTP 505: HTTP Version Not Supported', 'unknown'],
+    ['gh: HTTP 506: Variant Also Negotiates', 'unknown'],
+    ['gh: HTTP 400: operation timed out', 'unknown'],
   ] as const)('does not retry permanent read failure %s', (detail, kind) => {
     let calls = 0;
     const client = new GhGitHubQualityClient({
@@ -132,9 +135,31 @@ describe('GhGitHubQualityClient read retries', () => {
     expect(calls).toBe(1);
   });
 
+  it.each([408, 500, 502, 503, 504])(
+    'retries explicitly allowed HTTP %i read failure',
+    (status) => {
+      const invocations: GitHubCommandInvocation[] = [];
+      const delays: number[] = [];
+      const client = new GhGitHubQualityClient({
+        executor: (invocation) => {
+          invocations.push(invocation);
+          if (invocations.length === 1) {
+            throw commandFailure(`gh: HTTP ${status}: temporary read failure`);
+          }
+          return REPOSITORY_JSON;
+        },
+        sleep: (delayMs) => delays.push(delayMs),
+      });
+
+      expect(client.discoverRepository('/project').fullName).toBe('owner/repository');
+      expect(invocations).toHaveLength(2);
+      expect(invocations.every((invocation) => invocation.timeoutMs === 10_000)).toBe(true);
+      expect(delays).toEqual([250]);
+    },
+  );
+
   it.each([
     'dial tcp 192.0.2.1:443: i/o timeout',
-    'gh: HTTP 408: Request Timeout',
     'connect: connection refused',
     'connectex: A connection attempt failed because the connected party did not properly respond',
     'operation timed out',
@@ -204,7 +229,10 @@ describe('GhGitHubQualityClient read retries', () => {
     const writeClient = new GhGitHubQualityClient({
       executor: (invocation) => {
         writeInvocations.push(invocation);
-        throw commandFailure('Post "https://api.github.com/repos/owner/repository/rulesets": EOF');
+        if (invocation.args.includes('POST')) {
+          throw commandFailure('gh: HTTP 503: Service Unavailable');
+        }
+        throw commandFailure('Put "https://api.github.com/repos/owner/repository/rulesets/7": EOF');
       },
       sleep: () => {
         throw new Error('writes must not sleep');
@@ -223,6 +251,33 @@ describe('GhGitHubQualityClient read retries', () => {
     expect(writeInvocations).toHaveLength(2);
     expect(writeInvocations[1]?.args).toContain('PUT');
     expect(writeInvocations[1]?.timeoutMs).toBeUndefined();
+  });
+
+  it('does not let an injected retryable error bypass the HTTP allowlist', () => {
+    let calls = 0;
+    const client = new GhGitHubQualityClient({
+      executor: () => {
+        calls++;
+        throw new GitHubQualityError('temporary failure', undefined, {
+          kind: 'transient',
+          httpStatus: 501,
+          retryable: true,
+        });
+      },
+      sleep: () => {
+        throw new Error('unlisted HTTP status must not sleep');
+      },
+    });
+
+    expect(() => client.discoverRepository('/project')).toThrowError(
+      expect.objectContaining({
+        kind: 'transient',
+        httpStatus: 501,
+        retryable: false,
+        attempts: 1,
+      }),
+    );
+    expect(calls).toBe(1);
   });
 
   it('uses the structured 404 status when creating a missing label', () => {
