@@ -288,10 +288,11 @@ scope: root
 
 ## 最终回归事实（2026-07-28）
 
-- 结构治理 PR #80 已合并，`main` 为 `39ed19d46ce819326c4ce6c938c274c4d521cefd`；正式
-  coding-x 0.33.1 在 PR 最新提交 `633c8a7651cc438e7ea518b27aae9c2f16651449` 上重新验收两个
-  Story，Spec、工程标准与深度结构 Review 均通过且没有遗留 finding。合并后的 Quality Gate
-  #30316452669 与 CodeQL #30316452674 均成功。
+- 结构治理 PR #80 的正式本地 Review 由 coding-x 0.33.1 绑定 PR 最新提交
+  `633c8a7651cc438e7ea518b27aae9c2f16651449`，重新验收两个 Story；Spec、工程标准与深度结构
+  Review 均通过且没有遗留 finding。PR #80 随后合并，`main` 合并提交为
+  `39ed19d46ce819326c4ce6c938c274c4d521cefd`；合并后的 Quality Gate #30316452669 与 CodeQL
+  #30316452674 均成功。
 - 本地最终检查通过：类型检查、825 项全量测试、构建、成品 CLI、doctor、格式、静态检查、
   仓库健康、高危依赖审计与 diff check；doctor 回读质量契约和远端交付状态均为 `ready`，
   工作树与 `origin/main` 同步。
@@ -305,7 +306,20 @@ scope: root
 - npm `latest` 与 `next` 均为 0.33.1，`gitHead`、注解标签 `v0.33.1` 和不可变 Release 均绑定
   候选提交 `a57e8d3cf666c5293d28c2a3f5921be43044c1a7`；registry 与 Release tarball 重新下载后字节
   一致，SHA-256 为 `b27cab53e7d18ba6b1cd8ccf9421b99804524b531624dbddbb496ea29d9e9a73`。
-  当前 `main` 已包含该发布提交，但不会被误写成仍等于发布提交。
+- 上述本地 Review、GitHub 机械检查与发布物摘要分别证明审查结论、远端执行状态与制品身份，
+  彼此不能替代。当前 `main` 已包含 0.33.1 发布提交，但不等于该历史发布提交。
 - 失败恢复边界已复核：0.30.0 的 E409 和后续旧候选拒绝均未提前移动 `latest`；候选来源过期、
   schema 错误、运行身份或制品摘要不一致继续由回归测试失败关闭。`latest` 已移动后的事故按既定
   手工回退计划处理，本次最终回归不为演练而破坏稳定标签。
+
+## 状态变更清单（2026-07-28）
+
+| 对象 | 状态变更 | 成立依据 |
+|---|---|---|
+| `docs/specs/2026-07-26-cross-project-quality-gate-design.md` | `active` → `done` | 双层门禁、三仓验证、正式发布与 Bootstrap 收口均已完成 |
+| `docs/plans/2026-07-26-cross-project-quality-gate.md` | `active` → `done` | Task 18 最终回归完成，结构治理 PR #80 已合并并完成合并后检查 |
+| `docs/plans/2026-07-27-prestage-candidate-promotion.md` | `active` → `done` | 暂存前候选验证已交付，并用于 0.33.1 候选、暂存与稳定发布 |
+| `docs/prds/prd-loop-structure-governance.md` | `active` → `done` | 两个 Story 已由正式 Review 验收，PR #80 已合并且主分支检查成功 |
+| GitHub Issue #44 | `open` → `closed` | PR #78 合并后完成三个仓库、Ruleset、发布与制品摘要的最终回读 |
+| GitHub Issue #62 | `open` → `closed` | 0.33.0 过渡候选的跟踪与后续裁决已经完成 |
+| GitHub Issue #69 | `open` → `closed` | 暂存前固定候选验证的跟进事项已经完成 |
