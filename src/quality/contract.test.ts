@@ -440,7 +440,7 @@ describe('readQualityContract', () => {
       digest: expect.stringMatching(/^sha256:/),
     });
     if (result.status !== 'ready') return;
-    const versionMatches = CODING_ENGINE_STABLE_REFEREE_VERSION === CODING_X_VERSION;
+    const versionMatches = result.contract.codingXVersion === CODING_X_VERSION;
     expect(assessQualityRuntime(result.contract, CODING_X_VERSION, false)).toMatchObject({
       mode: versionMatches ? 'formal' : 'version-mismatch',
       expectedVersion: CODING_ENGINE_STABLE_REFEREE_VERSION,
