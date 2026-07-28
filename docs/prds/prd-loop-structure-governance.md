@@ -1,6 +1,6 @@
 ---
 title: "主循环与测试结构治理"
-status: active
+status: done
 updated: 2026-07-28
 scope: root
 ---

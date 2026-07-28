@@ -1,6 +1,6 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁实施计划"
-status: active
+status: done
 updated: 2026-07-28
 scope: root
 ---
@@ -208,8 +208,8 @@ scope: root
 - 旧规则审查的 Policy PR #76 已把正式裁判固定为 0.33.1；固定的 0.33.1 已完成
   coding-engine PR #77 的首次正式自托管，该 PR 已合并；
 - 两个外部试点 PR 也已合并；三个主分支合并提交和成功检查运行记录见“当前状态”；
-- Bootstrap Issue #44 仍保持开放；本次事实收口 PR 合并后须重新核对三个 PR、Ruleset、npm、
-  tag、Release 和摘要证据，才能决定是否关闭。
+- Bootstrap Issue #44 已在事实收口 PR #78 合并后重新核对三个 PR、Ruleset、npm、tag、
+  Release 和摘要证据，并于 2026-07-27 关闭。
 
 ## Phase 6：结构治理与收口
 
@@ -262,7 +262,7 @@ scope: root
 - 候选暂存与不可变发布流程已通过 PR #61 合并；发布标签 Ruleset、不可变 Release、
   `npm-staging` environment 和 stage-only Trusted Publisher 均已回读；运行 #30212975390 已证明
   OIDC 身份和来源声明有效，但 npm 以 0.30.0 曾被使用为由拒绝暂存，未创建 stage；
-- 0.33.0 版本准备由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
+- 0.33.0 版本准备曾由 Issue #62 跟踪。验证发现候选版本的完整 doctor 不应充当 GitHub 机械
   检查，已获 owner 授权拆出 coding-engine 仓库健康测试；PR #63 按已约定的一次性“机械
   CI + owner 人工 Bootstrap”裁决，不声称完成正式本地 AI Review。随后多轮真实 Dogfood
   在 stage 创建后发现产品问题，旧候选不能吸收新修复，因此 0.33.0 没有成为正式裁判；
@@ -283,4 +283,29 @@ scope: root
   `c6188742c3ade06391f90c593536b23c224ccad7`，Quality Gate 运行 #30310021499 成功；Python
   公开试点 PR #3 已合并，`main` 合并提交为
   `c2f5b3ba5cdabd6d9016c18821e67bc2432a4fa5`，Quality Gate 运行 #30310021340 成功；
-- Bootstrap Issue #44 在本次事实收口 PR 合并并完成最终回读前保持开放，不提前宣称关闭。
+- Bootstrap Issue #44 已在事实收口 PR #78 合并并完成最终回读后关闭；过渡期政策例外
+  Issue #62 与 #69 也在各自跟进事项全部完成后关闭。
+
+## 最终回归事实（2026-07-28）
+
+- 结构治理 PR #80 已合并，`main` 为 `39ed19d46ce819326c4ce6c938c274c4d521cefd`；正式
+  coding-x 0.33.1 在 PR 最新提交 `633c8a7651cc438e7ea518b27aae9c2f16651449` 上重新验收两个
+  Story，Spec、工程标准与深度结构 Review 均通过且没有遗留 finding。合并后的 Quality Gate
+  #30316452669 与 CodeQL #30316452674 均成功。
+- 本地最终检查通过：类型检查、825 项全量测试、构建、成品 CLI、doctor、格式、静态检查、
+  仓库健康、高危依赖审计与 diff check；doctor 回读质量契约和远端交付状态均为 `ready`，
+  工作树与 `origin/main` 同步。
+- `docs/dogfood-regression.md` 的 25 条断言已逐条复查。PR #80 不含 UI、PRD 再派生或 TDD/hook
+  变更，对应断言不适用；其余断言由本次正式运行工件、Validator/Review 绑定、结构化 evidence、
+  报告和失败路径回归覆盖，未发现行为回退。
+- coding-engine Ruleset #19747271、Go Ruleset #19773424 与 Python Ruleset #19773582 均启用、
+  无绕过者，并要求最新提交上的 `policy-guard-source` 与 `quality-gate`；三个仓库的发布标签规则
+  也均启用且禁止更新、删除。Go `main` #30310021499、Python `main` #30310021340 保持成功，
+  两个外部工作流只使用各自原生 Go/Python 工具，不安装 Node 或 coding-x。
+- npm `latest` 与 `next` 均为 0.33.1，`gitHead`、注解标签 `v0.33.1` 和不可变 Release 均绑定
+  候选提交 `a57e8d3cf666c5293d28c2a3f5921be43044c1a7`；registry 与 Release tarball 重新下载后字节
+  一致，SHA-256 为 `b27cab53e7d18ba6b1cd8ccf9421b99804524b531624dbddbb496ea29d9e9a73`。
+  当前 `main` 已包含该发布提交，但不会被误写成仍等于发布提交。
+- 失败恢复边界已复核：0.30.0 的 E409 和后续旧候选拒绝均未提前移动 `latest`；候选来源过期、
+  schema 错误、运行身份或制品摘要不一致继续由回归测试失败关闭。`latest` 已移动后的事故按既定
+  手工回退计划处理，本次最终回归不为演练而破坏稳定标签。

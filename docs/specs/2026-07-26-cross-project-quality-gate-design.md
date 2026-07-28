@@ -1,6 +1,6 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁设计"
-status: active
+status: done
 updated: 2026-07-28
 scope: root
 ---
@@ -404,7 +404,8 @@ Release。发布任务还必须确认标签提交属于受保护 main。
   `c2f5b3ba5cdabd6d9016c18821e67bc2432a4fa5`，Quality Gate 运行 #30310021340 成功；
 - 两个外部仓库作为公开试点是 owner 对本次试点的明确选择。通用能力对私有仓库仍按初始化
   能力探测结果裁决，账户套餐或 Ruleset 权限不足时停止，不降级；
-- Bootstrap Issue #44 在本次事实收口 PR 合并并完成最终回读前保持开放，不提前宣称关闭。
+- Bootstrap Issue #44 已在事实收口 PR #78 合并并完成三个仓库、Ruleset、npm、标签、Release
+  与制品摘要的最终回读后关闭。
 
 ## 明确非目标
 
@@ -441,4 +442,4 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 - `latest` 在三个公开精确版本冒烟前不变；npm、标签、Release 指向同一提交；
 - 回退演练能恢复前一个稳定版本；
 - Go 和 Python GitHub CI 不安装 Node 或 coding-x；两个外部仓库是 owner 确认的公开试点；
-- 三个真实 PR 已完成；Bootstrap Issue 仍须等待本次事实收口 PR 合并后的最终回读才能关闭。
+- 三个真实 PR 已完成；Bootstrap Issue #44 已在事实收口 PR #78 合并后的最终回读完成后关闭。

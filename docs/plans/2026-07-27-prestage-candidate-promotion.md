@@ -1,6 +1,6 @@
 ---
 title: npm 暂存前候选验证与精确提升
-status: active
+status: done
 updated: 2026-07-27
 scope: root
 ---
