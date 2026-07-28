@@ -25,7 +25,6 @@ import { QUALITY_WORKFLOW_PATH } from './github-workflows.js';
 import { runQualityInit } from './init.js';
 import { codeScanningToolsFromRuleset, requiredChecksFromRuleset } from './ruleset.js';
 import { findManagedReleaseRuleset, validateManagedReleaseRuleset } from './release-ruleset.js';
-import { CODING_X_VERSION } from '../version.js';
 
 const roots: string[] = [];
 
@@ -56,6 +55,12 @@ function repositoryFixture(contract = codingEngineContract()): string {
   git(root, 'commit', '-m', '初始提交');
   git(root, 'checkout', '-b', 'bootstrap-quality');
   return root;
+}
+
+function contractVersion(root: string): string {
+  const result = readQualityContract(root);
+  if (result.status !== 'ready') throw new Error(`fixture contract unavailable: ${result.status}`);
+  return result.contract.codingXVersion;
 }
 
 function check(name: string, sha: string, over: Partial<GitHubCheckRun> = {}): GitHubCheckRun {
@@ -150,7 +155,7 @@ function options(
 ) {
   return {
     root,
-    actualVersion: CODING_X_VERSION,
+    actualVersion: contractVersion(root),
     client,
     confirm: async (summary: string) => {
       summaries.push(summary);
@@ -281,8 +286,10 @@ describe('runQualityInit', () => {
 
   it('refuses a coding-x version that differs from the quality contract', async () => {
     const versionRoot = repositoryFixture();
+    const expectedVersion = contractVersion(versionRoot);
+    const mismatchedVersion = expectedVersion === '0.0.0' ? '0.0.1' : '0.0.0';
     await expect(runQualityInit({
-      ...options(versionRoot, new FakeGitHubClient()), actualVersion: '0.30.0',
-    })).rejects.toThrow(`质量契约固定 ${CODING_X_VERSION}`);
+      ...options(versionRoot, new FakeGitHubClient()), actualVersion: mismatchedVersion,
+    })).rejects.toThrow(`质量契约固定 ${expectedVersion}`);
   }, 15_000);
 });

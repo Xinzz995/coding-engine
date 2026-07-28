@@ -426,14 +426,24 @@ describe('quality contract identity and runtime mode', () => {
 });
 
 describe('readQualityContract', () => {
-  it('keeps the coding-engine dogfood contract valid', () => {
-    expect(readQualityContract(process.cwd())).toMatchObject({
+  it('keeps the coding-engine dogfood contract valid without making the candidate its own referee', () => {
+    const result = readQualityContract(process.cwd());
+    expect(result).toMatchObject({
       status: 'ready',
       contract: {
         repository: { fullName: 'Xinzz995/coding-engine', defaultBranch: 'main' },
-        codingXVersion: CODING_X_VERSION,
+        codingXVersion: expect.stringMatching(/^\d+\.\d+\.\d+$/),
       },
       digest: expect.stringMatching(/^sha256:/),
+    });
+    if (result.status !== 'ready') return;
+    const versionMatches = result.contract.codingXVersion === CODING_X_VERSION;
+    expect(assessQualityRuntime(result.contract, CODING_X_VERSION, false)).toMatchObject({
+      mode: versionMatches ? 'formal' : 'version-mismatch',
+      expectedVersion: result.contract.codingXVersion,
+      actualVersion: CODING_X_VERSION,
+      versionMatches,
+      deliveryReadyAllowed: versionMatches,
     });
   });
 
