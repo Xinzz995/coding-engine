@@ -376,7 +376,7 @@ function classifyCommandError(
         'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETDOWN',
         'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT',
       ].includes(code ?? '')
-      || /(?:\bEOF\b|connection reset|connection refused|connection attempt failed|socket hang up|TLS handshake timeout|i\/o timeout|operation timed out|context deadline exceeded|temporary failure|network is unreachable|no such host|could not resolve host|error connecting to|check your internet connection)/i
+      || /(?:\bEOF\b|connection reset|connection refused|connection attempt failed|forcibly closed by (?:the )?remote host|socket hang up|TLS handshake timeout|i\/o timeout|operation timed out|context deadline exceeded|temporary failure|network is unreachable|no such host|could not resolve host|error connecting to|check your internet connection)/i
         .test(detail)
     : RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(httpStatus);
 

@@ -113,6 +113,7 @@ describe('GhGitHubQualityClient read retries', () => {
     ['gh: HTTP 505: HTTP Version Not Supported', 'unknown'],
     ['gh: HTTP 506: Variant Also Negotiates', 'unknown'],
     ['gh: HTTP 400: operation timed out', 'unknown'],
+    ['wsarecv: An invalid argument was supplied.', 'unknown'],
   ] as const)('does not retry permanent read failure %s', (detail, kind) => {
     let calls = 0;
     const client = new GhGitHubQualityClient({
@@ -162,6 +163,7 @@ describe('GhGitHubQualityClient read retries', () => {
     'dial tcp 192.0.2.1:443: i/o timeout',
     'connect: connection refused',
     'connectex: A connection attempt failed because the connected party did not properly respond',
+    'read tcp 192.0.2.10:53120->140.82.114.6:443: wsarecv: An existing connection was forcibly closed by the remote host.',
     'operation timed out',
     'lookup api.github.com: no such host',
     'error connecting to github.com\ncheck your internet connection or https://githubstatus.com',
@@ -232,7 +234,9 @@ describe('GhGitHubQualityClient read retries', () => {
         if (invocation.args.includes('POST')) {
           throw commandFailure('gh: HTTP 503: Service Unavailable');
         }
-        throw commandFailure('Put "https://api.github.com/repos/owner/repository/rulesets/7": EOF');
+        throw commandFailure(
+          'wsarecv: An existing connection was forcibly closed by the remote host.',
+        );
       },
       sleep: () => {
         throw new Error('writes must not sleep');
