@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { readQualityContract, type QualityContract } from '../quality/contract.js';
 import {
   GITHUB_ACTIONS_APP_ID,
+  GitHubQualityError,
   type GitHubIssueInfo,
   type GitHubPullRequestInfo,
   type GitHubQualityClient,
@@ -159,12 +160,70 @@ describe('checkDeliveryGate', () => {
         now: new Date('2026-07-26T00:00:00Z'),
       });
       expect(invalid.status).toBe('invalid');
+      expect(invalid).toMatchObject({ remoteChecked: true, remoteFailure: null });
       expect(invalid.issues.map((entry) => entry.message)).toEqual(expect.arrayContaining([
         expect.stringContaining('未绑定预期 GitHub App'),
         expect.stringContaining('普通告警阈值为 all'),
         expect.stringContaining('秘密推送保护实际为关闭'),
         '不可变 Release 实际为关闭',
         '延期 Issue 已过期',
+      ]));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('distinguishes an unavailable remote probe from completed drift detection', () => {
+    const value = contract();
+    const root = rootWithManagedFiles(value);
+    const client = new FakeClient(value);
+    client.discoverRepository = () => {
+      throw new GitHubQualityError(
+        'GitHub 远端暂时不可用',
+        'Get "https://api.github.com/repos/owner/repository": EOF',
+        { kind: 'transient', retryable: true, attempts: 3 },
+      );
+    };
+    try {
+      const unavailable = checkDeliveryGate({
+        root, workspace: '.workspace', contract: value, local: false, client,
+      });
+      expect(unavailable).toMatchObject({
+        status: 'invalid',
+        remoteChecked: false,
+        remoteFailure: { kind: 'transient', attempts: 3 },
+      });
+      expect(unavailable.issues).toContainEqual(expect.objectContaining({
+        file: 'GitHub Probe',
+        message: expect.stringContaining('暂时不可用'),
+      }));
+      expect(unavailable.issues.map((entry) => entry.message).join('\n')).not.toContain('Ruleset');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps earlier drift findings when a later remote read becomes unavailable', () => {
+    const value = contract();
+    const root = rootWithManagedFiles(value);
+    const client = new FakeClient(value);
+    client.securityFeatures.secretScanningPushProtection = false;
+    client.listRulesets = () => {
+      throw new GitHubQualityError('GitHub 远端暂时不可用', 'gh: HTTP 503', {
+        kind: 'transient', retryable: true, attempts: 3,
+      });
+    };
+    try {
+      const unavailable = checkDeliveryGate({
+        root, workspace: '.workspace', contract: value, local: false, client,
+      });
+      expect(unavailable).toMatchObject({
+        status: 'invalid', remoteChecked: false,
+        remoteFailure: { kind: 'transient', attempts: 3 },
+      });
+      expect(unavailable.issues.map((entry) => entry.message)).toEqual(expect.arrayContaining([
+        expect.stringContaining('秘密推送保护实际为关闭'),
+        expect.stringContaining('暂时不可用'),
       ]));
     } finally {
       rmSync(root, { recursive: true, force: true });

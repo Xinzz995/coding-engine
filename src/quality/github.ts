@@ -1,5 +1,48 @@
 import { execFileSync } from 'node:child_process';
 
+const DEFAULT_GITHUB_READ_TIMEOUT_MS = 10_000;
+const DEFAULT_GITHUB_READ_ATTEMPTS = 3;
+const GITHUB_RETRY_BASE_DELAY_MS = 250;
+const RETRYABLE_GITHUB_READ_HTTP_STATUSES: ReadonlySet<number> = new Set([
+  408,
+  500,
+  502,
+  503,
+  504,
+]);
+
+export interface GitHubCommandInvocation {
+  args: readonly string[];
+  cwd?: string;
+  input?: string;
+  timeoutMs?: number;
+}
+
+export type GitHubCommandExecutor = (invocation: GitHubCommandInvocation) => string;
+
+export interface GhGitHubQualityClientOptions {
+  executor?: GitHubCommandExecutor;
+  sleep?: (delayMs: number) => void;
+}
+
+export type GitHubQualityErrorKind =
+  | 'transient'
+  | 'unauthenticated'
+  | 'forbidden'
+  | 'not-found'
+  | 'rate-limit'
+  | 'validation'
+  | 'invalid-response'
+  | 'tool'
+  | 'unknown';
+
+export interface GitHubQualityErrorOptions {
+  kind?: GitHubQualityErrorKind;
+  httpStatus?: number;
+  retryable?: boolean;
+  attempts?: number;
+}
+
 export const MANAGED_RULESET_NAME = 'coding-x quality gate';
 export const LEGACY_BOOTSTRAP_RULESET_NAME = 'coding-x bootstrap minimum';
 export const MANAGED_RELEASE_RULESET_NAME = 'coding-x protected release tags';
@@ -108,9 +151,22 @@ export interface GitHubQualityClient {
 }
 
 export class GitHubQualityError extends Error {
-  constructor(message: string, readonly detail?: string) {
+  readonly kind: GitHubQualityErrorKind;
+  readonly httpStatus?: number;
+  readonly retryable: boolean;
+  readonly attempts: number;
+
+  constructor(
+    message: string,
+    readonly detail?: string,
+    options: GitHubQualityErrorOptions = {},
+  ) {
     super(detail ? `${message}：${detail}` : message);
     this.name = 'GitHubQualityError';
+    this.kind = options.kind ?? 'invalid-response';
+    this.httpStatus = options.httpStatus;
+    this.retryable = options.retryable ?? false;
+    this.attempts = options.attempts ?? 1;
   }
 }
 
@@ -275,25 +331,162 @@ function parseImmutableReleases(value: unknown): GitHubImmutableReleases {
   return { enabled: value.enabled, enforcedByOwner: value.enforced_by_owner };
 }
 
+function commandErrorText(error: unknown): string {
+  if (isRecord(error)) {
+    const stderr = error.stderr;
+    if (typeof stderr === 'string' && stderr.trim() !== '') return stderr.trim();
+    if (Buffer.isBuffer(stderr) && stderr.length > 0) return stderr.toString('utf8').trim();
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function commandErrorCode(error: unknown): string | undefined {
+  return isRecord(error) && typeof error.code === 'string' ? error.code : undefined;
+}
+
+function httpStatusFromError(detail: string): number | undefined {
+  const match = /\bHTTP(?:\/\d(?:\.\d)?)?\s+(\d{3})\b/i.exec(detail);
+  return match ? Number(match[1]) : undefined;
+}
+
+function classifyCommandError(
+  error: unknown,
+  attempts: number,
+  operationCanRetry: boolean,
+): GitHubQualityError {
+  if (error instanceof GitHubQualityError) {
+    const retryable = operationCanRetry
+      && error.retryable
+      && (error.httpStatus === undefined
+        || RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(error.httpStatus));
+    if (retryable === error.retryable && error.attempts === attempts) return error;
+    return new GitHubQualityError('GitHub 远端操作失败', error.detail ?? error.message, {
+      kind: error.kind,
+      httpStatus: error.httpStatus,
+      retryable,
+      attempts,
+    });
+  }
+  const detail = commandErrorText(error);
+  const code = commandErrorCode(error);
+  const httpStatus = httpStatusFromError(detail);
+  const rateLimited = httpStatus === 429 || /(?:secondary |API )?rate limit/i.test(detail);
+  const transient = httpStatus === undefined
+    ? [
+        'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETDOWN',
+        'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT',
+      ].includes(code ?? '')
+      || /(?:\bEOF\b|connection reset|connection refused|connection attempt failed|forcibly closed by (?:the )?remote host|socket hang up|TLS handshake timeout|i\/o timeout|operation timed out|context deadline exceeded|temporary failure|network is unreachable|no such host|could not resolve host|error connecting to|check your internet connection)/i
+        .test(detail)
+    : RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(httpStatus);
+
+  if (httpStatus === 401
+      || /bad credentials|not logged in|gh auth login|populate (?:the )?GH_TOKEN|authentication token/i
+        .test(detail)) {
+    return new GitHubQualityError('GitHub CLI 未认证', detail, {
+      kind: 'unauthenticated', httpStatus, retryable: false, attempts,
+    });
+  }
+  if (rateLimited) {
+    return new GitHubQualityError('GitHub API 请求受限', detail, {
+      kind: 'rate-limit', httpStatus, retryable: false, attempts,
+    });
+  }
+  if (httpStatus === 403
+      || /resource not accessible by (?:integration|personal access token)/i.test(detail)) {
+    return new GitHubQualityError('GitHub API 权限不足', detail, {
+      kind: 'forbidden', httpStatus, retryable: false, attempts,
+    });
+  }
+  if (httpStatus === 404) {
+    return new GitHubQualityError('GitHub 资源不存在', detail, {
+      kind: 'not-found', httpStatus, retryable: false, attempts,
+    });
+  }
+  if (httpStatus === 422) {
+    return new GitHubQualityError('GitHub API 请求无效', detail, {
+      kind: 'validation', httpStatus, retryable: false, attempts,
+    });
+  }
+  if (transient) {
+    return new GitHubQualityError('GitHub 远端暂时不可用', detail, {
+      kind: 'transient', httpStatus, retryable: operationCanRetry, attempts,
+    });
+  }
+  if (code === 'ENOENT') {
+    return new GitHubQualityError('无法运行 GitHub CLI', detail, {
+      kind: 'tool', retryable: false, attempts,
+    });
+  }
+  return new GitHubQualityError('GitHub API 调用失败', detail, {
+    kind: 'unknown', httpStatus, retryable: false, attempts,
+  });
+}
+
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+
+function sleepSync(delayMs: number): void {
+  Atomics.wait(sleepBuffer, 0, 0, delayMs);
+}
+
+function defaultCommandExecutor(invocation: GitHubCommandInvocation): string {
+  return execFileSync('gh', [...invocation.args], {
+    ...(invocation.cwd ? { cwd: invocation.cwd } : {}),
+    ...(invocation.input === undefined ? {} : { input: invocation.input }),
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, GH_PROMPT_DISABLED: '1' },
+    maxBuffer: 8 * 1024 * 1024,
+    ...(invocation.timeoutMs === undefined ? {} : { timeout: invocation.timeoutMs }),
+  });
+}
+
 /** `gh` 复用用户现有登录，不把 token 写入项目或命令参数。 */
 export class GhGitHubQualityClient implements GitHubQualityClient {
-  private run(args: string[], cwd?: string, input?: string): unknown {
-    try {
-      const output = execFileSync('gh', args, {
-        ...(cwd ? { cwd } : {}),
-        ...(input === undefined ? {} : { input }),
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env, GH_PROMPT_DISABLED: '1' },
-        maxBuffer: 8 * 1024 * 1024,
-      });
-      return output.trim() === '' ? null : JSON.parse(output);
-    } catch (error) {
-      const stderr = isRecord(error) && typeof error.stderr === 'string'
-        ? error.stderr.trim()
-        : error instanceof Error ? error.message : String(error);
-      throw new GitHubQualityError('GitHub API 调用失败', stderr);
+  private readonly executor: GitHubCommandExecutor;
+  private readonly sleep: (delayMs: number) => void;
+
+  constructor(options: GhGitHubQualityClientOptions = {}) {
+    this.executor = options.executor ?? defaultCommandExecutor;
+    this.sleep = options.sleep ?? sleepSync;
+  }
+
+  private run(args: string[], cwd?: string, input?: string, retryRead = false): unknown {
+    const maxAttempts = retryRead ? DEFAULT_GITHUB_READ_ATTEMPTS : 1;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let output: string;
+      try {
+        output = this.executor({
+          args,
+          ...(cwd ? { cwd } : {}),
+          ...(input === undefined ? {} : { input }),
+          ...(retryRead ? { timeoutMs: DEFAULT_GITHUB_READ_TIMEOUT_MS } : {}),
+        });
+      } catch (error) {
+        const failure = classifyCommandError(error, attempt, retryRead);
+        if (!retryRead || !failure.retryable || attempt === maxAttempts) throw failure;
+        this.sleep(GITHUB_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
+        continue;
+      }
+      if (typeof output !== 'string') {
+        throw new GitHubQualityError('GitHub CLI 返回非文本结果', undefined, {
+          kind: 'invalid-response', retryable: false, attempts: attempt,
+        });
+      }
+      if (output.trim() === '') return null;
+      try {
+        return JSON.parse(output);
+      } catch (error) {
+        throw new GitHubQualityError(
+          'GitHub 返回无法解析的 JSON',
+          error instanceof Error ? error.message : String(error),
+          { kind: 'invalid-response', retryable: false, attempts: attempt },
+        );
+      }
     }
+    throw new GitHubQualityError('GitHub 读取重试未产生结果', undefined, {
+      kind: 'unknown', retryable: false, attempts: maxAttempts,
+    });
   }
 
   private api(path: string, method: 'GET' | 'POST' | 'PUT' = 'GET', body?: unknown): unknown {
@@ -301,13 +494,18 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
     if (method !== 'GET') args.push('--method', method);
     args.push(path);
     if (body !== undefined) args.push('--input', '-');
-    return this.run(args, undefined, body === undefined ? undefined : JSON.stringify(body));
+    return this.run(
+      args,
+      undefined,
+      body === undefined ? undefined : JSON.stringify(body),
+      method === 'GET',
+    );
   }
 
   discoverRepository(root: string): GitHubRepositoryInfo {
     return parseRepository(this.run([
       'repo', 'view', '--json', 'nameWithOwner,defaultBranchRef,isPrivate',
-    ], root));
+    ], root, undefined, true));
   }
 
   verifyDefaultBranch(repository: GitHubRepositoryInfo): void {
@@ -392,7 +590,7 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
       this.api(`repos/${repository}/labels/${encoded}`);
       return;
     } catch (error) {
-      if (!(error instanceof GitHubQualityError) || !error.message.includes('HTTP 404')) throw error;
+      if (!(error instanceof GitHubQualityError) || error.httpStatus !== 404) throw error;
       this.api(`repos/${repository}/labels`, 'POST', { name, color, description });
     }
   }
