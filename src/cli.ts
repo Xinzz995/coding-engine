@@ -78,7 +78,7 @@ runner:
   repair                         修复 workspace 中的 prd.json/state.json
   dashboard                      启动只读离线仪表盘
   doctor                         检查文档、门禁、模型与 workspace 健康度
-  status                         输出实现、最终 Review 与 GitHub 交付状态
+  status                         输出实现、最终 Review 与 GitHub 交付状态（退出码 0–7 见下方）
   report                         生成静态验证报告 report.html
   models [claude|codex|cursor]   查询全局模型目录
   config path|init|validate      查看、初始化或校验全局模型配置
@@ -97,7 +97,7 @@ runner:
   --workspace <dir>              workspace 路径（默认 .workspace）
   --no-open                      不自动打开仪表盘
   --keep-open                    循环结束后保留仪表盘
-  --port <n>                     仪表盘端口（0–65535；0 自动选择；默认 7331）
+  --port <n>                     仪表盘端口（仅接受 0–65535 的十进制整数；0 由系统选择可用端口；默认 7331）
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（doctor/status/models）
@@ -106,6 +106,16 @@ runner:
   --yes                          init 接受已展示的远端和文件变更
   --local                        doctor 只检查本地状态，不查询 GitHub
   -h, --help                     显示本帮助并退出
+
+status 退出码:
+  0                              实现验证、本地 Review 与 GitHub 交付条件均已就绪
+  1                              Story 未完成、state 损坏或 PRD 没有 Story
+  2                              workspace 不可读或最终 Review 状态损坏
+  3                              存在 blocked Story
+  4                              最终 Review 有待人工处理的 finding
+  5                              最终 Review 无法可靠验证
+  6                              最终 Review 未完成或已失效，或 GitHub CI / Ruleset 未就绪
+  7                              Shadow 已完成，但不能表示可交付
 
 更多说明: https://github.com/Xinzz995/coding-engine#readme`;
 

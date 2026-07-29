@@ -677,7 +677,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
-| 位置参数 `status` | — | 终端速览 story、最终 Review 与 GitHub 交付状态，并显示重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`；只有三部分均就绪才返回 0，其余返回 1–7 中对应状态，见下方退出码表 |
+| 位置参数 `status` | — | 终端速览 story、最终 Review 与 GitHub 交付状态，并显示重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`。退出码：`0`=全部 Story 已有效通过、本地最终 Review 已通过且 GitHub 交付 ready；`1`=Story 未完成、state 损坏或 PRD 无 Story；`2`=workspace 不可读或最终 Review 状态损坏；`3`=存在 blocked Story；`4`=最终 Review 有待人工处理 finding；`5`=最终 Review 无法可靠验证；`6`=最终 Review 未完成/已失效或 GitHub CI/Ruleset 未就绪；`7`=shadow 已完成，不能表示可交付 |
 | 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story+AC、门禁、分源 Validator claim/engine 裁决、截图、review、篡改红旗）；循环结束也从冻结 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
