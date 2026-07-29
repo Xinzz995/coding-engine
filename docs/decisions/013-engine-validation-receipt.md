@@ -36,3 +36,7 @@ agent 改写该字段时按阶段前值恢复并留 evidence。validator 未实�
 ## 后续修订
 
 ADR-015 保留本 ADR 的 `passes && validated && !blocked` 最终语义与 legacy 兼容，但 supersede 了“只凭正常退出和 state 前后值签发、暂不引入结构化 verdict”的范围裁决：所有新 Validator 轮次必须绑定引擎 request，并由引擎消费结构化 claim 后写 verdict 状态。
+
+ADR-020 进一步取代本 ADR 的裸布尔完成语义和 legacy 自动视作已验证：`validated` 继续保留，
+但正式通过还必须有与当前 Git HEAD 和当前有序验收标准匹配的结构化凭证；旧状态缺少凭证时
+只能重新验证，不能延续为当前绿灯。

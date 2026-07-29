@@ -38,3 +38,9 @@ scope: root
 - story id 成为 md ↔ json 对齐键：一旦分配永不重排/复用（prd-generate、prd-to-json 双侧约束）。
 - `Prd` 类型新增可选 `sourcePrd` 字段，旧 prd.json 不受影响（向后兼容）。
 - 第二阶段已于 v0.5.0 落地：状态迁出至 `.workspace/state.json`，prd.json 运行期只读，旧格式由引擎启动时自动抽取迁移；agent 写坏需求内容的通道就此关闭（state.json 仍由 `npx coding-x repair` 兜底）。
+
+## 后续修订
+
+ADR-020 将 Validator 的提交与验收摘要绑定纳入 `.workspace/state.json` 的引擎独占状态。
+`prd-to-json` 再派生时只能保留原有凭证，不得生成新凭证；有序 acceptanceCriteria 任何变化
+都会由引擎对账使旧凭证失效。
