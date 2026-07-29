@@ -184,6 +184,14 @@ function isLfsPointer(content: string | null): boolean {
   return content?.startsWith('version https://git-lfs.github.com/spec/v1\n') ?? false;
 }
 
+export function containsGitBinaryPatch(diff: string): boolean {
+  return diff.split('\n').some(
+    (line) =>
+      line === 'GIT binary patch' ||
+      (line.startsWith('Binary files ') && line.endsWith(' differ')),
+  );
+}
+
 function sourceDocuments(options: {
   headPaths: string[];
   changedFiles: string[];
@@ -340,7 +348,7 @@ export function runReviewPreflight(options: {
         message: `无法完整读取 PR diff；不会截断或拆分评审：${error instanceof Error ? error.message : String(error)}`,
       };
     }
-    if (diff.includes('GIT binary patch') || /Binary files .* differ/.test(diff)) {
+    if (containsGitBinaryPatch(diff)) {
       return { status: 'unverifiable', message: 'PR 包含关键二进制变化，无法完整交给文本 Reviewer' };
     }
     const files: ReviewFileContent[] = [];
