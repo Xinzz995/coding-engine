@@ -78,7 +78,8 @@ Validator failed 才清除跨轮保留的旧候选，并沿用既有 retry、升
 Validator 运行/协议不可验证时，保留旧候选、撤销凭证、不增加 retry，并立即非绿结束。机械/TDD
 不可验证时不进入 Validator，Validator 不可验证时不进入 Final Review；合法 Validator passed 才
 签发新凭证。质量契约明确声明某项机械检查不适用于当前平台时正常跳过；TDD `coverageCheck` 没有
-独立的平台跳过声明。
+独立的平台跳过声明。明确失败同样结束本次运行；候选清除后，由下一次启动先完成 Builder/升级模型
+预检，再进入 Developer，不能在只预检了 Validator/Review 的同一运行中直接调用 Builder。
 
 以上分类只服务 validation-only。普通 Builder 新候选继续遵循 ADR-009 与 ADR-017 的现有异常回写、
 stall、retry、升级和 blocked 语义；本计划不建立全局三态门禁。

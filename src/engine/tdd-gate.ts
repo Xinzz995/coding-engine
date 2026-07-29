@@ -3,9 +3,11 @@ import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import {
+  classifyValidationOnlyGateFailure,
   GATE_TIMEOUT_MS,
   runGateCommand,
   type GateFailure,
+  type ValidationOnlyFailureClassification,
 } from './gate.js';
 import type { Prd, TddConfig, TddPolicyFile } from './prd.js';
 
@@ -32,6 +34,25 @@ export type TddPolicyFailureCode =
 
 export interface TddGateFailure extends GateFailure {
   code: TddPolicyFailureCode;
+}
+
+/**
+ * validation-only 的 TDD 失败裁决。只有能直接证明候选违反冻结政策的结果
+ * 才算明确失败；基础设施、Git、读取与环境异常都保留候选并返回不可验证。
+ */
+export function classifyValidationOnlyTddFailure(
+  failure: TddGateFailure,
+): ValidationOnlyFailureClassification {
+  switch (failure.code) {
+    case 'policy-file-missing':
+    case 'policy-hash-mismatch':
+    case 'forbidden-pattern-added':
+      return 'failed';
+    case 'coverage-check-failed':
+      return classifyValidationOnlyGateFailure(failure);
+    default:
+      return 'unverifiable';
+  }
 }
 
 export interface TddPolicyResult {

@@ -14,9 +14,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Prd } from './prd.js';
 import {
   checkTddPolicy,
+  classifyValidationOnlyTddFailure,
   readTddConfig,
   runTddGate,
   type TddConfig,
+  type TddGateFailure,
 } from './tdd-gate.js';
 
 const cleanups: Array<() => void> = [];
@@ -52,6 +54,20 @@ function git(root: string, ...args: string[]): string {
 
 function hash(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function tddFailure(
+  code: TddGateFailure['code'],
+  overrides: Partial<TddGateFailure> = {},
+): TddGateFailure {
+  return {
+    code,
+    command: `[tdd-policy:${code}]`,
+    exitCode: null,
+    timedOut: false,
+    outputTail: 'fixture',
+    ...overrides,
+  };
 }
 
 function repo(): {
@@ -133,6 +149,43 @@ describe('readTddConfig', () => {
     const result = readTddConfig(prdWith(value));
     expect(result.status).toBe('invalid');
     if (result.status === 'invalid') expect(result.error.length).toBeGreaterThan(0);
+  });
+});
+
+describe('classifyValidationOnlyTddFailure', () => {
+  it.each([
+    'policy-file-missing',
+    'policy-hash-mismatch',
+    'forbidden-pattern-added',
+  ] as const)('把能直接证明候选违反冻结政策的 %s 分类为明确失败', (code) => {
+    expect(classifyValidationOnlyTddFailure(tddFailure(code))).toBe('failed');
+  });
+
+  it.each([
+    'project-root-unreadable',
+    'git-unavailable',
+    'git-root-mismatch',
+    'baseline-unreachable',
+    'policy-file-outside-root',
+    'policy-file-duplicate-target',
+    'policy-file-unreadable',
+    'source-scan-failed',
+  ] as const)('把无法证明候选有错的 %s 分类为不可验证', (code) => {
+    expect(classifyValidationOnlyTddFailure(tddFailure(code))).toBe('unverifiable');
+  });
+
+  it('按普通门禁规则分类 coverage 命令的明确失败与基础设施异常', () => {
+    expect(classifyValidationOnlyTddFailure(tddFailure('coverage-check-failed', {
+      exitCode: 7,
+    }))).toBe('failed');
+    expect(classifyValidationOnlyTddFailure(tddFailure('coverage-check-failed', {
+      exitCode: null,
+      timedOut: true,
+    }))).toBe('unverifiable');
+    expect(classifyValidationOnlyTddFailure(tddFailure('coverage-check-failed', {
+      exitCode: null,
+      timedOut: false,
+    }))).toBe('unverifiable');
   });
 });
 

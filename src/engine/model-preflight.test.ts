@@ -191,14 +191,16 @@ describe('preflightModelRouting', () => {
     expect(called).toBe(true);
   });
 
-  it('把 passes=true 但无验收凭证的 story 继续视为待执行', async () => {
+  it('validation-only 只要求 Validator 与最终 Review，不要求不会运行的 Builder', async () => {
     let called = false;
     const result = await preflightModelRouting({
       prd: prd(), state: state({ passes: true, validated: false }),
       requestedRunner: 'codex', runnerExplicit: true,
-      catalog: async () => { called = true; return available('mid-m', 'esc-m', 'val-m'); },
+      catalog: async () => { called = true; return available('val-m'); },
     });
-    expect(result.storyRoutes).toHaveLength(1);
+    expect(result.storyRoutes).toEqual([]);
+    expect(result.validator.model).toBe('val-m');
+    expect(result.review.model).toBe('val-m');
     expect(called).toBe(true);
   });
 });

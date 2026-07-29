@@ -3,9 +3,151 @@ import { writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readEvidence } from './evidence.js';
-import { setup, story, runLoop, fakeCounting, currentRepoTdd } from './loop-test-support.js';
+import { runLoop as runProductionLoop } from './loop.js';
+import type { QualityContract } from '../quality/contract.js';
+import {
+  setup,
+  story,
+  runLoop,
+  fakeCounting,
+  currentRepoTdd,
+  readyQualityContract,
+  strictConfig,
+  TEST_QUALITY_CONTRACT,
+} from './loop-test-support.js';
 
 describe('runLoop quality gate', () => {
+  it('validation-only clears the candidate only when a project command explicitly fails', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "process.exit(7)"'],
+    });
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'candidate',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude',
+        maxIterations: 3,
+        devTimeoutMs: 5000,
+        valTimeoutMs: 5000,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false, validationReceipt: null, retryCount: 3 });
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('stops at blocked after a fifth validation-only project-check failure without Developer', async () => {
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['node -e "process.exit(7)"'],
+    });
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'candidate',
+        retryCount: 4,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude',
+        maxIterations: 3,
+        devTimeoutMs: 5000,
+        valTimeoutMs: 5000,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
+      })).toBe(3);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({ passes: false, retryCount: 5, blocked: true });
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('validation-only preserves the candidate when a structured project command cannot start', async () => {
+    const digest = `sha256:${'c'.repeat(64)}`;
+    const contract = {
+      ...TEST_QUALITY_CONTRACT,
+      checks: {
+        test: {
+          checks: [{
+            id: 'missing-executable',
+            module: 'root',
+            command: {
+              executable: 'coding-x-command-that-does-not-exist',
+              args: [],
+              cwd: '.',
+              platforms: ['linux', 'macos', 'windows'],
+              timeoutMs: 1000,
+            },
+          }],
+        },
+        build: { notApplicable: 'fixture' },
+        static: { notApplicable: 'fixture' },
+        security: { notApplicable: 'fixture' },
+      },
+    } as QualityContract;
+    const { workspace, instructionsDir } = setup([story()], {
+      qualityContractDigest: digest,
+      qualityChecks: contract.checks,
+    });
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'candidate',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
+        qualityContractReader: () => readyQualityContract(contract, digest),
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          notes: 'candidate',
+          retryCount: 2,
+        });
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('gate failure rolls the story back and skips the validator for that round', async () => {
     const { workspace, instructionsDir } = setup([story()], {
       qualityChecks: ['node -e "console.error(\'gate-boom\'); process.exit(7)"'],
@@ -173,10 +315,17 @@ describe('runLoop TDD gate', () => {
   });
 
   it('reruns the TDD command after builder, rejects the story, and skips validator', async () => {
-    const { workspace, instructionsDir } = setup([story()], {
+    const fixture = setup([story()], {
       qualityChecks: ['node -e "process.exit(0)"'],
-      tdd: currentRepoTdd('node -e "console.error(\'coverage 80% < 90%\'); process.exit(7)"'),
     });
+    const { workspace, instructionsDir } = fixture;
+    const prdPath = join(workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+    prd.tdd = currentRepoTdd(
+      'node -e "console.error(\'coverage 80% < 90%\'); process.exit(7)"',
+      fixture.head(),
+    );
+    writeFileSync(prdPath, JSON.stringify(prd));
     const { fake, calls } = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
@@ -216,10 +365,52 @@ describe('runLoop TDD gate', () => {
     }
   });
 
+  it('stops at blocked after a fifth validation-only TDD failure without Developer', async () => {
+    const fixture = setup([story()]);
+    const { workspace, instructionsDir } = fixture;
+    const prdPath = join(workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+    prd.tdd = currentRepoTdd('node -e "process.exit(7)"', fixture.head());
+    writeFileSync(prdPath, JSON.stringify(prd));
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'candidate',
+        retryCount: 4,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runLoop({
+        kind: 'claude',
+        maxIterations: 3,
+        devTimeoutMs: 5000,
+        valTimeoutMs: 5000,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
+      })).toBe(3);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({ passes: false, retryCount: 5, blocked: true });
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('passes coding-x workspace and project root to both agents and lets validator run after TDD passes', async () => {
-    const { workspace, instructionsDir } = setup([story()], {
-      tdd: currentRepoTdd('node -e "process.exit(0)"'),
-    });
+    const fixture = setup([story()]);
+    const { workspace, instructionsDir, projectRoot } = fixture;
+    const prdPath = join(workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+    prd.tdd = currentRepoTdd('node -e "process.exit(0)"', fixture.head());
+    writeFileSync(prdPath, JSON.stringify(prd));
     const fake = join(workspace, 'fake-env.mjs');
     const calls = join(workspace, 'env-calls.jsonl');
     writeFileSync(
@@ -255,8 +446,8 @@ describe('runLoop TDD gate', () => {
         .map((line) => JSON.parse(line));
       expect(envs).toHaveLength(2);
       expect(envs).toEqual([
-        { workspace: resolve(workspace), projectRoot: resolve(process.cwd()) },
-        { workspace: resolve(workspace), projectRoot: resolve(process.cwd()) },
+        { workspace: resolve(workspace), projectRoot: resolve(projectRoot) },
+        { workspace: resolve(workspace), projectRoot: resolve(projectRoot) },
       ]);
       expect(
         readEvidence(workspace).records.find(
