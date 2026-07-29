@@ -83,7 +83,7 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 绑定最新提交的真实 `policy-guard-source` 任务，再运行一次完成最终绑定。中间返回 6
 表示“尚未就绪”，不是执行失败。
 
-最短可用路线是：**`coding-x init` → 已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `/review-loop`**。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
+最短可用路线是：**`coding-x init` → 已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `status` 返回 0 → 人工合并**。只有最终 Review 返回待人工处理的 finding 时，才运行 `/review-loop`，处理后重新运行 `coding-x`。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
 
 ### 首次运行前的安全红线
 
@@ -150,14 +150,19 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
    │         passed → validated=true                         │
    │         failed → 写 notes/retryCount/blocked            │
    │   所有 story 都 passes&&validated 或 blocked ?          │
-   │                                  是 ──▶ 成功退出         │
-   │                                       否 ──▶ 下一轮       │
+   │                                  否 ──▶ 下一轮           │
    └─────────────────────────────────────────────────────────┘
+                          ↓
+        有 blocked → 等待人工处理（退出码 3）
+        无 blocked → 重跑完整机械检查
+                   → Spec / 工程标准 / 风险触发的深度 Review
+                   → 查询 GitHub PR、CI 与 Ruleset
+                   → 三者均就绪才成功退出（退出码 0）
                           ↓
         http://localhost:7331  实时查看进度
 ```
 
-- **完成即退出**：全部 story 同时满足 `passes && validated`（无 blocked）→ 退出码 0；全部收敛但存在 blocked 待人工 → 退出码 3；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断 → 退出码 1（完整对照见「命令行参数」后的「退出码」表）。
+- **实现收敛不等于可交付**：全部 story 同时满足 `passes && validated` 且无 blocked 后，引擎还会重跑完整机械检查、执行本地最终 Review 并查询 GitHub 交付状态；三者均就绪才返回 0。存在 blocked 返回 3；后续检查、Review 或远端未就绪时返回对应的非零代码；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断，返回 1（完整对照见「命令行参数」后的「退出码」表）。
 - **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。每次真实调用记录完整收口耗时与退出码，异常时另保留最近 2000 字符诊断，终端输出仍实时可见。
 - **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018）。
@@ -302,10 +307,13 @@ npx coding-x ───────────────▶ Developer → 契�
                                               ▼
 最终 Review ────────────────▶ Spec → 工程标准 → 风险触发的深度 Review
                                               │
-                                              ▼
-/review-loop ───────────────▶ review-decisions.json + 人工裁决
-                                              ▼
-人决定合并 ─────────────────▶ /compound-docs（可选沉淀/显式归档）
+                       ┌──────────────────────┴──────────────────────┐
+                       │ 有阻断 finding                              │ Review 通过
+                       ▼                                             ▼
+/review-loop ─────────▶ 人工裁决；修复提交后重跑 coding-x     GitHub PR / CI / Ruleset
+                                                                     │ ready
+                                                                     ▼
+人决定合并 ───────────────────────────────────────────────▶ /compound-docs（可选沉淀/显式归档）
 ```
 
 ---
@@ -583,7 +591,7 @@ npx coding-x doctor
 npx coding-x codex      # 使用 Codex；也可以换成 claude 或 cursor
 ```
 
-启动后会依次发生：引擎获取 `.workspace/engine.lock` → 读取/初始化状态 → 预检 runner 与模型 → 启动仪表盘 → 每轮启动一个 Builder → 运行机械门禁 → 启动一个 Validator → 引擎写入裁决 → 继续下一个 story。Builder 会按 PRD 的 `branchName` 检查、创建或切换功能分支，并按 story 提交代码。
+启动后会依次发生：引擎获取 `.workspace/engine.lock` → 读取/初始化状态 → 预检 runner 与模型 → 启动仪表盘 → 每轮启动一个 Builder → 运行机械门禁 → 启动一个 Validator → 引擎写入裁决 → 继续下一个 story。全部 Story 验证完成后，引擎会重跑完整机械检查、执行本地最终 Review，再查询 GitHub PR、CI 与 Ruleset；只有三部分都就绪才返回 0。Builder 会按 PRD 的 `branchName` 检查、创建或切换功能分支，并按 story 提交代码。
 
 可以按 `Ctrl+C` 中止后稍后重跑。已验证 story 会保留；如果进程停在“Builder 声称完成、Validator 尚未签发”之间，下次启动会把该 story 恢复为待复核。异常退出留下的 stale lock 会由下次运行判定接管，不需要日常手删。
 
@@ -615,7 +623,7 @@ npx coding-x --shadow           # 候选版本真实 Dogfood；成功也固定�
 npx coding-x --stall-limit 5    # 连续无进展轮（空转/超时/异常退出）达 5 次才熔断（缺省 3）
 npx coding-x repair             # 修复 .workspace/ 下的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
-npx coding-x status             # 终端一屏速览工作区执行状态（退出码 0/1/2 可作 CI 门禁）
+npx coding-x status             # 终端一屏速览实现、最终 Review 与 GitHub 交付状态；0 才表示三者均就绪
 npx coding-x status --json      # 同上，stdout 输出单个 JSON 对象供脚本与 agent 消费
 npx coding-x doctor             # docs/、workspace Git 隔离等健康检查（硬错误以退出码 1 结束）
 npx coding-x doctor --json      # 单个 JSON；含契约摘要及 PRD 应原样冻结的结构化检查快照
@@ -637,7 +645,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 全部 Story 验证完成后，引擎先重新运行完整机械检查，再自动执行三个相互隔离的判断：Spec 是否实现正确、工程标准是否满足，以及高风险改动是否存在更深的结构问题。没有 PR、缺少必填意图、分支落后、模型隔离不可靠或上下文无法完整覆盖时都会停止，不能用普通 diff 审查降级放行。
 
-有 findings 时运行 `/review-loop`。它读取当前提交的 `.workspace/final-review.json`，一次解释一个 finding，并等待你选择：
+没有阻断 finding 时，引擎继续核验当前 PR 最新提交对应的 GitHub CI 与 Ruleset；远端为 `ready` 才返回 0，尚未就绪返回 6。最终 Review 返回 4 时才需要运行 `/review-loop`。它读取当前提交的 `.workspace/final-review.json`，一次解释一个待处理 finding，并等待你选择：
 
 - **授权修复**：只在你明确授权后修改；提交后重新运行 `coding-x`，旧 Review 和旧决定立即失效。
 - **提交反证**：给出可复核事实；“误报”“接受风险”不算反证。
@@ -648,7 +656,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 
 ### 第 5 步：收口沉淀（可选）
 
-推荐在分支合并后、推送或发布前，回到 Claude Code 等工具运行 `/compound-docs`。它基于**当前代码优先**，再与 Git、`progress.md`、本轮 PRD 交叉取证，把仍成立的结构变化、稳定约定和高频陷阱分层沉淀进 `docs/`；过程故事、一次性事故和已经失效的说法不会被当成长期知识。
+推荐在功能合并后、发布前，回到 Claude Code 等工具运行 `/compound-docs`。它基于**当前代码优先**，再与 Git、`progress.md`、本轮 PRD 交叉取证，把仍成立的结构变化、稳定约定和高频陷阱分层沉淀进 `docs/`；过程故事、一次性事故和已经失效的说法不会被当成长期知识。
 
 默认只处理本轮影响范围，并执行 active 知识的增量熵 GC、任务文档状态收尾和取舍账本汇总：
 
@@ -669,7 +677,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
-| 位置参数 `status` | — | 终端速览 story 状态/重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`；退出码 0=全通过 / 1=未全通过或 state 损坏 / 2=无可读工作区 |
+| 位置参数 `status` | — | 终端速览 story、最终 Review 与 GitHub 交付状态，并显示重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`；退出码见下方独立表格 |
 | 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story+AC、门禁、分源 Validator claim/engine 裁决、截图、review、篡改红旗）；循环结束也从冻结 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
@@ -680,7 +688,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `--workspace <dir>` | `.workspace` | `prd.json` / `state.json` / `progress.md` / `evidence.jsonl` 与瞬时 validation result 所在目录；`doctor` 用它定位 prd.json，并检查门禁、项目模型映射与 Git 隔离 |
 | `--no-open` | 关闭 | 不在启动时自动打开浏览器 |
 | `--keep-open` | 关闭 | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码） |
-| `--port <n>` | `7331` | 仪表盘端口 |
+| `--port <n>` | `7331` | 仪表盘端口；必须是 0–65535 的十进制整数，0 表示由系统选择可用端口 |
 | `--stall-limit <n>` | `3` | 仅 `run`（位置参数 `codex` 同属 `run`，同样适用）：连续无进展轮（no-op 空转、builder/validator 超时或异常退出）达到 n 次即提前终止（退出码 1），避免无人值守时死循环空跑；必须是正整数 |
 | `--stale-days <n>` | `30` | 仅 `doctor`：active 区文件的 git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期，`docs/archive/` 冷档案不参与 |
 | `--contract <file>` | — | 仅 `init`：读取仓库内已经人工确认的契约候选；不能读取仓库外路径 |
@@ -690,7 +698,20 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `--shadow` | 关闭 | 只供候选版本 Dogfood；原本成功的收敛固定退出 7，不能表示正式通过；真实失败仍保留原失败码 |
 | `--review-model <id>` | — | 最终 Review 的精确模型 ID；不能使用 runner 默认值，因为结果必须能绑定并复现实际模型 |
 
-### 退出码
+### `status` 子命令退出码
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部 Story 已有效通过、本地最终 Review 已通过且 GitHub 交付 ready |
+| `1` | Story 未完成、state 损坏或 PRD 没有 Story |
+| `2` | workspace 不可读或最终 Review 状态损坏 |
+| `3` | 存在 `blocked` Story |
+| `4` | 最终 Review 有待人工处理的 finding |
+| `5` | 最终 Review 无法可靠验证 |
+| `6` | 最终 Review 未完成、已失效，或 GitHub CI / Ruleset 未就绪 |
+| `7` | shadow 已完成，但不能表示可交付 |
+
+### 默认运行退出码
 
 默认命令（`run`，即无 `init`/`repair`/`dashboard`/`doctor`/`status`/`report`/`models`/`config`
 位置参数时；位置参数 `claude`/`codex`/`cursor` 只切换 runner，仍属 `run`，退出码规则相同）
@@ -737,7 +758,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `/init-docs` | 一个仓库第一次建立 AI 知识入口时 | 项目形态、配置、目录、技术栈；monorepo 候选需人确认 | 只创建缺失的 `AGENTS.md`、`CLAUDE.md` 和 docs 骨架；已有文件不覆盖 | 基线初始化；可幂等重跑补缺，之后人工确认黄金原则/占位并由 `/compound-docs` 持续维护 |
 | `/planning <功能描述>` | 编码前需要完整技术路线时；输入可为原始需求或 align/tech 对齐稿 | 项目文档、相关代码/测试、官方资料和黄金原则 | `docs/plans/<feature>.md`，含任务顺序、风险、验证命令和原则对照；不写代码 | 初始 `active`；供人/agent 实施和 review 定位，合并后置 `done`，可显式归档；不替代正式 PRD |
 | `/review-loop` | 最终 Review 返回待人工处理 finding 时 | `.workspace/final-review.json`、当前 HEAD 和已有结构化决定 | 经用户确认后追加 `.workspace/review-decisions.json`；只有明确授权才修复 | 一次处理一个 finding；修复提交后重跑 `coding-x`，旧结果失效；不自动推送、合并或发布 |
-| `/compound-docs` | 功能分支/引擎轮次收口，推荐合并后、推送前 | 当前代码（最高事实）、Git、progress、PRD 范围和 active 文档 | 只修改文档：沉淀、增量熵 GC、状态收尾、取舍账本；物理归档需明确授权 | 默认只处理本轮；“全量 GC”才全库审计；完成后长期知识继续 active，任务文档可 done/superseded → archive |
+| `/compound-docs` | 功能分支/引擎轮次收口，推荐功能合并后、发布前 | 当前代码（最高事实）、Git、progress、PRD 范围和 active 文档 | 只修改文档：沉淀、增量熵 GC、状态收尾、取舍账本；物理归档需明确授权 | 默认只处理本轮；“全量 GC”才全库审计；完成后长期知识继续 active，任务文档可 done/superseded → archive |
 
 ### Skills（按语境使用）
 
@@ -767,7 +788,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 写入避让与 Git 隔离检查**：builder 只 stage/commit story 文件并在提交后回写运行时状态；`prd-to-json` 双次检查活跃工作区锁、写前阻止静默污染，`doctor` 只读报告锁与 Git 隔离状态，不替用户删锁或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
-- **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 即收敛；无 blocked → 退出码 0，存在 blocked → 文案分叉列出 story 号，退出码 3（待人工处理）。
+- **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 只表示实现循环已经收敛；存在 blocked 返回 3。无 blocked 时继续执行完整机械检查、本地最终 Review 和 GitHub 交付查询，三者均就绪才返回 0；其余按下方完整退出码表返回。
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时控制**：开发/验证阶段各有独立超时。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`），启动时默认自动打开浏览器。`--keep-open` 让跑完后面板继续可看；`npx coding-x dashboard` 随时离线回看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。

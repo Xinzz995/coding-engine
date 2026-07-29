@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
+import { CLI_HELP, parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
 import * as dashboard from './dashboard/server.js';
 import { renderManagedGitHubFiles } from './quality/github-workflows.js';
 import { parseQualityContract } from './quality/contract.js';
@@ -232,6 +232,23 @@ describe('parseCliArgs', () => {
 });
 
 describe('main — help', () => {
+  it('说明端口的严格格式，并完整列出 status 的退出码', () => {
+    expect(CLI_HELP).toContain('仅接受 0–65535 的十进制整数；0 由系统选择可用端口');
+    expect(CLI_HELP).toContain('status 退出码:');
+    for (const meaning of [
+      '0                              实现验证、本地 Review 与 GitHub 交付条件均已就绪',
+      '1                              Story 未完成、state 损坏或 PRD 没有 Story',
+      '2                              workspace 不可读或最终 Review 状态损坏',
+      '3                              存在 blocked Story',
+      '4                              最终 Review 有待人工处理的 finding',
+      '5                              最终 Review 无法可靠验证',
+      '6                              最终 Review 未完成或已失效，或 GitHub CI / Ruleset 未就绪',
+      '7                              Shadow 已完成，但不能表示可交付',
+    ]) {
+      expect(CLI_HELP).toContain(meaning);
+    }
+  });
+
   it.each([
     ['--help'],
     ['-h'],
