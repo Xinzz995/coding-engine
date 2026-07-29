@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
+import * as dashboard from './dashboard/server.js';
 import { renderManagedGitHubFiles } from './quality/github-workflows.js';
 import { parseQualityContract } from './quality/contract.js';
 import { CODING_X_VERSION } from './version.js';
@@ -150,6 +151,30 @@ describe('parseCliArgs', () => {
     expect(c.keepOpen).toBe(true);
     expect(c.port).toBe(8080);
   });
+  it.each([
+    ['0', 0],
+    ['65535', 65535],
+  ])('accepts decimal port boundary %s', (raw, expected) => {
+    expect(parseCliArgs(['dashboard', '--port', raw]).port).toBe(expected);
+  });
+  it.each(['', '-1', '1.5', '1e2', '0x10', 'not-a-port'])(
+    'rejects invalid port literal %j',
+    (raw) => {
+      expect(() => parseCliArgs(['dashboard', '--port', raw])).toThrow(
+        `--port 必须是 0 到 65535（含边界）的十进制整数，收到「${raw}」`,
+      );
+    },
+  );
+  it.each(['65536', '999999'])('rejects out-of-range port %s', (raw) => {
+    expect(() => parseCliArgs(['dashboard', '--port', raw])).toThrow(
+      `--port 必须是 0 到 65535（含边界）的十进制整数，收到「${raw}」`,
+    );
+  });
+  it('rejects --port without a value with the same clear range error', () => {
+    expect(() => parseCliArgs(['dashboard', '--port'])).toThrow(
+      '--port 必须是 0 到 65535（含边界）的十进制整数，收到「」',
+    );
+  });
   it('defaults staleDays to 30', () => {
     expect(parseCliArgs(['doctor']).staleDays).toBe(30);
   });
@@ -261,6 +286,58 @@ describe('main — help', () => {
     } finally {
       logSpy.mockRestore();
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['dashboard', '--port', 'abc', '--help'],
+    ['dashboard', '--port', '1e2', '-h'],
+    ['dashboard', '--port', '--help'],
+    ['help', '--port', '0x10'],
+    ['dashboard', '--port', 'abc', 'help'],
+    ['dashboard', 'help', '--port', '0x10'],
+    ['dashboard', '--port', 'help'],
+  ])('prioritizes help over invalid --port for %j', async (...args) => {
+    const dashboardStart = vi.spyOn(dashboard, 'start');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await main(args)).toBe(0);
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('用法'));
+      expect(errSpy).not.toHaveBeenCalled();
+      expect(dashboardStart).not.toHaveBeenCalled();
+    } finally {
+      dashboardStart.mockRestore();
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+});
+
+describe('main — invalid --port', () => {
+  it.each([
+    { label: 'empty', args: ['dashboard', '--port', ''], raw: '' },
+    { label: 'missing', args: ['dashboard', '--port'], raw: '' },
+    { label: 'negative', args: ['dashboard', '--port', '-1'], raw: '-1' },
+    { label: 'decimal', args: ['dashboard', '--port', '1.5'], raw: '1.5' },
+    { label: 'scientific', args: ['dashboard', '--port', '1e2'], raw: '1e2' },
+    { label: 'hexadecimal', args: ['dashboard', '--port', '0x10'], raw: '0x10' },
+    { label: 'non-numeric', args: ['dashboard', '--port', 'abc'], raw: 'abc' },
+    { label: 'above range', args: ['dashboard', '--port', '65536'], raw: '65536' },
+  ])('rejects $label input before dashboard or browser startup', async ({ args, raw }) => {
+    const dashboardStart = vi.spyOn(dashboard, 'start');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await main(args)).toBe(1);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining(`收到「${raw}」`));
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('0 到 65535'));
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(dashboardStart).not.toHaveBeenCalled();
+    } finally {
+      dashboardStart.mockRestore();
+      errSpy.mockRestore();
+      logSpy.mockRestore();
     }
   });
 });
