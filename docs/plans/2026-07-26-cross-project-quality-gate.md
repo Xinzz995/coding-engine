@@ -352,9 +352,9 @@ scope: root
   `7f9b4797557a2e250fb071a133a3045c2e9be705` 和
   `3a2f2f3b61059547140984ae1ccf815496ecfbd3`。
 - 合并后的 coding-engine Quality Gate #30449850165 与 CodeQL #30449855412、Go Quality Gate
-  #30449555193、Python Quality Gate #30449734644 均成功。三个仓库随后使用公开 0.33.2
-  再次运行 doctor，质量契约与 GitHub 交付状态均为 `ready`，本地 `main` 与远端同步且工作树
-  干净。
+  #30449555193、Python Quality Gate #30449734644 均成功。三个仓库随后使用公开安装的 0.33.2，
+  并分别指定本次正式 Dogfood workspace 运行 doctor；质量契约快照与 GitHub 交付状态均为
+  `ready`，本地 `main` 与远端同步且工作树干净。该结论不覆盖仓库中其他遗留 workspace。
 - 本次复验继续保持责任边界：模型只在本地正式 Review 中运行；GitHub 只执行项目原生机械
   检查，不保存或证明本地 AI Review。候选证据、npm/标签/Release 身份、本地 Review 与远端
   检查分别证明不同事实，不能互相替代。
