@@ -15,7 +15,10 @@ builder 与 validator 共享 `state.json`：builder 完成时先写 `passes=true
 
 `state.json` 的每个 story 增加引擎独占布尔字段 `validated`。引擎观察到 validator 启动前 story 已由 builder 置为通过、validator 进程正常结束、结束后 story 仍存在、通过且未 blocked，才原子写 `validated=true`；若 validator 删除整条 story，引擎可恢复状态供下轮重试，但不得把恢复值当作 validator verdict。通过态定义为非 blocked 的 `passes && validated`，blocked 继续独立收敛。
 
-agent 改写该字段时按阶段前值恢复并留 evidence。validator 未实际完成的路径回写未验收的 `passes=true`；进程崩溃留下的显式待验收残态在下次启动时回写。旧 state 缺字段时，为保持已发布 workspace 不被全量重验，按历史 `passes` 值归一 `validated`。
+本 ADR 发布时的历史行为是：agent 改写该字段时按阶段前值恢复并留 evidence；validator 未实际完成
+的路径回写未验收的 `passes=true`；进程崩溃留下的显式待验收残态在下次启动时回写；旧 state 缺
+字段时按历史 `passes` 值归一 `validated`。这些恢复和兼容规则已由下述 ADR-020 取代，不再是后续
+实现应继续遵循的现行规则。
 
 以上关于裸布尔凭证、跨轮回写与 legacy 自动置绿的范围只描述本 ADR 发布时的行为。ADR-020
 引入可持续核对的结构化凭证后，`validated` 不能脱离当前 HEAD/有序 AC 绑定证明通过；旧状态缺少
