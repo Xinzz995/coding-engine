@@ -60,6 +60,84 @@ function run(root: string, args: string[]): string {
 }
 
 describe('runReviewPreflight old-policy boundary', () => {
+  it('does not mistake binary-marker text inside source code for an actual binary patch', () => {
+    const root = mkdtempSync(join(tmpdir(), 'review-preflight-binary-marker-text-'));
+    try {
+      run(root, ['init', '-q', '-b', 'main']);
+      run(root, ['config', 'user.email', 'review@test.local']);
+      run(root, ['config', 'user.name', 'review-test']);
+      const source = readQualityContract(process.cwd());
+      if (source.status !== 'ready') throw new Error(`contract unavailable: ${source.status}`);
+      const contract: QualityContract = structuredClone(source.contract);
+      contract.repository = { provider: 'github', fullName: 'owner/repo', defaultBranch: 'main' };
+      contract.generatedPaths = [];
+      contract.sources.specs = [{ kind: 'pull-request' }];
+      contract.sources.acceptanceCriteria = [{ kind: 'pull-request' }];
+      contract.sources.engineeringStandards = ['AGENTS.md'];
+      mkdirSync(join(root, '.coding-x'), { recursive: true });
+      mkdirSync(join(root, 'src'), { recursive: true });
+      writeFileSync(join(root, '.coding-x/quality.json'), `${JSON.stringify(contract, null, 2)}\n`);
+      writeFileSync(join(root, 'AGENTS.md'), '# Rules\n');
+      writeFileSync(join(root, 'src/source.ts'), 'export const before = true;\n');
+      run(root, ['add', '-A']);
+      run(root, ['commit', '-q', '-m', 'base']);
+      const baseSha = run(root, ['rev-parse', 'HEAD']);
+
+      run(root, ['switch', '-q', '-c', 'feature/binary-marker-text']);
+      writeFileSync(
+        join(root, 'src/source.ts'),
+        "export const markers = ['GIT binary patch', 'Binary files a and b differ'];\n",
+      );
+      run(root, ['add', 'src/source.ts']);
+      run(root, ['commit', '-q', '-m', 'mention binary markers']);
+      let headSha = run(root, ['rev-parse', 'HEAD']);
+      const client = {
+        discoverRepository: () => ({
+          fullName: 'owner/repo',
+          defaultBranch: 'main',
+          isPrivate: true,
+        }),
+        findOpenPullRequest: () => ({
+          number: 4,
+          headSha,
+          baseBranch: 'main',
+          baseSha,
+          url: 'https://example.test/4',
+          title: 'binary marker text',
+          body: completeBody,
+          labels: [],
+        }),
+      } as unknown as GitHubQualityClient;
+
+      expect(
+        runReviewPreflight({
+          root,
+          workspace: join(root, '.workspace'),
+          currentContract: contract,
+          client,
+        }),
+      ).toMatchObject({ status: 'ready' });
+
+      writeFileSync(join(root, 'src/source.ts'), Buffer.from([0, 1, 2, 3, 0, 255]));
+      run(root, ['add', 'src/source.ts']);
+      run(root, ['commit', '-q', '-m', 'actual binary']);
+      headSha = run(root, ['rev-parse', 'HEAD']);
+      expect(
+        runReviewPreflight({
+          root,
+          workspace: join(root, '.workspace'),
+          currentContract: contract,
+          client,
+        }),
+      ).toMatchObject({
+        status: 'unverifiable',
+        message: expect.stringContaining('二进制变化'),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('rejects an invalid UTF-8 changed blob before creating Reviewer context', () => {
     const root = mkdtempSync(join(tmpdir(), 'review-preflight-invalid-utf8-'));
     try {

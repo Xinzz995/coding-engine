@@ -122,7 +122,7 @@ Final Review 自身继续绑定 PR、base/head、Spec、规则、实际 Runner/�
 - 契约、文档、Reviewer 上下文和运行期控制文件均采用有界读取；非法 UTF-8、特殊文件、超量目录或上下文超限会在 Agent/模型采用结果前失败关闭。
 - 最终门禁无法改写引擎状态或伪造 Review 文件；status/report 使用远端查询后的最终 Story 快照，并重新核验 P1 延期 Issue。
 - 空 Story、无 Git HEAD、旧 evidence/Final Review、纯重验模型路由、两 Story 最终提交收敛与写入竞态均有回归。
-- 全量测试 67 个文件、1103 项通过（另有 1 项 Windows 专用测试在 macOS 跳过）；类型检查、静态检查、构建、仓库健康检查、成品 CLI 与打包安装冒烟通过。
+- 全量测试 67 个文件、1104 项通过（另有 1 项 Windows 专用测试在 macOS 跳过）；类型检查、静态检查、构建、仓库健康检查、成品 CLI 与打包安装冒烟通过。
 - 高危依赖审计通过；当前仅有一个开发工具的低危 Windows 开发服务器提示，不阻断本变更。
 
 ## 明确不做

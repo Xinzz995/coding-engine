@@ -607,7 +607,9 @@ export function runReviewPreflight(options: {
     }
     const diffBudgetError = consumeReviewText(contentBudget, diff, 'PR diff');
     if (diffBudgetError !== null) return diffBudgetError;
-    if (diff.includes('GIT binary patch') || /Binary files .* differ/.test(diff)) {
+    // Git 自己生成的二进制标记没有 diff 行前缀。必须锚定整行；否则受审源码里
+    // 仅仅出现字符串 "GIT binary patch" 就会把普通文本 PR 误判为二进制。
+    if (/^GIT binary patch$/m.test(diff) || /^Binary files .* differ$/m.test(diff)) {
       return {
         status: 'unverifiable',
         message: 'PR 包含关键二进制变化，无法完整交给文本 Reviewer',
