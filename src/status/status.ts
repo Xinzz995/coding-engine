@@ -307,7 +307,8 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
 
 /**
  * --json 机器可读输出：text 恒为单个可 JSON.parse 的对象（错误态输出 { error, workspace }），
- * 退出码语义与人类可读模式一致（0 全通过 / 1 未全通过 / 2 无可读工作区）。
+ * 退出码语义与人类可读模式一致：只有实现、Review、GitHub 均就绪才返回 0，
+ * 其余状态保守地返回 1–7 中对应代码。
  * 损坏警告不在此处——它走 stderr，由 cli 层负责，保证 stdout 纯净。
  */
 export function renderStatusJson(report: StatusReport): { text: string; exitCode: number } {

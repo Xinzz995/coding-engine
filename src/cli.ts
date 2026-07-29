@@ -78,7 +78,7 @@ runner:
   repair                         修复 workspace 中的 prd.json/state.json
   dashboard                      启动只读离线仪表盘
   doctor                         检查文档、门禁、模型与 workspace 健康度
-  status                         输出 workspace 执行状态
+  status                         输出实现、最终 Review 与 GitHub 交付状态
   report                         生成静态验证报告 report.html
   models [claude|codex|cursor]   查询全局模型目录
   config path|init|validate      查看、初始化或校验全局模型配置
@@ -97,7 +97,7 @@ runner:
   --workspace <dir>              workspace 路径（默认 .workspace）
   --no-open                      不自动打开仪表盘
   --keep-open                    循环结束后保留仪表盘
-  --port <n>                     仪表盘端口（默认 7331）
+  --port <n>                     仪表盘端口（0–65535；0 自动选择；默认 7331）
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（doctor/status/models）
