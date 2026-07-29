@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { repairJsonString, repairWorkspaceFiles } from './repair.js';
@@ -55,6 +63,27 @@ describe('repairWorkspaceFiles', () => {
     expect(() => repairWorkspaceFiles(dir)).toThrow();
     // 半修复状态是新的损坏形态：任一文件不可修复时，另一文件也不得被改动
     expect(readFileSync(join(dir, 'prd.json'), 'utf-8')).toBe(prdRaw);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.runIf(process.platform !== 'win32')('拒绝软链 state.json 且不修改目标文件', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'repair-ws-'));
+    const outside = join(dir, 'outside.json');
+    writeFileSync(join(dir, 'prd.json'), '{ "userStories": [], }');
+    writeFileSync(outside, '{ "outside": true, }');
+    symlinkSync(outside, join(dir, 'state.json'));
+    expect(() => repairWorkspaceFiles(dir)).toThrow(/安全读取|软链|普通文件/);
+    expect(readFileSync(outside, 'utf8')).toBe('{ "outside": true, }');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.runIf(process.platform !== 'win32')('拒绝 FIFO state.json 而不会等待写入端', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'repair-ws-'));
+    writeFileSync(join(dir, 'prd.json'), '{ "userStories": [], }');
+    execFileSync('mkfifo', [join(dir, 'state.json')]);
+    const started = Date.now();
+    expect(() => repairWorkspaceFiles(dir)).toThrow(/安全读取|普通文件/);
+    expect(Date.now() - started).toBeLessThan(1000);
     rmSync(dir, { recursive: true, force: true });
   });
 });

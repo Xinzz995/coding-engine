@@ -80,7 +80,7 @@ scope: root
 
 ### Task 4：Git 与 GitHub preflight
 
-测试并实现：功能分支、干净工作树、允许 workspace/生成物、fetch 后 base 包含关系、开放 PR、
+测试并实现：功能分支、Git 可见工作树无未允许变化、允许 workspace/生成物、fetch 后 base 包含关系、开放 PR、
 目标分支、PR 必填正文和 GitHub 权限。coding-x 不执行 merge/rebase/history rewrite；缺远端条件
 返回退出码 6，意图不可验证返回 5。
 
@@ -152,6 +152,9 @@ scope: root
 - 直接把工作流真实的 `policy-guard-source` 任务作为 required check，不再通过 Checks API
   额外写入结果；
 - 政策例外标签必须关联字段完整、未过期的 Issue；
+- 例外只在 PR 的 `policy-guard` 执行时验证；Issue 后续编辑、关闭、改标签或自然过期不会自动
+  撤销既有结果，owner 必须在变化后手动重跑检查并用 `doctor` 核对；
+- 个人仓库 owner 本来就能修改 Ruleset，因此不引入不可靠的后台重跑任务，也不承诺实时失效；
 - 第三方 Actions 固定完整 SHA，workflow 权限逐 job 最小化；
 - 用恶意 PR 标题、文件名、内容和 fork 验证不会执行不可信输入。
 

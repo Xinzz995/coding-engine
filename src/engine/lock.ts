@@ -1,7 +1,17 @@
-import { writeFileSync, readFileSync, unlinkSync, readdirSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, opendirSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { readSafeControlFileUtf8Sync } from './safe-control-file.js';
+import {
+  assertRegisteredWorkspacePath,
+  assertWorkspaceDirectory,
+  freezeWorkspaceDirectory,
+  removeRegisteredWorkspaceFileSync,
+  type WorkspaceDirectoryIdentity,
+} from './workspace-identity.js';
 
 export const LOCK_FILE = 'engine.lock';
+const LOCK_CONTROL_FILE_MAX_BYTES = 8 * 1024;
+const WORKSPACE_DIRECTORY_ENTRY_LIMIT = 4_096;
 
 export type LockCommand = 'run' | 'repair';
 
@@ -13,13 +23,18 @@ export interface LockInfo {
 
 /** 活锁冲突。message 已含完整人话与手动删锁出路，消费方 console.error(err.message) 后以退出码 2 结束。 */
 export class LockConflictError extends Error {
-  constructor(readonly holder: LockInfo | null, lockPath: string) {
-    super([
-      holder
-        ? `❌ workspace 已被另一个 coding-x 进程锁定（pid ${holder.pid}，命令 ${holder.command}，启动于 ${holder.startedAt}）。`
-        : '❌ workspace 锁被并发抢占（另一个 coding-x 进程正在启动）。',
-      `   若确认持锁进程已不存在，可手动删除 ${lockPath} 后重试。`,
-    ].join('\n'));
+  constructor(
+    readonly holder: LockInfo | null,
+    lockPath: string,
+  ) {
+    super(
+      [
+        holder
+          ? `❌ workspace 已被另一个 coding-x 进程锁定（pid ${holder.pid}，命令 ${holder.command}，启动于 ${holder.startedAt}）。`
+          : '❌ workspace 锁被并发抢占（另一个 coding-x 进程正在启动）。',
+        `   若确认持锁进程已不存在，可手动删除 ${lockPath} 后重试。`,
+      ].join('\n'),
+    );
     this.name = 'LockConflictError';
   }
 }
@@ -53,10 +68,20 @@ export function isPidAlive(pid: number): boolean {
 /** 读锁文件；缺失/JSON 损坏/字段形状非法一律 null（走 stale 处理线）。 */
 export function readLockInfo(lockPath: string): LockInfo | null {
   try {
-    const parsed = JSON.parse(readFileSync(lockPath, 'utf-8')) as unknown;
+    const raw = readSafeControlFileUtf8Sync(lockPath, {
+      maxBytes: LOCK_CONTROL_FILE_MAX_BYTES,
+      allowMissing: true,
+    });
+    if (raw === null) return null;
+    const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const o = parsed as Record<string, unknown>;
-    if (typeof o.pid !== 'number' || typeof o.startedAt !== 'string' || typeof o.command !== 'string') return null;
+    if (
+      typeof o.pid !== 'number' ||
+      typeof o.startedAt !== 'string' ||
+      typeof o.command !== 'string'
+    )
+      return null;
     return { pid: o.pid, startedAt: o.startedAt, command: o.command };
   } catch {
     return null;
@@ -68,16 +93,38 @@ export function readLockInfo(lockPath: string): LockInfo | null {
  * （此刻本进程是唯一写者，残留必属已死进程）；不要求去掉后缀后的原文件存在。
  * 正则与 fs-atomic.ts 的 tmp 命名配对，改动需两处同步。
  */
-function cleanTmpResidue(workspace: string): void {
-  let entries: string[];
+function cleanTmpResidue(workspace: string, identity: WorkspaceDirectoryIdentity): void {
+  let handle: ReturnType<typeof opendirSync> | null = null;
   try {
-    entries = readdirSync(workspace);
+    assertWorkspaceDirectory(identity);
+    handle = opendirSync(workspace);
+    let count = 0;
+    let entry = handle.readSync();
+    while (entry !== null) {
+      count += 1;
+      if (count > WORKSPACE_DIRECTORY_ENTRY_LIMIT) {
+        console.warn(
+          `⚠️  workspace 条目超过 ${WORKSPACE_DIRECTORY_ENTRY_LIMIT} 个，已停止清理临时残留`,
+        );
+        break;
+      }
+      if (/\.tmp-\d+$/.test(entry.name)) {
+        try {
+          removeRegisteredWorkspaceFileSync(join(workspace, entry.name), true);
+        } catch {
+          /* 尽力清理，失败无害 */
+        }
+      }
+      entry = handle.readSync();
+    }
+    assertWorkspaceDirectory(identity);
   } catch {
     return;
-  }
-  for (const name of entries) {
-    if (/\.tmp-\d+$/.test(name)) {
-      try { unlinkSync(join(workspace, name)); } catch { /* 尽力清理，失败无害 */ }
+  } finally {
+    try {
+      handle?.closeSync();
+    } catch {
+      // 最佳努力清理不因目录关闭失败阻断启动。
     }
   }
 }
@@ -88,30 +135,25 @@ function cleanTmpResidue(workspace: string): void {
  * kill -9 等无法拦截的死亡由下次启动的 stale 判定兜底。
  */
 export function acquireLock(workspace: string, command: LockCommand): LockHandle {
-  const lockPath = join(workspace, LOCK_FILE);
-  const payload = (): string => JSON.stringify(
-    { pid: process.pid, startedAt: new Date().toISOString(), command } satisfies LockInfo,
-    null, 2,
-  );
+  const workspacePath = resolve(workspace);
+  mkdirSync(workspacePath, { recursive: true });
+  const workspaceIdentity = freezeWorkspaceDirectory(workspacePath);
+  const lockPath = join(workspacePath, LOCK_FILE);
+  const payload = (): string =>
+    JSON.stringify(
+      { pid: process.pid, startedAt: new Date().toISOString(), command } satisfies LockInfo,
+      null,
+      2,
+    );
   const tryCreate = (): boolean => {
     try {
+      assertRegisteredWorkspacePath(lockPath);
       writeFileSync(lockPath, payload(), { flag: 'wx' });
+      assertWorkspaceDirectory(workspaceIdentity);
       return true;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'EEXIST') return false;
-      if (code === 'ENOENT') {
-        // workspace 目录尚不存在（首跑）：建目录重试一次；
-        // 重试撞 EEXIST（两实例同时首建目录抢锁）转 false 走外层活性判定，其余错误照抛
-        mkdirSync(workspace, { recursive: true });
-        try {
-          writeFileSync(lockPath, payload(), { flag: 'wx' });
-          return true;
-        } catch (err2) {
-          if ((err2 as NodeJS.ErrnoException).code === 'EEXIST') return false;
-          throw err2;
-        }
-      }
       throw err;
     }
   };
@@ -124,14 +166,18 @@ export function acquireLock(workspace: string, command: LockCommand): LockHandle
         ? `⚠️  检测到上次异常退出遗留的锁（pid ${holder.pid}，启动于 ${holder.startedAt}），已接管`
         : '⚠️  检测到损坏的 engine.lock（上次异常退出痕迹），已接管',
     );
-    try { unlinkSync(lockPath); } catch { /* 可能已被并发者清理 */ }
+    try {
+      removeRegisteredWorkspaceFileSync(lockPath, true);
+    } catch {
+      /* 可能已被并发者清理；workspace 身份变化会在下次创建时再次失败 */
+    }
     if (!tryCreate()) {
       // 接管竞态：另一实例抢先重建——按活锁对待，不循环重试（简单诚实）
       throw new LockConflictError(readLockInfo(lockPath), lockPath);
     }
   }
 
-  cleanTmpResidue(workspace);
+  cleanTmpResidue(workspacePath, workspaceIdentity);
 
   let released = false;
   const releaseNow = (): void => {
@@ -141,10 +187,12 @@ export function acquireLock(workspace: string, command: LockCommand): LockHandle
     process.removeListener('SIGTERM', onSignal);
     process.removeListener('exit', onExit);
     try {
-      unlinkSync(lockPath);
+      removeRegisteredWorkspaceFileSync(lockPath, true);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.warn(`⚠️  engine.lock 释放失败（下次启动将按 stale 接管）：${err instanceof Error ? err.message : String(err)}`);
+        console.warn(
+          `⚠️  engine.lock 释放失败（下次启动将按 stale 接管）：${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
   };
@@ -165,12 +213,27 @@ export function acquireLock(workspace: string, command: LockCommand): LockHandle
     console.warn(
       `⚠️  engine.lock ${holder ? `被改写（pid ${holder.pid}）` : '丢失或不可读'}——workspace 要求单写者，已重建`,
     );
-    try { unlinkSync(lockPath); } catch { /* 缺失则无需删 */ }
     try {
+      removeRegisteredWorkspaceFileSync(lockPath, true);
+    } catch (error) {
+      // workspace 整体被替换时不能沿新路径重建；必须终止本轮。
+      assertWorkspaceDirectory(workspaceIdentity);
+      console.warn(
+        `⚠️  engine.lock 清理失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      assertRegisteredWorkspacePath(lockPath);
       writeFileSync(lockPath, payload(), { flag: 'wx' });
+      assertWorkspaceDirectory(workspaceIdentity);
     } catch (err) {
+      // 普通文件竞态仍沿用“告警但不中断”；workspace 目录身份变化绝不能吞掉，
+      // 否则后续写入可能落到攻击者替换的新目录。
+      assertWorkspaceDirectory(workspaceIdentity);
       // 引擎自身仍是合法写者：重建失败不中断循环（中断反而把胜利让给篡改方）
-      console.warn(`⚠️  engine.lock 重建失败（不中断循环）：${err instanceof Error ? err.message : String(err)}`);
+      console.warn(
+        `⚠️  engine.lock 重建失败（不中断循环）：${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   };
 

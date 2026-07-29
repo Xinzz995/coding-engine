@@ -47,7 +47,7 @@ progress.md 里写了但当前代码已不再体现的经验，不沉淀。
 - **物理归档授权**：先记下用户本次请求是否已经明确包含「物理归档/归档完成态文档」。这决定第 8 步展示候选后能否直接移动，不影响前七步照常执行。
 
 - 读 `.workspace/prd.json`：branchName、交付范围（顶层 `sourcePrd` 存在时可读源 PRD 补背景）
-- 读 `.workspace/state.json`：哪些 story 已有效通过（`blocked=false` 且 `passes && validated`；旧 state 缺 `validated` 时按 `passes` 兼容，本轮实际完成范围）
+- 先运行 `npx coding-x status --workspace .workspace --json`，以引擎对当前 Git HEAD、当前有序 AC 与结构化 `validationReceipt` 的统一裁决判断哪些 story 当前有效；`state.json` 只用于查看原始 notes/blocked，不得用 `passes && validated` 自行推导完成，也不得把缺凭证的旧 state 兼容为绿色。status 无法取得可验证 HEAD 或状态损坏时，本轮不把相关 story 记为完成
 - git 取证基线：
 
 ```bash

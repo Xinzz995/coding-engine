@@ -13,6 +13,7 @@ export class ModelPreflightError extends Error {
 
 export interface StoryRoutePreview {
   storyId: string;
+  mode: 'implementation' | 'validation-only';
   difficulty: StoryDifficulty | null;
   currentBuilder: ModelChoice;
   initialBuilder: ModelChoice;
@@ -40,6 +41,8 @@ export interface ModelPreflightOptions {
   validatorOverride?: string;
   escalationOverride?: string;
   reviewOverride?: string;
+  /** blocked 已完整收敛时不会进入最终 Review，可跳过其模型目录要求。 */
+  reviewRequired?: boolean;
   catalog?: (runner: AgentKind) => ModelCatalogResult | Promise<ModelCatalogResult>;
 }
 
@@ -59,6 +62,10 @@ export function resolveRunKind(
 function storyPending(state: RunState | null, storyId: string): boolean {
   const current = state?.[storyId];
   return !current || (!isStoryPassed(current) && !current.blocked);
+}
+
+function storyNeedsImplementation(state: RunState | null, storyId: string): boolean {
+  return !state?.[storyId]?.passes;
 }
 
 function addModel(target: Map<string, string[]>, model: string | undefined, path: string): void {
@@ -86,9 +93,12 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
   const storyRoutes: StoryRoutePreview[] = [];
   const required = new Map<string, string[]>();
   const shadowed = new Map<string, string[]>();
+  let hasImplementationPending = false;
 
   for (const story of opts.prd?.userStories ?? []) {
     if (!storyPending(opts.state, story.id)) continue;
+    const needsImplementation = storyNeedsImplementation(opts.state, story.id);
+    if (needsImplementation) hasImplementationPending = true;
     // enabled 已严格校验；disabled stories 无 difficulty，不进入 config 索引。
     const difficulty = story.difficulty ?? null;
     const escalated = opts.state?.[story.id]?.escalated ?? false;
@@ -107,16 +117,27 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
           config, story, escalated: true,
         })
       : null;
-    storyRoutes.push({ storyId: story.id, difficulty, currentBuilder, initialBuilder, escalationBuilder, escalated });
-    addModel(required, currentBuilder.model, `story ${story.id} 当前 builder`);
-    if (!escalated) addModel(required, escalationBuilder?.model, `story ${story.id} escalation`);
+    storyRoutes.push({
+      storyId: story.id,
+      mode: needsImplementation ? 'implementation' : 'validation-only',
+      difficulty,
+      currentBuilder,
+      initialBuilder,
+      escalationBuilder,
+      escalated,
+    });
+    if (needsImplementation) {
+      addModel(required, currentBuilder.model, `story ${story.id} 当前 builder`);
+      if (!escalated) addModel(required, escalationBuilder?.model, `story ${story.id} escalation`);
+    }
 
-    if (config && opts.builderOverride && story.difficulty && !escalated) {
+    if (needsImplementation && config && opts.builderOverride && story.difficulty && !escalated) {
       addModel(shadowed, config.builder[story.difficulty], `models.builder.${story.difficulty}`);
     }
   }
 
   const hasPending = storyRoutes.length > 0;
+  const reviewRequired = opts.reviewRequired ?? true;
   const validator = resolveValidatorModel({ cliOverride: opts.validatorOverride, config });
   const review: ModelChoice = opts.reviewOverride
     ? { model: opts.reviewOverride, source: 'cli-review' }
@@ -124,9 +145,11 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
   if (hasPending) addModel(required, validator.model, 'validator');
   // 最终 Review 在 story 收敛后必然发生；已经明确的模型必须在任何 agent 启动前进入允许目录。
   // 正式 runLoop 还会在本预检返回后拒绝未固定的 Review 模型。
-  addModel(required, review.model, 'final reviewer');
+  if (reviewRequired) addModel(required, review.model, 'final reviewer');
   if (hasPending && config && opts.validatorOverride) addModel(shadowed, config.validator, 'models.validator');
-  if (hasPending && config && opts.escalationOverride) addModel(shadowed, config.escalation, 'models.escalation');
+  if (hasImplementationPending && config && opts.escalationOverride) {
+    addModel(shadowed, config.escalation, 'models.escalation');
+  }
 
   // prd.json 缺失/无法解析时 loop 的历史行为仍会进入 agent 修复轮。此时若用户给了
   // CLI 模型覆盖，它们不能因为没有可枚举 story 而绕过全局允许目录。
@@ -141,13 +164,18 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
   // 没有待执行 story 就不会发生模型调用：schema/runner 仍严格校验，
   // 但不为一个已收敛 workspace 做无意义的全局模型目录读取。prd 不可用且显式
   // 传入覆盖是例外：loop 仍可能启动修复 agent，必须先复核这些 ID。
-  const hasOverrides = opts.builderOverride !== undefined
-    || opts.validatorOverride !== undefined
-    || opts.escalationOverride !== undefined;
-  const hasReviewModel = review.model !== undefined;
-  const hasPolicy = (hasPending && (config !== null || hasOverrides))
+  const hasEffectivePendingOverrides = opts.validatorOverride !== undefined
+    || (hasImplementationPending && (
+      opts.builderOverride !== undefined || opts.escalationOverride !== undefined
+    ));
+  const hasReviewModel = reviewRequired && review.model !== undefined;
+  const hasPolicy = (hasPending && (config !== null || hasEffectivePendingOverrides))
     || hasReviewModel
-    || (prdUnavailable && hasOverrides);
+    || (prdUnavailable && (
+      opts.builderOverride !== undefined
+      || opts.validatorOverride !== undefined
+      || opts.escalationOverride !== undefined
+    ));
   if (!hasPolicy) {
     return {
       runner, config, catalog: { status: 'skipped', runner }, warnings: [], storyRoutes, validator, review,

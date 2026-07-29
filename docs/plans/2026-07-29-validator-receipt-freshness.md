@@ -16,26 +16,30 @@ Final Review、多 Story 后续提交或 Final Review 损坏时可能产生假�
 
 ## 完成合同
 
-| 验收标准 | 失败信号 | 验证证据 |
-|---|---|---|
-| 每个通过态绑定当前提交和当前有序验收标准 | 只凭 `passes && validated` 即可完成 | 状态解析、签发、失效与完成判定单测 |
-| 任一提交变化会使所有旧提交凭证失效 | Story A 在 H1 验证、Story B 产生 H2 后 A 仍为绿 | 多 Story H1→H2 收敛回归 |
-| 失效 Story 不重复调用 Developer | 仅因凭证过期而重新进入实现 Agent | validation-only 轮次测试与调用次数断言 |
-| 所有 Story 最终收敛到同一 HEAD | Final Review 能在凭证混合 H1/H2 时调用模型 | Final Review 前后机械断言与模型零调用测试 |
-| 验收标准变化立即失效 | Story 文案或顺序变化后旧凭证仍有效 | acceptance hash 变化测试 |
-| 旧、损坏或伪造字段不能复活通过态 | 从 evidence、旧 Final Review 或 legacy 布尔值补造凭证 | 迁移、repair、所有权恢复测试 |
-| 展示面不显示过期绿灯 | status、report 或 dashboard 在新提交后仍显示完成 | 三个展示面的当前 HEAD 回归 |
-| 正式模式没有 Git HEAD 时提前停止 | 进入 Developer、Validator 或 Reviewer 后才失败 | preflight 退出码和 agent/model 零调用测试 |
-| 空 Story 与旧历史记录不能退化成完成证明 | 空集合摘要、旧 evidence 或旧 Final Review 复活绿灯 | 空 Story 零调用与历史记录组合回归 |
-| 项目检查不能替引擎签发状态 | 测试/TDD 脚本伪造其他 Story 的完整绿态 | 检查前后完整快照恢复与 gate 来源证据 |
-| 纯重验不依赖不会调用的 Builder | Builder 模型已移除时 validation-only 被预检阻断 | 仅 Validator 模型可用的路由回归 |
-| Story 数量不挤占实现预算 | 两个实现轮都成功，却因第三个仅重验轮超过 `--max-iter 2` | 独立有界重验余量与两 Story 收敛回归 |
-| 最终结果写入窗口发生变化时立即撤销 | 写入前核对通过、写入后变化仍返回 0 | 写入后再核对并删除刚写结果的竞态回归 |
-| 项目检查不能在 Final Review 前替换凭证或留下源码改动 | 检查返回 0 后仍按新凭证进入模型，或脏工作树被忽略 | 检查前冻结、检查后凭证/工作树复核与模型零调用回归 |
-| Reviewer 主动升级可持久复核 | 首轮运行 deep，但保存结果随后无法读取或 status 误报过期 | 固定升级风险、状态一致性与 status 重建回归 |
-| PRD 模型路由变化会使旧 Review 失效 | 路由政策变化后旧结果仍为当前，或命令行临时覆盖误伤当前性 | 路由摘要绑定、loop 传递与 status/report 回归 |
-| 人工裁决不能在运行中被替换 | Agent 或项目检查改写裁决后继续沿用旧/新组合返回通过 | 启动冻结、逐边界恢复、刚写结果删除与证据回归 |
-| Final Review v1 不能伪装成 v2 | 旧结果补字段、迁移或继续显示为通过 | v1 拒绝、v2 必填绑定与重新运行路径 |
+| 验收标准                                             | 失败信号                                                 | 验证证据                                          |
+| ---------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------- |
+| 每个通过态绑定当前提交和当前有序验收标准             | 只凭 `passes && validated` 即可完成                      | 状态解析、签发、失效与完成判定单测                |
+| 任一提交变化会使所有旧提交凭证失效                   | Story A 在 H1 验证、Story B 产生 H2 后 A 仍为绿          | 多 Story H1→H2 收敛回归                           |
+| 失效 Story 不重复调用 Developer                      | 仅因凭证过期而重新进入实现 Agent                         | validation-only 轮次测试与调用次数断言            |
+| 所有 Story 最终收敛到同一 HEAD                       | Final Review 能在凭证混合 H1/H2 时调用模型               | Final Review 前后机械断言与模型零调用测试         |
+| 验收标准变化立即失效                                 | Story 文案或顺序变化后旧凭证仍有效                       | acceptance hash 变化测试                          |
+| 旧、损坏或伪造字段不能复活通过态                     | 从 evidence、旧 Final Review 或 legacy 布尔值补造凭证    | 迁移、repair、所有权恢复测试                      |
+| 展示面不显示过期绿灯                                 | status、report 或 dashboard 在新提交后仍显示完成         | 三个展示面的当前 HEAD 回归                        |
+| 正式模式没有 Git HEAD 时提前停止                     | 进入 Developer、Validator 或 Reviewer 后才失败           | preflight 退出码和 agent/model 零调用测试         |
+| 空 Story 与旧历史记录不能退化成完成证明              | 空集合摘要、旧 evidence 或旧 Final Review 复活绿灯       | 空 Story 零调用与历史记录组合回归                 |
+| 项目检查不能替引擎签发状态                           | 测试/TDD 脚本伪造其他 Story 的完整绿态                   | 检查前后完整快照恢复与 gate 来源证据              |
+| 纯重验不依赖不会调用的 Builder                       | Builder 模型已移除时 validation-only 被预检阻断          | 仅 Validator 模型可用的路由回归                   |
+| Story 数量不挤占实现预算                             | 两个实现轮都成功，却因第三个仅重验轮超过 `--max-iter 2`  | 独立有界重验余量与两 Story 收敛回归               |
+| 最终结果写入窗口发生变化时立即撤销                   | 写入前核对通过、写入后变化仍返回 0                       | 写入后再核对并删除刚写结果的竞态回归              |
+| 项目检查不能在 Final Review 前替换凭证或留下源码改动 | 检查返回 0 后仍按新凭证进入模型，或脏工作树被忽略        | 检查前冻结、检查后凭证/工作树复核与模型零调用回归 |
+| Reviewer 主动升级可持久复核                          | 首轮运行 deep，但保存结果随后无法读取或 status 误报过期  | 固定升级风险、状态一致性与 status 重建回归        |
+| PRD 模型路由变化会使旧 Review 失效                   | 路由政策变化后旧结果仍为当前，或命令行临时覆盖误伤当前性 | 路由摘要绑定、loop 传递与 status/report 回归      |
+| 人工裁决不能在运行中被替换                           | Agent 或项目检查改写裁决后继续沿用旧/新组合返回通过      | 启动冻结、逐边界恢复、刚写结果删除与证据回归      |
+| Final Review v1 不能伪装成 v2                        | 旧结果补字段、迁移或继续显示为通过                       | v1 拒绝、v2 必填绑定与重新运行路径                |
+| Validator 凭证不能包装 Git 可见的未提交源码          | 已跟踪、索引或未忽略路径变化，结果却绑定 HEAD            | 调用前后 Git 可见状态/HEAD 核对与零调用回归       |
+| 项目检查不能替换真正的 Agent                         | PATH、软链接或脚本包装器让 Validator/Reviewer 改换程序   | 项目代码前冻结原生入口、逐边界复核和替换攻击回归  |
+| 状态收集不能混用新旧快照                             | Review 已失效，但 Story 列表和退出码仍来自查询前         | 远端查询期间状态变化与最终快照回归                |
+| P1 延期不能永久复用旧核验                            | Issue 已关闭、过期或字段缺失后仍显示可交付               | status/report 重新查询 Issue 的回归               |
 
 ## 状态与收敛设计
 
@@ -67,6 +71,16 @@ Git HEAD 和有序 acceptanceCriteria 摘要。`validated` 保留为兼容和展
 必须持有绑定同一当前 HEAD 与当前验收标准的有效凭证。Final Review 在机械检查前冻结凭证
 身份；机械检查完成后、模型调用前同时核对凭证与工作树，Review、远端查询和结果写入后继续
 核对。失败返回不可验证，不调用或不接受模型结果。
+Reviewer 读取的 Git blob 必须能以 UTF-8 保持原始字节身份；非法编码在模型调用前返回不可验证。
+
+Validator 自身也只在调用前后已跟踪内容、索引和未忽略路径无未允许变化、HEAD 稳定时接受
+claim。Git ignored 文件、依赖与本机配置尚未纳入凭证；Issue #91 将改为精确 HEAD 干净检出执行。
+正式 Agent 在任何项目代码
+运行前冻结原生主程序、内容与版本；Developer、Validator、隔离探测和评审调用都使用同一冻结
+绝对路径，任一身份变化立即阻断，不再通过 PATH 重新选择程序。Developer/Validator 保留项目执行
+环境，只有只读 Reviewer 使用受控 HOME、TMP、系统 PATH 与认证快照。
+只接受可完整固定的项目外原生单文件入口；Node、shell、npm 与 Windows 命令脚本不降级执行，
+Cursor 正式入口若仍是脚本则返回不可验证。Windows 在进程树收口获得真实证明前也不签发正式结论。
 
 Final Review 自身继续绑定 PR、base/head、Spec、规则、实际 Runner/模型和冻结 PRD 路由政策
 等身份。Story 凭证摘要加入它的输入绑定，避免状态身份变化后复用旧 Review。Reviewer 主动
@@ -78,13 +92,13 @@ Final Review 自身继续绑定 PR、base/head、Spec、规则、实际 Runner/�
 
 ## 黄金原则对照
 
-| 原则 | 适用性与设计裁决 | 验证证据 |
-|---|---|---|
-| 1. 可证伪完成合同 | 适用。上表分别定义通过条件、假绿信号和可执行证据。 | 纯函数、状态机、模型零调用和展示回归 |
-| 2. 生成方不得自签 | 适用。Agent 只提交 claim；引擎持久化并持续核对当前 HEAD/AC 绑定。 | Agent 篡改恢复、legacy 不补造、错绑定失败测试 |
+| 原则              | 适用性与设计裁决                                                                                | 验证证据                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| 1. 可证伪完成合同 | 适用。上表分别定义通过条件、假绿信号和可执行证据。                                              | 纯函数、状态机、模型零调用和展示回归               |
+| 2. 生成方不得自签 | 适用。Agent 只提交 claim；引擎持久化并持续核对当前 HEAD/AC 绑定。                               | Agent 篡改恢复、legacy 不补造、错绑定失败测试      |
 | 3. 自治与风险对称 | 适用。本变更不扩大写入或发布权限；validation-only 减少无价值 Agent 调用，所有失配 fail closed。 | 调用次数、失败转 Builder、正式无 HEAD 提前停止测试 |
-| 4. 原生能力优先 | 适用。复用 Git HEAD、现有 Validator 协议和循环，不新增服务、守护进程或供应商逻辑。 | 核心类型保持 runner-neutral，adapter 无新增分支 |
-| 5. 失败恢复 | 适用。先固化无 Final Review、多 Story 混合提交、旧状态和 AC 变化四个真实失败，再验证成功收敛。 | Issue #90 对应回归、定向与全量检查 |
+| 4. 原生能力优先   | 适用。复用 Git HEAD、现有 Validator 协议和循环，不新增服务、守护进程或供应商逻辑。              | 核心类型保持 runner-neutral，adapter 无新增分支    |
+| 5. 失败恢复       | 适用。先固化无 Final Review、多 Story 混合提交、旧状态和 AC 变化四个真实失败，再验证成功收敛。  | Issue #90 对应回归、定向与全量检查                 |
 
 未裁决项：无。五项原则均适用。
 
@@ -104,8 +118,11 @@ Final Review 自身继续绑定 PR、base/head、Spec、规则、实际 Runner/�
 - 普通检查与 TDD 检查修改 `state.json` 时会恢复完整快照并记录 `gate` 来源，不能伪造其他 Story 绿态。
 - `status --json` 与 dashboard API 已公开 Story `validationReceipt` 和 `validationInvalidations`；Final Review v2 已公开 Story 凭证、冻结裁决与 PRD 路由摘要绑定。
 - 人工裁决运行内冻结、最终机械检查前后的凭证/工作树复核、Reviewer 风险升级重建和结果写入后撤销均已完成。
+- Validator 调用前后拒绝脏工作树；正式 Agent 在项目代码前冻结同一原生程序，Reviewer 另用受控环境，并在全部关键边界复核。
+- 契约、文档、Reviewer 上下文和运行期控制文件均采用有界读取；非法 UTF-8、特殊文件、超量目录或上下文超限会在 Agent/模型采用结果前失败关闭。
+- 最终门禁无法改写引擎状态或伪造 Review 文件；status/report 使用远端查询后的最终 Story 快照，并重新核验 P1 延期 Issue。
 - 空 Story、无 Git HEAD、旧 evidence/Final Review、纯重验模型路由、两 Story 最终提交收敛与写入竞态均有回归。
-- 全量测试 64 个文件、923 项通过；类型检查、静态检查、构建、仓库健康检查和成品 CLI 冒烟通过。
+- 全量测试 67 个文件、1103 项通过（另有 1 项 Windows 专用测试在 macOS 跳过）；类型检查、静态检查、构建、仓库健康检查、成品 CLI 与打包安装冒烟通过。
 - 高危依赖审计通过；当前仅有一个开发工具的低危 Windows 开发服务器提示，不阻断本变更。
 
 ## 明确不做
@@ -113,5 +130,5 @@ Final Review 自身继续绑定 PR、base/head、Spec、规则、实际 Runner/�
 - 不把 workspace 凭证、裁决快照或摘要称为密码学签名、身份认证或 GitHub 交付证明；同权限进程仍可直接伪造本地文件；
 - 不从历史记录自动迁移、猜测或补造凭证；
 - 不因过期而重复调用 Developer；
-- 不修改 GitHub 机械门禁或在 GitHub 调用模型；
+- 不在 GitHub 调用模型；本 PR 只加固现有 Policy Guard 的文件完整性与最小权限，不承诺例外状态后续变化会自动撤销旧结果；
 - 不在本 PR 进行 npm 发布或结构拆分。

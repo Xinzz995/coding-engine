@@ -1,7 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import type { Story } from './prd.js';
 import {
   VALIDATION_RESULT_MAX_BYTES,
@@ -9,8 +19,10 @@ import {
   clearValidationResult,
   createValidationRequest,
   readGitHead,
+  readValidationArtifactIdentity,
   readValidationResult,
   renderValidatorInstruction,
+  verifyGitObjectClosure,
   type ValidationRequest,
   type ValidationResult,
 } from './validation-protocol.js';
@@ -39,7 +51,10 @@ function request(dir: string): ValidationRequest {
   return createValidationRequest(story, dir, 'a'.repeat(40), 'request-123');
 }
 
-function resultFor(req: ValidationRequest, overrides: Partial<ValidationResult> = {}): ValidationResult {
+function resultFor(
+  req: ValidationRequest,
+  overrides: Partial<ValidationResult> = {},
+): ValidationResult {
   return {
     version: 1,
     requestId: req.requestId,
@@ -64,6 +79,80 @@ describe('validation request', () => {
   it('reads a real Git HEAD and reports non-Git directories as unavailable', () => {
     expect(readGitHead(process.cwd())).toMatch(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
     expect(readGitHead(tempDir())).toBeNull();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not execute a project-local git PATH replacement',
+    () => {
+      const root = tempDir();
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+      execFileSync('git', ['config', 'user.email', 'validator@test.local'], { cwd: root });
+      execFileSync('git', ['config', 'user.name', 'validator-test'], { cwd: root });
+      writeFileSync(join(root, 'source.txt'), 'committed\n');
+      execFileSync('git', ['add', 'source.txt'], { cwd: root });
+      execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: root });
+      const bin = join(root, 'node_modules', '.bin');
+      const marker = join(root, 'fake-git-ran');
+      const previousPath = process.env.PATH;
+      try {
+        mkdirSync(bin, { recursive: true });
+        const fake = join(bin, 'git');
+        writeFileSync(fake, `#!/bin/sh\ntouch '${marker}'\nprintf '%040d\\n' 0\n`);
+        chmodSync(fake, 0o755);
+        process.env.PATH = `${bin}${delimiter}${previousPath ?? ''}`;
+
+        expect(readGitHead(root)).toBeNull();
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        process.env.PATH = previousPath;
+      }
+    },
+  );
+
+  it('invalidates the frozen Git tool when repository control configuration changes', () => {
+    const root = tempDir();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'validator@test.local'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'validator-test'], { cwd: root });
+    writeFileSync(join(root, 'source.txt'), 'committed\n');
+    execFileSync('git', ['add', 'source.txt'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: root });
+
+    expect(readGitHead(root)).toMatch(/^[a-f0-9]{40,64}$/);
+    writeFileSync(join(root, '.git', 'config'), '\n[credential]\n\thelper = !echo unsafe\n', {
+      flag: 'a',
+    });
+
+    expect(readGitHead(root)).toBeNull();
+  });
+
+  it('rejects a reachable Git object whose compressed bytes no longer match its object name', () => {
+    const root = tempDir();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'validator@test.local'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'validator-test'], { cwd: root });
+    writeFileSync(join(root, 'source.txt'), 'real content\n');
+    execFileSync('git', ['add', 'source.txt'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: root });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    const realBlob = execFileSync('git', ['rev-parse', 'HEAD:source.txt'], {
+      cwd: root,
+      encoding: 'utf8',
+    }).trim();
+    const evilBlob = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+      cwd: root,
+      encoding: 'utf8',
+      input: 'replacement content\n',
+    }).trim();
+    const objectPath = (oid: string) =>
+      join(root, '.git', 'objects', oid.slice(0, 2), oid.slice(2));
+    chmodSync(objectPath(realBlob), 0o644);
+    writeFileSync(objectPath(realBlob), readFileSync(objectPath(evilBlob)));
+
+    expect(verifyGitObjectClosure(root, [head])).toMatchObject({
+      ok: false,
+      diagnostic: expect.stringContaining('对象闭包损坏'),
+    });
   });
 
   it('binds one request to the exact story, AC snapshot, artifact and workspace path', () => {
@@ -105,6 +194,85 @@ describe('validation request', () => {
 
     expect(existsSync(req.resultPath)).toBe(false);
   });
+
+  it('binds Validator only to a clean HEAD while allowing engine workspace files', () => {
+    const root = tempDir();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'validator@test.local'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'validator-test'], { cwd: root });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+    writeFileSync(join(root, '.gitignore'), '.workspace/\n');
+    writeFileSync(join(root, 'source.txt'), 'committed\n');
+    execFileSync('git', ['add', '-A'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: root });
+
+    expect(readValidationArtifactIdentity(root, '.workspace')).toEqual({
+      ok: true,
+      gitHead: readGitHead(root),
+    });
+
+    writeFileSync(join(root, 'source.txt'), 'dirty\n');
+    expect(readValidationArtifactIdentity(root, '.workspace')).toMatchObject({
+      ok: false,
+      diagnostic: expect.stringContaining('source.txt'),
+    });
+
+    writeFileSync(join(root, 'source.txt'), 'committed\n');
+    writeFileSync(join(root, 'untracked.txt'), 'not committed\n');
+    expect(readValidationArtifactIdentity(root, '.workspace')).toMatchObject({
+      ok: false,
+      diagnostic: expect.stringContaining('untracked.txt'),
+    });
+
+    rmSync(join(root, 'untracked.txt'));
+    mkdirSync(join(root, '.workspace'));
+    writeFileSync(join(root, '.workspace', 'validation-result.json'), '{}\n');
+    expect(readValidationArtifactIdentity(root, '.workspace')).toEqual({
+      ok: true,
+      gitHead: readGitHead(root),
+    });
+  });
+
+  it.each([
+    ['assume-unchanged', '--assume-unchanged', '--no-assume-unchanged'],
+    ['skip-worktree', '--skip-worktree', '--no-skip-worktree'],
+  ])('rejects tracked content hidden by %s', (_label, enable, disable) => {
+    const root = tempDir();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'validator@test.local'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'validator-test'], { cwd: root });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+    writeFileSync(join(root, 'source.txt'), 'committed\n');
+    execFileSync('git', ['add', 'source.txt'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: root });
+    execFileSync('git', ['update-index', enable, 'source.txt'], { cwd: root });
+    writeFileSync(join(root, 'source.txt'), 'hidden change\n');
+
+    expect(readValidationArtifactIdentity(root, '.workspace')).toMatchObject({
+      ok: false,
+      diagnostic: expect.stringContaining('source.txt'),
+    });
+
+    execFileSync('git', ['update-index', disable, 'source.txt'], { cwd: root });
+  });
+
+  it('reports both sides of a staged rename as a dirty artifact', () => {
+    const root = tempDir();
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'validator@test.local'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'validator-test'], { cwd: root });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
+    writeFileSync(join(root, 'before.txt'), 'committed\n');
+    execFileSync('git', ['add', 'before.txt'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: root });
+    execFileSync('git', ['mv', 'before.txt', 'after.txt'], { cwd: root });
+
+    const identity = readValidationArtifactIdentity(root, '.workspace');
+    expect(identity).toMatchObject({ ok: false });
+    if (identity.ok) throw new Error('rename unexpectedly accepted');
+    expect(identity.diagnostic).toContain('before.txt');
+    expect(identity.diagnostic).toContain('after.txt');
+  });
 });
 
 describe('readValidationResult', () => {
@@ -137,31 +305,38 @@ describe('readValidationResult', () => {
     const dir = tempDir();
     const req = request(dir);
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'missing-result',
+      ok: false,
+      code: 'missing-result',
     });
 
     writeFileSync(req.resultPath, 'x'.repeat(VALIDATION_RESULT_MAX_BYTES + 1));
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'result-too-large',
+      ok: false,
+      code: 'result-too-large',
     });
 
     writeFileSync(req.resultPath, '{broken');
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'invalid-json',
+      ok: false,
+      code: 'invalid-json',
     });
   });
 
-  it.runIf(process.platform !== 'win32')('refuses a validation result reached through a symlink', () => {
-    const dir = tempDir();
-    const req = request(dir);
-    const actual = join(dir, 'outside-result.json');
-    writeFileSync(actual, JSON.stringify(resultFor(req)));
-    symlinkSync(actual, req.resultPath);
+  it.runIf(process.platform !== 'win32')(
+    'refuses a validation result reached through a symlink',
+    () => {
+      const dir = tempDir();
+      const req = request(dir);
+      const actual = join(dir, 'outside-result.json');
+      writeFileSync(actual, JSON.stringify(resultFor(req)));
+      symlinkSync(actual, req.resultPath);
 
-    expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'unreadable-result',
-    });
-  });
+      expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
+        ok: false,
+        code: 'unreadable-result',
+      });
+    },
+  );
 
   it.each([
     ['request ID', { requestId: 'stale-request' }],
@@ -174,7 +349,8 @@ describe('readValidationResult', () => {
     writeResult(req, resultFor(req, overrides));
 
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'binding-mismatch',
+      ok: false,
+      code: 'binding-mismatch',
     });
   });
 
@@ -184,51 +360,67 @@ describe('readValidationResult', () => {
     writeResult(req, resultFor(req));
 
     expect(readValidationResult(req.resultPath, req, 'd'.repeat(40))).toMatchObject({
-      ok: false, code: 'artifact-changed',
+      ok: false,
+      code: 'artifact-changed',
     });
   });
 
   it.each([
     ['missing AC', [{ acIndex: 1, passed: true, evidence: 'ok' }]],
-    ['duplicate AC', [
-      { acIndex: 1, passed: true, evidence: 'ok' },
-      { acIndex: 1, passed: true, evidence: 'again' },
-    ]],
-    ['out-of-order AC', [
-      { acIndex: 2, passed: true, evidence: 'second' },
-      { acIndex: 1, passed: true, evidence: 'first' },
-    ]],
-    ['empty evidence', [
-      { acIndex: 1, passed: true, evidence: '' },
-      { acIndex: 2, passed: true, evidence: 'ok' },
-    ]],
+    [
+      'duplicate AC',
+      [
+        { acIndex: 1, passed: true, evidence: 'ok' },
+        { acIndex: 1, passed: true, evidence: 'again' },
+      ],
+    ],
+    [
+      'out-of-order AC',
+      [
+        { acIndex: 2, passed: true, evidence: 'second' },
+        { acIndex: 1, passed: true, evidence: 'first' },
+      ],
+    ],
+    [
+      'empty evidence',
+      [
+        { acIndex: 1, passed: true, evidence: '' },
+        { acIndex: 2, passed: true, evidence: 'ok' },
+      ],
+    ],
   ])('rejects structurally invalid checks: %s', (_label, checks) => {
     const dir = tempDir();
     const req = request(dir);
     writeResult(req, resultFor(req, { checks }));
 
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'invalid-schema',
+      ok: false,
+      code: 'invalid-schema',
     });
   });
 
   it('rejects verdict/check contradictions and unknown fields', () => {
     const dir = tempDir();
     const req = request(dir);
-    writeResult(req, resultFor(req, {
-      verdict: 'passed',
-      checks: [
-        { acIndex: 1, passed: false, evidence: 'failed' },
-        { acIndex: 2, passed: true, evidence: 'ok' },
-      ],
-    }));
+    writeResult(
+      req,
+      resultFor(req, {
+        verdict: 'passed',
+        checks: [
+          { acIndex: 1, passed: false, evidence: 'failed' },
+          { acIndex: 2, passed: true, evidence: 'ok' },
+        ],
+      }),
+    );
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'invalid-schema',
+      ok: false,
+      code: 'invalid-schema',
     });
 
     writeResult(req, { ...resultFor(req), extra: 'unversioned extension' });
     expect(readValidationResult(req.resultPath, req, req.gitHead)).toMatchObject({
-      ok: false, code: 'invalid-schema',
+      ok: false,
+      code: 'invalid-schema',
     });
   });
 

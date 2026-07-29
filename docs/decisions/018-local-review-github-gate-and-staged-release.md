@@ -67,6 +67,9 @@ Bootstrap”，不绕过 doctor，也不声称完成正式本地 AI Review。受
   总闸失败；
 - 政策变更由默认分支旧 `policy-guard` 读取元数据检查；带凭据任务不执行 PR 代码或文本，
   Ruleset 直接要求该工作流的真实 `policy-guard-source` 任务，不再额外写入一条同名结果；
+  政策例外只在该 PR 检查执行时验证，之后编辑、关闭、改标签或自然过期不会自动撤销已产生
+  的绿灯；合并前 owner 必须在例外变化后手动重跑检查并用 `doctor` 核对。本方案不承诺例外
+  实时失效，也不把本来就能修改规则的个人仓库 owner 描述为独立可信根；
 - coding-engine 检查 Node 22/24 与 Ubuntu/macOS/Windows，运行时最低 Node 22；
 - npm 使用 OIDC staged publish；固定候选先完成三仓 Dogfood，再提交 stage、批准到 `next`、
   完成公开精确版本冒烟，最后人工移动 `latest`；staging 不可用时只能由用户明确批准临时

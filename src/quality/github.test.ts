@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import {
   GhGitHubQualityClient,
   GitHubQualityError,
@@ -32,6 +35,32 @@ function rulesetPayload(): GitHubRulesetPayload {
 }
 
 describe('GhGitHubQualityClient read retries', () => {
+  it.skipIf(process.platform === 'win32')(
+    'refuses a project-local gh PATH candidate without executing it',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'github-path-poison-'));
+      const bin = join(root, 'node_modules', '.bin');
+      const marker = join(root, 'fake-gh-ran');
+      const previousPath = process.env.PATH;
+      try {
+        mkdirSync(bin, { recursive: true });
+        const fake = join(bin, 'gh');
+        writeFileSync(fake, `#!/bin/sh\ntouch '${marker}'\nprintf '{}\\n'\n`);
+        chmodSync(fake, 0o755);
+        process.env.PATH = `${bin}${delimiter}${previousPath ?? ''}`;
+
+        const client = new GhGitHubQualityClient({ sleep: () => {} });
+        expect(() => client.discoverRepository(root)).toThrowError(
+          expect.objectContaining({ kind: 'unknown', retryable: false }),
+        );
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        process.env.PATH = previousPath;
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('recovers from a transient GraphQL EOF with bounded backoff', () => {
     const invocations: GitHubCommandInvocation[] = [];
     const delays: number[] = [];

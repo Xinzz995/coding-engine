@@ -87,7 +87,7 @@ runner:
   help                           显示本帮助
 
 选项:
-  --max-iter <n>                 最大迭代轮数（默认 50）
+  --max-iter <n>                 实现/修复轮上限（默认 50；仅重验另有有界余量）
   --dev-timeout <分钟>           Builder 超时（默认 30）
   --val-timeout <分钟>           Validator 超时（默认 60）
   --builder-model <id>           临时覆盖初始 Builder 模型

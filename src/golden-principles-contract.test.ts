@@ -19,7 +19,7 @@ describe('新功能黄金原则合同', () => {
       '防线与可逆性必须同步增加',
       '原生执行能力优先复用',
       '以假绿率和失败恢复衡量价值',
-      'agent 声明不得包装成防伪事实',
+      '不能把 agent 声明包装成防伪事实',
       'runner-neutral',
     ]) expect(principles).toContain(anchor);
   });

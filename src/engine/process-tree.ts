@@ -14,6 +14,15 @@ function isProcessGroupAlive(pid: number): boolean {
   }
 }
 
+/**
+ * 根进程退出后检查其独占 POSIX 进程组是否仍有成员。Windows 没有等价的
+ * 负 pid 探测，因此返回 null，由调用方继续依赖 close/超时收口。
+ */
+export function hasLiveProcessGroup(child: ChildProcess): boolean | null {
+  if (process.platform === 'win32' || child.pid === undefined) return null;
+  return isProcessGroupAlive(child.pid);
+}
+
 function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(-pid, signal);
@@ -79,6 +88,26 @@ export async function terminateProcessTree(child: ChildProcess): Promise<void> {
   signalProcessGroup(pid, 'SIGKILL');
   if (!await waitForProcessGroupExit(pid, TERMINATION_CONFIRM_MS)) {
     throw new Error(`进程组 ${pid} 在 SIGKILL 后仍未确认退出`);
+  }
+}
+
+/**
+ * 安全策略违规不提供优雅退出窗口：立即强杀整棵进程树，并在返回前确认进程组消失。
+ */
+export async function forceTerminateProcessTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) {
+    child.kill('SIGKILL');
+    return;
+  }
+  if (process.platform === 'win32') {
+    await taskkill(pid);
+    return;
+  }
+
+  signalProcessGroup(pid, 'SIGKILL');
+  if (!await waitForProcessGroupExit(pid, TERMINATION_CONFIRM_MS)) {
+    throw new Error(`进程组 ${pid} 在立即 SIGKILL 后仍未确认退出`);
   }
 }
 

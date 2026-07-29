@@ -3,11 +3,16 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
+import { tryReadPrd, validatePrdStoryDefinitions, type StoryDifficulty } from '../engine/prd.js';
 import { readDisplayState, mergedStories, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
-import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
+import {
+  readModelRouting,
+  type ModelRouteSource,
+  type ModelRoutingReadResult,
+} from '../engine/models.js';
 import type { AgentKind } from '../engine/agent.js';
+import { readGitHead } from '../engine/validation-protocol.js';
 
 export type Phase = 'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'error';
 
@@ -25,13 +30,26 @@ interface State {
 }
 
 const state: State = {
-  iteration: 0, maxIterations: 50, phase: 'idle', currentStory: null, model: null,
-  routeSource: null, storyDifficulty: null, runner: null, startedAt: null,
+  iteration: 0,
+  maxIterations: 50,
+  phase: 'idle',
+  currentStory: null,
+  model: null,
+  routeSource: null,
+  storyDifficulty: null,
+  runner: null,
+  startedAt: null,
 };
 let workspaceDir = '.workspace';
+let projectRootDir = process.cwd();
 
-export function configureWorkspace(workspace: string, maxIterations: number): void {
+export function configureWorkspace(
+  workspace: string,
+  maxIterations: number,
+  projectRoot: string = process.cwd(),
+): void {
   workspaceDir = workspace;
+  projectRootDir = projectRoot;
   state.maxIterations = maxIterations;
   state.iteration = 0;
   state.phase = 'idle';
@@ -44,8 +62,12 @@ export function configureWorkspace(workspace: string, maxIterations: number): vo
 }
 
 export function setState(patch: {
-  iteration?: number; phase?: Phase; currentStory?: string | null; model?: string | null;
-  routeSource?: ModelRouteSource | null; storyDifficulty?: StoryDifficulty | null;
+  iteration?: number;
+  phase?: Phase;
+  currentStory?: string | null;
+  model?: string | null;
+  routeSource?: ModelRouteSource | null;
+  storyDifficulty?: StoryDifficulty | null;
   runner?: AgentKind | null;
 }): void {
   if (patch.iteration !== undefined) state.iteration = patch.iteration;
@@ -59,9 +81,14 @@ export function setState(patch: {
 
 export interface ApiResponse {
   runtime: {
-    iteration: number; max_iterations: number; phase: Phase;
-    current_story: string | null; elapsed: number; model: string | null;
-    route_source: ModelRouteSource | null; story_difficulty: StoryDifficulty | null;
+    iteration: number;
+    max_iterations: number;
+    phase: Phase;
+    current_story: string | null;
+    elapsed: number;
+    model: string | null;
+    route_source: ModelRouteSource | null;
+    story_difficulty: StoryDifficulty | null;
     runner: AgentKind | null;
   };
   project: string;
@@ -70,14 +97,22 @@ export interface ApiResponse {
   stories: StoryView[];
   /** state.json 存在但损坏；stories 已按未验证状态 fail-closed。 */
   stateCorrupted: boolean;
+  /** PRD Story 身份与验收标准可用于状态和完成判定。 */
+  prdReady: boolean;
+  prdError: string | null;
+  validationInvalidations: Array<{ storyId: string; reason: string }>;
   modelRouting: ModelRoutingReadResult;
   logs: string;
 }
 
 export function buildApiResponse(): ApiResponse {
   const elapsed = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0;
-  const prd = tryReadPrd(join(workspaceDir, 'prd.json'));
-  const displayState = prd ? readDisplayState(join(workspaceDir, 'state.json'), prd) : null;
+  const parsedPrd = tryReadPrd(join(workspaceDir, 'prd.json'));
+  const prdValidation = parsedPrd ? validatePrdStoryDefinitions(parsedPrd) : null;
+  const prd = prdValidation?.ok ? parsedPrd : null;
+  const displayState = prd
+    ? readDisplayState(join(workspaceDir, 'state.json'), prd, readGitHead(projectRootDir))
+    : null;
   const logs = readProgress(join(workspaceDir, 'progress.md'));
   return {
     runtime: {
@@ -96,6 +131,14 @@ export function buildApiResponse(): ApiResponse {
     sourcePrd: prd?.sourcePrd ?? '',
     stories: prd && displayState ? mergedStories(prd, displayState.state) : [],
     stateCorrupted: displayState?.stateCorrupted ?? false,
+    prdReady: prd !== null,
+    prdError:
+      prd !== null
+        ? null
+        : prdValidation && !prdValidation.ok
+          ? prdValidation.error
+          : 'prd.json 缺失、损坏或不可读',
+    validationInvalidations: displayState?.validationInvalidations ?? [],
     modelRouting: readModelRouting(prd),
     logs,
   };
@@ -109,7 +152,10 @@ function defaultPublicDir(): string {
  * Pure mapping from platform → the shell command that opens a URL in the user's
  * default browser. Exported so tests can assert behavior without spawning.
  */
-export function browserOpenCommand(platform: NodeJS.Platform, url: string): { cmd: string; args: string[] } {
+export function browserOpenCommand(
+  platform: NodeJS.Platform,
+  url: string,
+): { cmd: string; args: string[] } {
   if (platform === 'darwin') return { cmd: 'open', args: [url] };
   if (platform === 'win32') return { cmd: 'cmd', args: ['/c', 'start', '', url] };
   return { cmd: 'xdg-open', args: [url] };
@@ -121,8 +167,9 @@ export function start(opts: {
   port?: number;
   publicDir?: string;
   openBrowser?: boolean;
+  projectRoot?: string;
 }): { close(): void; address(): { port: number }; ready: Promise<{ port: number }> } {
-  configureWorkspace(opts.workspace, opts.maxIterations);
+  configureWorkspace(opts.workspace, opts.maxIterations, opts.projectRoot);
   const publicDir = opts.publicDir ?? defaultPublicDir();
   const requestedPort = opts.port ?? 7331;
 

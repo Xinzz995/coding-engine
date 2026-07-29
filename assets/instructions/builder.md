@@ -22,7 +22,7 @@
    - 用明确的文件路径执行 `git add <path...>`，不要使用 `git add .` 或 `git add -A`
    - commit 前执行 `git diff --cached --name-only`，确认暂存区只含本 story 文件；若发现 workspace 或无关文件，不得把它们带入提交，也不要擅自重置用户已有暂存内容
    - 提交消息为：`feat: [Story ID] - [Story Title]`
-8. 提交成功后再更新 `state.json`，将已完成 story 对应 id 的 `passes` 设为 `true`（**不要修改 prd.json**——它是只读的需求文件）；`validated` 与 `escalated` 是引擎独占字段，必须原样保留——`passes=true` 只是待 Validator 复核的候选结果，引擎只会在 Validator 的结构化 passed claim 通过目标绑定与协议检查后签发 `validated=true`
+8. 提交成功后再更新 `state.json`，将已完成 story 对应 id 的 `passes` 设为 `true`（**不要修改 prd.json**——它是只读的需求文件）；`validated`、`validationReceipt` 与 `escalated` 是引擎独占字段，必须原样保留——`passes=true` 只是待 Validator 复核的候选结果，引擎只会在 Validator 的结构化 passed claim 通过目标绑定与协议检查后签发绑定当前 Git HEAD 和有序 AC 的凭证
 9. 每次完成运行后, 将你的进度追加到 `progress.md`
 
 ## 进度报告格式
@@ -57,7 +57,7 @@
 ## 质量要求
 
 - 所有 commits 必须通过项目的质量检查（typecheck、lint、test）
-- `state.json` 中的 `validated`、`escalated` 只能由引擎修改；无论当前值是 true 还是 false，都不得新增、删除、翻转或重置
+- `state.json` 中的 `validated`、`validationReceipt`、`escalated` 只能由引擎修改；无论当前值是什么，都不得新增、删除、翻转、替换或重置
 - 不要提交损坏的代码
 - 遵循现有的代码 patterns
 - **写码前按序自查，停在第一个成立的台阶**：本项目已有的 helper/util/pattern 能复用吗 → 标准库能做吗 → 运行时/平台原生特性能覆盖吗 → 已装依赖能解决吗 → 都不能，才写只满足当前 acceptanceCriteria 的最小实现

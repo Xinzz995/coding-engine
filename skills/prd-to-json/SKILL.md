@@ -419,7 +419,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 1. **每个 user story 成为一个 JSON 条目**
 2. **IDs**：源 PRD 的 story 标题带 `US-nnn` 编号时（prd-generate 产出格式）**必须沿用**；仅当源无编号时才从 US-001 顺序分配。转换中新增/拆分出的 story 顺延历史最大编号（含源 PRD 中已删除 story 曾占用的编号，不回收），不插号、不重排
 3. **Priority**：基于依赖顺序，然后是文档顺序
-4. **不写状态字段**：passes/validated/notes/retryCount/blocked/escalated 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
+4. **不写状态字段**：passes/validated/validationReceipt/notes/retryCount/blocked/escalated 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
@@ -615,19 +615,20 @@ Add ability to mark tasks with different statuses.
    - 原 `tdd` 配置与本次仓库事实完全一致且政策文件摘要未变 → 原样保留；任何命令、路径、
       阈值、排除、基线、禁止标记或摘要变化都必须重新走 TDD 一次确认与真实基线，不能静默
       更新摘要
-   - 当前质量契约摘要与原 `qualityContractDigest` 不同 → 使用当前摘要整体重新派生；旧运行
-     结果不再可复用，不能只修改摘要并保留已通过状态
-3. 若 `state.json` 存在，先把旧 state 缺失的 `validated` 按同条 `passes` 理解、缺失的 `escalated` 按 `false` 理解，再按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
-   - id 相同且 acceptanceCriteria 无实质变化 → 该 id 状态原样保留
-   - id 相同但 acceptanceCriteria 有实质变化 → 该 id 重置：passes 与 validated 置 `false`、retryCount 置 `0`、blocked 置 `false`、escalated 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）
+   - 当前质量契约摘要与原 `qualityContractDigest` 不同 → 使用当前摘要整体重新派生；所有
+     Story 清除 `validated` 与 `validationReceipt`，已有 `passes=true` 只保留为待机械检查和
+     Validator 重验的实现候选，不能只修改摘要并保留已通过状态
+3. 若 `state.json` 存在，先按保守规则归一：旧 state 缺少 `validationReceipt`，或该字段结构非法时，保留原 `passes`，但把 `validated` 置 `false`、`validationReceipt` 置 `null`；缺失的 `escalated` 按 `false` 理解。不得从 evidence、旧 Final Review、当前 Git HEAD 或 `passes/validated` 布尔值补造凭证。然后按 story id 对齐调整（不存在则跳过，引擎会自动初始化）：
+   - id 相同且 acceptanceCriteria 的字符串内容、数量和顺序完全相同 → 该 id 状态原样保留；已有结构化凭证也只原样保留，正式运行仍会核对它是否匹配当前 Git HEAD
+   - id 相同但 acceptanceCriteria 任一字符串、数量或顺序变化 → 保留原 `passes` 作为实现候选，`validated` 置 `false`、`validationReceipt` 置 `null`、retryCount 置 `0`、blocked 置 `false`、escalated 置 `false`；notes 写入 `[需求已变更 YYYY-MM-DD] 验收标准已更新，按新标准重验（原 passes=true/false）`——若原 notes 中存在以 `[需求冲突]` 或 `[需要人工核实]` 开头的行，将它们原样保留在新内容之前（未裁决的仲裁记录不得因再派生而丢失）。原 passes=true 会由引擎走 validation-only：跳过 Developer，重跑机械检查和 Validator；只有重验失败后才交回 Developer
    - acceptanceCriteria 未变，但 difficulty、models.runner 或该 story 对应的初始 `models.builder[difficulty]` 变化 → 只把 escalated 重置为 `false`，其他执行状态保留
    - 只改 difficultyReason、validator 或 escalation 模型 → escalated 保留；它们不改变该 story 的初始路由
-   - 上述路由变化影响已 blocked story 时，必须让用户选择“保持 blocked”或“用新路由重试”；选择重试时同时设置 passes=false、validated=false、blocked=false、retryCount=0、escalated=false，并在 notes 追加模型路由重试说明
+   - 上述路由变化影响已 blocked story 时，必须让用户选择“保持 blocked”或“用新路由重试”；选择重试时同时设置 passes=false、validated=false、validationReceipt=null、blocked=false、retryCount=0、escalated=false，并在 notes 追加模型路由重试说明
    - 新增 id → 不写入 state.json（引擎按初始状态处理）
    - 源 md 已删除的 id → 从 state.json 移除该键，在对照表标注「已移除」
 4. 输出对照表时增加「难度处理」「模型路由」「状态处理」列（保留/重评/重置/新增/移除）
 
-验收实质变化的判定：AC 条目的增删、断言内容的改变算；纯错别字/措辞润色不算。story 难度输入的实质变化还包括 title/description/AC 的语义改变。拿不准时按「有实质变化」处理（宁可重验，不可漏验）。
+验收凭证失效使用精确判定：AC 数组中任一字符串、条目数量或顺序变化都必须失效，错别字和措辞润色也不例外，不能让模型判断“实质相同”。难度重评仍使用语义判定：title/description/AC 的语义改变才算；拿不准时按需要重评处理。
 
 ---
 
@@ -647,7 +648,7 @@ Add ability to mark tasks with different statuses.
 - [ ] 复杂功能最后有一个闭环集成验证 story
 - [ ] Acceptance criteria 是可验证的（不模糊）
 - [ ] 没有 story 依赖于后面的 story
-- [ ] story 不含任何状态字段（passes/validated/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
+- [ ] story 不含任何状态字段（passes/validated/validationReceipt/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
 - [ ] `npx coding-x doctor --json` 确认质量契约有效且固定版本匹配；顶层
   `qualityContractDigest` 等于 doctor 当前摘要；结构化 `qualityChecks` 与

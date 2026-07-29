@@ -1,28 +1,19 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Prd } from './prd.js';
-import {
-  checkTddPolicy,
-  readTddConfig,
-  runTddGate,
-  type TddConfig,
-} from './tdd-gate.js';
+import { checkTddPolicy, readTddConfig, runTddGate, type TddConfig } from './tdd-gate.js';
 
 const cleanups: Array<() => void> = [];
 
 afterEach(() => {
-  cleanups.splice(0).reverse().forEach((cleanup) => cleanup());
+  cleanups
+    .splice(0)
+    .reverse()
+    .forEach((cleanup) => cleanup());
 });
 
 function prdWith(tdd?: unknown): Prd {
@@ -108,27 +99,42 @@ describe('readTddConfig', () => {
     ['parent source pathspec', baseConfig({ sourcePathspecs: ['src/../secret/**'] })],
     ['exclude-only source pathspec', baseConfig({ sourcePathspecs: [':(exclude)src/**'] })],
     ['non-array policy files', baseConfig({ policyFiles: {} })],
-    ['duplicate policy path', baseConfig({
-      policyFiles: [
-        { path: 'coverage.mjs', sha256: 'a'.repeat(64) },
-        { path: 'coverage.mjs', sha256: 'b'.repeat(64) },
-      ],
-    })],
-    ['absolute policy path', baseConfig({
-      policyFiles: [{ path: '/tmp/coverage.mjs', sha256: 'a'.repeat(64) }],
-    })],
-    ['parent policy path', baseConfig({
-      policyFiles: [{ path: '../coverage.mjs', sha256: 'a'.repeat(64) }],
-    })],
-    ['invalid policy sha', baseConfig({
-      policyFiles: [{ path: 'coverage.mjs', sha256: 'ABC' }],
-    })],
+    [
+      'duplicate policy path',
+      baseConfig({
+        policyFiles: [
+          { path: 'coverage.mjs', sha256: 'a'.repeat(64) },
+          { path: 'coverage.mjs', sha256: 'b'.repeat(64) },
+        ],
+      }),
+    ],
+    [
+      'absolute policy path',
+      baseConfig({
+        policyFiles: [{ path: '/tmp/coverage.mjs', sha256: 'a'.repeat(64) }],
+      }),
+    ],
+    [
+      'parent policy path',
+      baseConfig({
+        policyFiles: [{ path: '../coverage.mjs', sha256: 'a'.repeat(64) }],
+      }),
+    ],
+    [
+      'invalid policy sha',
+      baseConfig({
+        policyFiles: [{ path: 'coverage.mjs', sha256: 'ABC' }],
+      }),
+    ],
     ['invalid baseline', baseConfig({ baselineRef: 'HEAD' })],
     ['empty forbidden patterns', baseConfig({ forbiddenAddedPatterns: [] })],
     ['blank forbidden pattern', baseConfig({ forbiddenAddedPatterns: [''] })],
-    ['duplicate forbidden pattern', baseConfig({
-      forbiddenAddedPatterns: ['c8 ignore', 'c8 ignore'],
-    })],
+    [
+      'duplicate forbidden pattern',
+      baseConfig({
+        forbiddenAddedPatterns: ['c8 ignore', 'c8 ignore'],
+      }),
+    ],
   ])('fails closed for %s', (_label, value) => {
     const result = readTddConfig(prdWith(value));
     expect(result.status).toBe('invalid');
@@ -147,10 +153,13 @@ describe('checkTddPolicy', () => {
 
   it('fails closed when the baseline is unreachable', () => {
     const fixture = repo();
-    const result = checkTddPolicy({
-      ...fixture.config,
-      baselineRef: 'f'.repeat(40),
-    }, fixture.root);
+    const result = checkTddPolicy(
+      {
+        ...fixture.config,
+        baselineRef: 'f'.repeat(40),
+      },
+      fixture.root,
+    );
     expect(result).toMatchObject({
       ok: false,
       failure: { code: 'baseline-unreachable' },
@@ -179,12 +188,71 @@ describe('checkTddPolicy', () => {
     writeFileSync(outsideFile, 'process.exit(0);\n');
     rmSync(linked.policyPath);
     symlinkSync(outsideFile, linked.policyPath);
-    expect(checkTddPolicy({
-      ...linked.config,
-      policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(outsideFile) }],
-    }, linked.root)).toMatchObject({
+    expect(
+      checkTddPolicy(
+        {
+          ...linked.config,
+          policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(outsideFile) }],
+        },
+        linked.root,
+      ),
+    ).toMatchObject({
       ok: false,
       failure: { code: 'policy-file-outside-root' },
+    });
+  });
+
+  it.runIf(process.platform !== 'win32')('拒绝 FIFO 政策文件而不会等待写入端', () => {
+    const fixture = repo();
+    rmSync(fixture.policyPath);
+    execFileSync('mkfifo', [fixture.policyPath]);
+    const started = Date.now();
+    expect(checkTddPolicy(fixture.config, fixture.root)).toMatchObject({
+      ok: false,
+      failure: { code: 'policy-file-unreadable' },
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it.runIf(process.platform !== 'win32')('拒绝未跟踪 FIFO 源文件而不会等待写入端', () => {
+    const fixture = repo();
+    const fifo = join(fixture.root, 'src', 'pending.js');
+    const target = join(fixture.root, 'pending-source-fifo');
+    execFileSync('mkfifo', [target]);
+    symlinkSync(target, fifo);
+    const started = Date.now();
+    expect(checkTddPolicy(fixture.config, fixture.root)).toMatchObject({
+      ok: false,
+      failure: { code: 'source-scan-failed' },
+    });
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it('拒绝超过文件数量或累计字节上限的未跟踪生产文件扫描', () => {
+    const byCount = repo();
+    writeFileSync(join(byCount.root, 'src', 'one.js'), 'one\n');
+    writeFileSync(join(byCount.root, 'src', 'two.js'), 'two\n');
+    expect(
+      checkTddPolicy(byCount.config, byCount.root, { fileLimit: 1, totalBytes: 1024 }),
+    ).toMatchObject({
+      ok: false,
+      failure: {
+        code: 'source-scan-failed',
+        outputTail: expect.stringContaining('超过 1 个'),
+      },
+    });
+
+    const byBytes = repo();
+    writeFileSync(join(byBytes.root, 'src', 'one.js'), '123456\n');
+    writeFileSync(join(byBytes.root, 'src', 'two.js'), 'abcdef\n');
+    expect(
+      checkTddPolicy(byBytes.config, byBytes.root, { fileLimit: 10, totalBytes: 10 }),
+    ).toMatchObject({
+      ok: false,
+      failure: {
+        code: 'source-scan-failed',
+        outputTail: expect.stringContaining('超过 10 bytes'),
+      },
     });
   });
 

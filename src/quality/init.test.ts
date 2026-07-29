@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -76,7 +77,9 @@ function check(name: string, sha: string, over: Partial<GitHubCheckRun> = {}): G
 
 class FakeGitHubClient implements GitHubQualityClient {
   repository: GitHubRepositoryInfo = {
-    fullName: 'example/project', defaultBranch: 'main', isPrivate: true,
+    fullName: 'example/project',
+    defaultBranch: 'main',
+    isPrivate: true,
   };
   rulesets: GitHubRuleset[] = [];
   pullRequest: GitHubPullRequestInfo | null = null;
@@ -177,8 +180,11 @@ describe('runQualityInit', () => {
 
     const generated = await runQualityInit(options(root, client, [], summaries));
     expect(generated).toMatchObject({
-      status: 'files-created', exitCode: 6, rulesetId: 101,
-      activeRequiredChecks: [], pendingRequiredChecks: ['quality-gate', 'policy-guard-source'],
+      status: 'files-created',
+      exitCode: 6,
+      rulesetId: 101,
+      activeRequiredChecks: [],
+      pendingRequiredChecks: ['quality-gate', 'policy-guard-source'],
     });
     expect(client.rulesets[0].name).toBe(MANAGED_RULESET_NAME);
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([]);
@@ -194,22 +200,28 @@ describe('runQualityInit', () => {
     expect(summaries[1]).toContain('即将保护 GitHub 发布标签：v*');
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(true);
     expect(readFileSync(join(root, QUALITY_WORKFLOW_PATH), 'utf8')).toContain('name: quality-gate');
-    expect(client.labels).toEqual(new Set([
-      'quality-policy-approved', 'quality-policy-exception', 'quality-p1-deferral',
-    ]));
+    expect(client.labels).toEqual(
+      new Set(['quality-policy-approved', 'quality-policy-exception', 'quality-p1-deferral']),
+    );
 
     git(root, 'add', '.');
     git(root, 'commit', '-m', '加入质量门禁');
     const head = git(root, 'rev-parse', 'HEAD');
     client.pullRequest = {
-      number: 7, headSha: head, baseBranch: 'main', url: 'https://example.test/pr/7',
+      number: 7,
+      headSha: head,
+      baseBranch: 'main',
+      url: 'https://example.test/pr/7',
     };
     client.runs = [check('quality-gate', head)];
 
     const qualityActive = await runQualityInit(options(root, client));
     expect(qualityActive).toMatchObject({
-      status: 'checks-activated', exitCode: 6, pullRequest: 7,
-      activeRequiredChecks: ['quality-gate'], pendingRequiredChecks: ['policy-guard-source'],
+      status: 'checks-activated',
+      exitCode: 6,
+      pullRequest: 7,
+      activeRequiredChecks: ['quality-gate'],
+      pendingRequiredChecks: ['policy-guard-source'],
     });
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([
       { context: 'quality-gate', integration_id: 15368 },
@@ -241,7 +253,9 @@ describe('runQualityInit', () => {
     const client = new FakeGitHubClient();
     const result = await runQualityInit(options(root, client));
     expect(result).toMatchObject({
-      status: 'files-created', releaseRulesetId: null, immutableReleases: true,
+      status: 'files-created',
+      releaseRulesetId: null,
+      immutableReleases: true,
     });
     expect(client.rulesets.map((ruleset) => ruleset.name)).toEqual([MANAGED_RULESET_NAME]);
     expect(client.events).toContain('enable-immutable-releases');
@@ -255,12 +269,19 @@ describe('runQualityInit', () => {
     git(root, 'commit', '-m', '加入质量门禁');
     const head = git(root, 'rev-parse', 'HEAD');
     client.pullRequest = {
-      number: 8, headSha: head, baseBranch: 'main', url: 'https://example.test/pr/8',
+      number: 8,
+      headSha: head,
+      baseBranch: 'main',
+      url: 'https://example.test/pr/8',
     };
-    client.runs = [check('quality-gate', head, {
-      app: { id: 999, slug: 'external-ci', name: 'External CI' },
-    })];
-    await expect(runQualityInit(options(root, client))).rejects.toThrow('不是唯一的 GitHub Actions 来源');
+    client.runs = [
+      check('quality-gate', head, {
+        app: { id: 999, slug: 'external-ci', name: 'External CI' },
+      }),
+    ];
+    await expect(runQualityInit(options(root, client))).rejects.toThrow(
+      '不是唯一的 GitHub Actions 来源',
+    );
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([]);
   });
 
@@ -275,21 +296,68 @@ describe('runQualityInit', () => {
   it('refuses unrelated dirty files', async () => {
     const dirtyRoot = repositoryFixture();
     writeFileSync(join(dirtyRoot, 'unrelated.txt'), 'do not mix\n');
-    await expect(runQualityInit(options(dirtyRoot, new FakeGitHubClient()))).rejects.toThrow('无关的改动');
+    await expect(runQualityInit(options(dirtyRoot, new FakeGitHubClient()))).rejects.toThrow(
+      '无关的改动',
+    );
   }, 15_000);
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a tracked contract symlink to a FIFO without waiting for a writer',
+    async () => {
+      const root = repositoryFixture();
+      const initOptions = options(root, new FakeGitHubClient());
+      const outside = mkdtempSync(join(tmpdir(), 'coding-x-init-contract-fifo-'));
+      roots.push(outside);
+      const fifo = join(outside, 'contract.json');
+      execFileSync('mkfifo', [fifo]);
+      rmSync(join(root, '.coding-x', 'quality.json'));
+      symlinkSync(fifo, join(root, 'contract.json'));
+      git(root, 'add', '-A');
+      git(root, 'commit', '-m', '准备契约输入');
+
+      const started = Date.now();
+      await expect(
+        runQualityInit({ ...initOptions, contractFile: 'contract.json' }),
+      ).rejects.toThrow('无法读取契约输入');
+      expect(Date.now() - started).toBeLessThan(1_000);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not read a managed file through a symlink',
+    async () => {
+      const root = repositoryFixture();
+      const outside = mkdtempSync(join(tmpdir(), 'coding-x-init-managed-outside-'));
+      roots.push(outside);
+      const managed = join(root, '.github', 'workflows', 'quality-gate.yml');
+      mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+      const outsideFile = join(outside, 'quality-gate.yml');
+      writeFileSync(outsideFile, '# Generated from outside\n');
+      symlinkSync(outsideFile, managed);
+
+      await expect(runQualityInit(options(root, new FakeGitHubClient()))).rejects.toThrow(
+        '安全读取',
+      );
+    },
+  );
 
   it('refuses initialization on the default branch', async () => {
     const mainRoot = repositoryFixture();
     git(mainRoot, 'checkout', 'main');
-    await expect(runQualityInit(options(mainRoot, new FakeGitHubClient()))).rejects.toThrow('默认分支');
+    await expect(runQualityInit(options(mainRoot, new FakeGitHubClient()))).rejects.toThrow(
+      '默认分支',
+    );
   }, 15_000);
 
   it('refuses a coding-x version that differs from the quality contract', async () => {
     const versionRoot = repositoryFixture();
     const expectedVersion = contractVersion(versionRoot);
     const mismatchedVersion = expectedVersion === '0.0.0' ? '0.0.1' : '0.0.0';
-    await expect(runQualityInit({
-      ...options(versionRoot, new FakeGitHubClient()), actualVersion: mismatchedVersion,
-    })).rejects.toThrow(`质量契约固定 ${expectedVersion}`);
+    await expect(
+      runQualityInit({
+        ...options(versionRoot, new FakeGitHubClient()),
+        actualVersion: mismatchedVersion,
+      }),
+    ).rejects.toThrow(`质量契约固定 ${expectedVersion}`);
   }, 15_000);
 });

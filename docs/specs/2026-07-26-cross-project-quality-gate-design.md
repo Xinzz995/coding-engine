@@ -1,7 +1,7 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁设计"
 status: done
-updated: 2026-07-28
+updated: 2026-07-30
 scope: root
 ---
 
@@ -84,7 +84,7 @@ coding-engine 首版仍位于个人 GitHub 仓库。Ruleset 能可靠阻止日�
 | 层 | 能证明 | 不能证明 |
 |---|---|---|
 | 本地 Review | 指定 runner/model 在绑定输入上返回了何种结构化判断 | 模型判断一定正确；GitHub 上必然执行过 |
-| Validator | 当前 story 的验收标准获得了引擎签发的验证结果 | 工程结构优秀；交付条件全部满足 |
+| Validator | 当前 story 获得了仍匹配当前 HEAD 与当前有序验收标准的引擎凭证 | 工程结构优秀；交付条件全部满足 |
 | GitHub CI | 默认分支旧工作流对当前提交执行的机械任务结局 | 本地 AI Review 已运行；owner 永远不能改规则 |
 | Ruleset | 日常合并必须满足已配置的 PR 和状态检查 | 仓库 owner 无法删除规则 |
 | staged 制品 | 三个项目验证的是同一候选 tarball | 未经后续核验的 dist-tag、标签和 Release 自动一致 |
@@ -166,22 +166,33 @@ GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式
 2. 从质量契约冻结出的机械检查；
 3. 可选 TDD 门禁；
 4. Validator 逐条验证验收标准；
-5. 引擎签发 Validator 结果。
+5. 引擎签发绑定 request ID、非空 Git HEAD 和有序验收标准摘要的结构化凭证。
 
-Validator 不承担工程标准或结构 Review。修复产生新提交后，受影响的 Validator 和最终
-Review 都必须重新运行。
+Validator 不承担工程标准或结构 Review。`validated` 布尔值不能独立表示完成；正式通过还
+要求 `validationReceipt` 与当前 Git HEAD 和当前有序验收标准完全匹配。任一提交都会使全部
+旧 Story 凭证失效，任一 Story 的 AC 文字、数量或顺序变化也会使该 Story 凭证失效。失效只
+表示证据需要重验，不等于实现已知错误：引擎保留 `passes=true` 候选，跳过 Developer，完整
+重跑机械检查和 Validator；重验失败后，下一轮才交回 Developer。旧 state 可解析但不自动
+变绿，也不得从 evidence、旧 Final Review 或当前文件反向补造凭证。
+
+所有 Story 必须在最终 Review 前收敛到同一当前 HEAD。正式模式不能读取非空 Git HEAD 时，
+在任何 Developer、Validator 或 Review 模型调用前停止。进入最终 Review 前、机械检查后模型
+调用前，以及模型完成后，都重新核对结构化凭证；运行中漂移的结果不能被接受。
 
 ### 最终 Review 前置条件
 
 全部 story 验证完成后，引擎依次确认：
 
 - 当前在功能分支，不是契约中的默认分支；
-- 工作树干净，仅允许 workspace 和契约明确声明的生成产物；
+- 已跟踪内容与索引等于 HEAD，仅允许 workspace 和契约生成物中的 Git 可见改动；
 - 已获取远端最新默认分支，当前分支包含该提交；引擎不自动 merge、rebase 或改写历史；
 - 当前分支存在目标为默认分支的开放 GitHub PR；
 - PR 正文包含目标、Spec 和验收标准来源。
 
 缺 PR 返回远端未就绪；意图资料不完整返回 `unverifiable`，都不能签发正式 Review。
+当前 Git ignored 文件、依赖和本机配置仍可影响本地项目命令与 Validator，不在 HEAD 凭证
+绑定内；Reviewer 的受控审查包不包含它们。Issue #91 跟踪在精确 HEAD 临时干净检出中重建
+本地 setup 并执行机械检查与 Validator；完成前不宣称完整本地执行环境已绑定 HEAD。
 
 ### 三层 Review
 
@@ -225,7 +236,8 @@ PR 若把这些流程后置条件写入验证计划，Spec 轴不得因无法预
 - Spec、默认分支工程标准、默认分支质量契约摘要；
 - coding-x 精确版本；
 - runner 类型、实际模型、runner 版本和 Review 规则版本；
-- 风险判断输入和结果。
+- 风险判断输入和结果；
+- 全部 Story 当前有效验收凭证的稳定摘要。
 
 任一项变化，旧 Review 立即失效。只有远端 CI 状态变化时，`status` 可只查询 GitHub 而不
 再次调用模型。
@@ -305,6 +317,10 @@ PR/base/head、评审轮次和状态。
 `status/report` 必须分别展示 story 验证、本地 Review、远端 CI/规则和最终交付结论，不能用
 “所有 story 通过”代替“可交付”。
 
+Story 的结构化 `validationReceipt` 同样只是本地引擎控制流记录，不是密码学签名。同权限
+进程仍能改写 workspace；该凭证用于消除正常运行、异常恢复和展示消费中的过期假绿，不扩大
+为 GitHub 或第三方可信证明。
+
 ## GitHub 机械门禁
 
 ### 默认分支 Ruleset
@@ -332,7 +348,11 @@ PR/base/head、评审轮次和状态。
 不拼接运行 PR 内容。一次性政策标签仅表示 owner 明确批准，必须关联有效 Issue，不称为
 第二方审批。Ruleset 直接要求 GitHub 为该默认分支工作流产生、并关联 PR 最新 head 的真实
 `policy-guard-source` 任务；工作流不再通过 Checks API 额外写入一条结果，也不需要检查写
-权限。所有第三方 Action 固定完整提交 SHA，并采用最小权限。
+权限。例外的正文、状态、标签和到期日在该 PR 的检查执行时读取并验证；Issue 后续变化不会
+自动重跑，也不会自动撤销已存在的绿色结果。合并前 owner 必须在例外变化后手动重跑该 PR
+检查并执行 `doctor` 核对。个人仓库 owner 本来就能修改 Ruleset，因此这里不引入具有工作流
+写权限的后台重跑任务，不承诺例外实时失效，也不称其为独立可信根。所有第三方 Action 固定
+完整提交 SHA，并采用逐 job 最小权限。
 
 ### coding-engine 检查矩阵
 
@@ -428,6 +448,10 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 ### 本地
 
 - 缺契约、schema 过新、版本错误、脏工作树、默认分支、落后分支、缺 PR 分别得到约定错误；
+- 缺失/旧版凭证、任一新提交或有序 AC 变化使 Story 退出有效通过；仅因过期时走
+  validation-only，不重复调用 Developer，全部 Story 最终绑定同一 HEAD；
+- 正式模式无法读取 Git HEAD 时，在任何 Agent 或 Review 模型调用前停止；旧 evidence 与
+  Final Review 不能补造凭证；
 - PR 正文、Spec、提交、规则、runner/model 变化使旧 Review 失效；CI 单独变化不触发重审；
 - 缺 Spec、模型异常、格式损坏、上下文不足、关键内容不可读返回 `unverifiable`；
 - Reviewer 写文件、危险命令、秘密、MCP、hook 和插件反向测试全部失败；
@@ -439,6 +463,8 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 - 最小锁在 Bootstrap PR 前阻止直接推送；首次 check-run 出现后才能加入 required checks；
 - 任何平台任务失败、取消、超时或未运行使总闸失败；`[skip ci]` 和条件跳过不能假绿；
 - 政策变化由默认分支旧 guard 识别；有凭据任务不执行 PR 内容；
+- 政策例外只保证在 PR guard 实际运行时有效；例外随后变化时，owner 必须手动重跑并用
+  `doctor` 核对，不宣称旧绿灯会实时失效；
 - 权限不足、规则漂移或私库能力不足明确失败；工作流扫描确认无模型调用和 AI 凭据。
 
 ### 发布和外部项目

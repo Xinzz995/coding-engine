@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -17,15 +17,43 @@ import { deriveQualityChecks, readQualityContract } from '../quality/contract.js
 import { renderManagedGitHubFiles } from '../quality/github-workflows.js';
 import { CODING_X_VERSION } from '../version.js';
 
-const FULL_FM = ['---', 'title: 示例', 'status: active', 'updated: 2026-07-03', 'scope: root', '---', '', '# 正文'].join('\n');
+const FULL_FM = [
+  '---',
+  'title: 示例',
+  'status: active',
+  'updated: 2026-07-03',
+  'scope: root',
+  '---',
+  '',
+  '# 正文',
+].join('\n');
 const ORIGINAL_CODING_X_CONFIG = process.env.CODING_X_CONFIG;
-const ISOLATED_MISSING_CONFIG = join(tmpdir(), `coding-x-doctor-${process.pid}-missing-config.json`);
-
-const runDoctor = (root: string, options: DoctorOptions = {}) => runDoctorWithQuality(root, {
-  requireQualityContract: false,
-  local: true,
-  ...options,
+const ISOLATED_MISSING_CONFIG = join(
+  tmpdir(),
+  `coding-x-doctor-${process.pid}-missing-config.json`,
+);
+const VALID_USER_STORIES = [
+  {
+    id: 'US-001',
+    title: 'fixture',
+    description: 'd',
+    acceptanceCriteria: ['fixture acceptance criterion'],
+    priority: 1,
+  },
+];
+const VALID_PRD_JSON = JSON.stringify({
+  project: 'fixture',
+  branchName: 'fixture/story',
+  description: 'fixture',
+  userStories: VALID_USER_STORIES,
 });
+
+const runDoctor = (root: string, options: DoctorOptions = {}) =>
+  runDoctorWithQuality(root, {
+    requireQualityContract: false,
+    local: true,
+    ...options,
+  });
 
 function writeQualityContract(root: string, codingXVersion = CODING_X_VERSION): string {
   const source = JSON.parse(readFileSync(join(process.cwd(), '.coding-x', 'quality.json'), 'utf8'));
@@ -58,7 +86,16 @@ afterEach(() => {
 
 /** 四字段齐全、updated 为指定值的 frontmatter 文档。 */
 function fmDoc(updated: string): string {
-  return ['---', 'title: 示例', 'status: active', `updated: ${updated}`, 'scope: root', '---', '', '# 正文'].join('\n');
+  return [
+    '---',
+    'title: 示例',
+    'status: active',
+    `updated: ${updated}`,
+    'scope: root',
+    '---',
+    '',
+    '# 正文',
+  ].join('\n');
 }
 
 /** 建临时项目根，写入 files（相对路径 → 内容），回调后清理。 */
@@ -89,7 +126,11 @@ function gitCommitAll(root: string, date: string): void {
   execFileSync('git', ['commit', '-q', '-m', 'fixture'], {
     cwd: root,
     stdio: 'ignore',
-    env: { ...process.env, GIT_AUTHOR_DATE: `${date}T12:00:00Z`, GIT_COMMITTER_DATE: `${date}T12:00:00Z` },
+    env: {
+      ...process.env,
+      GIT_AUTHOR_DATE: `${date}T12:00:00Z`,
+      GIT_COMMITTER_DATE: `${date}T12:00:00Z`,
+    },
   });
 }
 
@@ -151,6 +192,63 @@ describe('runDoctor — frontmatter 完整性', () => {
       const report = runDoctor(root);
       expect(report.docsFound).toBe(false);
       expect(report.frontmatter).toBeNull();
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a docs directory symlink outside the project',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'doctor-docs-link-'));
+      const outside = mkdtempSync(join(tmpdir(), 'doctor-docs-outside-'));
+      try {
+        writeFileSync(join(outside, 'outside.md'), FULL_FM);
+        symlinkSync(outside, join(root, 'docs'), 'dir');
+        const report = runDoctor(root);
+        expect(report.docsFound).toBe(true);
+        expect(report.frontmatter).toMatchObject({
+          scanned: 0,
+          issues: [
+            expect.objectContaining({ file: 'docs', message: expect.stringContaining('软链') }),
+          ],
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects FIFO Markdown and AGENTS.md without waiting for writers',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'doctor-fifo-'));
+      try {
+        mkdirSync(join(root, 'docs'));
+        execFileSync('mkfifo', [join(root, 'docs', 'blocked.md')]);
+        execFileSync('mkfifo', [join(root, 'AGENTS.md')]);
+        const started = Date.now();
+        const report = runDoctor(root);
+        expect(Date.now() - started).toBeLessThan(1_000);
+        expect(report.frontmatter?.issues).toContainEqual(
+          expect.objectContaining({ file: join('docs', 'blocked.md') }),
+        );
+        expect(report.agentsIndex?.issues).toContainEqual(
+          expect.objectContaining({ file: 'AGENTS.md' }),
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('rejects an oversized Markdown file instead of loading it without a bound', () => {
+    withProject({ 'docs/oversized.md': 'x'.repeat(4 * 1024 * 1024 + 1) }, (root) => {
+      expect(runDoctor(root).frontmatter?.issues).toContainEqual(
+        expect.objectContaining({
+          file: join('docs', 'oversized.md'),
+          message: expect.stringContaining('安全读取'),
+        }),
+      );
     });
   });
 });
@@ -226,11 +324,14 @@ describe('runDoctor — updated 新鲜度', () => {
     });
   });
   it('does not count files lacking an updated field toward the freshness check', () => {
-    withProject({ 'docs/no-updated.md': '---\ntitle: x\nstatus: active\nscope: root\n---\n' }, (root) => {
-      const fresh = runDoctor(root).freshness!;
-      expect(fresh.checked).toBe(0);
-      expect(fresh.issues).toEqual([]);
-    });
+    withProject(
+      { 'docs/no-updated.md': '---\ntitle: x\nstatus: active\nscope: root\n---\n' },
+      (root) => {
+        const fresh = runDoctor(root).freshness!;
+        expect(fresh.checked).toBe(0);
+        expect(fresh.issues).toEqual([]);
+      },
+    );
   });
   it('skips docs/archive files even when updated is old or malformed', () => {
     withProject(
@@ -296,7 +397,12 @@ describe('extractInlineLinkTargets', () => {
     expect(extractInlineLinkTargets(content)).toEqual(['a.md', 'img/x.png']);
   });
   it('ignores link-like literals inside fenced code blocks and inline code', () => {
-    const content = ['```', '[fence](in-fence.md)', '```', '行内 `[code](in-code.md)` 不算链接，[真](real.md)。'].join('\n');
+    const content = [
+      '```',
+      '[fence](in-fence.md)',
+      '```',
+      '行内 `[code](in-code.md)` 不算链接，[真](real.md)。',
+    ].join('\n');
     expect(extractInlineLinkTargets(content)).toEqual(['real.md']);
   });
 });
@@ -536,7 +642,9 @@ describe('runDoctor quality contract check', () => {
       const rendered = renderDoctorReport(report);
       expect(rendered.exitCode).toBe(1);
       expect(rendered.text).toContain('coding-x init');
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('accepts a valid contract when no transient PRD exists', () => {
@@ -546,12 +654,17 @@ describe('runDoctor quality contract check', () => {
       const digest = writeQualityContract(root);
       const report = runDoctorWithQuality(root, { local: true });
       expect(report.quality).toMatchObject({
-        status: 'ready', digest, prdFound: false, prdDigestMatches: null,
+        status: 'ready',
+        digest,
+        prdFound: false,
+        prdDigestMatches: null,
       });
       const { text, exitCode } = renderDoctorReport(report);
       expect(text).toContain('当前没有待运行 PRD');
       expect(exitCode).toBe(0);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('fails on a stale PRD digest or a qualityChecks snapshot that is not contract-derived', () => {
@@ -559,18 +672,63 @@ describe('runDoctor quality contract check', () => {
     try {
       writeQualityContract(root);
       mkdirSync(join(root, '.workspace'));
-      writeFileSync(join(root, '.workspace', 'prd.json'), JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
-        qualityContractDigest: `sha256:${'b'.repeat(64)}`,
-        qualityChecks: ['npm test'],
-      }));
+      writeFileSync(
+        join(root, '.workspace', 'prd.json'),
+        JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: VALID_USER_STORIES,
+          qualityContractDigest: `sha256:${'b'.repeat(64)}`,
+          qualityChecks: ['npm test'],
+        }),
+      );
       const report = runDoctorWithQuality(root, { local: true });
       expect(report.quality.prdDigestMatches).toBe(false);
       const { text, exitCode } = renderDoctorReport(report);
       expect(exitCode).toBe(1);
       expect(text).toContain('摘要不匹配');
       expect(text).toContain('完整派生快照');
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when PRD Story identities are ambiguous even if contract bindings match', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-invalid-stories-'));
+    try {
+      const contractDigest = writeQualityContract(root);
+      mkdirSync(join(root, '.workspace'));
+      writeFileSync(
+        join(root, '.workspace', 'prd.json'),
+        JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: [
+            VALID_USER_STORIES[0],
+            { ...VALID_USER_STORIES[0], id: ' US-001 ', title: 'duplicate' },
+          ],
+          qualityContractDigest: contractDigest,
+          qualityChecks: qualitySnapshot(root),
+        }),
+      );
+
+      const report = runDoctorWithQuality(root, { local: true });
+      expect(report.quality.status).toBe('invalid');
+      expect(report.quality.prdDigestMatches).toBeNull();
+      expect(report.quality.prdChecksMatch).toBeNull();
+      expect(report.tdd.status).toBe('invalid');
+      expect(report.modelCatalog.routingEnabled).toBe(false);
+      expect(
+        [...report.quality.issues, ...report.tdd.issues, ...report.modelCatalog.issues].every(
+          (issue) => issue.message.includes('重复 Story ID'),
+        ),
+      ).toBe(true);
+      expect(renderDoctorReport(report).exitCode).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('binds a matching PRD in an absolute custom workspace and works without docs/', () => {
@@ -578,15 +736,23 @@ describe('runDoctor quality contract check', () => {
     const workspaceAbs = mkdtempSync(join(tmpdir(), 'doc-gate-abs-ws-'));
     try {
       const digest = writeQualityContract(root);
-      writeFileSync(join(workspaceAbs, 'prd.json'), JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
-        qualityContractDigest: digest,
-        qualityChecks: qualitySnapshot(root),
-      }));
+      writeFileSync(
+        join(workspaceAbs, 'prd.json'),
+        JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: VALID_USER_STORIES,
+          qualityContractDigest: digest,
+          qualityChecks: qualitySnapshot(root),
+        }),
+      );
       const report = runDoctorWithQuality(root, { workspace: workspaceAbs, local: true });
       expect(report.docsFound).toBe(false);
       expect(report.quality).toMatchObject({
-        prdFound: true, prdDigestMatches: true, prdChecksMatch: true,
+        prdFound: true,
+        prdDigestMatches: true,
+        prdChecksMatch: true,
       });
       expect(report.modelCatalog.configPath).toBe(ISOLATED_MISSING_CONFIG);
       expect(renderDoctorReport(report).exitCode).toBe(0);
@@ -606,7 +772,9 @@ describe('runDoctor quality contract check', () => {
       expect(exitCode).toBe(1);
       expect(text).toContain('固定版本 9.9.9');
       expect(text).toContain(`当前版本 ${CODING_X_VERSION}`);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('emits one machine-readable object with the same exit decision', () => {
@@ -619,16 +787,22 @@ describe('runDoctor quality contract check', () => {
       expect(JSON.parse(json.text)).toMatchObject({
         schemaVersion: 1,
         quality: {
-          status: 'ready', digest,
+          status: 'ready',
+          digest,
           derivedChecks: expect.objectContaining({ test: expect.any(Object) }),
         },
       });
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
 describe('runDoctor TDD policy check', () => {
-  function configureTdd(root: string, coverageCheck: string): {
+  function configureTdd(
+    root: string,
+    coverageCheck: string,
+  ): {
     policyPath: string;
     markerPath: string;
   } {
@@ -646,30 +820,42 @@ describe('runDoctor TDD policy check', () => {
       encoding: 'utf8',
     }).trim();
     const sha256 = createHash('sha256').update(readFileSync(policyPath)).digest('hex');
-    writeFileSync(join(root, '.workspace', 'prd.json'), JSON.stringify({
-      project: 'p', branchName: 'b', description: 'd', userStories: [],
-      tdd: {
-        coverageCheck: `node scripts/coverage.mjs ${markerPath}`,
-        sourcePathspecs: [':(glob)src/**'],
-        policyFiles: [{ path: 'scripts/coverage.mjs', sha256 }],
-        baselineRef,
-        forbiddenAddedPatterns: ['c8 ignore'],
-      },
-    }));
+    writeFileSync(
+      join(root, '.workspace', 'prd.json'),
+      JSON.stringify({
+        project: 'p',
+        branchName: 'b',
+        description: 'd',
+        userStories: VALID_USER_STORIES,
+        tdd: {
+          coverageCheck: `node scripts/coverage.mjs ${markerPath}`,
+          sourcePathspecs: [':(glob)src/**'],
+          policyFiles: [{ path: 'scripts/coverage.mjs', sha256 }],
+          baselineRef,
+          forbiddenAddedPatterns: ['c8 ignore'],
+        },
+      }),
+    );
     return { policyPath, markerPath };
   }
 
   it('reports disabled TDD as informational and non-failing', () => {
-    withProject({
-      'docs/a.md': FULL_FM,
-      '.workspace/prd.json': JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
-      }),
-    }, (root) => {
-      const report = runDoctor(root);
-      expect(report.tdd).toMatchObject({ status: 'disabled', issues: [] });
-      expect(renderDoctorReport(report).exitCode).toBe(0);
-    });
+    withProject(
+      {
+        'docs/a.md': FULL_FM,
+        '.workspace/prd.json': JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: VALID_USER_STORIES,
+        }),
+      },
+      (root) => {
+        const report = runDoctor(root);
+        expect(report.tdd).toMatchObject({ status: 'disabled', issues: [] });
+        expect(renderDoctorReport(report).exitCode).toBe(0);
+      },
+    );
   });
 
   it('validates policy integrity without running coverageCheck', () => {
@@ -691,18 +877,24 @@ describe('runDoctor TDD policy check', () => {
   });
 
   it('fails doctor for malformed config and changed policy hash', () => {
-    withProject({
-      'docs/a.md': FULL_FM,
-      '.workspace/prd.json': JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
-        tdd: { coverageCheck: '' },
-      }),
-    }, (root) => {
-      const report = runDoctor(root);
-      expect(report.tdd.status).toBe('invalid');
-      expect(report.tdd.issues).toHaveLength(1);
-      expect(renderDoctorReport(report).exitCode).toBe(1);
-    });
+    withProject(
+      {
+        'docs/a.md': FULL_FM,
+        '.workspace/prd.json': JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: VALID_USER_STORIES,
+          tdd: { coverageCheck: '' },
+        }),
+      },
+      (root) => {
+        const report = runDoctor(root);
+        expect(report.tdd.status).toBe('invalid');
+        expect(report.tdd.issues).toHaveLength(1);
+        expect(renderDoctorReport(report).exitCode).toBe(1);
+      },
+    );
 
     const root = mkdtempSync(join(tmpdir(), 'doctor-tdd-'));
     try {
@@ -720,77 +912,114 @@ describe('runDoctor TDD policy check', () => {
 });
 
 const ROUTED_PRD = {
-  project: 'p', branchName: 'b', description: 'd',
+  project: 'p',
+  branchName: 'b',
+  description: 'd',
   models: {
     runner: 'codex',
     builder: { low: 'low-m', medium: 'mid-m', high: 'high-m' },
     validator: 'val-m',
     escalation: 'esc-m',
   },
-  userStories: [{
-    id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
-    difficulty: 'medium', difficultyReason: '命中 medium-1：见 src/api.ts。',
-  }],
+  userStories: [
+    {
+      id: 'US-001',
+      title: 't',
+      description: 'd',
+      acceptanceCriteria: ['ac'],
+      priority: 1,
+      difficulty: 'medium',
+      difficultyReason: '命中 medium-1：见 src/api.ts。',
+    },
+  ],
 };
 
 describe('runDoctor global model catalog check', () => {
   it('skips a missing catalog when prd.json does not enable models', () => {
-    withProject({
-      '.workspace/prd.json': JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
-      }),
-    }, (root) => {
-      const missingConfig = join(root, 'missing-config.json');
-      const report = runDoctor(root, { modelConfigPath: missingConfig });
-      expect(report.modelCatalog).toMatchObject({
-        prdFound: true, routingEnabled: false, checked: 0, issues: [],
-        configPath: missingConfig, configStatus: 'missing', configuredRunners: [],
-      });
-      const { text, exitCode } = renderDoctorReport(report);
-      expect(text).toContain('未启用 models');
-      expect(text).toContain('runner-default 不受影响');
-      expect(exitCode).toBe(0);
-    });
+    withProject(
+      {
+        '.workspace/prd.json': JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: VALID_USER_STORIES,
+        }),
+      },
+      (root) => {
+        const missingConfig = join(root, 'missing-config.json');
+        const report = runDoctor(root, { modelConfigPath: missingConfig });
+        expect(report.modelCatalog).toMatchObject({
+          prdFound: true,
+          routingEnabled: false,
+          checked: 0,
+          issues: [],
+          configPath: missingConfig,
+          configStatus: 'missing',
+          configuredRunners: [],
+        });
+        const { text, exitCode } = renderDoctorReport(report);
+        expect(text).toContain('未启用 models');
+        expect(text).toContain('runner-default 不受影响');
+        expect(exitCode).toBe(0);
+      },
+    );
   });
 
   it('validates and summarizes an existing catalog when prd.json does not enable models', () => {
-    withProject({
-      '.workspace/prd.json': JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
-      }),
-      'global-models.json': JSON.stringify({
-        version: 1,
-        models: { claude: [{ id: 'sonnet' }], codex: [{ id: 'model-a' }, { id: 'model-b' }] },
-      }),
-    }, (root) => {
-      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
-      expect(report.modelCatalog).toMatchObject({
-        routingEnabled: false,
-        configStatus: 'available',
-        configuredRunners: [{ runner: 'claude', count: 1 }, { runner: 'codex', count: 2 }],
-        issues: [],
-      });
-      const { text, exitCode } = renderDoctorReport(report);
-      expect(text).toContain('配置 schema 合法（claude 1 项、codex 2 项）');
-      expect(text).toContain('无需项目模型映射复核');
-      expect(exitCode).toBe(0);
-    });
+    withProject(
+      {
+        '.workspace/prd.json': JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: VALID_USER_STORIES,
+        }),
+        'global-models.json': JSON.stringify({
+          version: 1,
+          models: { claude: [{ id: 'sonnet' }], codex: [{ id: 'model-a' }, { id: 'model-b' }] },
+        }),
+      },
+      (root) => {
+        const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+        expect(report.modelCatalog).toMatchObject({
+          routingEnabled: false,
+          configStatus: 'available',
+          configuredRunners: [
+            { runner: 'claude', count: 1 },
+            { runner: 'codex', count: 2 },
+          ],
+          issues: [],
+        });
+        const { text, exitCode } = renderDoctorReport(report);
+        expect(text).toContain('配置 schema 合法（claude 1 项、codex 2 项）');
+        expect(text).toContain('无需项目模型映射复核');
+        expect(exitCode).toBe(0);
+      },
+    );
   });
 
   it('fails for an existing invalid catalog even when prd.json does not enable models', () => {
-    withProject({
-      '.workspace/prd.json': JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd', userStories: [],
-      }),
-      'global-models.json': '{ broken',
-    }, (root) => {
-      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
-      expect(report.modelCatalog).toMatchObject({
-        routingEnabled: false, configStatus: 'error', checked: 0,
-      });
-      expect(report.modelCatalog.issues[0]?.message).toContain('不是合法 JSON');
-      expect(renderDoctorReport(report).exitCode).toBe(1);
-    });
+    withProject(
+      {
+        '.workspace/prd.json': JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: VALID_USER_STORIES,
+        }),
+        'global-models.json': '{ broken',
+      },
+      (root) => {
+        const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+        expect(report.modelCatalog).toMatchObject({
+          routingEnabled: false,
+          configStatus: 'error',
+          checked: 0,
+        });
+        expect(report.modelCatalog.issues[0]?.message).toContain('不是合法 JSON');
+        expect(renderDoctorReport(report).exitCode).toBe(1);
+      },
+    );
   });
 
   it('fails when an enabled project has no global model config, even without docs/', () => {
@@ -799,7 +1028,9 @@ describe('runDoctor global model catalog check', () => {
       const report = runDoctor(root, { modelConfigPath: missingConfig });
       expect(report.docsFound).toBe(false);
       expect(report.modelCatalog).toMatchObject({
-        routingEnabled: true, runner: 'codex', checked: 0,
+        routingEnabled: true,
+        runner: 'codex',
+        checked: 0,
       });
       expect(report.modelCatalog.issues).toHaveLength(1);
       const { text, exitCode } = renderDoctorReport(report);
@@ -812,25 +1043,31 @@ describe('runDoctor global model catalog check', () => {
     ['broken JSON', '{ broken'],
     ['invalid schema', JSON.stringify({ version: 2, models: { codex: [] } })],
   ])('fails for an invalid global model config: %s', (_label, config) => {
-    withProject({
-      '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
-      'global-models.json': config,
-    }, (root) => {
-      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
-      expect(report.modelCatalog.issues).toHaveLength(1);
-      expect(renderDoctorReport(report).exitCode).toBe(1);
-    });
+    withProject(
+      {
+        '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+        'global-models.json': config,
+      },
+      (root) => {
+        const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+        expect(report.modelCatalog.issues).toHaveLength(1);
+        expect(renderDoctorReport(report).exitCode).toBe(1);
+      },
+    );
   });
 
   it('fails when the selected runner catalog is empty', () => {
-    withProject({
-      '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
-      'global-models.json': JSON.stringify({ version: 1, models: { codex: [] } }),
-    }, (root) => {
-      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
-      expect(report.modelCatalog.issues[0].message).toContain('未配置任何模型');
-      expect(renderDoctorReport(report).exitCode).toBe(1);
-    });
+    withProject(
+      {
+        '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+        'global-models.json': JSON.stringify({ version: 1, models: { codex: [] } }),
+      },
+      (root) => {
+        const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+        expect(report.modelCatalog.issues[0].message).toContain('未配置任何模型');
+        expect(renderDoctorReport(report).exitCode).toBe(1);
+      },
+    );
   });
 
   it.each([
@@ -840,24 +1077,27 @@ describe('runDoctor global model catalog check', () => {
     ['models.validator', 'val-m'],
     ['models.escalation', 'esc-m'],
   ] as const)('fails when routed project model %s (%s) is not declared', (fieldPath, missingId) => {
-    withProject({
-      '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
-      'global-models.json': JSON.stringify({
-        version: 1,
-        models: {
-          codex: ['low-m', 'mid-m', 'high-m', 'val-m', 'esc-m']
-            .filter((id) => id !== missingId)
-            .map((id) => ({ id })),
-        },
-      }),
-    }, (root) => {
-      const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
-      expect(report.modelCatalog.checked).toBe(5);
-      expect(report.modelCatalog.issues).toHaveLength(1);
-      expect(report.modelCatalog.issues[0].message).toContain(fieldPath);
-      expect(report.modelCatalog.issues[0].message).toContain(missingId);
-      expect(renderDoctorReport(report).exitCode).toBe(1);
-    });
+    withProject(
+      {
+        '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+        'global-models.json': JSON.stringify({
+          version: 1,
+          models: {
+            codex: ['low-m', 'mid-m', 'high-m', 'val-m', 'esc-m']
+              .filter((id) => id !== missingId)
+              .map((id) => ({ id })),
+          },
+        }),
+      },
+      (root) => {
+        const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+        expect(report.modelCatalog.checked).toBe(5);
+        expect(report.modelCatalog.issues).toHaveLength(1);
+        expect(report.modelCatalog.issues[0].message).toContain(fieldPath);
+        expect(report.modelCatalog.issues[0].message).toContain(missingId);
+        expect(renderDoctorReport(report).exitCode).toBe(1);
+      },
+    );
   });
 
   it('passes all five declarations without probing provider availability or runner binaries', () => {
@@ -865,24 +1105,30 @@ describe('runDoctor global model catalog check', () => {
     const originals = binVars.map((name) => [name, process.env[name]] as const);
     for (const name of binVars) process.env[name] = `/definitely/missing/${name}`;
     try {
-      withProject({
-        '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
-        'global-models.json': JSON.stringify({
-          version: 1,
-          models: {
-            codex: ['low-m', 'mid-m', 'high-m', 'val-m', 'esc-m'].map((id) => ({ id })),
-          },
-        }),
-      }, (root) => {
-        const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
-        expect(report.modelCatalog).toMatchObject({
-          routingEnabled: true, runner: 'codex', checked: 5, issues: [],
-        });
-        const { text, exitCode } = renderDoctorReport(report);
-        expect(text).toContain('5/5');
-        expect(text).toContain('不检查 provider 在线可用性');
-        expect(exitCode).toBe(0);
-      });
+      withProject(
+        {
+          '.workspace/prd.json': JSON.stringify(ROUTED_PRD),
+          'global-models.json': JSON.stringify({
+            version: 1,
+            models: {
+              codex: ['low-m', 'mid-m', 'high-m', 'val-m', 'esc-m'].map((id) => ({ id })),
+            },
+          }),
+        },
+        (root) => {
+          const report = runDoctor(root, { modelConfigPath: join(root, 'global-models.json') });
+          expect(report.modelCatalog).toMatchObject({
+            routingEnabled: true,
+            runner: 'codex',
+            checked: 5,
+            issues: [],
+          });
+          const { text, exitCode } = renderDoctorReport(report);
+          expect(text).toContain('5/5');
+          expect(text).toContain('不检查 provider 在线可用性');
+          expect(exitCode).toBe(0);
+        },
+      );
     } finally {
       for (const [name, value] of originals) {
         if (value === undefined) delete process.env[name];
@@ -894,29 +1140,32 @@ describe('runDoctor global model catalog check', () => {
 
 describe('runDoctor workspace Git isolation check', () => {
   it('reports an ignored workspace as protected', () => {
-    withProject({
-      '.gitignore': '.workspace/\n',
-      '.workspace/prd.json': '{}',
-    }, (root) => {
-      gitInit(root);
-      const report = runDoctor(root);
-      expect(report.workspaceGit).toEqual({
-        workspacePath: '.workspace',
-        workspaceFound: true,
-        gitAvailable: true,
-        insideRepository: true,
-        ignored: true,
-        trackedFiles: [],
-      });
-      const { text, exitCode } = renderDoctorReport(report);
-      expect(text).toContain('workspace Git 隔离');
-      expect(text).toContain('已被 Git 忽略');
-      expect(exitCode).toBe(0);
-    });
+    withProject(
+      {
+        '.gitignore': '.workspace/\n',
+        '.workspace/prd.json': VALID_PRD_JSON,
+      },
+      (root) => {
+        gitInit(root);
+        const report = runDoctor(root);
+        expect(report.workspaceGit).toEqual({
+          workspacePath: '.workspace',
+          workspaceFound: true,
+          gitAvailable: true,
+          insideRepository: true,
+          ignored: true,
+          trackedFiles: [],
+        });
+        const { text, exitCode } = renderDoctorReport(report);
+        expect(text).toContain('workspace Git 隔离');
+        expect(text).toContain('已被 Git 忽略');
+        expect(exitCode).toBe(0);
+      },
+    );
   });
 
   it('advises without failing when an existing workspace is not ignored', () => {
-    withProject({ '.workspace/prd.json': '{}' }, (root) => {
+    withProject({ '.workspace/prd.json': VALID_PRD_JSON }, (root) => {
       gitInit(root);
       const report = runDoctor(root);
       expect(report.workspaceGit).toMatchObject({
@@ -934,7 +1183,7 @@ describe('runDoctor workspace Git isolation check', () => {
   });
 
   it('reports tracked runtime files even when a later ignore rule matches the workspace', () => {
-    withProject({ '.workspace/prd.json': '{}' }, (root) => {
+    withProject({ '.workspace/prd.json': VALID_PRD_JSON }, (root) => {
       gitInit(root);
       gitCommitAll(root, '2026-07-22');
       writeFileSync(join(root, '.gitignore'), '.workspace/\n');
@@ -950,7 +1199,7 @@ describe('runDoctor workspace Git isolation check', () => {
   });
 
   it('skips safely outside a Git worktree and still works without docs/', () => {
-    withProject({ '.workspace/prd.json': '{}' }, (root) => {
+    withProject({ '.workspace/prd.json': VALID_PRD_JSON }, (root) => {
       const report = runDoctor(root);
       expect(report.docsFound).toBe(false);
       expect(report.workspaceGit).toMatchObject({
@@ -982,9 +1231,14 @@ describe('runDoctor workspace lock check', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-lock-stale-'));
     try {
       mkdirSync(join(root, '.workspace'), { recursive: true });
-      writeFileSync(join(root, '.workspace', 'engine.lock'), JSON.stringify({
-        pid: 999999999, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
-      }));
+      writeFileSync(
+        join(root, '.workspace', 'engine.lock'),
+        JSON.stringify({
+          pid: 999999999,
+          startedAt: '2026-07-16T00:00:00.000Z',
+          command: 'run',
+        }),
+      );
       const report = runDoctor(root);
       expect(report.lock).toEqual({ found: true, stale: true, pid: 999999999 });
       const { text, exitCode } = renderDoctorReport(report);
@@ -999,9 +1253,14 @@ describe('runDoctor workspace lock check', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-lock-live-'));
     try {
       mkdirSync(join(root, '.workspace'), { recursive: true });
-      writeFileSync(join(root, '.workspace', 'engine.lock'), JSON.stringify({
-        pid: process.pid, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
-      }));
+      writeFileSync(
+        join(root, '.workspace', 'engine.lock'),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: '2026-07-16T00:00:00.000Z',
+          command: 'run',
+        }),
+      );
       const report = runDoctor(root);
       expect(report.lock).toEqual({ found: true, stale: false, pid: process.pid });
       expect(renderDoctorReport(report).text).toContain('引擎运行中');
@@ -1016,9 +1275,14 @@ describe('runDoctor workspace lock check', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-lock-abs-root-'));
     const workspaceAbs = mkdtempSync(join(tmpdir(), 'doc-lock-abs-ws-'));
     try {
-      writeFileSync(join(workspaceAbs, 'engine.lock'), JSON.stringify({
-        pid: process.pid, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
-      }));
+      writeFileSync(
+        join(workspaceAbs, 'engine.lock'),
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: '2026-07-16T00:00:00.000Z',
+          command: 'run',
+        }),
+      );
       const report = runDoctor(root, { workspace: workspaceAbs });
       expect(report.lock).toEqual({ found: true, stale: false, pid: process.pid });
     } finally {
@@ -1031,9 +1295,14 @@ describe('runDoctor workspace lock check', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-lock-abs-root-'));
     const workspaceAbs = mkdtempSync(join(tmpdir(), 'doc-lock-abs-ws-'));
     try {
-      writeFileSync(join(workspaceAbs, 'engine.lock'), JSON.stringify({
-        pid: 999999999, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
-      }));
+      writeFileSync(
+        join(workspaceAbs, 'engine.lock'),
+        JSON.stringify({
+          pid: 999999999,
+          startedAt: '2026-07-16T00:00:00.000Z',
+          command: 'run',
+        }),
+      );
       const report = runDoctor(root, { workspace: workspaceAbs });
       expect(report.lock).toEqual({ found: true, stale: true, pid: 999999999 });
     } finally {

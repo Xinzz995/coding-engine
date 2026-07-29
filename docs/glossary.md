@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-26
+updated: 2026-07-29
 scope: root
 ---
 
@@ -23,16 +23,21 @@ story 的唯一验收依据；引擎把本轮有序快照放进 validation reque
 禁用：验收条件、完成标准
 
 **打回**
-机械门禁失败，或引擎接受 Validator 的结构化 failed claim 后执行的状态转移：passes/validated 设回 false、notes 写失败详情、retryCount +1，builder 下轮重试。
+机械门禁失败，或引擎接受 Validator 的结构化 failed claim 后执行的状态转移：passes/validated 设回 false、清除 validationReceipt、notes 写失败详情、retryCount +1，builder 下轮重试。
 禁用：驳回、退回
 
 **blocked**
 story 被跳过并等待人工处理的状态；可由重试达到上限触发，也可由 agent 配合仲裁标签显式置位。它与有效通过态一起构成循环收敛判定。
 禁用：卡死、挂起
 
-**验收凭证（validated）**
-Validator 正常完成、结构化 result 与本轮 story/AC hash/Git HEAD/request ID 全部匹配、逐 AC 结论通过且未改写 state 后，由引擎签发的 story 通过凭证。由引擎独占，agent 不得改写；story 只有 `blocked=false` 且 `passes && validated` 才是有效通过。
-禁用：验证标记、通过凭证（统一用「验收凭证」；字段名用 `validated`）
+**验收凭证（validationReceipt）**
+Validator 正常完成、结构化 result 与本轮 story/有序 AC 摘要/Git HEAD/request ID 全部匹配、逐 AC 结论通过且未改写 state 后，由引擎签发的结构化本地记录。由引擎独占，agent 不得改写；story 只有非 blocked、passes/validated 都为 true，且凭证仍匹配当前 HEAD 和当前有序 AC 时才有效通过。它不是密码学签名，也不是 GitHub 共享证明；`validated` 只是兼容与展示字段。
+禁用：验证标记、验证证书（统一用「验收凭证」；结构化字段名用 `validationReceipt`）
+
+**validation-only（仅重验轮）**
+实现候选仍为 passes=true，但凭证因缺失、提交变化或有序 AC 变化而无效时的收敛轮次。引擎跳过 Developer，完整重跑机械检查和 Validator；只有检查或验收失败后，下一轮才交给 Developer 修复。
+它不消耗 `--max-iter` 的实现/修复预算，但受按 Story 数量和 stall 阈值计算的独立上限约束。
+禁用：重新开发、旧结果复用
 
 **validation request（验收请求）**
 引擎为一次 Validator 调用生成的唯一目标合同：含一次性 request ID、story ID、有序验收标准快照/hash、调用前 Git HEAD 和 resultPath。它绑定“本轮要验什么”，不是密码学挑战。
@@ -43,7 +48,7 @@ Validator 按 v1 schema 提交的逐 AC 结构化结论（passed/failed、eviden
 禁用：验收证明、Validator 凭证、验证证书
 
 **结构化验收协议**
-validation request → Validator claim → engine protocol verdict/receipt 的 runner-neutral 控制面合同。缺结果、错绑定、畸形 schema、产物变化或 Validator 改写 state 一律 invalid 并 fail closed。
+validation request → Validator claim → engine protocol verdict/receipt 的 runner-neutral 控制面合同。缺结果、错绑定、畸形 schema、产物变化或 Validator 改写 state 一律 invalid 并 fail closed；签发后的持久凭证还要持续匹配当前 HEAD 和有序 AC。
 禁用：Validator IPC、结果文件协议（只描述媒介，掩盖目标绑定与状态机）
 
 **假绿**
@@ -136,7 +141,7 @@ notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验�
 
 **异常轮**
 builder 或 validator 进程以异常结局结束的轮次。结局判定机械三分（completed / timeout / error），只看引擎自己观测的超时信号与退出码，不解析 agent 输出内容（ADR-009）。
-禁用：失败轮、作废轮（异常轮不作废产物——提交与文件保留，走回写待复核）
+禁用：失败轮、作废轮（异常轮不作废已落盘产物；但若本异常轮才把 `passes` 从 false 改为 true，仍按 ADR-009 回写为 false，不能与 HEAD/AC 对账失效后的 validation-only 候选混为一谈）
 
 **Agent 调用凭证**
 引擎对一次真实 Builder/Validator 子进程调用的机械观察：进程树完全收口前的墙钟耗时、退出码，以及仅在异常时保留的有界 stdout/stderr 尾部。输出内容是恢复诊断，不是 provider 事实、账单证明或验收结论。
@@ -146,16 +151,16 @@ builder 或 validator 进程以异常结局结束的轮次。结局判定机械�
 builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳过机械门禁与 validator（省一次强模型调用），计入 stall 熔断。
 禁用：空跑轮、无效轮
 
-**回写待复核**
-异常轮的兜底机制：本轮被翻为 true 且未经验收的 passes 回写为 false，notes 追加 `[中断轮待复核]` 机械标记行（自带下轮重验指令）；不涨 retryCount（中断不是能力不足，不消耗打回预算）。
-禁用：回滚（只回写验收状态，不回滚已落盘的提交与产物）
+**实现候选待验收**
+`passes=true, validated=false, validationReceipt=null` 的中间态。它表示已有实现需要机械检查和 Validator 重验，不表示通过，也不等于实现已知错误；引擎以 validation-only 处理，不因单纯缺少新鲜凭证重复调用 Developer。
+禁用：已完成、已通过
 
 **stall 熔断**
-空转轮、两侧异常轮或验收未完整执行且触发待复核回写的轮次，连续累计达 `--stall-limit`（缺省 3）即提前终止循环（退出码 1）；门禁打回与正常完成的有效轮清零计数。
+空转轮或两侧异常轮连续累计达 `--stall-limit`（缺省 3）即提前终止循环（退出码 1）；门禁打回、validation-only 重验与正常完成的有效轮清零计数。
 禁用：空转保护、无进展终止
 
 **收敛出口**
-全部 story 达到有效通过（`passes && validated`）或 blocked 时的结束语义：全通过退出码 0；存在 blocked 时列出 story 号、退出码 3 交人工处理。
+全部 story 持有匹配同一当前 HEAD 与各自当前有序 AC 的有效验收凭证，或 blocked 时的实现循环结束语义：存在 blocked 时列出 story 号、退出码 3 交人工处理；全通过仍要继续最终机械检查、本地 Review 和远端交付核验，三者就绪才退出 0。
 禁用：完成出口、全绿出口
 
 **证据索引**
@@ -189,9 +194,9 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 ## 关系
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
-- builder 把 `passes=true` 作为候选结果；引擎生成 validation request，Validator 提交逐 AC claim，引擎确认目标绑定/协议/state 不变式后才写 verdict 或签发验收凭证；passes 与 validated 同时为 true 才是有效通过
+- builder 把 `passes=true` 作为候选结果；引擎生成 validation request，Validator 提交逐 AC claim，引擎确认目标绑定/协议/state 不变式后才写 verdict 或签发验收凭证；passes/validated 同时为 true 且凭证匹配当前 HEAD/有序 AC 才有效通过
 - 打回递增 retryCount，达到上限转 blocked；全部 story 有效通过或 blocked 即走收敛出口结束循环
-- 异常轮触发回写待复核并计入 stall 熔断；空转轮跳过门禁与 validator、同样计入熔断
+- 异常轮计入 stall 熔断；本异常轮新产生的 `passes=true` 按 ADR-009 回写为 false。只有原本已经存在、后来因 HEAD/AC 对账失效而缺少当前有效凭证的实现候选，下一有效轮才以 validation-only 重验；空转轮跳过门禁与 validator、同样计入熔断
 - 每次实际启动的 Builder/Validator 都产生 Agent 调用凭证；status/report 从证据索引恢复耗时、退出码和异常诊断，但不把输出内容当裁决依据
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含最终 Review finding 裁决、GitHub 交付核验与 `/compound-docs`（沉淀、熵 GC、状态收尾及显式授权后的物理归档）

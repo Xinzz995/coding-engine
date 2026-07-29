@@ -1,11 +1,22 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { writeFileAtomicSync } from './fs-atomic.js';
 
 let cleanup: Array<() => void> = [];
-afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
+afterEach(() => {
+  cleanup.forEach((f) => f());
+  cleanup = [];
+});
 
 function ws(): string {
   const dir = mkdtempSync(join(tmpdir(), 'fs-atomic-'));
@@ -37,5 +48,15 @@ describe('writeFileAtomicSync', () => {
     writeFileSync(join(dir, 'target', 'occupied'), 'x');
     expect(() => writeFileAtomicSync(join(dir, 'target'), 'data')).toThrow();
     expect(readdirSync(dir).filter((n) => /\.tmp-\d+$/.test(n))).toEqual([]);
+  });
+
+  it.skipIf(process.platform === 'win32')('never follows a pre-positioned tmp symlink', () => {
+    const dir = ws();
+    const target = join(dir, 'state.json');
+    const outside = join(dir, 'outside.txt');
+    writeFileSync(outside, 'outside');
+    symlinkSync(outside, `${target}.tmp-${process.pid}`);
+    expect(() => writeFileAtomicSync(target, 'forged')).toThrow();
+    expect(readFileSync(outside, 'utf8')).toBe('outside');
   });
 });

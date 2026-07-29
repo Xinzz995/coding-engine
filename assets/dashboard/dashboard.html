@@ -191,7 +191,7 @@ const PHASE_MAP = {
   developing: { label: 'Developer Agent 工作中', color: 'var(--mac-blue)',   animate: true },
   gating:     { label: '机械门禁检查中',        color: 'var(--mac-purple)', animate: true },
   validating: { label: 'Validator 验证中',    color: 'var(--mac-orange)', animate: true },
-  done:       { label: '全部完成',           color: 'var(--mac-green)',  animate: false },
+  done:       { label: 'Story 已收敛，等待最终 Review 结论', color: 'var(--mac-green)', animate: false },
   error:      { label: '出现错误',           color: 'var(--mac-red)',    animate: false },
 };
 
@@ -200,7 +200,7 @@ const STATE_CONFIG = {
   passed:  { label: '已通过', dotColor: 'var(--mac-green)',  badgeBg: 'hsla(142,60%,95%,1)',      badgeColor: 'var(--mac-green)' },
   failed:  { label: '未通过', dotColor: 'var(--mac-red)',    badgeBg: 'hsla(4,80%,96%,1)',        badgeColor: 'var(--mac-red)' },
   blocked: { label: '已阻塞', dotColor: 'var(--mac-orange)', badgeBg: 'hsla(36,80%,95%,1)',      badgeColor: 'var(--mac-orange)' },
-  awaiting:{ label: '待引擎验收', dotColor: 'var(--mac-purple)', badgeBg: 'hsla(280,60%,95%,1)', badgeColor: 'var(--mac-purple)' },
+  awaiting:{ label: '实现候选待验收', dotColor: 'var(--mac-purple)', badgeBg: 'hsla(280,60%,95%,1)', badgeColor: 'var(--mac-purple)' },
   pending: { label: '待执行', dotColor: 'var(--mac-gray)',   badgeBg: 'transparent',              badgeColor: 'var(--muted)' },
 };
 
@@ -212,21 +212,39 @@ function fmtElapsed(s) {
   return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
 }
 
+function hasValidationReceipt(story) {
+  const receipt = story.validationReceipt;
+  return receipt && receipt.schemaVersion === 1 && typeof receipt.requestId === 'string' && receipt.requestId.length > 0 && typeof receipt.gitHead === 'string' && typeof receipt.acceptanceHash === 'string';
+}
+
 function getState(story, cur) {
   if (story.id === cur) return 'active';
   if (story.blocked) return 'blocked';
-  if (story.passes === true && story.validated === true) return 'passed';
+  if (story.passes === true && story.validated === true && hasValidationReceipt(story)) return 'passed';
   if (story.passes === true) return 'awaiting';
   if (story.passes === false && (story.retryCount > 0 || story.notes)) return 'failed';
   return 'pending';
 }
 
-function renderStories(stories, cur) {
+const VALIDATION_REASON = {
+  'candidate-not-passing': '实现候选已不再通过',
+  'story-blocked': 'Story 已阻塞',
+  'validated-false': '验收状态未完成',
+  'missing-receipt': '缺少 Validator 验证凭证',
+  'invalid-receipt': 'Validator 验证凭证损坏',
+  'git-head-unavailable': '无法确认当前提交',
+  'git-head-mismatch': '代码提交已变化，需要重新验收',
+  'acceptance-hash-mismatch': '验收标准已变化，需要重新验收',
+};
+
+function renderStories(stories, cur, validationInvalidations = []) {
   const el = document.getElementById('storyList');
   el.innerHTML = stories.map(s => {
     const st = getState(s, cur);
     const cfg = STATE_CONFIG[st];
     const isActive = st === 'active';
+    const invalidation = validationInvalidations.find(item => item.storyId === s.id);
+    const validationReason = invalidation ? (VALIDATION_REASON[invalidation.reason] || invalidation.reason) : '';
     return `<div class="story-card ${st} ${isActive ? 'active-pulse' : ''}">
       <div class="row">
         <div class="dot ${isActive ? 'breathe' : ''}" style="background:${cfg.dotColor}"></div>
@@ -240,6 +258,7 @@ function renderStories(stories, cur) {
           </div>
           <div class="card-title">${esc(s.title)}</div>
           ${s.difficultyReason ? `<div class="notes" style="color:var(--muted)">${esc(s.difficultyReason)}</div>` : ''}
+          ${validationReason ? `<div class="notes" style="color:var(--mac-purple)">待验收原因：${esc(validationReason)}</div>` : ''}
           ${s.notes ? `<div class="notes">${esc(s.notes)}</div>` : ''}
         </div>
       </div>
@@ -265,13 +284,13 @@ function renderLogs(logs) {
 }
 
 function renderProgress(stories) {
-  const passed = stories.filter(s => !s.blocked && s.passes === true && s.validated === true).length;
+  const passed = stories.filter(s => !s.blocked && s.passes === true && s.validated === true && hasValidationReceipt(s)).length;
   const total = stories.length;
   document.getElementById('progressFill').style.width = (total ? Math.round(passed/total*100) : 0) + '%';
   document.getElementById('progressLabel').textContent = passed + '/' + total;
 }
 
-function renderPhase(rt, routing, stateCorrupted) {
+function renderPhase(rt, routing, stateCorrupted, prdReady = true, prdError = null) {
   const cfg = PHASE_MAP[rt.phase] || PHASE_MAP.idle;
   const dot = document.getElementById('phaseDot');
   const text = document.getElementById('phaseText');
@@ -289,7 +308,9 @@ function renderPhase(rt, routing, stateCorrupted) {
   document.getElementById('iterInfo').textContent = `Round ${rt.iteration}/${rt.max_iterations}`;
   document.getElementById('elapsedInfo').textContent = fmtElapsed(rt.elapsed);
   const routingText = document.getElementById('routingText');
-  if (stateCorrupted) {
+  if (!prdReady) {
+    routingText.textContent = '⚠ PRD 未就绪：' + (prdError || 'Story 定义无效');
+  } else if (stateCorrupted) {
     routingText.textContent = '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair';
   } else if (routing && routing.status === 'enabled') {
     const m = routing.config;
@@ -316,11 +337,14 @@ function setEndedBanner(visible) {
 const FALLBACK = {
   runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340, model: 'opus', route_source: 'difficulty', story_difficulty: 'medium', runner: 'claude' },
   stateCorrupted: false,
+  prdReady: true,
+  prdError: null,
+  validationInvalidations: [],
   modelRouting: { status: 'disabled', config: null, errors: [] },
   project: '简易笔记系统',
   stories: [
-    { id:'US-001', title:'初始化项目结构与静态导出配置', passes:true, validated:true, notes:'', retryCount:0, blocked:false },
-    { id:'US-002', title:'定义 Note 数据类型与示例数据预加载', passes:true, validated:true, notes:'', retryCount:0, blocked:false },
+    { id:'US-001', title:'初始化项目结构与静态导出配置', passes:true, validated:true, validationReceipt:{ schemaVersion:1, requestId:'demo-1', gitHead:'a'.repeat(40), acceptanceHash:'sha256:'+'b'.repeat(64) }, notes:'', retryCount:0, blocked:false },
+    { id:'US-002', title:'定义 Note 数据类型与示例数据预加载', passes:true, validated:true, validationReceipt:{ schemaVersion:1, requestId:'demo-2', gitHead:'a'.repeat(40), acceptanceHash:'sha256:'+'c'.repeat(64) }, notes:'', retryCount:0, blocked:false },
     { id:'US-003', title:'笔记列表组件（左侧栏）', passes:false, validated:false, notes:'列表项点击事件未正确绑定', retryCount:2, blocked:false },
     { id:'US-004', title:'笔记详情展示（右侧区域）', passes:false, validated:false, notes:'', retryCount:0, blocked:false },
     { id:'US-005', title:'新建笔记功能', passes:false, validated:false, notes:'', retryCount:0, blocked:false },
@@ -354,10 +378,10 @@ async function poll() {
       data = FALLBACK;
     }
   }
-  renderStories(data.stories, data.runtime.current_story);
+  renderStories(data.stories, data.runtime.current_story, data.validationInvalidations || []);
   renderProgress(data.stories);
   renderLogs(data.logs);
-  renderPhase(data.runtime, data.modelRouting, data.stateCorrupted);
+  renderPhase(data.runtime, data.modelRouting, data.stateCorrupted, data.prdReady, data.prdError);
 }
 
 setInterval(poll, POLL_MS);

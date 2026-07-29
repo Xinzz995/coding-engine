@@ -1,15 +1,10 @@
-import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
+import { execTrustedToolSync } from '../engine/trusted-tool.js';
 
 const DEFAULT_GITHUB_READ_TIMEOUT_MS = 10_000;
 const DEFAULT_GITHUB_READ_ATTEMPTS = 3;
 const GITHUB_RETRY_BASE_DELAY_MS = 250;
-const RETRYABLE_GITHUB_READ_HTTP_STATUSES: ReadonlySet<number> = new Set([
-  408,
-  500,
-  502,
-  503,
-  504,
-]);
+const RETRYABLE_GITHUB_READ_HTTP_STATUSES: ReadonlySet<number> = new Set([408, 500, 502, 503, 504]);
 
 export interface GitHubCommandInvocation {
   args: readonly string[];
@@ -175,7 +170,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function stringField(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value === '') throw new GitHubQualityError(`GitHub 返回缺少 ${name}`);
+  if (typeof value !== 'string' || value === '')
+    throw new GitHubQualityError(`GitHub 返回缺少 ${name}`);
   return value;
 }
 
@@ -192,7 +188,8 @@ function parseRepository(value: unknown): GitHubRepositoryInfo {
   if (!isRecord(defaultRef)) {
     throw new GitHubQualityError('远端仓库没有默认分支；请先创建最小初始提交');
   }
-  if (typeof value.isPrivate !== 'boolean') throw new GitHubQualityError('GitHub 返回非法 isPrivate');
+  if (typeof value.isPrivate !== 'boolean')
+    throw new GitHubQualityError('GitHub 返回非法 isPrivate');
   return {
     fullName: stringField(value.nameWithOwner, 'nameWithOwner'),
     defaultBranch: stringField(defaultRef.name, 'defaultBranchRef.name'),
@@ -216,9 +213,13 @@ function parseRuleset(value: unknown): GitHubRuleset {
   if (!isRecord(value)) throw new GitHubQualityError('无法解析 GitHub Ruleset');
   const conditions = value.conditions;
   const refName = isRecord(conditions) ? conditions.ref_name : null;
-  if (!isRecord(refName) || !Array.isArray(refName.include) || !Array.isArray(refName.exclude)
-      || !refName.include.every((item) => typeof item === 'string')
-      || !refName.exclude.every((item) => typeof item === 'string')) {
+  if (
+    !isRecord(refName) ||
+    !Array.isArray(refName.include) ||
+    !Array.isArray(refName.exclude) ||
+    !refName.include.every((item) => typeof item === 'string') ||
+    !refName.exclude.every((item) => typeof item === 'string')
+  ) {
     throw new GitHubQualityError('GitHub Ruleset 缺少合法 ref_name 条件');
   }
   if (!Array.isArray(value.rules) || !Array.isArray(value.bypass_actors)) {
@@ -267,7 +268,8 @@ function parseIssue(value: unknown): GitHubIssueInfo {
     throw new GitHubQualityError('无法解析 GitHub Issue');
   }
   const state = value.state;
-  if (state !== 'open' && state !== 'closed') throw new GitHubQualityError('GitHub Issue state 非法');
+  if (state !== 'open' && state !== 'closed')
+    throw new GitHubQualityError('GitHub Issue state 非法');
   return {
     number: numberField(value.number, 'issue.number'),
     state,
@@ -324,8 +326,11 @@ function parseSecurityFeatures(value: unknown): GitHubSecurityFeatures {
 }
 
 function parseImmutableReleases(value: unknown): GitHubImmutableReleases {
-  if (!isRecord(value) || typeof value.enabled !== 'boolean'
-      || typeof value.enforced_by_owner !== 'boolean') {
+  if (
+    !isRecord(value) ||
+    typeof value.enabled !== 'boolean' ||
+    typeof value.enforced_by_owner !== 'boolean'
+  ) {
     throw new GitHubQualityError('GitHub 未返回合法的不可变 Release 状态');
   }
   return { enabled: value.enabled, enforcedByOwner: value.enforced_by_owner };
@@ -355,10 +360,10 @@ function classifyCommandError(
   operationCanRetry: boolean,
 ): GitHubQualityError {
   if (error instanceof GitHubQualityError) {
-    const retryable = operationCanRetry
-      && error.retryable
-      && (error.httpStatus === undefined
-        || RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(error.httpStatus));
+    const retryable =
+      operationCanRetry &&
+      error.retryable &&
+      (error.httpStatus === undefined || RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(error.httpStatus));
     if (retryable === error.retryable && error.attempts === attempts) return error;
     return new GitHubQualityError('GitHub 远端操作失败', error.detail ?? error.message, {
       kind: error.kind,
@@ -371,55 +376,92 @@ function classifyCommandError(
   const code = commandErrorCode(error);
   const httpStatus = httpStatusFromError(detail);
   const rateLimited = httpStatus === 429 || /(?:secondary |API )?rate limit/i.test(detail);
-  const transient = httpStatus === undefined
-    ? [
-        'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETDOWN',
-        'ENETUNREACH', 'ENOTFOUND', 'EPIPE', 'ETIMEDOUT',
-      ].includes(code ?? '')
-      || /(?:\bEOF\b|connection reset|connection refused|connection attempt failed|forcibly closed by (?:the )?remote host|socket hang up|TLS handshake timeout|i\/o timeout|operation timed out|context deadline exceeded|temporary failure|network is unreachable|no such host|could not resolve host|error connecting to|check your internet connection)/i
-        .test(detail)
-    : RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(httpStatus);
+  const transient =
+    httpStatus === undefined
+      ? [
+          'ECONNRESET',
+          'ECONNREFUSED',
+          'EAI_AGAIN',
+          'EHOSTUNREACH',
+          'ENETDOWN',
+          'ENETUNREACH',
+          'ENOTFOUND',
+          'EPIPE',
+          'ETIMEDOUT',
+        ].includes(code ?? '') ||
+        /(?:\bEOF\b|connection reset|connection refused|connection attempt failed|forcibly closed by (?:the )?remote host|socket hang up|TLS handshake timeout|i\/o timeout|operation timed out|context deadline exceeded|temporary failure|network is unreachable|no such host|could not resolve host|error connecting to|check your internet connection)/i.test(
+          detail,
+        )
+      : RETRYABLE_GITHUB_READ_HTTP_STATUSES.has(httpStatus);
 
-  if (httpStatus === 401
-      || /bad credentials|not logged in|gh auth login|populate (?:the )?GH_TOKEN|authentication token/i
-        .test(detail)) {
+  if (
+    httpStatus === 401 ||
+    /bad credentials|not logged in|gh auth login|populate (?:the )?GH_TOKEN|authentication token/i.test(
+      detail,
+    )
+  ) {
     return new GitHubQualityError('GitHub CLI 未认证', detail, {
-      kind: 'unauthenticated', httpStatus, retryable: false, attempts,
+      kind: 'unauthenticated',
+      httpStatus,
+      retryable: false,
+      attempts,
     });
   }
   if (rateLimited) {
     return new GitHubQualityError('GitHub API 请求受限', detail, {
-      kind: 'rate-limit', httpStatus, retryable: false, attempts,
+      kind: 'rate-limit',
+      httpStatus,
+      retryable: false,
+      attempts,
     });
   }
-  if (httpStatus === 403
-      || /resource not accessible by (?:integration|personal access token)/i.test(detail)) {
+  if (
+    httpStatus === 403 ||
+    /resource not accessible by (?:integration|personal access token)/i.test(detail)
+  ) {
     return new GitHubQualityError('GitHub API 权限不足', detail, {
-      kind: 'forbidden', httpStatus, retryable: false, attempts,
+      kind: 'forbidden',
+      httpStatus,
+      retryable: false,
+      attempts,
     });
   }
   if (httpStatus === 404) {
     return new GitHubQualityError('GitHub 资源不存在', detail, {
-      kind: 'not-found', httpStatus, retryable: false, attempts,
+      kind: 'not-found',
+      httpStatus,
+      retryable: false,
+      attempts,
     });
   }
   if (httpStatus === 422) {
     return new GitHubQualityError('GitHub API 请求无效', detail, {
-      kind: 'validation', httpStatus, retryable: false, attempts,
+      kind: 'validation',
+      httpStatus,
+      retryable: false,
+      attempts,
     });
   }
   if (transient) {
     return new GitHubQualityError('GitHub 远端暂时不可用', detail, {
-      kind: 'transient', httpStatus, retryable: operationCanRetry, attempts,
+      kind: 'transient',
+      httpStatus,
+      retryable: operationCanRetry,
+      attempts,
     });
   }
   if (code === 'ENOENT') {
     return new GitHubQualityError('无法运行 GitHub CLI', detail, {
-      kind: 'tool', retryable: false, attempts,
+      kind: 'tool',
+      retryable: false,
+      attempts,
     });
   }
   return new GitHubQualityError('GitHub API 调用失败', detail, {
-    kind: 'unknown', httpStatus, retryable: false, attempts,
+    kind: 'unknown',
+    httpStatus,
+    retryable: false,
+    attempts,
   });
 }
 
@@ -430,10 +472,11 @@ function sleepSync(delayMs: number): void {
 }
 
 function defaultCommandExecutor(invocation: GitHubCommandInvocation): string {
-  return execFileSync('gh', [...invocation.args], {
-    ...(invocation.cwd ? { cwd: invocation.cwd } : {}),
+  const root = resolve(invocation.cwd ?? process.cwd());
+  return execTrustedToolSync('gh', invocation.args, {
+    cwd: root,
+    projectRoot: root,
     ...(invocation.input === undefined ? {} : { input: invocation.input }),
-    encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, GH_PROMPT_DISABLED: '1' },
     maxBuffer: 8 * 1024 * 1024,
@@ -445,6 +488,7 @@ function defaultCommandExecutor(invocation: GitHubCommandInvocation): string {
 export class GhGitHubQualityClient implements GitHubQualityClient {
   private readonly executor: GitHubCommandExecutor;
   private readonly sleep: (delayMs: number) => void;
+  private projectRoot = resolve(process.cwd());
 
   constructor(options: GhGitHubQualityClientOptions = {}) {
     this.executor = options.executor ?? defaultCommandExecutor;
@@ -458,7 +502,7 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
       try {
         output = this.executor({
           args,
-          ...(cwd ? { cwd } : {}),
+          cwd: resolve(cwd ?? this.projectRoot),
           ...(input === undefined ? {} : { input }),
           ...(retryRead ? { timeoutMs: DEFAULT_GITHUB_READ_TIMEOUT_MS } : {}),
         });
@@ -470,7 +514,9 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
       }
       if (typeof output !== 'string') {
         throw new GitHubQualityError('GitHub CLI 返回非文本结果', undefined, {
-          kind: 'invalid-response', retryable: false, attempts: attempt,
+          kind: 'invalid-response',
+          retryable: false,
+          attempts: attempt,
         });
       }
       if (output.trim() === '') return null;
@@ -485,12 +531,20 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
       }
     }
     throw new GitHubQualityError('GitHub 读取重试未产生结果', undefined, {
-      kind: 'unknown', retryable: false, attempts: maxAttempts,
+      kind: 'unknown',
+      retryable: false,
+      attempts: maxAttempts,
     });
   }
 
   private api(path: string, method: 'GET' | 'POST' | 'PUT' = 'GET', body?: unknown): unknown {
-    const args = ['api', '-H', 'Accept: application/vnd.github+json', '-H', 'X-GitHub-Api-Version: 2022-11-28'];
+    const args = [
+      'api',
+      '-H',
+      'Accept: application/vnd.github+json',
+      '-H',
+      'X-GitHub-Api-Version: 2022-11-28',
+    ];
     if (method !== 'GET') args.push('--method', method);
     args.push(path);
     if (body !== undefined) args.push('--input', '-');
@@ -503,9 +557,15 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
   }
 
   discoverRepository(root: string): GitHubRepositoryInfo {
-    return parseRepository(this.run([
-      'repo', 'view', '--json', 'nameWithOwner,defaultBranchRef,isPrivate',
-    ], root, undefined, true));
+    this.projectRoot = resolve(root);
+    return parseRepository(
+      this.run(
+        ['repo', 'view', '--json', 'nameWithOwner,defaultBranchRef,isPrivate'],
+        root,
+        undefined,
+        true,
+      ),
+    );
   }
 
   verifyDefaultBranch(repository: GitHubRepositoryInfo): void {
@@ -554,7 +614,9 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
   }
 
   listCheckRuns(repository: string, sha: string): GitHubCheckRun[] {
-    const value = this.api(`repos/${repository}/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`);
+    const value = this.api(
+      `repos/${repository}/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`,
+    );
     if (!isRecord(value) || !Array.isArray(value.check_runs)) {
       throw new GitHubQualityError('GitHub 返回的 check runs 非法');
     }

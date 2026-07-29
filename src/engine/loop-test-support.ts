@@ -6,8 +6,10 @@ import { tmpdir } from 'node:os';
 import { runLoop as runProductionLoop, type LoopConfig } from './loop.js';
 import type { QualityContract, QualityContractReadResult } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
-import { digest } from '../review/common.js';
+import { digest, reviewRoutingDigest } from '../review/common.js';
 import type { FinalReviewState } from '../review/types.js';
+import { acceptanceHash } from './validation-protocol.js';
+import type { StoryState, ValidationReceipt } from './state.js';
 
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 
@@ -64,11 +66,29 @@ export function setup(
   return { workspace, instructionsDir };
 }
 
+/** 为会产生真实提交的循环回归建立隔离 Git 根，绝不改动当前仓库。 */
+export function setupGitProject(): string {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'loop-project-'));
+  cleanup.push(() => rmSync(projectRoot, { recursive: true, force: true }));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: projectRoot, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.name', 'coding-x-test'], { cwd: projectRoot });
+  execFileSync('git', ['config', 'user.email', 'coding-x-test@example.invalid'], {
+    cwd: projectRoot,
+  });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: projectRoot });
+  writeFileSync(join(projectRoot, 'source.txt'), 'initial\n');
+  execFileSync('git', ['add', 'source.txt'], { cwd: projectRoot });
+  execFileSync('git', ['commit', '-m', 'initial'], { cwd: projectRoot, stdio: 'ignore' });
+  return projectRoot;
+}
+
+export const TEST_ACCEPTANCE_CRITERIA = ['fixture acceptance criterion'] as const;
+
 export const story = (over: Record<string, unknown> = {}) => ({
   id: 'US-001',
   title: 't',
   description: 'd',
-  acceptanceCriteria: [],
+  acceptanceCriteria: [...TEST_ACCEPTANCE_CRITERIA],
   priority: 1,
   ...over,
 });
@@ -99,10 +119,54 @@ export const catalogWith =
     });
 
 export const finalReviewPass: NonNullable<LoopConfig['finalReviewRunner']> = (options) =>
-  Promise.resolve({
-    exitCode: options.shadow ? 7 : 0,
-    message: options.shadow ? 'fixture shadow review' : 'fixture final review passed',
-  });
+  Promise.resolve(
+    options.validateStoryReceipts().ok
+      ? {
+          exitCode: options.shadow ? 7 : 0,
+          message: options.shadow ? 'fixture shadow review' : 'fixture final review passed',
+        }
+      : { exitCode: 5, message: 'fixture Story receipts are not current' },
+  );
+
+export function currentGitHead(projectRoot = process.cwd()): string {
+  return execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+  })
+    .trim()
+    .toLowerCase();
+}
+
+export function validationReceipt(
+  storyId = 'US-001',
+  criteria: readonly string[] = TEST_ACCEPTANCE_CRITERIA,
+  gitHead = currentGitHead(),
+  requestId = `fixture-${storyId}`,
+): ValidationReceipt {
+  return {
+    schemaVersion: 1,
+    requestId,
+    gitHead,
+    acceptanceHash: acceptanceHash(storyId, criteria),
+  };
+}
+
+export function passedStoryState(
+  storyId = 'US-001',
+  criteria: readonly string[] = TEST_ACCEPTANCE_CRITERIA,
+  gitHead = currentGitHead(),
+  requestId?: string,
+): StoryState {
+  return {
+    passes: true,
+    validated: true,
+    validationReceipt: validationReceipt(storyId, criteria, gitHead, requestId),
+    notes: '',
+    retryCount: 0,
+    blocked: false,
+    escalated: false,
+  };
+}
 
 export function previousFinalReview(headSha: string): FinalReviewState {
   const risk = {
@@ -114,7 +178,7 @@ export function previousFinalReview(headSha: string): FinalReviewState {
   };
   const riskDigest = digest(risk);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'passed',
     deliveryStatus: 'ready',
     binding: {
@@ -127,6 +191,9 @@ export function previousFinalReview(headSha: string): FinalReviewState {
       specDigest: 'spec',
       engineeringStandardsDigest: 'standards',
       qualityContractDigest: 'contract',
+      storyValidationDigest: 'story-validation',
+      reviewDecisionsDigest: 'review-decisions',
+      reviewRoutingDigest: reviewRoutingDigest(undefined),
       codingXVersion: CODING_X_VERSION,
       runner: 'claude',
       model: 'review-model',
@@ -176,6 +243,7 @@ export const runLoop = (cfg: LoopConfig): Promise<number> =>
     ...cfg,
     qualityContractReader: () => readyQualityContract(),
     legacyValidatorProtocolForTests: true,
+    unsafeSkipAgentExecutableFreezeForTests: true,
     finalReviewRunner: cfg.finalReviewRunner ?? finalReviewPass,
   });
 
@@ -213,16 +281,17 @@ export function fakeBoundValidator(workspace: string, mode: BoundValidatorMode):
     let call = 1;
     try { call = Number(readFileSync(${JSON.stringify(calls)}, 'utf8')) + 1; } catch {}
     writeFileSync(${JSON.stringify(calls)}, String(call));
-    if (call === 1) {
+    const prompt = process.argv.at(-1) ?? '';
+    const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+    if (markerAt < 0) {
       const state = JSON.parse(readFileSync(statePath, 'utf8'));
       state['US-001'].passes = true;
       state['US-001'].validated = false;
+      state['US-001'].validationReceipt = null;
       writeFileSync(statePath, JSON.stringify(state, null, 2));
       appendFileSync(${JSON.stringify(progressPath)}, '## builder completed US-001\n');
       process.exit(0);
     }
-    const prompt = process.argv.at(-1) ?? '';
-    const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
     const jsonAt = prompt.indexOf('{', markerAt);
     const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);
     if (markerAt < 0 || jsonAt < 0 || fenceAt < 0) process.exit(9);
@@ -269,6 +338,10 @@ export function strictConfig(workspace: string, instructionsDir: string): LoopCo
     stallLimit: 3,
     qualityContractReader: () => readyQualityContract(),
     finalReviewRunner: finalReviewPass,
+    unsafeSkipAgentExecutableFreezeForTests: true,
+    // 单测仓库本身会被本轮待测实现改脏；结构化协议的 Git 读法由
+    // validation-protocol.test.ts 在隔离仓库验证，循环攻击测试再显式覆盖此注入。
+    validationArtifactIdentityReader: (cwd) => ({ ok: true, gitHead: currentGitHead(cwd) }),
   };
 }
 

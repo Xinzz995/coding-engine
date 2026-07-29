@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { QualityContract } from '../quality/contract.js';
 import type { ReviewPreflightContext } from './preflight.js';
-import { assessReviewRisk } from './risk.js';
+import {
+  applyReviewerDeepReviewRequest,
+  assessReviewRisk,
+  REVIEWER_DEEP_REVIEW_REASON,
+} from './risk.js';
 
 function context(over: Partial<ReviewPreflightContext> = {}): ReviewPreflightContext {
   const contract = {
@@ -14,7 +18,8 @@ function context(over: Partial<ReviewPreflightContext> = {}): ReviewPreflightCon
     },
   } as QualityContract;
   return {
-    root: '/repo', branch: 'feature', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40),
+    root: '/repo', workspace: '/repo/.workspace',
+    branch: 'feature', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40),
     pullRequest: {
       number: 1, headSha: 'b'.repeat(40), baseBranch: 'main', baseSha: 'a'.repeat(40),
       url: 'https://example.test/1', title: 'change', body: '', labels: [],
@@ -66,5 +71,15 @@ describe('assessReviewRisk', () => {
       ],
     }));
     expect(result.categories).toEqual(expect.arrayContaining(['cross-module', 'large-file']));
+  });
+
+  it('adds a reproducible Reviewer escalation even when the PR already requested deep review', () => {
+    const base = assessReviewRisk(context({
+      pullRequest: { ...context().pullRequest, body: '- [x] 我主动要求深度结构评审\n' },
+    }));
+    const escalated = applyReviewerDeepReviewRequest(base, true);
+    expect(escalated.categories.filter((item) => item === 'reviewer-request')).toHaveLength(1);
+    expect(escalated.reasons).toContain(REVIEWER_DEEP_REVIEW_REASON);
+    expect(applyReviewerDeepReviewRequest(escalated, true)).toEqual(escalated);
   });
 });

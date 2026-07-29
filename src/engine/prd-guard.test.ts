@@ -1,5 +1,15 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync, mkdirSync, unlinkSync, chmodSync } from 'node:fs';
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  readdirSync,
+  mkdirSync,
+  unlinkSync,
+  chmodSync,
+  symlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createPrdGuard } from './prd-guard.js';
@@ -20,9 +30,19 @@ function setup(content?: string): { dir: string; prdPath: string } {
 }
 
 const PRD = JSON.stringify({
-  project: 'p', branchName: 'ralph/x', description: 'd',
+  project: 'p',
+  branchName: 'ralph/x',
+  description: 'd',
   qualityChecks: ['npm test'],
-  userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['原始验收标准'], priority: 1 }],
+  userStories: [
+    {
+      id: 'US-001',
+      title: 't',
+      description: 'd',
+      acceptanceCriteria: ['原始验收标准'],
+      priority: 1,
+    },
+  ],
 });
 
 describe('createPrdGuard: 快照建立与一致读取', () => {
@@ -124,6 +144,27 @@ describe('createPrdGuard: 篡改处置', () => {
     expect(readdirSync(dir).filter((f) => f.startsWith('prd.tampered-'))).toHaveLength(0);
     expect(guard.summary().count).toBe(1);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    '快照建立后拒绝 prd.json 软链，只恢复控制路径且不读取或改写目标',
+    () => {
+      const { dir, prdPath } = setup(PRD);
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const guard = createPrdGuard(prdPath);
+      guard.read();
+      const target = join(dir, 'outside-prd.json');
+      const forged = PRD.replace('原始验收标准', '软链外的伪造标准');
+      writeFileSync(target, forged);
+      unlinkSync(prdPath);
+      symlinkSync(target, prdPath);
+
+      const result = guard.read();
+      expect(result.prd?.userStories[0].acceptanceCriteria).toEqual(['原始验收标准']);
+      expect(result.restoreFailed).toBe(false);
+      expect(readFileSync(prdPath, 'utf8')).toBe(PRD);
+      expect(readFileSync(target, 'utf8')).toBe(forged);
+    },
+  );
 
   it('快照建立后文件损坏（非法 JSON）：损坏内容存档、磁盘恢复', () => {
     const { dir, prdPath } = setup(PRD);

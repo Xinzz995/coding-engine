@@ -668,6 +668,7 @@ describe('模型升级触发与状态所有权', () => {
       expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toEqual({
         passes: false,
         validated: false,
+        validationReceipt: null,
         notes: 'keep',
         retryCount: 2,
         blocked: false,

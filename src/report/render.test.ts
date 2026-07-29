@@ -3,11 +3,21 @@ import { renderReportHtml, escapeHtml, renderMarkdownLite } from './render.js';
 import type { ReportData } from './report.js';
 import type { EvidenceRecord } from '../engine/evidence.js';
 import type { ModelsConfig } from '../engine/prd.js';
+import type { ValidationReceipt } from '../engine/state.js';
+
+const validationReceipt = {
+  schemaVersion: 1,
+  requestId: 'request-US-001',
+  gitHead: 'a'.repeat(40),
+  acceptanceHash: `sha256:${'b'.repeat(64)}`,
+} satisfies ValidationReceipt;
 
 function withModelsConfig(): ModelsConfig {
   return {
-    runner: 'claude', builder: { low: 'fast-m', medium: 'mid-m', high: 'high-m' },
-    validator: 'val-m', escalation: 'esc-m',
+    runner: 'claude',
+    builder: { low: 'fast-m', medium: 'mid-m', high: 'high-m' },
+    validator: 'val-m',
+    escalation: 'esc-m',
   };
 }
 
@@ -17,15 +27,33 @@ function data(over: Partial<ReportData> = {}): ReportData {
     generatedAt: new Date('2026-07-08T12:34:00'),
     prdSource: 'disk',
     prd: {
-      project: 'proj', branchName: 'ralph/x', description: 'd',
+      project: 'proj',
+      branchName: 'ralph/x',
+      description: 'd',
       userStories: [
-        { id: 'US-001', title: '第一个', description: 'd', acceptanceCriteria: ['能打开页面'], priority: 1 },
+        {
+          id: 'US-001',
+          title: '第一个',
+          description: 'd',
+          acceptanceCriteria: ['能打开页面'],
+          priority: 1,
+        },
       ],
     },
     stories: [
       {
-        id: 'US-001', title: '第一个', description: 'd', acceptanceCriteria: ['能打开页面'],
-        priority: 1, passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false,
+        id: 'US-001',
+        title: '第一个',
+        description: 'd',
+        acceptanceCriteria: ['能打开页面'],
+        priority: 1,
+        passes: true,
+        validated: true,
+        validationReceipt,
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
       },
     ],
     stateCorrupted: false,
@@ -34,7 +62,13 @@ function data(over: Partial<ReportData> = {}): ReportData {
     tamperedArchives: [],
     screenshots: [],
     evidence: { records: [], skippedLines: 0 },
-    finalReview: { status: 'missing' },
+    finalReview: {
+      read: { status: 'missing' },
+      current: false,
+      staleReasons: [],
+    },
+    currentGitHead: 'b'.repeat(40),
+    storyValidationDigest: 'story-validation',
     ...over,
   };
 }
@@ -45,29 +79,66 @@ function ev(records: EvidenceRecord[], skippedLines = 0) {
 
 function readyReview(shadow = false): ReportData['finalReview'] {
   return {
-    status: 'ready',
-    state: {
-      schemaVersion: 1,
-      status: 'passed',
-      deliveryStatus: shadow ? 'shadow' : 'ready',
-      binding: {
-        prNumber: 9, targetBranch: 'main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40),
-        prTitleDigest: 'title', prBodyDigest: 'body', specDigest: 'spec',
-        engineeringStandardsDigest: 'standards', qualityContractDigest: 'contract',
-        codingXVersion: '0.30.0', runner: 'codex', model: 'gpt-test', runnerVersion: '1.0.0',
-        reviewRulesVersion: '1.0.0', reviewRulesDigest: 'rules', riskDigest: 'risk',
+    read: {
+      status: 'ready',
+      state: {
+        schemaVersion: 2,
+        status: 'passed',
+        deliveryStatus: shadow ? 'shadow' : 'ready',
+        binding: {
+          prNumber: 9,
+          targetBranch: 'main',
+          baseSha: 'a'.repeat(40),
+          headSha: 'b'.repeat(40),
+          prTitleDigest: 'title',
+          prBodyDigest: 'body',
+          specDigest: 'spec',
+          engineeringStandardsDigest: 'standards',
+          qualityContractDigest: 'contract',
+          storyValidationDigest: 'story-validation',
+          reviewDecisionsDigest: 'review-decisions',
+          reviewRoutingDigest: 'review-routing',
+          codingXVersion: '0.30.0',
+          runner: 'codex',
+          model: 'gpt-test',
+          runnerVersion: '1.0.0',
+          reviewRulesVersion: '1.0.0',
+          reviewRulesDigest: 'rules',
+          riskDigest: 'risk',
+        },
+        risk: {
+          triggered: false,
+          categories: [],
+          reasons: [],
+          changedFiles: ['src/a.ts'],
+          changedModules: ['src'],
+          digest: 'risk',
+        },
+        axes: [
+          {
+            axis: 'spec',
+            status: 'passed',
+            summary: 'ok',
+            findings: [],
+            requestDeepReview: false,
+            durationMs: 1,
+            attempts: 1,
+          },
+        ],
+        remote: {
+          status: 'ready',
+          checks: [],
+          rulesetErrors: [],
+          checkedAt: '2026-07-08T12:34:00Z',
+        },
+        round: 1,
+        shadow,
+        startedAt: '2026-07-08T12:33:00Z',
+        completedAt: '2026-07-08T12:34:00Z',
       },
-      risk: {
-        triggered: false, categories: [], reasons: [], changedFiles: ['src/a.ts'],
-        changedModules: ['src'], digest: 'risk',
-      },
-      axes: [{
-        axis: 'spec', status: 'passed', summary: 'ok', findings: [],
-        requestDeepReview: false, durationMs: 1, attempts: 1,
-      }],
-      remote: { status: 'ready', checks: [], rulesetErrors: [], checkedAt: '2026-07-08T12:34:00Z' },
-      round: 1, shadow, startedAt: '2026-07-08T12:33:00Z', completedAt: '2026-07-08T12:34:00Z',
     },
+    current: true,
+    staleReasons: [],
   };
 }
 
@@ -119,26 +190,53 @@ describe('renderReportHtml', () => {
     expect(passed).toContain('✅ 通过');
     expect(passed).not.toContain('重试');
     const s = data().stories[0];
-    const blocked = renderReportHtml(data({
-      stories: [{ ...s, passes: false, blocked: true, retryCount: 5 }],
-    }));
+    const blocked = renderReportHtml(
+      data({
+        stories: [
+          {
+            ...s,
+            passes: false,
+            validated: false,
+            validationReceipt: null,
+            blocked: true,
+            retryCount: 5,
+          },
+        ],
+      }),
+    );
     expect(blocked).toContain('⛔ blocked');
     expect(blocked).toContain('重试 5 次');
-    const pending = renderReportHtml(data({
-      stories: [{ ...s, passes: false, blocked: false }],
-    }));
+    const pending = renderReportHtml(
+      data({
+        stories: [
+          { ...s, passes: false, validated: false, validationReceipt: null, blocked: false },
+        ],
+      }),
+    );
     expect(pending).toContain('⬜ 未完成');
   });
 
   it('结果横幅三态', () => {
     expect(renderReportHtml(data())).toContain('Story 验证完成 1/1');
     const s = data().stories[0];
-    expect(renderReportHtml(data({
-      stories: [{ ...s, passes: false, blocked: true }],
-    }))).toContain('blocked');
-    expect(renderReportHtml(data({
-      stories: [{ ...s, passes: false, blocked: false }],
-    }))).toContain('进行中');
+    expect(
+      renderReportHtml(
+        data({
+          stories: [
+            { ...s, passes: false, validated: false, validationReceipt: null, blocked: true },
+          ],
+        }),
+      ),
+    ).toContain('blocked');
+    expect(
+      renderReportHtml(
+        data({
+          stories: [
+            { ...s, passes: false, validated: false, validationReceipt: null, blocked: false },
+          ],
+        }),
+      ),
+    ).toContain('进行中');
   });
 
   it('把 Story、本地 Review 和 GitHub 交付分开显示', () => {
@@ -150,12 +248,56 @@ describe('renderReportHtml', () => {
     expect(ready).toContain('本地 Review 与 GitHub 交付条件已就绪');
     expect(ready).toContain('PR #9');
 
+    const staleValidation = renderReportHtml(
+      data({
+        finalReview: {
+          ...readyReview(),
+          current: false,
+          staleReasons: ['Story Validator 凭证已变化'],
+        },
+        storyValidationDigest: 'changed-story-validation',
+      }),
+    );
+    expect(staleValidation).toContain(
+      '本地最终 Review 已因 PR、提交、规则、Runner 或 Story 验证变化而失效',
+    );
+    expect(staleValidation).toContain('Story Validator 凭证已变化');
+
+    const remoteDrift = renderReportHtml(
+      data({
+        finalReview: {
+          ...readyReview(),
+          refreshedRemote: {
+            status: 'invalid',
+            checks: [],
+            rulesetErrors: ['必需检查已被替换'],
+            checkedAt: '2026-07-08T12:35:00Z',
+          },
+        },
+      }),
+    );
+    expect(remoteDrift).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
+    expect(remoteDrift).toContain('GitHub：invalid');
+
     const shadow = renderReportHtml(data({ finalReview: readyReview(true) }));
     expect(shadow).toContain('Shadow 结果不能表示可交付');
 
     const corrupted = renderReportHtml(data({ finalReview: readyReview(), stateCorrupted: true }));
     expect(corrupted).toContain('Story 状态未完成或不可验证，不能交付');
     expect(corrupted).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
+
+    const unsupported = renderReportHtml(
+      data({
+        finalReview: {
+          read: { status: 'unsupported', schemaVersion: 1 },
+          current: false,
+          staleReasons: [],
+        },
+      }),
+    );
+    expect(unsupported).toContain('旧格式 v1 已失效');
+    expect(unsupported).toContain('这不表示文件损坏');
+    expect(unsupported).not.toContain('状态损坏');
   });
 
   it('空 userStories 显式警示横幅：不落入「进行中 0/0」', () => {
@@ -166,17 +308,21 @@ describe('renderReportHtml', () => {
 
   it('AC 逐条呈现且转义', () => {
     const s = data().stories[0];
-    const html = renderReportHtml(data({
-      stories: [{ ...s, acceptanceCriteria: ['支持 <b> 标签展示'] }],
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [{ ...s, acceptanceCriteria: ['支持 <b> 标签展示'] }],
+      }),
+    );
     expect(html).toContain('支持 &lt;b&gt; 标签展示');
   });
 
   it('AC 非数组形状时不抛，卡片仍渲染（tryReadPrd 无逐字段守卫的脏数据防御）', () => {
     const s = data().stories[0];
-    const html = renderReportHtml(data({
-      stories: [{ ...s, acceptanceCriteria: 'nope' as unknown as string[] }],
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [{ ...s, acceptanceCriteria: 'nope' as unknown as string[] }],
+      }),
+    );
     expect(html).toContain(s.id);
   });
 
@@ -191,12 +337,18 @@ describe('renderReportHtml', () => {
 
   it('notes 行分类高亮：仲裁/门禁/Validator 失败/BLOCKED', () => {
     const s = data().stories[0];
-    const html = renderReportHtml(data({
-      stories: [{
-        ...s, passes: false,
-        notes: '[需求冲突] 与文档矛盾\n[门禁失败 - 第1次] 2026-07-08 12:00\n[验证失败 - 第2次] 2026-07-08 12:10\n[BLOCKED: 已达到最大重试次数，跳过此 story]\n普通行',
-      }],
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [
+          {
+            ...s,
+            passes: false,
+            notes:
+              '[需求冲突] 与文档矛盾\n[门禁失败 - 第1次] 2026-07-08 12:00\n[验证失败 - 第2次] 2026-07-08 12:10\n[BLOCKED: 已达到最大重试次数，跳过此 story]\n普通行',
+          },
+        ],
+      }),
+    );
     expect(html).toContain('class="note-line arbitration"');
     expect(html).toContain('class="note-line gate-fail"');
     expect(html).toContain('class="note-line blocked-line"');
@@ -205,22 +357,36 @@ describe('renderReportHtml', () => {
 
   it('notes 注入不执行：<script> 必须被转义', () => {
     const s = data().stories[0];
-    const html = renderReportHtml(data({
-      stories: [{ ...s, notes: '<script>alert(1)</script>' }],
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [{ ...s, notes: '<script>alert(1)</script>' }],
+      }),
+    );
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).not.toContain('<script>alert(1)');
   });
 
   it('截图画廊：相对 src、URL 编码、builder/validator 分组、非图片成链接、未归类单列', () => {
-    const html = renderReportHtml(data({
-      screenshots: [
-        { filename: 'builder-US-001-1.png', storyId: 'US-001', phase: 'builder', isImage: true },
-        { filename: 'validator us 001.png', storyId: 'US-001', phase: 'validator', isImage: true },
-        { filename: 'builder-US-001-export.pdf', storyId: 'US-001', phase: 'builder', isImage: false },
-        { filename: 'random.png', storyId: null, phase: null, isImage: true },
-      ],
-    }));
+    const html = renderReportHtml(
+      data({
+        screenshots: [
+          { filename: 'builder-US-001-1.png', storyId: 'US-001', phase: 'builder', isImage: true },
+          {
+            filename: 'validator us 001.png',
+            storyId: 'US-001',
+            phase: 'validator',
+            isImage: true,
+          },
+          {
+            filename: 'builder-US-001-export.pdf',
+            storyId: 'US-001',
+            phase: 'builder',
+            isImage: false,
+          },
+          { filename: 'random.png', storyId: null, phase: null, isImage: true },
+        ],
+      }),
+    );
     expect(html).toContain('src="screenshots/builder-US-001-1.png"');
     expect(html).toContain('screenshots/validator%20us%20001.png');
     expect(html).toContain('builder 截图');
@@ -232,19 +398,28 @@ describe('renderReportHtml', () => {
   });
 
   it('非图片链接强制下载而非浏览器内联打开；所有 target="_blank" 链接加 rel 防 window.opener 反向访问', () => {
-    const html = renderReportHtml(data({
-      screenshots: [
-        { filename: 'builder-US-001-1.png', storyId: 'US-001', phase: 'builder', isImage: true },
-        { filename: 'builder-US-001-export.pdf', storyId: 'US-001', phase: 'builder', isImage: false },
-      ],
-    }));
+    const html = renderReportHtml(
+      data({
+        screenshots: [
+          { filename: 'builder-US-001-1.png', storyId: 'US-001', phase: 'builder', isImage: true },
+          {
+            filename: 'builder-US-001-export.pdf',
+            storyId: 'US-001',
+            phase: 'builder',
+            isImage: false,
+          },
+        ],
+      }),
+    );
     expect(html).toContain(' download');
     expect(html).toContain('rel="noopener noreferrer"');
   });
 
   it('红旗区条件渲染：有 tampered 才出现', () => {
     expect(renderReportHtml(data())).not.toContain('红旗区');
-    const html = renderReportHtml(data({ tamperedArchives: ['prd.tampered-20260708-010101.json'] }));
+    const html = renderReportHtml(
+      data({ tamperedArchives: ['prd.tampered-20260708-010101.json'] }),
+    );
     expect(html).toContain('红旗区');
     expect(html).toContain('prd.tampered-20260708-010101.json');
     expect(html).toContain('ADR-007');
@@ -252,9 +427,11 @@ describe('renderReportHtml', () => {
 
   it('历史 review Markdown 只作为本地反馈展示，不再声称是可信留痕', () => {
     expect(renderReportHtml(data())).toContain('尚无历史 Markdown 反馈');
-    const html = renderReportHtml(data({
-      reviews: [{ filename: 'review-2026-07-08.md', content: '## 层 2 发现清单\n- 发现 A' }],
-    }));
+    const html = renderReportHtml(
+      data({
+        reviews: [{ filename: 'review-2026-07-08.md', content: '## 层 2 发现清单\n- 发现 A' }],
+      }),
+    );
     expect(html).toContain('review-2026-07-08.md');
     expect(html).toContain('<h5>层 2 发现清单</h5>');
     expect(html).toContain('<li>发现 A</li>');
@@ -275,11 +452,21 @@ describe('renderReportHtml', () => {
     expect(renderReportHtml(data())).toContain('PRD 未绑定派生快照');
     const withChecks = data();
     withChecks.prd.qualityChecks = {
-      test: { checks: [{
-        id: 'tests', module: 'root', command: {
-          executable: 'npm', args: ['test'], cwd: '.', platforms: ['linux'], timeoutMs: 1000,
-        },
-      }] },
+      test: {
+        checks: [
+          {
+            id: 'tests',
+            module: 'root',
+            command: {
+              executable: 'npm',
+              args: ['test'],
+              cwd: '.',
+              platforms: ['linux'],
+              timeoutMs: 1000,
+            },
+          },
+        ],
+      },
       build: { notApplicable: '无需构建' },
       static: { notApplicable: 'fixture' },
       security: { notApplicable: 'fixture' },
@@ -320,7 +507,10 @@ describe('renderReportHtml', () => {
 
   it('模型路由：旧 escalateAfter 格式显示重新派生警示', () => {
     const withInvalidEscalate = data();
-    (withInvalidEscalate.prd as { models?: unknown }).models = { ...withModelsConfig(), escalateAfter: 0 };
+    (withInvalidEscalate.prd as { models?: unknown }).models = {
+      ...withModelsConfig(),
+      escalateAfter: 0,
+    };
     const html = renderReportHtml(withInvalidEscalate);
     expect(html).toContain('escalateAfter');
     expect(html).toContain('prd-to-json');
@@ -328,7 +518,10 @@ describe('renderReportHtml', () => {
 
   it('模型路由：旧 profiles 格式显示重新派生警示', () => {
     const withProfiles = data();
-    (withProfiles.prd as { models?: unknown }).models = { ...withModelsConfig(), profiles: { fast: { claude: 'sonnet' } } };
+    (withProfiles.prd as { models?: unknown }).models = {
+      ...withModelsConfig(),
+      profiles: { fast: { claude: 'sonnet' } },
+    };
     const html = renderReportHtml(withProfiles);
     expect(html).toContain('models.profiles');
     expect(html).toContain('prd-to-json');
@@ -365,10 +558,38 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('gate-run 记录渲染执行历史表：通过与失败两态', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', ok: true, total: 2, ran: 2, ms: 8000 },
-      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:10:00.000Z', iteration: 2, storyId: 'US-001', ok: false, total: 2, ran: 1, ms: 500, failedCommand: 'npm test', exitCode: 7, timedOut: false, diagnosticTail: 'FAIL test_x\n<b>expected 1</b>' },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'gate-run',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 1,
+            storyId: 'US-001',
+            ok: true,
+            total: 2,
+            ran: 2,
+            ms: 8000,
+          },
+          {
+            type: 'gate-run',
+            source: 'engine',
+            at: '2026-07-08T06:10:00.000Z',
+            iteration: 2,
+            storyId: 'US-001',
+            ok: false,
+            total: 2,
+            ran: 1,
+            ms: 500,
+            failedCommand: 'npm test',
+            exitCode: 7,
+            timedOut: false,
+            diagnosticTail: 'FAIL test_x\n<b>expected 1</b>',
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('门禁执行历史');
     expect(html).toContain('✅ 通过');
     expect(html).toContain('❌ 未通过');
@@ -384,20 +605,39 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('TDD 配置与最终门禁历史明确区分政策完整性和覆盖命令', () => {
-    const input = data(ev([
-      {
-        type: 'tdd-gate', source: 'engine', at: '2026-07-23T06:00:00.000Z',
-        phase: 'preflight', iteration: 0, storyId: null,
-        ok: true, policyOk: true, commandRan: false, ms: 10,
-      },
-      {
-        type: 'tdd-gate', source: 'engine', at: '2026-07-23T06:10:00.000Z',
-        phase: 'post-builder', iteration: 1, storyId: 'US-001',
-        ok: false, policyOk: true, commandRan: true, ms: 500,
-        failureCode: 'coverage-check-failed', failedCommand: 'npm run coverage',
-        exitCode: 7, timedOut: false, diagnosticTail: 'branch 80% < 90%',
-      },
-    ]));
+    const input = data(
+      ev([
+        {
+          type: 'tdd-gate',
+          source: 'engine',
+          at: '2026-07-23T06:00:00.000Z',
+          phase: 'preflight',
+          iteration: 0,
+          storyId: null,
+          ok: true,
+          policyOk: true,
+          commandRan: false,
+          ms: 10,
+        },
+        {
+          type: 'tdd-gate',
+          source: 'engine',
+          at: '2026-07-23T06:10:00.000Z',
+          phase: 'post-builder',
+          iteration: 1,
+          storyId: 'US-001',
+          ok: false,
+          policyOk: true,
+          commandRan: true,
+          ms: 500,
+          failureCode: 'coverage-check-failed',
+          failedCommand: 'npm run coverage',
+          exitCode: 7,
+          timedOut: false,
+          diagnosticTail: 'branch 80% < 90%',
+        },
+      ]),
+    );
     input.prd.tdd = {
       coverageCheck: 'npm run coverage',
       sourcePathspecs: [':(glob)src/**'],
@@ -416,9 +656,21 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('claim 按 acIndex（1 起）挂到对应 AC 并带 agent 声明标注与免责行', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'screenshot-claim', source: 'validator', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'validator-us-001-pass-1.png', acIndex: 1, note: '页面打开成功' },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'screenshot-claim',
+            source: 'validator',
+            at: '2026-07-08T06:00:00.000Z',
+            storyId: 'US-001',
+            file: 'validator-us-001-pass-1.png',
+            acIndex: 1,
+            note: '页面打开成功',
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('ac-claim');
     expect(html).toContain('validator-us-001-pass-1.png');
     expect(html).toContain('页面打开成功');
@@ -427,10 +679,27 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('claim 的 storyId 大小写不敏感归对；acIndex 越界或缺省归 story 级登记', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'us-001', file: 'builder-US-001-1.png', acIndex: 99 },
-      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:01.000Z', storyId: 'US-001', file: 'builder-US-001-2.png' },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'screenshot-claim',
+            source: 'builder',
+            at: '2026-07-08T06:00:00.000Z',
+            storyId: 'us-001',
+            file: 'builder-US-001-1.png',
+            acIndex: 99,
+          },
+          {
+            type: 'screenshot-claim',
+            source: 'builder',
+            at: '2026-07-08T06:00:01.000Z',
+            storyId: 'US-001',
+            file: 'builder-US-001-2.png',
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('story 级登记');
     expect(html).toContain('builder-US-001-1.png');
     expect(html).toContain('builder-US-001-2.png');
@@ -443,20 +712,40 @@ describe('renderReportHtml evidence 增强', () => {
 
   it('claim 的 acIndex 非整数（如 1.5）归 story 级登记，不静默丢弃（发现 1）', () => {
     const s = data().stories[0];
-    const html = renderReportHtml(data({
-      stories: [{ ...s, acceptanceCriteria: ['第一条', '第二条'] }],
-      ...ev([
-        { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'builder-US-001-noninteger.png', acIndex: 1.5 },
-      ]),
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [{ ...s, acceptanceCriteria: ['第一条', '第二条'] }],
+        ...ev([
+          {
+            type: 'screenshot-claim',
+            source: 'builder',
+            at: '2026-07-08T06:00:00.000Z',
+            storyId: 'US-001',
+            file: 'builder-US-001-noninteger.png',
+            acIndex: 1.5,
+          },
+        ]),
+      }),
+    );
     expect(html).toContain('story 级登记');
     expect(html).toContain('builder-US-001-noninteger.png');
   });
 
   it('storyId 匹配不到任何 story 的孤儿 claim 落未归类工件区', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-999', file: 'mystery.png', note: '来历不明' },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'screenshot-claim',
+            source: 'builder',
+            at: '2026-07-08T06:00:00.000Z',
+            storyId: 'US-999',
+            file: 'mystery.png',
+            note: '来历不明',
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('未归类工件');
     expect(html).toContain('mystery.png');
     expect(html).toContain('US-999');
@@ -464,15 +753,34 @@ describe('renderReportHtml evidence 增强', () => {
 
   it('画廊：有登记的截图排前显示 note，未登记的标「未登记」', () => {
     const shots = [
-      { filename: 'builder-US-001-1.png', storyId: 'US-001', phase: 'builder' as const, isImage: true },
-      { filename: 'builder-US-001-2.png', storyId: 'US-001', phase: 'builder' as const, isImage: true },
+      {
+        filename: 'builder-US-001-1.png',
+        storyId: 'US-001',
+        phase: 'builder' as const,
+        isImage: true,
+      },
+      {
+        filename: 'builder-US-001-2.png',
+        storyId: 'US-001',
+        phase: 'builder' as const,
+        isImage: true,
+      },
     ];
-    const html = renderReportHtml(data({
-      screenshots: shots,
-      ...ev([
-        { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'builder-US-001-2.png', note: '已登记的那张' },
-      ]),
-    }));
+    const html = renderReportHtml(
+      data({
+        screenshots: shots,
+        ...ev([
+          {
+            type: 'screenshot-claim',
+            source: 'builder',
+            at: '2026-07-08T06:00:00.000Z',
+            storyId: 'US-001',
+            file: 'builder-US-001-2.png',
+            note: '已登记的那张',
+          },
+        ]),
+      }),
+    );
     expect(html).toContain('已登记的那张');
     expect(html).toContain('未登记');
     // 登记的 -2 排在未登记的 -1 之前
@@ -480,9 +788,25 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('iteration 记录渲染轮次时间线折叠区', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', builderRan: true, builderModel: 'fast-m', validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 1,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: 'fast-m',
+            validatorRan: true,
+            validatorModel: 'val-m',
+            skippedValidator: false,
+            agentBlocked: false,
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('轮次时间线');
     expect(html).toContain('fast-m');
     expect(html).toContain('val-m');
@@ -490,16 +814,31 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('Agent 调用凭证展示耗时/退出码，并把异常输出按纯文本转义', () => {
-    const html = renderReportHtml(data(ev([{
-      type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z',
-      iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
-      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
-      builderOutcome: 'error',
-      builderInvocation: {
-        durationMs: 4571, exitCode: 1,
-        diagnosticTail: 'API Error: 402 <script>Account overdue</script>',
-      },
-    }])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-22T10:40:23.145Z',
+            iteration: 1,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: null,
+            validatorRan: false,
+            validatorModel: null,
+            skippedValidator: false,
+            agentBlocked: false,
+            builderOutcome: 'error',
+            builderInvocation: {
+              durationMs: 4571,
+              exitCode: 1,
+              diagnosticTail: 'API Error: 402 <script>Account overdue</script>',
+            },
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('4.6s · exit 1');
     expect(html).toContain('Builder 进程输出尾部');
     expect(html).toContain('API Error: 402 &lt;script&gt;Account overdue&lt;/script&gt;');
@@ -507,13 +846,28 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('validator 打回诊断进入时间线且按纯文本转义', () => {
-    const html = renderReportHtml(data(ev([{
-      type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z',
-      iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
-      validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
-      builderOutcome: 'completed', validatorOutcome: 'completed',
-      validatorDiagnostic: 'AC 2 未通过\n<img src=x onerror=alert(1)>',
-    }])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 1,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: null,
+            validatorRan: true,
+            validatorModel: null,
+            skippedValidator: false,
+            agentBlocked: false,
+            builderOutcome: 'completed',
+            validatorOutcome: 'completed',
+            validatorDiagnostic: 'AC 2 未通过\n<img src=x onerror=alert(1)>',
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('Validator 打回详情');
     expect(html).toContain('AC 2 未通过');
     expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
@@ -522,27 +876,51 @@ describe('renderReportHtml evidence 增强', () => {
 
   it('结构化 claim 与协议错误分源展示并转义 agent 文本', () => {
     const hash = `sha256:${'a'.repeat(64)}`;
-    const html = renderReportHtml(data(ev([
-      {
-        type: 'validation-claim', source: 'validator', at: '2026-07-22T06:00:00.000Z',
-        iteration: 2, requestId: 'request-2', storyId: 'US-001',
-        acceptanceHash: hash, gitHead: null, verdict: 'failed',
-        checks: [{ acIndex: 1, passed: false, evidence: '收到 200 <script>alert(1)</script>' }],
-        summary: 'AC 1 未通过',
-      },
-      {
-        type: 'iteration', source: 'engine', at: '2026-07-22T06:00:01.000Z',
-        iteration: 2, storyId: 'US-001', builderRan: true, builderModel: null,
-        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
-        validationProtocol: 'invalid',
-        validationTarget: {
-          requestId: 'request-2', storyId: 'US-001', acceptanceHash: hash, gitHead: null,
-        },
-        validationProtocolError: { code: 'state-mutated', diagnostic: 'Validator 修改 state.json' },
-        validatorStateMutation: true,
-        validationRollback: true,
-      },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'validation-claim',
+            source: 'validator',
+            at: '2026-07-22T06:00:00.000Z',
+            iteration: 2,
+            requestId: 'request-2',
+            storyId: 'US-001',
+            acceptanceHash: hash,
+            gitHead: null,
+            verdict: 'failed',
+            checks: [{ acIndex: 1, passed: false, evidence: '收到 200 <script>alert(1)</script>' }],
+            summary: 'AC 1 未通过',
+          },
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-22T06:00:01.000Z',
+            iteration: 2,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: null,
+            validatorRan: true,
+            validatorModel: null,
+            skippedValidator: false,
+            agentBlocked: false,
+            validationProtocol: 'invalid',
+            validationTarget: {
+              requestId: 'request-2',
+              storyId: 'US-001',
+              acceptanceHash: hash,
+              gitHead: null,
+            },
+            validationProtocolError: {
+              code: 'state-mutated',
+              diagnostic: 'Validator 修改 state.json',
+            },
+            validatorStateMutation: true,
+            validationRollback: true,
+          },
+        ]),
+      ),
+    );
 
     expect(html).toContain('Validator 结构化声明');
     expect(html).toContain('source=validator');
@@ -560,59 +938,133 @@ describe('renderReportHtml evidence 增强', () => {
 
   it('passes=true 但无引擎验收凭证时不显示全绿', () => {
     const base = data();
-    const html = renderReportHtml(data({
-      stories: [{ ...base.stories[0], validated: false }],
-    }));
-    expect(html).toContain('待引擎验收');
+    const html = renderReportHtml(
+      data({
+        stories: [{ ...base.stories[0], validated: true, validationReceipt: null }],
+      }),
+    );
+    expect(html).toContain('实现候选待验收');
     expect(html).toContain('进行中：0/1 通过');
     expect(html).not.toContain('全部通过 1/1');
   });
 
   it('blocked 优先于矛盾的 passes 与 validated 组合', () => {
     const base = data();
-    const html = renderReportHtml(data({
-      stories: [{ ...base.stories[0], blocked: true }],
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [{ ...base.stories[0], blocked: true }],
+      }),
+    );
     expect(html).toContain('⛔ blocked');
     expect(html).toContain('0 通过 · 1 blocked');
     expect(html).not.toContain('全部通过 1/1');
   });
 
-  it('验收凭证签发、回写与 validated 篡改进入时间线和红旗区', () => {
-    const html = renderReportHtml(data(ev([
-      {
-        type: 'iteration', source: 'engine', at: '2026-07-22T06:00:00.000Z',
-        iteration: 3, storyId: 'US-001', builderRan: true, builderModel: null,
-        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
-        validationReceipt: true,
-      },
-      {
-        type: 'iteration', source: 'engine', at: '2026-07-22T06:01:00.000Z',
-        iteration: 4, storyId: 'US-002', builderRan: true, builderModel: null,
-        validatorRan: false, validatorModel: null, skippedValidator: true, agentBlocked: false,
-        validationRollback: true,
-        stateValidationTamper: [{ expected: false, received: true, side: 'builder' }],
-      },
-    ])));
+  it('验收凭证签发、待重验候选、回写与 validated 篡改进入时间线和红旗区', () => {
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-22T06:00:00.000Z',
+            iteration: 3,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: null,
+            validatorRan: true,
+            validatorModel: null,
+            skippedValidator: false,
+            agentBlocked: false,
+            validationReceipt: true,
+          },
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-22T06:01:00.000Z',
+            iteration: 4,
+            storyId: 'US-002',
+            builderRan: true,
+            builderModel: null,
+            validatorRan: true,
+            validatorModel: null,
+            skippedValidator: false,
+            agentBlocked: false,
+            validationPending: true,
+          },
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-22T06:02:00.000Z',
+            iteration: 5,
+            storyId: 'US-002',
+            builderRan: true,
+            builderModel: null,
+            validatorRan: false,
+            validatorModel: null,
+            skippedValidator: true,
+            agentBlocked: false,
+            validationRollback: true,
+            gateStateMutation: true,
+            reviewDecisionsTamper: [
+              {
+                side: 'gate',
+                expectedDigest: `sha256:${'a'.repeat(64)}`,
+                receivedDigest: `sha256:${'b'.repeat(64)}`,
+              },
+            ],
+            stateValidationTamper: [
+              { expected: false, received: true, side: 'builder' },
+              {
+                storyId: 'US-003',
+                expected: false,
+                received: true,
+                side: 'gate',
+                fields: ['validated', 'validationReceipt'],
+              },
+            ],
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('验收凭证已签发');
+    expect(html).toContain('未签发验收凭证，保留实现候选等待重验');
     expect(html).toContain('未签发验收凭证，已回写待复核');
     expect(html).toContain('改写 validated（false → true）已恢复');
+    expect(html).toContain('US-003：gate 改写 validated、validationReceipt（false → true）已恢复');
+    expect(html).toContain('引擎独占字段 <code>validated、validationReceipt</code>');
+    expect(html).toContain('项目检查改写 state.json，完整快照已恢复');
+    expect(html).toContain('gate 改写 Review 裁决，冻结快照已恢复并阻断');
+    expect(html).toContain('改写人工 Review 裁决');
     expect(html).toContain('引擎独占字段 <code>validated</code>');
+    expect(html).toContain('agent 或项目检查修改的数据');
     expect(html).toContain('红旗区：运行期状态 / PRD 篡改');
   });
 
   it('跨 story 所有权篡改展示实际目标，旧 evidence 回退轮次 storyId', () => {
-    const html = renderReportHtml(data(ev([
-      {
-        type: 'iteration', source: 'engine', at: '2026-07-22T06:02:00.000Z',
-        iteration: 5, storyId: 'US-001', builderRan: true, builderModel: null,
-        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
-        stateValidationTamper: [
-          { storyId: 'US-002', expected: false, received: true, side: 'builder' },
-          { expected: false, received: 'missing', side: 'validator' },
-        ],
-      },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-22T06:02:00.000Z',
+            iteration: 5,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: null,
+            validatorRan: true,
+            validatorModel: null,
+            skippedValidator: false,
+            agentBlocked: false,
+            stateValidationTamper: [
+              { storyId: 'US-002', expected: false, received: true, side: 'builder' },
+              { expected: false, received: 'missing', side: 'validator' },
+            ],
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('US-002：builder 改写 validated（false → true）已恢复');
     expect(html).toContain('US-001：validator 改写 validated（false → missing）已恢复');
     expect(html).toContain('US-002：builder 改写引擎独占字段 <code>validated</code>');
@@ -621,19 +1073,38 @@ describe('renderReportHtml evidence 增强', () => {
 
   it('路由证据展示难度、实际模型来源、升级触发与状态篡改', () => {
     const base = data();
-    const html = renderReportHtml(data({
-      stories: [{
-        ...base.stories[0], difficulty: 'high', difficultyReason: '命中 high-2：跨模块修改。', escalated: true,
-      }],
-      ...ev([{
-        type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z',
-        iteration: 2, storyId: 'US-001', builderRan: true, builderModel: 'esc-m',
-        validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false,
-        storyDifficulty: 'high', builderRouteSource: 'escalation', validatorRouteSource: 'validator',
-        escalationTriggeredBy: 'validator',
-        stateRouteTamper: [{ expected: true, received: false, side: 'builder' }],
-      }]),
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [
+          {
+            ...base.stories[0],
+            difficulty: 'high',
+            difficultyReason: '命中 high-2：跨模块修改。',
+            escalated: true,
+          },
+        ],
+        ...ev([
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 2,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: 'esc-m',
+            validatorRan: true,
+            validatorModel: 'val-m',
+            skippedValidator: false,
+            agentBlocked: false,
+            storyDifficulty: 'high',
+            builderRouteSource: 'escalation',
+            validatorRouteSource: 'validator',
+            escalationTriggeredBy: 'validator',
+            stateRouteTamper: [{ expected: true, received: false, side: 'builder' }],
+          },
+        ]),
+      }),
+    );
     expect(html).toContain('命中 high-2');
     expect(html).toContain('⬆️ 已升级');
     expect(html).toContain('esc-m [escalation]');
@@ -645,45 +1116,83 @@ describe('renderReportHtml evidence 增强', () => {
 
   it('renderTimeline validator 列三种跳过归因：agent blocked / 快照写回失败 / 未跑（triage 13）', () => {
     const base = {
-      type: 'iteration' as const, source: 'engine' as const, at: '2026-07-08T06:00:00.000Z',
-      iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
-      validatorRan: false, validatorModel: null,
+      type: 'iteration' as const,
+      source: 'engine' as const,
+      at: '2026-07-08T06:00:00.000Z',
+      iteration: 1,
+      storyId: 'US-001',
+      builderRan: true,
+      builderModel: null,
+      validatorRan: false,
+      validatorModel: null,
     };
-    const blockedHtml = renderReportHtml(data(ev([{ ...base, skippedValidator: false, agentBlocked: true }])));
+    const blockedHtml = renderReportHtml(
+      data(ev([{ ...base, skippedValidator: false, agentBlocked: true }])),
+    );
     expect(blockedHtml).toContain('跳过（agent blocked）');
-    const skippedHtml = renderReportHtml(data(ev([{ ...base, skippedValidator: true, agentBlocked: false }])));
+    const skippedHtml = renderReportHtml(
+      data(ev([{ ...base, skippedValidator: true, agentBlocked: false }])),
+    );
     expect(skippedHtml).toContain('跳过（快照写回失败）');
-    const notRunHtml = renderReportHtml(data(ev([{ ...base, skippedValidator: false, agentBlocked: false }])));
+    const notRunHtml = renderReportHtml(
+      data(ev([{ ...base, skippedValidator: false, agentBlocked: false }])),
+    );
     expect(notRunHtml).toContain('未跑');
   });
 
   it('tamper 记录给红旗区补轮次时刻（文件扫描保底仍在）', () => {
-    const html = renderReportHtml(data({
-      tamperedArchives: ['prd.tampered-20260708-060000.json'],
-      ...ev([
-        { type: 'tamper', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 3, archive: 'prd.tampered-20260708-060000.json' },
-      ]),
-    }));
+    const html = renderReportHtml(
+      data({
+        tamperedArchives: ['prd.tampered-20260708-060000.json'],
+        ...ev([
+          {
+            type: 'tamper',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 3,
+            archive: 'prd.tampered-20260708-060000.json',
+          },
+        ]),
+      }),
+    );
     expect(html).toContain('红旗区');
     expect(html).toContain('第 3 轮');
   });
 
   it('tamper 记录带 archive 名但文件清单无匹配（归档已不在工作区）时补独立行，不留空 <ul>（发现 2）', () => {
-    const html = renderReportHtml(data({
-      tamperedArchives: [],
-      ...ev([
-        { type: 'tamper', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 4, archive: 'prd.tampered-20260708-070000.json' },
-      ]),
-    }));
+    const html = renderReportHtml(
+      data({
+        tamperedArchives: [],
+        ...ev([
+          {
+            type: 'tamper',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 4,
+            archive: 'prd.tampered-20260708-070000.json',
+          },
+        ]),
+      }),
+    );
     expect(html).toContain('红旗区');
     expect(html).toContain('已不在工作区');
     expect(html).not.toContain('<ul></ul>');
   });
 
   it('renderRedFlags 删除类篡改（archive:null）单独成行（triage 13）', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'tamper', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 5, archive: null },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'tamper',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 5,
+            archive: null,
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('红旗区');
     expect(html).toContain('删除类篡改（无存档）');
     expect(html).toContain('第 5 轮');
@@ -695,9 +1204,21 @@ describe('renderReportHtml evidence 增强', () => {
   });
 
   it('claim 文本转义：note/file 注入不落地', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'screenshot-claim', source: 'builder', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'a.png', acIndex: 1, note: '<script>alert(1)</script>' },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'screenshot-claim',
+            source: 'builder',
+            at: '2026-07-08T06:00:00.000Z',
+            storyId: 'US-001',
+            file: 'a.png',
+            acIndex: 1,
+            note: '<script>alert(1)</script>',
+          },
+        ]),
+      ),
+    );
     expect(html).not.toContain('<script>alert(1)');
     expect(html).toContain('&lt;script&gt;');
   });
@@ -706,16 +1227,32 @@ describe('renderReportHtml evidence 增强', () => {
 describe('时间线区异常轮标注', () => {
   it('timeout/error/noop/gateRejected 轮在时间线行上可辨', () => {
     const base = {
-      type: 'iteration' as const, source: 'engine' as const, at: '2026-07-08T06:00:00.000Z',
-      storyId: 'US-001', builderRan: true, builderModel: null,
-      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      type: 'iteration' as const,
+      source: 'engine' as const,
+      at: '2026-07-08T06:00:00.000Z',
+      storyId: 'US-001',
+      builderRan: true,
+      builderModel: null,
+      validatorRan: false,
+      validatorModel: null,
+      skippedValidator: false,
+      agentBlocked: false,
     };
-    const html = renderReportHtml(data(ev([
-      { ...base, iteration: 1, builderOutcome: 'timeout', abortRollback: { storyId: 'US-001' } },
-      { ...base, iteration: 2, noop: true, builderOutcome: 'completed' },
-      { ...base, iteration: 3, gateRejected: true, validatorOutcome: 'skipped' },
-      { ...base, iteration: 4, builderOutcome: 'completed', validatorOutcome: 'completed' },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            ...base,
+            iteration: 1,
+            builderOutcome: 'timeout',
+            abortRollback: { storyId: 'US-001' },
+          },
+          { ...base, iteration: 2, noop: true, builderOutcome: 'completed' },
+          { ...base, iteration: 3, gateRejected: true, validatorOutcome: 'skipped' },
+          { ...base, iteration: 4, builderOutcome: 'completed', validatorOutcome: 'completed' },
+        ]),
+      ),
+    );
     expect(html).toContain('builder 超时');
     expect(html).toContain('空转');
     expect(html).toContain('门禁打回');
@@ -723,9 +1260,25 @@ describe('时间线区异常轮标注', () => {
   });
 
   it('旧 evidence（无新字段）时间线渲染与 0.21.0 一致（零破坏）', () => {
-    const html = renderReportHtml(data(ev([
-      { type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', builderRan: true, builderModel: 'fast-m', validatorRan: true, validatorModel: 'val-m', skippedValidator: false, agentBlocked: false },
-    ])));
+    const html = renderReportHtml(
+      data(
+        ev([
+          {
+            type: 'iteration',
+            source: 'engine',
+            at: '2026-07-08T06:00:00.000Z',
+            iteration: 1,
+            storyId: 'US-001',
+            builderRan: true,
+            builderModel: 'fast-m',
+            validatorRan: true,
+            validatorModel: 'val-m',
+            skippedValidator: false,
+            agentBlocked: false,
+          },
+        ]),
+      ),
+    );
     expect(html).toContain('轮次时间线');
     expect(html).not.toContain('空转（无产出）');
     expect(html).toContain('<td>—</td>');
@@ -733,12 +1286,18 @@ describe('时间线区异常轮标注', () => {
 
   it('notes 中断标记行按引擎行样式高亮', () => {
     const s = data().stories[0];
-    const html = renderReportHtml(data({
-      stories: [{
-        ...s, passes: false,
-        notes: '[中断轮待复核] 2026-07-17 10:00 builder 执行超时被终止：本轮 passes 置位未经完整验收，已回写；请确认实现后重新走完门禁与验收',
-      }],
-    }));
+    const html = renderReportHtml(
+      data({
+        stories: [
+          {
+            ...s,
+            passes: false,
+            notes:
+              '[中断轮待复核] 2026-07-17 10:00 builder 执行超时被终止：本轮 passes 置位未经完整验收，已回写；请确认实现后重新走完门禁与验收',
+          },
+        ],
+      }),
+    );
     expect(html).toContain('[中断轮待复核]');
     // 语义即「按引擎行样式高亮」——同 gate-fail 行复用同一 CSS 类，非纯文本可见性
     expect(html).toContain('class="note-line gate-fail"');

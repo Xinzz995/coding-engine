@@ -1,15 +1,22 @@
 import type { ReportData, ScreenshotEntry } from './report.js';
 import { INITIAL_STORY_STATE, isStoryPassed, type StoryView } from '../engine/state.js';
 import {
-  isArbitrationLine, GATE_FAIL_LINE_PREFIX,
-  VALIDATOR_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX,
+  isArbitrationLine,
+  GATE_FAIL_LINE_PREFIX,
+  VALIDATOR_FAIL_LINE_PREFIX,
+  BLOCKED_LINE_PREFIX,
+  ABORT_LINE_PREFIX,
 } from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
 import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
 import { readTddConfig } from '../engine/tdd-gate.js';
 
 export function escapeHtml(s: string): string {
-  return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+  return s
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
 }
 
 /**
@@ -39,15 +46,26 @@ export function renderMarkdownLite(md: string): string {
   let listBuf: string[] = [];
   let codeBuf: string[] | null = null;
   const flushList = () => {
-    if (listBuf.length) { out.push(`<ul>${listBuf.join('')}</ul>`); listBuf = []; }
+    if (listBuf.length) {
+      out.push(`<ul>${listBuf.join('')}</ul>`);
+      listBuf = [];
+    }
   };
   for (const line of md.split('\n')) {
     if (line.startsWith('```')) {
-      if (codeBuf === null) { flushList(); codeBuf = []; }
-      else { out.push(`<pre class="code-block">${codeBuf.join('\n')}</pre>`); codeBuf = null; }
+      if (codeBuf === null) {
+        flushList();
+        codeBuf = [];
+      } else {
+        out.push(`<pre class="code-block">${codeBuf.join('\n')}</pre>`);
+        codeBuf = null;
+      }
       continue;
     }
-    if (codeBuf !== null) { codeBuf.push(escapeHtml(line)); continue; }
+    if (codeBuf !== null) {
+      codeBuf.push(escapeHtml(line));
+      continue;
+    }
     const h = /^(#{1,3}) (.*)$/.exec(line);
     if (h) {
       flushList();
@@ -55,12 +73,19 @@ export function renderMarkdownLite(md: string): string {
       out.push(`<h${lv}>${inlineMd(h[2])}</h${lv}>`);
       continue;
     }
-    if (line.startsWith('- ')) { listBuf.push(`<li>${inlineMd(line.slice(2))}</li>`); continue; }
-    if (line.trim() === '') { flushList(); continue; }
+    if (line.startsWith('- ')) {
+      listBuf.push(`<li>${inlineMd(line.slice(2))}</li>`);
+      continue;
+    }
+    if (line.trim() === '') {
+      flushList();
+      continue;
+    }
     flushList();
     out.push(`<p>${inlineMd(line)}</p>`);
   }
-  if (codeBuf !== null && codeBuf.length) out.push(`<pre class="code-block">${codeBuf.join('\n')}</pre>`);
+  if (codeBuf !== null && codeBuf.length)
+    out.push(`<pre class="code-block">${codeBuf.join('\n')}</pre>`);
   flushList();
   return out.join('\n');
 }
@@ -88,7 +113,8 @@ function noteLineClass(line: string): string {
 
 function renderNotes(notes: string): string {
   if (notes.trim() === '') return '';
-  const lines = notes.split('\n')
+  const lines = notes
+    .split('\n')
     .map((l) => `<div class="${noteLineClass(l)}">${text(l)}</div>`)
     .join('');
   return `<div class="notes">${lines}</div>`;
@@ -106,7 +132,10 @@ function renderShotFigure(s: ScreenshotEntry, markUnclaimed: boolean): string {
 }
 
 // claimedFiles=null：全局无任何 claim（无 evidence 或无登记）——不标注不排序，视觉与 0.19.0 一致
-function renderGallery(shots: ScreenshotEntry[], claimedFiles: ReadonlySet<string> | null = null): string {
+function renderGallery(
+  shots: ScreenshotEntry[],
+  claimedFiles: ReadonlySet<string> | null = null,
+): string {
   if (shots.length === 0) return '';
   const groups = [
     { phase: 'builder' as const, label: 'builder 截图' },
@@ -117,11 +146,15 @@ function renderGallery(shots: ScreenshotEntry[], claimedFiles: ReadonlySet<strin
     const own = shots.filter((s) => s.phase === g.phase);
     if (own.length === 0) continue;
     // 登记优先：有 claim 的排前（组内稳定排序，登记态相同保持名序）；无 claim 语境保持名序
-    const sorted = claimedFiles === null ? own
-      : [...own].sort((a, b) => Number(claimedFiles.has(b.filename)) - Number(claimedFiles.has(a.filename)));
+    const sorted =
+      claimedFiles === null
+        ? own
+        : [...own].sort(
+            (a, b) => Number(claimedFiles.has(b.filename)) - Number(claimedFiles.has(a.filename)),
+          );
     parts.push(
       `<div class="gallery-group"><div class="gallery-label">${g.label}（${own.length}）</div>` +
-      `<div class="gallery">${sorted.map((s) => renderShotFigure(s, claimedFiles !== null && !claimedFiles.has(s.filename))).join('')}</div></div>`,
+        `<div class="gallery">${sorted.map((s) => renderShotFigure(s, claimedFiles !== null && !claimedFiles.has(s.filename))).join('')}</div></div>`,
     );
   }
   return parts.join('');
@@ -130,26 +163,43 @@ function renderGallery(shots: ScreenshotEntry[], claimedFiles: ReadonlySet<strin
 function storyBadge(s: StoryView): string {
   if (isStoryPassed(s)) return '<span class="badge ok">✅ 通过</span>';
   if (s.blocked) return '<span class="badge blocked">⛔ blocked</span>';
-  if (s.passes) return '<span class="badge pending">🟨 待引擎验收</span>';
+  if (s.passes) return '<span class="badge pending">🟨 实现候选待验收</span>';
   return '<span class="badge pending">⬜ 未完成</span>';
 }
 
-function renderStoryCard(s: StoryView, shots: ScreenshotEntry[], claims: ScreenshotClaim[], anyClaims: boolean): string {
+function renderStoryCard(
+  s: StoryView,
+  shots: ScreenshotEntry[],
+  claims: ScreenshotClaim[],
+  anyClaims: boolean,
+): string {
   const retry = s.retryCount > 0 ? ` <span class="retry">重试 ${s.retryCount} 次</span>` : '';
   const routeMeta = s.difficulty
     ? `<div class="meta-line">难度：<code>${text(s.difficulty)}</code>${s.escalated ? ' · ⬆️ 已升级' : ''}` +
       `${s.difficultyReason ? ` · 依据：${text(s.difficultyReason)}` : ''}</div>`
-    : (s.escalated ? '<div class="meta-line">⬆️ 已升级</div>' : '');
+    : s.escalated
+      ? '<div class="meta-line">⬆️ 已升级</div>'
+      : '';
   // tryReadPrd 无逐字段守卫，acceptanceCriteria 可能形状非法——渲染层兜底为空列表
   const acList = Array.isArray(s.acceptanceCriteria) ? s.acceptanceCriteria : [];
   // acIndex 从 1 数起；越界（<1 或 >AC 数）、非整数（如 1.5）与缺省一律归 story 级登记，不静默丢弃
   const isStoryLevel = (c: ScreenshotClaim) =>
-    c.acIndex === undefined || !Number.isInteger(c.acIndex) || c.acIndex < 1 || c.acIndex > acList.length;
-  const acs = acList.map((a, idx) => {
-    const own = claims.filter((c) => c.acIndex === idx + 1);
-    const badges = own.map((c) => ` ${claimLink(c)}${c.note ? `<span class="claim-note">${text(c.note)}</span>` : ''}`).join('');
-    return `<li>${text(a)}${badges}</li>`;
-  }).join('');
+    c.acIndex === undefined ||
+    !Number.isInteger(c.acIndex) ||
+    c.acIndex < 1 ||
+    c.acIndex > acList.length;
+  const acs = acList
+    .map((a, idx) => {
+      const own = claims.filter((c) => c.acIndex === idx + 1);
+      const badges = own
+        .map(
+          (c) =>
+            ` ${claimLink(c)}${c.note ? `<span class="claim-note">${text(c.note)}</span>` : ''}`,
+        )
+        .join('');
+      return `<li>${text(a)}${badges}</li>`;
+    })
+    .join('');
   const storyClaims = claims.filter(isStoryLevel);
   const storyClaimsHtml = storyClaims.length
     ? `<div class="meta-line">story 级登记：${storyClaims.map((c) => `${claimLink(c)}${c.note ? `（${text(c.note)}）` : ''}`).join(' · ')}</div>`
@@ -170,8 +220,10 @@ function renderImplementationBanner(stories: StoryView[], stateCorrupted: boolea
   if (total === 0) return '<div class="banner blocked">⚠️ prd.json 中没有任何 story</div>';
   const passed = stories.filter(isStoryPassed).length;
   const blocked = stories.filter((x) => x.blocked).length;
-  if (total > 0 && passed === total) return `<div class="banner ok">✅ Story 验证完成 ${passed}/${total}</div>`;
-  if (blocked > 0) return `<div class="banner blocked">⛔ ${passed} 通过 · ${blocked} blocked · 共 ${total}</div>`;
+  if (total > 0 && passed === total)
+    return `<div class="banner ok">✅ Story 验证完成 ${passed}/${total}</div>`;
+  if (blocked > 0)
+    return `<div class="banner blocked">⛔ ${passed} 通过 · ${blocked} blocked · 共 ${total}</div>`;
   return `<div class="banner running">⏳ 进行中：${passed}/${total} 通过</div>`;
 }
 
@@ -183,35 +235,55 @@ function reviewStatusLabel(status: 'passed' | 'failed' | 'unverifiable'): string
 
 function renderFinalReview(data: ReportData, stories: StoryView[]): string {
   const review = data.finalReview;
-  if (review.status === 'missing') {
+  if (review.read.status === 'missing') {
     return `<section class="card"><h2>交付状态</h2>
 <div class="banner running">⏳ Story 结果不等于可交付</div>
 <p>本地最终 Review 尚未运行；GitHub 交付状态尚未由最终 Review 记录。</p></section>`;
   }
-  if (review.status === 'invalid') {
+  if (review.read.status === 'unsupported') {
+    return `<section class="card"><h2>交付状态</h2>
+<div class="banner running">⏳ 本地最终 Review 旧格式 v${review.read.schemaVersion} 已失效</div>
+<p>请重新运行 coding-x 生成当前格式的 Review 结果；这不表示文件损坏。</p></section>`;
+  }
+  if (review.read.status === 'invalid') {
     return `<section class="card red-flag"><h2>交付状态</h2>
 <div class="banner blocked">❌ 本地最终 Review 状态损坏</div>
-<p>${text(review.error)}</p></section>`;
+<p>${text(review.read.error)}</p></section>`;
   }
-  const state = review.state;
+  const state = review.read.state;
   const findings = state.axes.flatMap((axis) => axis.findings);
-  const axes = state.axes.map((axis) =>
-    `<li>${text(axis.axis)}：${text(reviewStatusLabel(axis.status))} · ${axis.findings.length} 个 finding</li>`,
-  ).join('');
-  const implementationReady = !data.stateCorrupted
-    && stories.length > 0
-    && stories.every(isStoryPassed);
-  const deliveryReady = implementationReady
-    && state.status === 'passed' && state.remote.status === 'ready' && !state.shadow;
+  const axes = state.axes
+    .map(
+      (axis) =>
+        `<li>${text(axis.axis)}：${text(reviewStatusLabel(axis.status))} · ${axis.findings.length} 个 finding</li>`,
+    )
+    .join('');
+  const implementationReady =
+    !data.stateCorrupted && stories.length > 0 && stories.every(isStoryPassed);
+  const reviewCurrent = implementationReady && review.current;
+  const remote = review.refreshedRemote ?? state.remote;
+  const deliveryReady =
+    reviewCurrent && state.status === 'passed' && remote.status === 'ready' && !state.shadow;
   const banner = deliveryReady
     ? '<div class="banner ok">✅ 本地 Review 与 GitHub 交付条件已就绪</div>'
     : `<div class="banner ${state.status === 'failed' || state.status === 'unverifiable' || !implementationReady ? 'blocked' : 'running'}">` +
-      `${state.shadow ? '🧪 Shadow 结果不能表示可交付'
-        : !implementationReady ? '❌ Story 状态未完成或不可验证，不能交付'
-          : '⏳ 尚未达到交付条件'}</div>`;
+      `${
+        state.shadow
+          ? '🧪 Shadow 结果不能表示可交付'
+          : !implementationReady
+            ? '❌ Story 状态未完成或不可验证，不能交付'
+            : !reviewCurrent
+              ? '❌ 本地最终 Review 已因 PR、提交、规则、Runner 或 Story 验证变化而失效'
+              : '⏳ 尚未达到交付条件'
+      }</div>`;
+  const stale =
+    review.staleReasons.length > 0
+      ? `<div class="meta-line warn">失效原因：${text(review.staleReasons.join('；'))}</div>`
+      : '';
   return `<section class="card"><h2>交付状态</h2>
 ${banner}
-<div class="meta-line">本地 Review：${text(reviewStatusLabel(state.status))} · GitHub：${text(state.remote.status)} · finding：${findings.length}</div>
+${stale}
+<div class="meta-line">本地 Review：${text(reviewStatusLabel(state.status))} · GitHub：${text(remote.status)} · finding：${findings.length}</div>
 <div class="meta-line">PR #${state.binding.prNumber} · head <code>${text(state.binding.headSha.slice(0, 12))}</code> · ${text(state.binding.runner)} / ${text(state.binding.model)}</div>
 ${axes ? `<ul class="checks">${axes}</ul>` : ''}
 <p class="placeholder">这是本机 workspace 中的结果展示，不是 GitHub 共享证明；共享交付记录以 GitHub 检查与 PR 历史为准。</p>
@@ -220,7 +292,8 @@ ${axes ? `<ul class="checks">${axes}</ul>` : ''}
 
 function renderGateConfig(data: ReportData): string {
   const value: unknown = data.prd.qualityChecks;
-  if (value === undefined) return '<div class="meta-line warn">质量契约检查：PRD 未绑定派生快照</div>';
+  if (value === undefined)
+    return '<div class="meta-line warn">质量契约检查：PRD 未绑定派生快照</div>';
   if (Array.isArray(value)) {
     const legacy = value.every((entry) => typeof entry === 'string');
     return legacy
@@ -245,11 +318,17 @@ function renderGateConfig(data: ReportData): string {
       return '<div class="meta-line warn">质量契约检查：派生快照形状非法</div>';
     }
     for (const check of record.checks) {
-      if (typeof check !== 'object' || check === null || Array.isArray(check)
-          || typeof (check as Record<string, unknown>).id !== 'string') {
+      if (
+        typeof check !== 'object' ||
+        check === null ||
+        Array.isArray(check) ||
+        typeof (check as Record<string, unknown>).id !== 'string'
+      ) {
         return '<div class="meta-line warn">质量契约检查：派生快照形状非法</div>';
       }
-      rows.push(`<li>${text(category)}：<code>${text((check as Record<string, unknown>).id)}</code></li>`);
+      rows.push(
+        `<li>${text(category)}：<code>${text((check as Record<string, unknown>).id)}</code></li>`,
+      );
     }
   }
   return `<div class="meta-line">质量契约派生检查：</div><ul class="checks">${rows.join('')}</ul>`;
@@ -262,10 +341,12 @@ function renderTddConfig(data: ReportData): string {
     return `<div class="meta-line warn">TDD 门禁：配置非法（${text(parsed.error)}）</div>`;
   }
   const config = parsed.config;
-  return '<div class="meta-line">TDD 门禁：已启用</div>'
-    + `<ul class="checks"><li><code>${text(config.coverageCheck)}</code></li>`
-    + `<li>政策文件 ${config.policyFiles.length} 个 · 生产路径 ${config.sourcePathspecs.length} 个`
-    + ` · 基线 <code>${text(config.baselineRef.slice(0, 12))}</code></li></ul>`;
+  return (
+    '<div class="meta-line">TDD 门禁：已启用</div>' +
+    `<ul class="checks"><li><code>${text(config.coverageCheck)}</code></li>` +
+    `<li>政策文件 ${config.policyFiles.length} 个 · 生产路径 ${config.sourcePathspecs.length} 个` +
+    ` · 基线 <code>${text(config.baselineRef.slice(0, 12))}</code></li></ul>`
+  );
 }
 
 /** ISO at → 本地 YYYY-MM-DD HH:mm；非法输入原样转义呈现（evidence 是 agent 可写区数据） */
@@ -275,7 +356,9 @@ function stampOf(at: string): string {
 }
 
 function gateRunsOf(records: EvidenceRecord[]): Extract<EvidenceRecord, { type: 'gate-run' }>[] {
-  return records.filter((r): r is Extract<EvidenceRecord, { type: 'gate-run' }> => r.type === 'gate-run');
+  return records.filter(
+    (r): r is Extract<EvidenceRecord, { type: 'gate-run' }> => r.type === 'gate-run',
+  );
 }
 
 function renderDiagnostic(label: string, value: string | undefined): string {
@@ -283,7 +366,9 @@ function renderDiagnostic(label: string, value: string | undefined): string {
   return `<details class="evidence-diagnostic"><summary>${text(label)}</summary><pre>${text(value)}</pre></details>`;
 }
 
-function invocationMeta(value: { durationMs: number; exitCode: number | null } | undefined): string {
+function invocationMeta(
+  value: { durationMs: number; exitCode: number | null } | undefined,
+): string {
   if (!value) return '';
   const exit = value.exitCode === null ? 'exit unavailable' : `exit ${value.exitCode}`;
   return ` · ${(value.durationMs / 1000).toFixed(1)}s · ${exit}`;
@@ -292,113 +377,157 @@ function invocationMeta(value: { durationMs: number; exitCode: number | null } |
 function renderGateHistory(records: EvidenceRecord[]): string {
   const runs = gateRunsOf(records);
   if (runs.length === 0) return '';
-  const rows = runs.map((r) => {
-    const failNote = r.ok ? '' : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
-    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
-  }).join('');
-  return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
+  const rows = runs
+    .map((r) => {
+      const failNote = r.ok
+        ? ''
+        : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
+      return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
+    })
+    .join('');
+  return (
+    `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
-    `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>`;
+    `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>`
+  );
 }
 
 function renderTddHistory(records: EvidenceRecord[]): string {
-  const runs = records.filter((record): record is Extract<EvidenceRecord, { type: 'tdd-gate' }> =>
-    record.type === 'tdd-gate');
+  const runs = records.filter(
+    (record): record is Extract<EvidenceRecord, { type: 'tdd-gate' }> => record.type === 'tdd-gate',
+  );
   if (runs.length === 0) return '';
-  const rows = runs.map((run) => {
-    const phase = run.phase === 'preflight' ? '启动预检' : `第 ${run.iteration} 轮`;
-    const policy = run.policyOk ? '政策通过' : '政策未通过';
-    const command = !run.commandRan
-      ? '未执行'
-      : run.ok ? '覆盖命令通过' : '覆盖命令未通过';
-    const failure = run.ok
-      ? ''
-      : `${text(run.failureCode ?? '')} · ${text(run.failedCommand ?? '')}`
-        + `${run.timedOut ? '（超时）' : run.exitCode !== undefined && run.exitCode !== null ? `（退出码 ${run.exitCode}）` : ''}`
-        + renderDiagnostic('TDD 门禁输出尾部', run.diagnosticTail);
-    return `<tr><td>${phase}</td><td>${text(run.storyId ?? '—')}</td>`
-      + `<td>${run.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${policy}</td><td>${command}</td>`
-      + `<td>${(run.ms / 1000).toFixed(1)}s</td><td>${stampOf(run.at)}</td><td>${failure}</td></tr>`;
-  }).join('');
-  return '<div class="meta-line">TDD 门禁执行历史（engine 记录）：</div>'
-    + '<table class="evidence-table"><thead><tr><th>阶段</th><th>story</th><th>结果</th>'
-    + '<th>政策</th><th>覆盖命令</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead>'
-    + `<tbody>${rows}</tbody></table>`;
+  const rows = runs
+    .map((run) => {
+      const phase = run.phase === 'preflight' ? '启动预检' : `第 ${run.iteration} 轮`;
+      const policy = run.policyOk ? '政策通过' : '政策未通过';
+      const command = !run.commandRan ? '未执行' : run.ok ? '覆盖命令通过' : '覆盖命令未通过';
+      const failure = run.ok
+        ? ''
+        : `${text(run.failureCode ?? '')} · ${text(run.failedCommand ?? '')}` +
+          `${run.timedOut ? '（超时）' : run.exitCode !== undefined && run.exitCode !== null ? `（退出码 ${run.exitCode}）` : ''}` +
+          renderDiagnostic('TDD 门禁输出尾部', run.diagnosticTail);
+      return (
+        `<tr><td>${phase}</td><td>${text(run.storyId ?? '—')}</td>` +
+        `<td>${run.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${policy}</td><td>${command}</td>` +
+        `<td>${(run.ms / 1000).toFixed(1)}s</td><td>${stampOf(run.at)}</td><td>${failure}</td></tr>`
+      );
+    })
+    .join('');
+  return (
+    '<div class="meta-line">TDD 门禁执行历史（engine 记录）：</div>' +
+    '<table class="evidence-table"><thead><tr><th>阶段</th><th>story</th><th>结果</th>' +
+    '<th>政策</th><th>覆盖命令</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead>' +
+    `<tbody>${rows}</tbody></table>`
+  );
 }
 
 function renderTimeline(records: EvidenceRecord[]): string {
-  const iters = records.filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration');
+  const iters = records.filter(
+    (r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration',
+  );
   if (iters.length === 0) return '';
-  const rows = iters.map((r) => {
-    const flags: string[] = [];
-    if (r.builderOutcome === 'timeout') flags.push('builder 超时');
-    if (r.builderOutcome === 'error') flags.push('builder 异常退出');
-    if (r.noop) flags.push('空转（无产出）');
-    if (r.gateRejected) flags.push('门禁打回');
-    if (r.validatorOutcome === 'timeout') flags.push('validator 超时');
-    if (r.validatorOutcome === 'error') flags.push('validator 异常退出');
-    if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
-    if (r.validationRollback) flags.push('未签发验收凭证，已回写待复核');
-    if (r.validationReceipt) flags.push('验收凭证已签发');
-    if (r.validationProtocol === 'passed') flags.push('结构化验收协议通过');
-    if (r.validationProtocol === 'failed') flags.push('结构化验收结论未通过');
-    if (r.validationProtocol === 'invalid') flags.push('结构化验收协议无效');
-    if (r.validationTarget) {
-      flags.push(
-        `目标 ${text(r.validationTarget.storyId)} · AC ${text(r.validationTarget.acceptanceHash.slice(0, 15))}…` +
-        ` · Git ${text(r.validationTarget.gitHead?.slice(0, 12) ?? 'unavailable')}`,
-      );
-    }
-    if (r.validatorStateMutation) flags.push('Validator 改写 state.json，快照已恢复');
-    if (r.validatorDiagnostic) flags.push('Validator 打回');
-    if (r.escalationTriggeredBy) flags.push(`已触发升级（${text(r.escalationTriggeredBy)}）`);
-    for (const tamper of r.stateRouteTamper ?? []) {
-      flags.push(`${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 escalated（${tamper.expected} → ${tamper.received}）已恢复`);
-    }
-    for (const tamper of r.stateValidationTamper ?? []) {
-      flags.push(`${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 validated（${tamper.expected} → ${tamper.received}）已恢复`);
-    }
-    const protocolDiagnostic = r.validationProtocolError
-      ? `${r.validationProtocolError.code}: ${r.validationProtocolError.diagnostic}`
-      : undefined;
-    const flagCell = `${flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—'}` +
-      `${renderDiagnostic('Builder 进程输出尾部', r.builderInvocation?.diagnosticTail)}` +
-      `${renderDiagnostic('Validator 进程输出尾部', r.validatorInvocation?.diagnosticTail)}` +
-      `${renderDiagnostic('结构化验收协议错误', protocolDiagnostic)}` +
-      `${renderDiagnostic('Validator 打回详情', r.validatorDiagnostic)}`;
-    const builder = r.builderRan
-      ? `${text(r.builderModel ?? '默认')} [${text(r.builderRouteSource ?? '来源未知')}]` +
-        invocationMeta(r.builderInvocation)
-      : '未跑';
-    const validator = r.validatorRan
-      ? `${text(r.validatorModel ?? '默认')} [${text(r.validatorRouteSource ?? '来源未知')}]` +
-        invocationMeta(r.validatorInvocation)
-      : (r.agentBlocked ? '跳过（agent blocked）' : r.skippedValidator ? '跳过（快照写回失败）' : '未跑');
-    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${text(r.storyDifficulty ?? '—')}</td><td>${builder}</td><td>${validator}</td><td>${flagCell}</td><td>${stampOf(r.at)}</td></tr>`;
-  }).join('');
-  return `<section class="card"><details><summary><h2>轮次时间线（engine 记录）</h2></summary>` +
+  const rows = iters
+    .map((r) => {
+      const flags: string[] = [];
+      if (r.builderOutcome === 'timeout') flags.push('builder 超时');
+      if (r.builderOutcome === 'error') flags.push('builder 异常退出');
+      if (r.noop) flags.push('空转（无产出）');
+      if (r.gateRejected) flags.push('门禁打回');
+      if (r.validatorOutcome === 'timeout') flags.push('validator 超时');
+      if (r.validatorOutcome === 'error') flags.push('validator 异常退出');
+      if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
+      if (r.validationRollback) flags.push('未签发验收凭证，已回写待复核');
+      if (r.validationPending) flags.push('未签发验收凭证，保留实现候选等待重验');
+      if (r.validationReceipt) flags.push('验收凭证已签发');
+      if (r.validationProtocol === 'passed') flags.push('结构化验收协议通过');
+      if (r.validationProtocol === 'failed') flags.push('结构化验收结论未通过');
+      if (r.validationProtocol === 'invalid') flags.push('结构化验收协议无效');
+      if (r.validationTarget) {
+        flags.push(
+          `目标 ${text(r.validationTarget.storyId)} · AC ${text(r.validationTarget.acceptanceHash.slice(0, 15))}…` +
+            ` · Git ${text(r.validationTarget.gitHead?.slice(0, 12) ?? 'unavailable')}`,
+        );
+      }
+      if (r.validatorStateMutation) flags.push('Validator 改写 state.json，快照已恢复');
+      if (r.gateStateMutation) flags.push('项目检查改写 state.json，完整快照已恢复');
+      for (const tamper of r.reviewDecisionsTamper ?? []) {
+        flags.push(`${tamper.side} 改写 Review 裁决，冻结快照已恢复并阻断`);
+      }
+      if (r.validatorDiagnostic) flags.push('Validator 打回');
+      if (r.escalationTriggeredBy) flags.push(`已触发升级（${text(r.escalationTriggeredBy)}）`);
+      for (const tamper of r.stateRouteTamper ?? []) {
+        flags.push(
+          `${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 escalated（${tamper.expected} → ${tamper.received}）已恢复`,
+        );
+      }
+      for (const tamper of r.stateValidationTamper ?? []) {
+        const fields = tamper.fields?.join('、') ?? 'validated';
+        flags.push(
+          `${text(tamper.storyId ?? r.storyId ?? '—')}：${tamper.side} 改写 ${text(fields)}（${tamper.expected} → ${tamper.received}）已恢复`,
+        );
+      }
+      const protocolDiagnostic = r.validationProtocolError
+        ? `${r.validationProtocolError.code}: ${r.validationProtocolError.diagnostic}`
+        : undefined;
+      const flagCell =
+        `${flags.length > 0 ? `⚠️ ${flags.join('；')}` : '—'}` +
+        `${renderDiagnostic('Builder 进程输出尾部', r.builderInvocation?.diagnosticTail)}` +
+        `${renderDiagnostic('Validator 进程输出尾部', r.validatorInvocation?.diagnosticTail)}` +
+        `${renderDiagnostic('结构化验收协议错误', protocolDiagnostic)}` +
+        `${renderDiagnostic('Validator 打回详情', r.validatorDiagnostic)}`;
+      const builder = r.builderRan
+        ? `${text(r.builderModel ?? '默认')} [${text(r.builderRouteSource ?? '来源未知')}]` +
+          invocationMeta(r.builderInvocation)
+        : '未跑';
+      const validator = r.validatorRan
+        ? `${text(r.validatorModel ?? '默认')} [${text(r.validatorRouteSource ?? '来源未知')}]` +
+          invocationMeta(r.validatorInvocation)
+        : r.agentBlocked
+          ? '跳过（agent blocked）'
+          : r.skippedValidator
+            ? '跳过（快照写回失败）'
+            : '未跑';
+      return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${text(r.storyDifficulty ?? '—')}</td><td>${builder}</td><td>${validator}</td><td>${flagCell}</td><td>${stampOf(r.at)}</td></tr>`;
+    })
+    .join('');
+  return (
+    `<section class="card"><details><summary><h2>轮次时间线（engine 记录）</h2></summary>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>难度</th><th>builder 实际路由</th><th>validator 实际路由</th><th>状态</th><th>时刻</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>` +
-    `<p class="placeholder">每轮一条记录；异常轮（超时/异常退出/空转/门禁打回）见状态列标注。</p></details></section>`;
+    `<p class="placeholder">每轮一条记录；异常轮（超时/异常退出/空转/门禁打回）见状态列标注。</p></details></section>`
+  );
 }
 
 function renderValidationClaims(records: EvidenceRecord[]): string {
-  const claims = records.filter((record): record is Extract<EvidenceRecord, { type: 'validation-claim' }> =>
-    record.type === 'validation-claim');
+  const claims = records.filter(
+    (record): record is Extract<EvidenceRecord, { type: 'validation-claim' }> =>
+      record.type === 'validation-claim',
+  );
   if (claims.length === 0) return '';
-  const rows = claims.map((claim) => {
-    const checks = claim.checks.map((check) =>
-      `<li>${check.passed ? '✅' : '❌'} AC ${check.acIndex}：${text(check.evidence)}</li>`).join('');
-    const detail = `<details><summary>${text(claim.summary)}</summary><ol>${checks}</ol></details>`;
-    return `<tr><td>${claim.iteration}</td><td>${text(claim.storyId)}</td>` +
-      `<td>${claim.verdict === 'passed' ? '✅ passed' : '❌ failed'}</td>` +
-      `<td>${text(claim.acceptanceHash.slice(0, 15))}…</td>` +
-      `<td>${text(claim.gitHead?.slice(0, 12) ?? 'unavailable')}</td><td>${detail}</td></tr>`;
-  }).join('');
-  return `<section class="card"><details><summary><h2>Validator 结构化声明</h2></summary>` +
+  const rows = claims
+    .map((claim) => {
+      const checks = claim.checks
+        .map(
+          (check) =>
+            `<li>${check.passed ? '✅' : '❌'} AC ${check.acIndex}：${text(check.evidence)}</li>`,
+        )
+        .join('');
+      const detail = `<details><summary>${text(claim.summary)}</summary><ol>${checks}</ol></details>`;
+      return (
+        `<tr><td>${claim.iteration}</td><td>${text(claim.storyId)}</td>` +
+        `<td>${claim.verdict === 'passed' ? '✅ passed' : '❌ failed'}</td>` +
+        `<td>${text(claim.acceptanceHash.slice(0, 15))}…</td>` +
+        `<td>${text(claim.gitHead?.slice(0, 12) ?? 'unavailable')}</td><td>${detail}</td></tr>`
+      );
+    })
+    .join('');
+  return (
+    `<section class="card"><details><summary><h2>Validator 结构化声明</h2></summary>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>claim</th><th>AC hash</th><th>Git HEAD</th><th>逐项证据</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">这些记录的 source=validator，是经引擎做新鲜度与目标绑定校验后的 agent claim；它们不是安全签名或 CI 证明。</p>` +
-    `</details></section>`;
+    `</details></section>`
+  );
 }
 
 function claimLink(c: ScreenshotClaim): string {
@@ -412,58 +541,123 @@ function renderModels(data: ReportData): string {
     return routing.errors.map((e) => `<div class="meta-line warn">${escapeHtml(e)}</div>`).join('');
   }
   const { config } = routing;
-  return `<div class="meta-line">模型路由（${escapeHtml(config.runner)}）：` +
+  return (
+    `<div class="meta-line">模型路由（${escapeHtml(config.runner)}）：` +
     `builder low=<code>${escapeHtml(config.builder.low)}</code> · ` +
     `medium=<code>${escapeHtml(config.builder.medium)}</code> · ` +
     `high=<code>${escapeHtml(config.builder.high)}</code> · ` +
     `validator=<code>${escapeHtml(config.validator)}</code> · ` +
-    `escalation=<code>${escapeHtml(config.escalation)}</code></div>`;
+    `escalation=<code>${escapeHtml(config.escalation)}</code></div>`
+  );
 }
 
 function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
-  const tamperEvents = records.filter((r): r is Extract<EvidenceRecord, { type: 'tamper' }> => r.type === 'tamper');
+  const tamperEvents = records.filter(
+    (r): r is Extract<EvidenceRecord, { type: 'tamper' }> => r.type === 'tamper',
+  );
   const stateRouteTampers = records
     .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration')
-    .flatMap((r) => (r.stateRouteTamper ?? []).map((t) => ({
-      ...t, iteration: r.iteration, at: r.at, storyId: t.storyId ?? r.storyId,
-    })));
+    .flatMap((r) =>
+      (r.stateRouteTamper ?? []).map((t) => ({
+        ...t,
+        iteration: r.iteration,
+        at: r.at,
+        storyId: t.storyId ?? r.storyId,
+      })),
+    );
   const stateValidationTampers = records
     .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration')
-    .flatMap((r) => (r.stateValidationTamper ?? []).map((t) => ({
-      ...t, iteration: r.iteration, at: r.at, storyId: t.storyId ?? r.storyId,
-    })));
-  const validatorStateMutations = records
-    .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> =>
-      r.type === 'iteration' && r.validatorStateMutation === true);
-  if (tampered.length === 0 && tamperEvents.length === 0
-      && stateRouteTampers.length === 0 && stateValidationTampers.length === 0
-      && validatorStateMutations.length === 0) return '';
-  const eventOf = new Map(tamperEvents.filter((t) => t.archive !== null).map((t) => [t.archive as string, t]));
-  const files = tampered.map((f) => {
-    const ev = eventOf.get(f);
-    return `<li><code>${text(f)}</code>${ev ? `（第 ${ev.iteration} 轮 ${stampOf(ev.at)} 检出）` : ''}</li>`;
-  }).join('');
-  const deletions = tamperEvents.filter((t) => t.archive === null).map((t) =>
-    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出删除类篡改（无存档）</li>`,
-  ).join('');
+    .flatMap((r) =>
+      (r.stateValidationTamper ?? []).map((t) => ({
+        ...t,
+        iteration: r.iteration,
+        at: r.at,
+        storyId: t.storyId ?? r.storyId,
+      })),
+    );
+  const validatorStateMutations = records.filter(
+    (r): r is Extract<EvidenceRecord, { type: 'iteration' }> =>
+      r.type === 'iteration' && r.validatorStateMutation === true,
+  );
+  const gateStateMutations = records.filter(
+    (r): r is Extract<EvidenceRecord, { type: 'iteration' }> =>
+      r.type === 'iteration' && r.gateStateMutation === true,
+  );
+  const reviewDecisionTampers = records
+    .filter((r): r is Extract<EvidenceRecord, { type: 'iteration' }> => r.type === 'iteration')
+    .flatMap((r) =>
+      (r.reviewDecisionsTamper ?? []).map((tamper) => ({
+        ...tamper,
+        iteration: r.iteration,
+        at: r.at,
+      })),
+    );
+  if (
+    tampered.length === 0 &&
+    tamperEvents.length === 0 &&
+    stateRouteTampers.length === 0 &&
+    stateValidationTampers.length === 0 &&
+    validatorStateMutations.length === 0 &&
+    gateStateMutations.length === 0 &&
+    reviewDecisionTampers.length === 0
+  )
+    return '';
+  const eventOf = new Map(
+    tamperEvents.filter((t) => t.archive !== null).map((t) => [t.archive as string, t]),
+  );
+  const files = tampered
+    .map((f) => {
+      const ev = eventOf.get(f);
+      return `<li><code>${text(f)}</code>${ev ? `（第 ${ev.iteration} 轮 ${stampOf(ev.at)} 检出）` : ''}</li>`;
+    })
+    .join('');
+  const deletions = tamperEvents
+    .filter((t) => t.archive === null)
+    .map((t) => `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出删除类篡改（无存档）</li>`)
+    .join('');
   // 存档已记名但工作区找不到对应文件（如归档目录未携带 tampered 文件、或人工清理过）：
   // 不能静默消失——单独成行提示「已不在工作区」，取证链断裂时红旗区不得只剩空 <ul>
-  const missing = tamperEvents.filter((t) => t.archive !== null && !tampered.includes(t.archive)).map((t) =>
-    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出，存档 <code>${text(t.archive)}</code> 已不在工作区</li>`,
-  ).join('');
-  const routeItems = stateRouteTampers.map((t) =>
-    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>escalated</code>（${t.expected} → ${t.received}），已恢复</li>`,
-  ).join('');
-  const validationItems = stateValidationTampers.map((t) =>
-    `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>validated</code>（${t.expected} → ${t.received}），已恢复</li>`,
-  ).join('');
-  const validatorMutationItems = validatorStateMutations.map((r) =>
-    `<li>第 ${r.iteration} 轮 ${stampOf(r.at)} ${text(r.storyId ?? '—')}：Validator 改写 <code>state.json</code>，引擎已恢复调用前快照并拒绝该轮 claim</li>`,
-  ).join('');
+  const missing = tamperEvents
+    .filter((t) => t.archive !== null && !tampered.includes(t.archive))
+    .map(
+      (t) =>
+        `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} 检出，存档 <code>${text(t.archive)}</code> 已不在工作区</li>`,
+    )
+    .join('');
+  const routeItems = stateRouteTampers
+    .map(
+      (t) =>
+        `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>escalated</code>（${t.expected} → ${t.received}），已恢复</li>`,
+    )
+    .join('');
+  const validationItems = stateValidationTampers
+    .map((t) => {
+      const fields = t.fields?.join('、') ?? 'validated';
+      return `<li>第 ${t.iteration} 轮 ${stampOf(t.at)} ${text(t.storyId ?? '—')}：${t.side} 改写引擎独占字段 <code>${text(fields)}</code>（${t.expected} → ${t.received}），已恢复</li>`;
+    })
+    .join('');
+  const validatorMutationItems = validatorStateMutations
+    .map(
+      (r) =>
+        `<li>第 ${r.iteration} 轮 ${stampOf(r.at)} ${text(r.storyId ?? '—')}：Validator 改写 <code>state.json</code>，引擎已恢复调用前快照并拒绝该轮 claim</li>`,
+    )
+    .join('');
+  const gateMutationItems = gateStateMutations
+    .map(
+      (r) =>
+        `<li>第 ${r.iteration} 轮 ${stampOf(r.at)}：项目检查改写 <code>state.json</code>，引擎已恢复检查前完整快照</li>`,
+    )
+    .join('');
+  const reviewDecisionItems = reviewDecisionTampers
+    .map(
+      (tamper) =>
+        `<li>第 ${tamper.iteration} 轮 ${stampOf(tamper.at)}：${tamper.side} 改写人工 Review 裁决（${text(tamper.expectedDigest.slice(0, 15))}… → ${text(tamper.receivedDigest.slice(0, 15))}…），引擎已恢复冻结快照并阻断</li>`,
+    )
+    .join('');
   return `<section class="card red-flag">
 <h2>🚩 红旗区：运行期状态 / PRD 篡改</h2>
-<p>引擎检出并恢复了不应由 agent 修改的数据（PRD 防护见 ADR-007，状态所有权见 ADR-013/ADR-015）。合并裁决前请逐个核对：</p>
-<ul>${files}${deletions}${missing}${routeItems}${validationItems}${validatorMutationItems}</ul>
+<p>引擎检出并恢复了不应由 agent 或项目检查修改的数据（PRD 防护见 ADR-007，状态所有权见 ADR-013/ADR-015）。合并裁决前请逐个核对：</p>
+<ul>${files}${deletions}${missing}${routeItems}${validationItems}${validatorMutationItems}${gateMutationItems}${reviewDecisionItems}</ul>
 <p>指引：核对上述记录及对应存档；与预期不符须停止合并。</p>
 </section>`;
 }
@@ -471,9 +665,12 @@ function renderRedFlags(tampered: string[], records: EvidenceRecord[]): string {
 function renderUnattributed(shots: ScreenshotEntry[], orphanClaims: ScreenshotClaim[]): string {
   const orphan = shots.filter((s) => s.storyId === null);
   if (orphan.length === 0 && orphanClaims.length === 0) return '';
-  const claimLines = orphanClaims.map((c) =>
-    `<div class="artifact-link">${claimLink(c)}（登记 storyId：<code>${text(c.storyId)}</code> 未匹配任何 story）${c.note ? ` ${text(c.note)}` : ''}</div>`,
-  ).join('');
+  const claimLines = orphanClaims
+    .map(
+      (c) =>
+        `<div class="artifact-link">${claimLink(c)}（登记 storyId：<code>${text(c.storyId)}</code> 未匹配任何 story）${c.note ? ` ${text(c.note)}` : ''}</div>`,
+    )
+    .join('');
   return `<section class="card"><h2>未归类工件</h2><div class="gallery">${orphan.map((s) => renderShotFigure(s, false)).join('')}</div>${claimLines}</section>`;
 }
 
@@ -482,10 +679,14 @@ function renderReviews(reviews: ReportData['reviews']): string {
     return '<section class="card"><h2>本地裁决记录</h2><p class="placeholder">尚无历史 Markdown 反馈；正式裁决只写入结构化记录。</p></section>';
   }
   // 旧 review-*.md 只作为本地历史反馈展示；它被 Git 忽略，不能成为共享交付凭证。
-  const disclaimer = '<p class="placeholder">以下 Markdown 仅为被 Git 忽略的本地历史反馈；不能作为通过证明。共享交付记录以 GitHub 检查与 PR 历史为准。</p>';
-  const sections = reviews.map((r) =>
-    `<section class="card review"><h2>历史本地反馈：${text(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
-  ).join('\n');
+  const disclaimer =
+    '<p class="placeholder">以下 Markdown 仅为被 Git 忽略的本地历史反馈；不能作为通过证明。共享交付记录以 GitHub 检查与 PR 历史为准。</p>';
+  const sections = reviews
+    .map(
+      (r) =>
+        `<section class="card review"><h2>历史本地反馈：${text(r.filename)}</h2><div class="md">${renderMarkdownLite(r.content)}</div></section>`,
+    )
+    .join('\n');
   return disclaimer + sections;
 }
 
@@ -576,30 +777,47 @@ export function renderReportHtml(data: ReportData): string {
     byStory.set(s.storyId, list);
   }
   // claim 归属：storyId 大小写不敏感匹配（对齐 parseScreenshotEntry 先例）；匹配不到的落未归类
-  const allClaims = data.evidence.records.filter((r): r is ScreenshotClaim => r.type === 'screenshot-claim');
+  const allClaims = data.evidence.records.filter(
+    (r): r is ScreenshotClaim => r.type === 'screenshot-claim',
+  );
   const idByLower = new Map(stories.map((s) => [String(s.id).toLowerCase(), s.id]));
   const claimsByStory = new Map<string, ScreenshotClaim[]>();
   const orphanClaims: ScreenshotClaim[] = [];
   for (const c of allClaims) {
     const realId = idByLower.get(c.storyId.toLowerCase());
-    if (realId === undefined) { orphanClaims.push(c); continue; }
+    if (realId === undefined) {
+      orphanClaims.push(c);
+      continue;
+    }
     const list = claimsByStory.get(realId) ?? [];
     list.push(c);
     claimsByStory.set(realId, list);
   }
-  const cards = stories.map((s) => renderStoryCard(s, byStory.get(s.id) ?? [], claimsByStory.get(s.id) ?? [], allClaims.length > 0)).join('\n');
-  const claimDisclaimer = allClaims.length > 0
-    ? '<p class="placeholder">「agent 声明」类证据由 builder/validator 自行登记，真实性以截图内容与 git 历史为准。</p>'
-    : '';
+  const cards = stories
+    .map((s) =>
+      renderStoryCard(
+        s,
+        byStory.get(s.id) ?? [],
+        claimsByStory.get(s.id) ?? [],
+        allClaims.length > 0,
+      ),
+    )
+    .join('\n');
+  const claimDisclaimer =
+    allClaims.length > 0
+      ? '<p class="placeholder">「agent 声明」类证据由 builder/validator 自行登记，真实性以截图内容与 git 历史为准。</p>'
+      : '';
   const stateWarn = data.stateCorrupted
     ? '<div class="meta-line warn">⚠️ state.json 已损坏，按全部 story 未验证处理；未使用 prd.json 内嵌旧格式状态（建议 npx coding-x repair）</div>'
     : '';
-  const prdSource = data.prdSource === 'engine-snapshot'
-    ? '<div class="meta-line">需求来源：引擎启动快照（运行期冻结）</div>'
-    : '';
-  const evidenceWarn = data.evidence.skippedLines > 0
-    ? `<div class="meta-line warn">⚠️ evidence.jsonl 有 ${data.evidence.skippedLines} 行无法解析已跳过</div>`
-    : '';
+  const prdSource =
+    data.prdSource === 'engine-snapshot'
+      ? '<div class="meta-line">需求来源：引擎启动快照（运行期冻结）</div>'
+      : '';
+  const evidenceWarn =
+    data.evidence.skippedLines > 0
+      ? `<div class="meta-line warn">⚠️ evidence.jsonl 有 ${data.evidence.skippedLines} 行无法解析已跳过</div>`
+      : '';
   const title = `${text(prd.project)} · 验证报告`;
   return `<!DOCTYPE html>
 <html lang="zh-CN">

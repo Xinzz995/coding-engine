@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvidence } from './evidence.js';
-import { setup, story, runLoop } from './loop-test-support.js';
+import { setup, story, runLoop, passedStoryState } from './loop-test-support.js';
 
 describe('no-op 检测与 stall 熔断', () => {
   it('builder 空转（双无变化）：跳过验收只跑 builder，连续 3 轮熔断 exit 1', async () => {
@@ -112,7 +112,7 @@ describe('no-op 检测与 stall 熔断', () => {
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': passedStoryState(),
       }),
     );
     const fake = join(workspace, 'fake.mjs');
@@ -138,7 +138,7 @@ describe('no-op 检测与 stall 熔断', () => {
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': passedStoryState(),
       }),
     );
     const fake = join(workspace, 'fake.mjs');
@@ -170,7 +170,7 @@ describe('no-op 检测与 stall 熔断', () => {
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': passedStoryState(),
         'US-002': { passes: false, notes: '[需要人工核实] 待裁决', retryCount: 0, blocked: true },
       }),
     );

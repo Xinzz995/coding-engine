@@ -11,7 +11,7 @@ import {
   runContractQualityChecks,
 } from './gate.js';
 import type { GateFailure } from './gate.js';
-import type { RunState } from './state.js';
+import type { RunState, ValidationReceipt } from './state.js';
 import type { Prd } from './prd.js';
 import type {
   FrozenQualityChecks,
@@ -41,6 +41,13 @@ const failure = (over: Partial<GateFailure> = {}): GateFailure => ({
   command: 'npm test', exitCode: 1, timedOut: false, outputTail: '2 failed', ...over,
 });
 
+const validationReceipt = {
+  schemaVersion: 1,
+  requestId: 'request-US-001',
+  gitHead: 'a'.repeat(40),
+  acceptanceHash: `sha256:${'b'.repeat(64)}`,
+} satisfies ValidationReceipt;
+
 describe('readQualityChecks', () => {
   it('returns null when prd is null or field missing', () => {
     expect(readQualityChecks(null)).toBeNull();
@@ -65,7 +72,15 @@ describe('readQualityChecks', () => {
 
 describe('applyGateFailure', () => {
   const base: RunState = {
-    'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+    'US-001': {
+      passes: true,
+      validated: true,
+      validationReceipt,
+      notes: '',
+      retryCount: 0,
+      blocked: false,
+      escalated: false,
+    },
   };
   const now = new Date(2026, 6, 5, 14, 30); // 本地时间 2026-07-05 14:30
 
@@ -73,6 +88,7 @@ describe('applyGateFailure', () => {
     const next = applyGateFailure(base, 'US-001', failure(), now);
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
+    expect(next['US-001'].validationReceipt).toBeNull();
     expect(next['US-001'].retryCount).toBe(1);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain('[门禁失败 - 第1次] 2026-07-05 14:30');
@@ -86,6 +102,7 @@ describe('applyGateFailure', () => {
     expect(next).not.toBe(base);
     expect(base['US-001'].passes).toBe(true);
     expect(base['US-001'].validated).toBe(true);
+    expect(base['US-001'].validationReceipt).toEqual(validationReceipt);
     expect(base['US-001'].notes).toBe('');
   });
 
@@ -94,6 +111,7 @@ describe('applyGateFailure', () => {
       'US-001': {
         passes: true,
         validated: false,
+        validationReceipt: null,
         notes: '[需求冲突] 2026-07-01 10:00 冲突点（源说 X，AC 说 Y，已按 Y 实现）\n[验证失败 - 第1次] 旧失败详情',
         retryCount: 1,
         blocked: false,
@@ -109,11 +127,20 @@ describe('applyGateFailure', () => {
 
   it('marks blocked and appends BLOCKED note when retryCount reaches MAX_RETRIES', () => {
     const state: RunState = {
-      'US-001': { passes: true, validated: false, notes: '', retryCount: MAX_RETRIES - 1, blocked: false, escalated: false },
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: '',
+        retryCount: MAX_RETRIES - 1,
+        blocked: false,
+        escalated: false,
+      },
     };
     const next = applyGateFailure(state, 'US-001', failure(), now);
     expect(next['US-001'].retryCount).toBe(MAX_RETRIES);
     expect(next['US-001'].blocked).toBe(true);
+    expect(next['US-001'].validationReceipt).toBeNull();
     expect(next['US-001'].notes).toContain('[BLOCKED: 已达到最大重试次数，跳过此 story]');
   });
 
@@ -121,6 +148,7 @@ describe('applyGateFailure', () => {
     const next = applyGateFailure({}, 'US-009', failure({ timedOut: true, exitCode: null }), now);
     expect(next['US-009'].retryCount).toBe(1);
     expect(next['US-009'].blocked).toBe(false);
+    expect(next['US-009'].validationReceipt).toBeNull();
     expect(next['US-009'].notes).toContain('执行超时被终止');
   });
 
@@ -129,6 +157,7 @@ describe('applyGateFailure', () => {
       'US-001': {
         passes: false,
         validated: false,
+        validationReceipt: null,
         notes: '[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已附调查过程\n普通旧失败行',
         retryCount: 0,
         blocked: false,
@@ -147,6 +176,7 @@ describe('applyGateFailure', () => {
       'US-001': {
         passes: false,
         validated: false,
+        validationReceipt: null,
         notes: '[需求冲突] 冲突点 A\n[需要人工核实] 疑点 B\n其他旧内容',
         retryCount: 0,
         blocked: false,
@@ -162,6 +192,7 @@ describe('applyGateFailure', () => {
       'US-001': {
         passes: false,
         validated: false,
+        validationReceipt: null,
         notes: '[需要人工核实] 已置 blocked 待人工',
         retryCount: 0,
         blocked: true,
@@ -180,7 +211,8 @@ describe('engine-owned Validator verdict state', () => {
   const base: RunState = {
     'US-001': {
       passes: true,
-      validated: false,
+      validated: true,
+      validationReceipt,
       notes: '[需求冲突] 保留这条仲裁\n旧失败详情',
       retryCount: 2,
       blocked: false,
@@ -194,6 +226,7 @@ describe('engine-owned Validator verdict state', () => {
     expect(next['US-001']).toEqual({
       passes: true,
       validated: false,
+      validationReceipt: null,
       notes: '[需求冲突] 保留这条仲裁',
       retryCount: 0,
       blocked: false,
@@ -214,6 +247,7 @@ describe('engine-owned Validator verdict state', () => {
 
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
+    expect(next['US-001'].validationReceipt).toBeNull();
     expect(next['US-001'].retryCount).toBe(3);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain('[需求冲突] 保留这条仲裁\n[验证失败 - 第3次] 2026-07-22 18:30');
@@ -234,6 +268,7 @@ describe('engine-owned Validator verdict state', () => {
 
     expect(next['US-001'].retryCount).toBe(MAX_RETRIES);
     expect(next['US-001'].blocked).toBe(true);
+    expect(next['US-001'].validationReceipt).toBeNull();
     expect(next['US-001'].notes).toContain('[BLOCKED: 已达到最大重试次数，跳过此 story]');
   });
 });
@@ -325,6 +360,29 @@ describe('runQualityChecks', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it.runIf(process.platform !== 'win32')(
+    'fails closed and kills a delayed descendant after the gate root exits 0',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'gate-background-'));
+      const marker = join(dir, 'late-write.txt');
+      try {
+        const descendant =
+          `node -e "setTimeout(() => { ` +
+          `require('node:fs').writeFileSync('${marker}', 'escaped'); process.exit(7) }, 750)"`;
+        const result = await runQualityChecks([`${descendant} & exit 0`], process.cwd(), 5_000);
+
+        expect(result.ok).toBe(false);
+        expect(result.failure).toMatchObject({ exitCode: 0, timedOut: false });
+        expect(result.failure?.outputTail).toContain('仍有后台子进程');
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
 
   it('returns total/ran/ms — pass runs all, fail-fast stops at the failing check', async () => {
     const pass = await runQualityChecks(['node -e "process.exit(0)"', 'node -e "process.exit(0)"'], process.cwd());
@@ -463,10 +521,21 @@ describe('applyAbortRollback', () => {
   const at = new Date('2026-07-17T10:00:00');
 
   it('回写 passes=false 并写入中断标记行；retryCount 与 blocked 不动', () => {
-    const state = { 'US-001': { passes: true, validated: true, notes: '', retryCount: 2, blocked: false, escalated: false } };
+    const state: RunState = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt,
+        notes: '',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
+    expect(next['US-001'].validationReceipt).toBeNull();
     expect(next['US-001'].retryCount).toBe(2);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain(ABORT_LINE_PREFIX);
@@ -475,26 +544,46 @@ describe('applyAbortRollback', () => {
     // 不可变：原 state 不被就地修改
     expect(state['US-001'].passes).toBe(true);
     expect(state['US-001'].validated).toBe(true);
+    expect(state['US-001'].validationReceipt).toEqual(validationReceipt);
   });
 
   it('error 结局的标记行含退出码', () => {
-    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false } };
+    const state: RunState = {
+      'US-001': {
+        passes: true, validated: false, validationReceipt: null,
+        notes: '', retryCount: 0, blocked: false, escalated: false,
+      },
+    };
     const next = applyAbortRollback(state, 'US-001', { side: 'validator', timedOut: false, exitCode: 143 }, at);
+    expect(next['US-001'].validationReceipt).toBeNull();
     expect(next['US-001'].notes).toContain('validator');
     expect(next['US-001'].notes).toContain('退出码 143');
   });
 
   it('外部信号终止（timedOut=false 且 exitCode=null）渲染「被信号终止」而非「退出码 null」', () => {
     // runAgent 的 exit 事件 code 为 null 仅发生在进程被信号终止且非引擎超时路径
-    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false } };
+    const state: RunState = {
+      'US-001': {
+        passes: true, validated: false, validationReceipt: null,
+        notes: '', retryCount: 0, blocked: false, escalated: false,
+      },
+    };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: false, exitCode: null }, at);
+    expect(next['US-001'].validationReceipt).toBeNull();
     expect(next['US-001'].notes).toContain('被信号终止');
     expect(next['US-001'].notes).not.toContain('退出码 null');
   });
 
   it('保全既有仲裁标签行在标记行之前', () => {
-    const state = { 'US-001': { passes: true, validated: false, notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录', retryCount: 0, blocked: false, escalated: false } };
+    const state: RunState = {
+      'US-001': {
+        passes: true, validated: false, validationReceipt: null,
+        notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录',
+        retryCount: 0, blocked: false, escalated: false,
+      },
+    };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
+    expect(next['US-001'].validationReceipt).toBeNull();
     const lines = next['US-001'].notes.split('\n');
     expect(lines[0]).toBe('[需求冲突] AC2 与源 PRD 矛盾');
     expect(lines[1].startsWith(ABORT_LINE_PREFIX)).toBe(true);
@@ -502,7 +591,12 @@ describe('applyAbortRollback', () => {
   });
 
   it('prev.blocked 时原样返回不回写（停下等人信号优先）', () => {
-    const state = { 'US-001': { passes: true, validated: false, notes: '[需要人工核实] x', retryCount: 1, blocked: true, escalated: false } };
+    const state: RunState = {
+      'US-001': {
+        passes: true, validated: false, validationReceipt: null,
+        notes: '[需要人工核实] x', retryCount: 1, blocked: true, escalated: false,
+      },
+    };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
     expect(next).toBe(state);
   });

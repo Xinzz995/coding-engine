@@ -43,7 +43,12 @@ function powershellArg(value: string): string {
 function explicitShellArgs(shell: string, script: string): string[] {
   const name = basename(shell).toLowerCase();
   if (name === 'cmd' || name === 'cmd.exe') return ['/d', '/s', '/c', script];
-  if (name === 'powershell' || name === 'powershell.exe' || name === 'pwsh' || name === 'pwsh.exe') {
+  if (
+    name === 'powershell' ||
+    name === 'powershell.exe' ||
+    name === 'pwsh' ||
+    name === 'pwsh.exe'
+  ) {
     return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script];
   }
   return ['-c', script];
@@ -51,16 +56,17 @@ function explicitShellArgs(shell: string, script: string): string[] {
 
 function commandLine(command: QualityCommand, platform: QualityPlatform): string {
   const executable = 'executable' in command ? command.executable : command.shell;
-  const args = 'executable' in command
-    ? command.args
-    : explicitShellArgs(command.shell, command.script);
+  const args =
+    'executable' in command ? command.args : explicitShellArgs(command.shell, command.script);
   if (platform === 'windows') {
     return `& ${[executable, ...args].map(powershellArg).join(' ')}`;
   }
   return [executable, ...args].map(posixArg).join(' ');
 }
 
-function allChecks(contract: QualityContract): Array<QualityCheck & { category: QualityCheckCategory }> {
+function allChecks(
+  contract: QualityContract,
+): Array<QualityCheck & { category: QualityCheckCategory }> {
   const checks: Array<QualityCheck & { category: QualityCheckCategory }> = [];
   for (const category of CATEGORIES) {
     const group = contract.checks[category];
@@ -71,11 +77,7 @@ function allChecks(contract: QualityContract): Array<QualityCheck & { category: 
   return checks;
 }
 
-function commandStep(
-  name: string,
-  command: QualityCommand,
-  platform: QualityPlatform,
-): string[] {
+function commandStep(name: string, command: QualityCommand, platform: QualityPlatform): string[] {
   return [
     `      - name: ${yamlString(name)}`,
     `        working-directory: ${yamlString(command.cwd)}`,
@@ -86,14 +88,18 @@ function commandStep(
 }
 
 function toolchainStep(toolchain: QualityToolchain): string[] {
-  const action = toolchain.kind === 'node'
-    ? `actions/setup-node@${SETUP_NODE_ACTION_SHA}`
-    : toolchain.kind === 'go'
-      ? `actions/setup-go@${SETUP_GO_ACTION_SHA}`
-      : `actions/setup-python@${SETUP_PYTHON_ACTION_SHA}`;
-  const versionKey = toolchain.kind === 'node'
-    ? 'node-version'
-    : toolchain.kind === 'go' ? 'go-version' : 'python-version';
+  const action =
+    toolchain.kind === 'node'
+      ? `actions/setup-node@${SETUP_NODE_ACTION_SHA}`
+      : toolchain.kind === 'go'
+        ? `actions/setup-go@${SETUP_GO_ACTION_SHA}`
+        : `actions/setup-python@${SETUP_PYTHON_ACTION_SHA}`;
+  const versionKey =
+    toolchain.kind === 'node'
+      ? 'node-version'
+      : toolchain.kind === 'go'
+        ? 'go-version'
+        : 'python-version';
   const lines = [
     `      - name: ${yamlString(`toolchain / ${toolchain.kind} ${toolchain.version}`)}`,
     `        uses: ${action}`,
@@ -101,7 +107,9 @@ function toolchainStep(toolchain: QualityToolchain): string[] {
     `          ${versionKey}: ${yamlString(toolchain.version)}`,
   ];
   if (toolchain.cache !== undefined) {
-    lines.push(`          cache: ${typeof toolchain.cache === 'boolean' ? String(toolchain.cache) : yamlString(toolchain.cache)}`);
+    lines.push(
+      `          cache: ${typeof toolchain.cache === 'boolean' ? String(toolchain.cache) : yamlString(toolchain.cache)}`,
+    );
   }
   if (toolchain.cacheDependencyPath !== undefined) {
     lines.push(`          cache-dependency-path: ${yamlString(toolchain.cacheDependencyPath)}`);
@@ -172,9 +180,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     '        env:',
   );
   contract.github.jobs.forEach((job, index) => {
-    lines.push(
-      `          RESULT_${index + 1}: ` + '${{ needs.checks_' + job.id + '.result }}',
-    );
+    lines.push(`          RESULT_${index + 1}: ` + '${{ needs.checks_' + job.id + '.result }}');
   });
   lines.push(
     '        run: |',
@@ -220,16 +226,17 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
 
-permissions:
-  contents: read
-  pull-requests: read
-  issues: read
+permissions: {}
 
 jobs:
   policy-guard:
     name: ${POLICY_GUARD_REQUIRED_CHECK}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     steps:
       - name: Check protected policy changes through the GitHub API
         id: evaluate
@@ -269,14 +276,61 @@ jobs:
           # opened/labeled can race: the event payload is an immutable snapshot, so policy
           # decisions must read the current labels and body from GitHub.
           pr = api(f"/repos/{repo}/pulls/{number}")
-          files = []
+          changed_files = pr.get("changed_files")
+          if (
+              isinstance(changed_files, bool)
+              or not isinstance(changed_files, int)
+              or changed_files < 0
+          ):
+              raise SystemExit("GitHub PR changed_files is missing or invalid")
+          # GitHub's pull-request-files API exposes at most 3000 entries. At the
+          # boundary we cannot prove that every changed path was returned, so a
+          # policy decision must fail closed and require a smaller PR.
+          if changed_files >= 3000:
+              raise SystemExit(
+                  "Policy Guard cannot verify pull requests with 3000 or more changed files; "
+                  "split the pull request"
+              )
+
+          file_entries = []
           page = 1
           while True:
               batch = api(f"/repos/{repo}/pulls/{number}/files?per_page=100&page={page}")
-              files.extend(item["filename"] for item in batch)
+              if not isinstance(batch, list):
+                  raise SystemExit("GitHub pull request files response is invalid")
+              file_entries.extend(batch)
+              if len(file_entries) > changed_files:
+                  raise SystemExit(
+                      "GitHub pull request files response exceeds declared changed_files"
+                  )
               if len(batch) < 100:
                   break
               page += 1
+
+          if len(file_entries) != changed_files:
+              raise SystemExit(
+                  "GitHub pull request files response is incomplete: "
+                  f"expected {changed_files}, received {len(file_entries)}"
+              )
+
+          files = set()
+          for item in file_entries:
+              if not isinstance(item, dict):
+                  raise SystemExit("GitHub pull request files response contains an invalid item")
+              filename = item.get("filename")
+              if not isinstance(filename, str) or not filename:
+                  raise SystemExit("GitHub pull request file is missing filename")
+              files.add(filename)
+              # For a rename, GitHub's filename is the destination. The source
+              # must be checked too, otherwise moving a protected policy file to
+              # an ordinary path silently evades the old-rule guard.
+              previous_filename = item.get("previous_filename")
+              if previous_filename is not None:
+                  if not isinstance(previous_filename, str) or not previous_filename:
+                      raise SystemExit(
+                          "GitHub pull request file contains an invalid previous_filename"
+                      )
+                  files.add(previous_filename)
 
           changed = sorted({
               path for path in files
@@ -419,12 +473,18 @@ export function renderManagedGitHubFiles(contract: QualityContract): Record<stri
     [POLICY_WORKFLOW_PATH]: renderPolicyGuardWorkflow(contract),
     [PULL_REQUEST_TEMPLATE_PATH]: renderPullRequestTemplate(),
     [P1_ISSUE_TEMPLATE_PATH]: issueTemplate(
-      'P1 延期', '登记一次有责任人和期限的 P1 延期', '[P1 延期]',
-      'quality-p1-deferral', contract.exceptions.p1.maxDays,
+      'P1 延期',
+      '登记一次有责任人和期限的 P1 延期',
+      '[P1 延期]',
+      'quality-p1-deferral',
+      contract.exceptions.p1.maxDays,
     ),
     [POLICY_ISSUE_TEMPLATE_PATH]: issueTemplate(
-      '质量政策例外', '登记一次有期限的质量政策变更例外', '[政策例外]',
-      'quality-policy-exception', contract.exceptions.policy.maxDays,
+      '质量政策例外',
+      '登记一次有期限的质量政策变更例外',
+      '[政策例外]',
+      'quality-policy-exception',
+      contract.exceptions.policy.maxDays,
     ),
   };
 }

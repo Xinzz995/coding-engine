@@ -31,8 +31,11 @@ function goContract(): QualityContract {
         id: `test-${module.id}`,
         module: module.id,
         command: {
-          executable: 'go', args: ['test', './...'], cwd: module.path,
-          platforms: ['linux'], timeoutMs: 600_000,
+          executable: 'go',
+          args: ['test', './...'],
+          cwd: module.path,
+          platforms: ['linux'],
+          timeoutMs: 600_000,
         },
       })),
     },
@@ -40,13 +43,15 @@ function goContract(): QualityContract {
     static: { notApplicable: '试点项目暂未配置独立静态检查。' },
     security: { notApplicable: '试点项目没有外部运行时依赖。' },
   };
-  contract.github.jobs = [{
-    id: 'ubuntu-go',
-    platform: 'linux',
-    toolchains: [{ kind: 'go', version: '1.24', cache: true }],
-    setup: [],
-    checkIds: ['test-api', 'test-worker'],
-  }];
+  contract.github.jobs = [
+    {
+      id: 'ubuntu-go',
+      platform: 'linux',
+      toolchains: [{ kind: 'go', version: '1.24', cache: true }],
+      setup: [],
+      checkIds: ['test-api', 'test-worker'],
+    },
+  ];
   return contract;
 }
 
@@ -114,11 +119,53 @@ describe('renderPolicyGuardWorkflow', () => {
     expect(yaml).not.toContain('pr = event["pull_request"]');
   });
 
+  it('keeps policy decisions inside the pull request event and grants no workflow-write access', () => {
+    const yaml = renderPolicyGuardWorkflow(codingEngineContract());
+    expect(yaml).toContain('permissions: {}');
+    expect(yaml).toContain('contents: read\n      pull-requests: read\n      issues: read');
+    expect(yaml).not.toContain('\n  issues:');
+    expect(yaml).not.toContain('\n  schedule:');
+    expect(yaml).not.toContain('\n  workflow_dispatch:');
+    expect(yaml).not.toContain('policy exception revalidation');
+    expect(yaml).not.toContain('actions: write');
+    expect(yaml).not.toContain('/actions/runs/');
+    expect(yaml).not.toContain('checks: write');
+    expect(yaml).not.toContain('/check-runs');
+  });
+
+  it('checks both sides of every rename so protected paths cannot be moved around the guard', () => {
+    const yaml = renderPolicyGuardWorkflow(codingEngineContract());
+    expect(yaml).toContain('filename = item.get("filename")');
+    expect(yaml).toContain('files.add(filename)');
+    expect(yaml).toContain('previous_filename = item.get("previous_filename")');
+    expect(yaml).toContain('files.add(previous_filename)');
+
+    // The same two-sided collection covers protected -> ordinary, ordinary -> protected,
+    // and protected -> protected renames before the frozen policy patterns are evaluated.
+    expect(yaml.indexOf('files.add(filename)')).toBeLessThan(yaml.indexOf('changed = sorted({'));
+    expect(yaml.indexOf('files.add(previous_filename)')).toBeLessThan(
+      yaml.indexOf('changed = sorted({'),
+    );
+  });
+
+  it('fails closed when GitHub cannot prove the complete changed-file list', () => {
+    const yaml = renderPolicyGuardWorkflow(codingEngineContract());
+    expect(yaml).toContain('changed_files = pr.get("changed_files")');
+    expect(yaml).toContain('if changed_files >= 3000:');
+    expect(yaml).toContain('split the pull request');
+    expect(yaml).toContain('if len(file_entries) > changed_files:');
+    expect(yaml).toContain('if len(file_entries) != changed_files:');
+    expect(yaml).toContain('expected {changed_files}, received {len(file_entries)}');
+  });
+
   it('freezes current engineering standards and policy/release paths into the old-rule workflow', () => {
     const yaml = renderPolicyGuardWorkflow(codingEngineContract());
     for (const path of [
-      '.coding-x/**', '.github/workflows/**', 'AGENTS.md',
-      'docs/golden-principles.md', 'package.json',
+      '.coding-x/**',
+      '.github/workflows/**',
+      'AGENTS.md',
+      'docs/golden-principles.md',
+      'package.json',
     ]) {
       expect(yaml).toContain(JSON.stringify(path));
     }
@@ -128,12 +175,14 @@ describe('renderPolicyGuardWorkflow', () => {
 describe('renderManagedGitHubFiles', () => {
   it('generates the workflow, required PR fields, and structured exception Issue forms', () => {
     const files = renderManagedGitHubFiles(codingEngineContract());
-    expect(Object.keys(files)).toEqual(expect.arrayContaining([
-      QUALITY_WORKFLOW_PATH,
-      POLICY_WORKFLOW_PATH,
-      PULL_REQUEST_TEMPLATE_PATH,
-      POLICY_ISSUE_TEMPLATE_PATH,
-    ]));
+    expect(Object.keys(files)).toEqual(
+      expect.arrayContaining([
+        QUALITY_WORKFLOW_PATH,
+        POLICY_WORKFLOW_PATH,
+        PULL_REQUEST_TEMPLATE_PATH,
+        POLICY_ISSUE_TEMPLATE_PATH,
+      ]),
+    );
     expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('明确的非目标');
     expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('Spec 与验收标准来源');
     expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('验收标准只写改动应具备的行为');

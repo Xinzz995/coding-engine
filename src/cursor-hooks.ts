@@ -1,14 +1,8 @@
-import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  closeSync,
-  constants,
   existsSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
-  openSync,
-  readFileSync,
   realpathSync,
   renameSync,
   rmdirSync,
@@ -16,18 +10,17 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import {
+  readSafeControlFileSync,
+  readSafeControlFileUtf8Sync,
+  SafeControlFileError,
+} from './engine/safe-control-file.js';
+import { execTrustedToolSync } from './engine/trusted-tool.js';
 
 export type CursorHookAction = 'install' | 'status' | 'remove';
 export type CursorHookStatus =
-  | 'installed'
-  | 'healthy'
-  | 'removed'
-  | 'absent'
-  | 'missing'
-  | 'stale'
-  | 'conflict'
-  | 'error';
+  'installed' | 'healthy' | 'removed' | 'absent' | 'missing' | 'stale' | 'conflict' | 'error';
 
 export interface CursorHookResult {
   exitCode: 0 | 1;
@@ -55,6 +48,10 @@ const CURSOR_HOOK_ENTRY = Object.freeze({
 const HOOK_FILE = 'tdd-commit-check.mjs';
 const INSTALL_FILE = 'install.json';
 const SHA256 = /^[a-f0-9]{64}$/;
+const SAFE_GIT_CONFIG = ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'] as const;
+const CURSOR_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
+const CURSOR_HOOK_MAX_BYTES = 4 * 1024 * 1024;
+const CURSOR_INSTALL_RECORD_MAX_BYTES = 64 * 1024;
 
 interface InstallRecord {
   schemaVersion: 1;
@@ -78,7 +75,6 @@ interface TargetPaths {
 
 interface CursorConfig {
   exists: boolean;
-  raw: Buffer | null;
   value: Record<string, unknown>;
 }
 
@@ -93,34 +89,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function result(
-  status: CursorHookStatus,
-  message: string,
-  root?: string,
-): CursorHookResult {
+function result(status: CursorHookStatus, message: string, root?: string): CursorHookResult {
   return {
     status,
     message,
     root,
-    exitCode: status === 'installed'
-      || status === 'healthy'
-      || status === 'removed'
-      || status === 'absent'
-      ? 0
-      : 1,
+    exitCode:
+      status === 'installed' || status === 'healthy' || status === 'removed' || status === 'absent'
+        ? 0
+        : 1,
   };
 }
 
+function lexicalGitRoot(cwd: string): string {
+  let current = resolve(cwd);
+  while (true) {
+    if (existsSync(join(current, '.git'))) return current;
+    const parent = dirname(current);
+    if (parent === current) return resolve(cwd);
+    current = parent;
+  }
+}
+
 function resolveGitRoot(cwd: string): string {
-  const git = spawnSync('git', ['rev-parse', '--show-toplevel'], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024,
-  });
-  if (git.error || git.status !== 0 || !git.stdout.trim()) {
+  try {
+    const root = execTrustedToolSync('git', [...SAFE_GIT_CONFIG, 'rev-parse', '--show-toplevel'], {
+      cwd,
+      projectRoot: lexicalGitRoot(cwd),
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 1024 * 1024,
+    }).trim();
+    if (!root) throw new Error('Git 未返回项目根');
+    return realpathSync(root);
+  } catch {
     throw new Error('当前目录不在可用的 Git worktree 中');
   }
-  return realpathSync(git.stdout.trim());
 }
 
 function pathsFor(root: string): TargetPaths {
@@ -165,15 +168,18 @@ function validateTargetLayout(paths: TargetPaths): void {
 }
 
 function readCursorConfig(path: string): CursorConfig {
-  if (!existsSync(path)) {
-    return { exists: false, raw: null, value: { version: 1, hooks: {} } };
-  }
-  const raw = readFileSync(path);
+  const raw = readSafeControlFileUtf8Sync(path, {
+    maxBytes: CURSOR_CONFIG_MAX_BYTES,
+    allowMissing: true,
+  });
+  if (raw === null) return { exists: false, value: { version: 1, hooks: {} } };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw.toString('utf8'));
+    parsed = JSON.parse(raw) as unknown;
   } catch (error) {
-    throw new Error(`Cursor hooks 配置不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `Cursor hooks 配置不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.hooks)) {
     throw new Error('Cursor hooks 配置必须是 version=1 且 hooks 为对象');
@@ -182,28 +188,36 @@ function readCursorConfig(path: string): CursorConfig {
   if (before !== undefined && !Array.isArray(before)) {
     throw new Error('Cursor hooks.beforeShellExecution 必须是数组');
   }
-  return { exists: true, raw, value: parsed };
+  return { exists: true, value: parsed };
 }
 
 function readInstallRecord(path: string): InstallRecord | null {
-  if (!existsSync(path)) return null;
+  const raw = readSafeControlFileUtf8Sync(path, {
+    maxBytes: CURSOR_INSTALL_RECORD_MAX_BYTES,
+    allowMissing: true,
+  });
+  if (raw === null) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
+    parsed = JSON.parse(raw) as unknown;
   } catch (error) {
-    throw new Error(`coding-x 安装记录不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `coding-x 安装记录不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
-  if (!isRecord(parsed)
-      || parsed.schemaVersion !== 1
-      || parsed.command !== CURSOR_HOOK_COMMAND
-      || parsed.hookFile !== HOOK_FILE
-      || typeof parsed.hookSha256 !== 'string'
-      || !SHA256.test(parsed.hookSha256)
-      || typeof parsed.entrySha256 !== 'string'
-      || !SHA256.test(parsed.entrySha256)
-      || typeof parsed.cursorDirCreated !== 'boolean'
-      || typeof parsed.managedDirCreated !== 'boolean'
-      || typeof parsed.configCreated !== 'boolean') {
+  if (
+    !isRecord(parsed) ||
+    parsed.schemaVersion !== 1 ||
+    parsed.command !== CURSOR_HOOK_COMMAND ||
+    parsed.hookFile !== HOOK_FILE ||
+    typeof parsed.hookSha256 !== 'string' ||
+    !SHA256.test(parsed.hookSha256) ||
+    typeof parsed.entrySha256 !== 'string' ||
+    !SHA256.test(parsed.entrySha256) ||
+    typeof parsed.cursorDirCreated !== 'boolean' ||
+    typeof parsed.managedDirCreated !== 'boolean' ||
+    typeof parsed.configCreated !== 'boolean'
+  ) {
     throw new Error('coding-x 安装记录结构无效');
   }
   return parsed as unknown as InstallRecord;
@@ -214,25 +228,23 @@ function hashBytes(bytes: Buffer): string {
 }
 
 function readBundle(path: string): Buffer | null {
-  let descriptor: number;
   try {
-    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-    descriptor = openSync(path, constants.O_RDONLY | noFollow);
+    return readSafeControlFileSync(path, {
+      maxBytes: CURSOR_HOOK_MAX_BYTES,
+      allowMissing: true,
+    });
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ELOOP') return null;
+    if (error instanceof SafeControlFileError) {
+      throw new Error(`coding-x 发布物中的 TDD hook 无效（${error.code}）`);
+    }
     throw error;
-  }
-  try {
-    if (!fstatSync(descriptor).isFile()) return null;
-    return readFileSync(descriptor);
-  } finally {
-    closeSync(descriptor);
   }
 }
 
 function hashFile(path: string): string {
-  return hashBytes(readFileSync(path));
+  const bytes = readSafeControlFileSync(path, { maxBytes: CURSOR_HOOK_MAX_BYTES });
+  if (bytes === null) throw new Error(`受管脚本不存在：${path}`);
+  return hashBytes(bytes);
 }
 
 function hashManagedEntry(value: unknown): string {
@@ -262,12 +274,14 @@ function isManagedEntry(value: unknown): boolean {
 }
 
 function isCanonicalEntry(value: unknown): boolean {
-  return isRecord(value)
-    && Object.keys(value).sort().join(',') === 'command,failClosed,matcher,timeout'
-    && value.command === CURSOR_HOOK_ENTRY.command
-    && value.matcher === CURSOR_HOOK_ENTRY.matcher
-    && value.timeout === CURSOR_HOOK_ENTRY.timeout
-    && value.failClosed === CURSOR_HOOK_ENTRY.failClosed;
+  return (
+    isRecord(value) &&
+    Object.keys(value).sort().join(',') === 'command,failClosed,matcher,timeout' &&
+    value.command === CURSOR_HOOK_ENTRY.command &&
+    value.matcher === CURSOR_HOOK_ENTRY.matcher &&
+    value.timeout === CURSOR_HOOK_ENTRY.timeout &&
+    value.failClosed === CURSOR_HOOK_ENTRY.failClosed
+  );
 }
 
 function assertManagedEntrySafe(
@@ -320,20 +334,19 @@ function withoutManagedEntries(config: Record<string, unknown>): Record<string, 
 
 function canDeleteCreatedConfig(config: Record<string, unknown>): boolean {
   if (Object.keys(config).some((key) => key !== 'version' && key !== 'hooks')) return false;
-  return config.version === 1
-    && isRecord(config.hooks)
-    && Object.keys(config.hooks).length === 0;
+  return config.version === 1 && isRecord(config.hooks) && Object.keys(config.hooks).length === 0;
 }
 
 function encodeJson(value: unknown): Buffer {
   return Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function snapshot(path: string): FileSnapshot {
+function snapshot(path: string, maxBytes: number): FileSnapshot {
   const stat = lstatIfPresent(path);
-  return stat !== null
-    ? { path, exists: true, bytes: readFileSync(path), mode: stat.mode & 0o777 }
-    : { path, exists: false, bytes: null, mode: null };
+  if (stat === null) return { path, exists: false, bytes: null, mode: null };
+  const bytes = readSafeControlFileSync(path, { maxBytes });
+  if (bytes === null) throw new Error(`快照文件不存在：${path}`);
+  return { path, exists: true, bytes, mode: stat.mode & 0o777 };
 }
 
 function atomicWrite(path: string, bytes: Buffer, requestedMode?: number): void {
@@ -353,8 +366,10 @@ function atomicWrite(path: string, bytes: Buffer, requestedMode?: number): void 
   }
 }
 
-function writeIfChanged(path: string, bytes: Buffer): void {
-  if (existsSync(path) && readFileSync(path).equals(bytes)) return;
+function writeIfChanged(path: string, bytes: Buffer, maxBytes: number): void {
+  if (bytes.length > maxBytes) throw new Error(`${path} 超过 ${maxBytes} bytes`);
+  const current = readSafeControlFileSync(path, { maxBytes, allowMissing: true });
+  if (current?.equals(bytes)) return;
   atomicWrite(path, bytes);
 }
 
@@ -405,7 +420,11 @@ function install(paths: TargetPaths, bundle: Buffer): CursorHookResult {
     configCreated,
   };
   const nextConfig = withCanonicalEntry(config.value);
-  const snapshots = [snapshot(paths.config), snapshot(paths.hook), snapshot(paths.install)];
+  const snapshots = [
+    snapshot(paths.config, CURSOR_CONFIG_MAX_BYTES),
+    snapshot(paths.hook, CURSOR_HOOK_MAX_BYTES),
+    snapshot(paths.install, CURSOR_INSTALL_RECORD_MAX_BYTES),
+  ];
   const createdDirs: string[] = [];
 
   try {
@@ -417,12 +436,14 @@ function install(paths: TargetPaths, bundle: Buffer): CursorHookResult {
       mkdirSync(paths.managedDir);
       createdDirs.unshift(paths.managedDir);
     }
-    writeIfChanged(paths.hook, bundle);
-    writeIfChanged(paths.install, encodeJson(nextRecord));
-    writeIfChanged(paths.config, encodeJson(nextConfig));
+    writeIfChanged(paths.hook, bundle, CURSOR_HOOK_MAX_BYTES);
+    writeIfChanged(paths.install, encodeJson(nextRecord), CURSOR_INSTALL_RECORD_MAX_BYTES);
+    writeIfChanged(paths.config, encodeJson(nextConfig), CURSOR_CONFIG_MAX_BYTES);
   } catch (error) {
     rollback(snapshots, createdDirs);
-    throw new Error(`安装 Cursor TDD 检查失败并已尝试恢复：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `安装 Cursor TDD 检查失败并已尝试恢复：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   return result('installed', `✅ Cursor TDD 提交前检查已安装：${paths.config}`, paths.root);
@@ -440,7 +461,11 @@ function status(paths: TargetPaths, bundle: Buffer): CursorHookResult {
   assertManagedFileSafe(paths, record);
   assertManagedEntrySafe(config.value, record);
   if (record === null || !hookExists || entries.length !== 1 || !isCanonicalEntry(entries[0])) {
-    return result('stale', '❌ Cursor TDD 提交前检查不完整或配置已漂移，请重新运行 install', paths.root);
+    return result(
+      'stale',
+      '❌ Cursor TDD 提交前检查不完整或配置已漂移，请重新运行 install',
+      paths.root,
+    );
   }
   if (record.hookSha256 !== hashBytes(bundle)) {
     return result('stale', '❌ Cursor TDD 提交前检查版本已过期，请重新运行 install', paths.root);
@@ -464,18 +489,24 @@ function remove(paths: TargetPaths): CursorHookResult {
 
   const nextConfig = withoutManagedEntries(config.value);
   const deleteConfig = record.configCreated && canDeleteCreatedConfig(nextConfig);
-  const snapshots = [snapshot(paths.config), snapshot(paths.hook), snapshot(paths.install)];
+  const snapshots = [
+    snapshot(paths.config, CURSOR_CONFIG_MAX_BYTES),
+    snapshot(paths.hook, CURSOR_HOOK_MAX_BYTES),
+    snapshot(paths.install, CURSOR_INSTALL_RECORD_MAX_BYTES),
+  ];
   try {
     if (deleteConfig) {
       if (existsSync(paths.config)) unlinkSync(paths.config);
     } else if (config.exists) {
-      writeIfChanged(paths.config, encodeJson(nextConfig));
+      writeIfChanged(paths.config, encodeJson(nextConfig), CURSOR_CONFIG_MAX_BYTES);
     }
     if (existsSync(paths.hook)) unlinkSync(paths.hook);
     if (existsSync(paths.install)) unlinkSync(paths.install);
   } catch (error) {
     rollback(snapshots, []);
-    throw new Error(`卸载 Cursor TDD 检查失败并已尝试恢复：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `卸载 Cursor TDD 检查失败并已尝试恢复：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   if (record.managedDirCreated) {
@@ -513,7 +544,10 @@ export function runCursorHookAction(
     return status(paths, bundle);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const conflict = /符号链接|配置|安装记录|受管脚本|Cursor hooks|归属|不是目录|不是普通文件/.test(message);
+    const conflict =
+      /符号链接|配置|安装记录|受管脚本|Cursor hooks|归属|不是目录|不是普通文件|安全读取/.test(
+        message,
+      );
     return result(conflict ? 'conflict' : 'error', `❌ ${message}`, root);
   }
 }

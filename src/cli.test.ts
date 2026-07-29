@@ -1,9 +1,25 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
+import {
+  mkdtempSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  symlinkSync,
+  realpathSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { CLI_HELP, parseCliArgs, permissionWarning, runDashboard, isDirectInvocation, main } from './cli.js';
+import {
+  CLI_HELP,
+  parseCliArgs,
+  permissionWarning,
+  runDashboard,
+  isDirectInvocation,
+  main,
+} from './cli.js';
 import * as dashboard from './dashboard/server.js';
 import { renderManagedGitHubFiles } from './quality/github-workflows.js';
 import { parseQualityContract } from './quality/contract.js';
@@ -193,7 +209,14 @@ describe('parseCliArgs', () => {
     expect(() => parseCliArgs(['doctor', '--stale-days', '1e2'])).toThrow('--stale-days'); // === 100
   });
   it('parses all three model overrides', () => {
-    const c = parseCliArgs(['--builder-model', 'haiku', '--validator-model', 'opus', '--escalation-model', 'max']);
+    const c = parseCliArgs([
+      '--builder-model',
+      'haiku',
+      '--validator-model',
+      'opus',
+      '--escalation-model',
+      'max',
+    ]);
     expect(c.builderModel).toBe('haiku');
     expect(c.validatorModel).toBe('opus');
     expect(c.escalationModel).toBe('max');
@@ -249,24 +272,22 @@ describe('main — help', () => {
     }
   });
 
-  it.each([
-    ['--help'],
-    ['-h'],
-    ['help'],
-    ['config', '--help'],
-  ])('%s prints help to stdout and exits 0', async (...args) => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      expect(await main(args)).toBe(0);
-      expect(logSpy).toHaveBeenCalledTimes(1);
-      expect(logSpy.mock.calls[0][0]).toEqual(expect.stringContaining('用法'));
-      expect(errSpy).not.toHaveBeenCalled();
-    } finally {
-      logSpy.mockRestore();
-      errSpy.mockRestore();
-    }
-  });
+  it.each([['--help'], ['-h'], ['help'], ['config', '--help']])(
+    '%s prints help to stdout and exits 0',
+    async (...args) => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        expect(await main(args)).toBe(0);
+        expect(logSpy).toHaveBeenCalledTimes(1);
+        expect(logSpy.mock.calls[0][0]).toEqual(expect.stringContaining('用法'));
+        expect(errSpy).not.toHaveBeenCalled();
+      } finally {
+        logSpy.mockRestore();
+        errSpy.mockRestore();
+      }
+    },
+  );
 
   it('lists every command, runner and option in one canonical help view', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -274,13 +295,38 @@ describe('main — help', () => {
       expect(await main(['--help'])).toBe(0);
       const output = String(logSpy.mock.calls[0][0]);
       for (const token of [
-        'claude', 'codex', 'cursor',
-        'init', 'repair', 'dashboard', 'doctor', 'status', 'report', 'models', 'config', 'hooks cursor',
-        '--max-iter', '--dev-timeout', '--val-timeout', '--builder-model',
-        '--validator-model', '--review-model', '--escalation-model', '--workspace', '--no-open',
-        '--keep-open', '--port', '--stall-limit', '--stale-days', '--json',
-        '--shadow', '--contract', '--yes', '--local',
-        '--help', '-h',
+        'claude',
+        'codex',
+        'cursor',
+        'init',
+        'repair',
+        'dashboard',
+        'doctor',
+        'status',
+        'report',
+        'models',
+        'config',
+        'hooks cursor',
+        '--max-iter',
+        '--dev-timeout',
+        '--val-timeout',
+        '--builder-model',
+        '--validator-model',
+        '--review-model',
+        '--escalation-model',
+        '--workspace',
+        '--no-open',
+        '--keep-open',
+        '--port',
+        '--stall-limit',
+        '--stale-days',
+        '--json',
+        '--shadow',
+        '--contract',
+        '--yes',
+        '--local',
+        '--help',
+        '-h',
       ]) {
         expect(output, `help 缺少 ${token}`).toContain(token);
       }
@@ -423,13 +469,23 @@ describe('main — status subcommand', () => {
     const workspace = mkdtempSync(join(tmpdir(), 'status-cli-'));
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
-        project: 'cli-proj', branchName: 'ralph/s', description: 'd',
-        userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
-      }));
-      writeFileSync(join(workspace, 'state.json'), JSON.stringify({
-        'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(workspace, 'prd.json'),
+        JSON.stringify({
+          project: 'cli-proj',
+          branchName: 'ralph/s',
+          description: 'd',
+          userStories: [
+            { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['ac'], priority: 1 },
+          ],
+        }),
+      );
+      writeFileSync(
+        join(workspace, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const code = await main(['status', '--workspace', workspace]);
       expect(code).toBe(1);
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('cli-proj'));
@@ -454,10 +510,18 @@ describe('main — status subcommand', () => {
 
 describe('main — status --json', () => {
   const writePrd = (workspace: string) => {
-    writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
-      project: 'cli-proj', branchName: 'ralph/s', description: 'd', sourcePrd: 'docs/prds/s.md',
-      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
-    }));
+    writeFileSync(
+      join(workspace, 'prd.json'),
+      JSON.stringify({
+        project: 'cli-proj',
+        branchName: 'ralph/s',
+        description: 'd',
+        sourcePrd: 'docs/prds/s.md',
+        userStories: [
+          { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['ac'], priority: 1 },
+        ],
+      }),
+    );
   };
 
   it('prints exactly one JSON.parse-able object to stdout with the same exit semantics', async () => {
@@ -465,9 +529,12 @@ describe('main — status --json', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       writePrd(workspace);
-      writeFileSync(join(workspace, 'state.json'), JSON.stringify({
-        'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(workspace, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const code = await main(['status', '--workspace', workspace, '--json']);
       expect(code).toBe(1);
       expect(logSpy).toHaveBeenCalledTimes(1); // stdout 无装饰性文本混入
@@ -524,7 +591,12 @@ describe('main — status --json', () => {
   it('emits parseable error JSON and exits 2 when the workspace is missing', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      const code = await main(['status', '--workspace', join(tmpdir(), 'status-json-none'), '--json']);
+      const code = await main([
+        'status',
+        '--workspace',
+        join(tmpdir(), 'status-json-none'),
+        '--json',
+      ]);
       expect(code).toBe(2);
       expect(logSpy).toHaveBeenCalledTimes(1);
       expect(JSON.parse(logSpy.mock.calls[0][0] as string).error).toBe('missing');
@@ -537,14 +609,32 @@ describe('main — status --json', () => {
 describe('runDashboard', () => {
   it('serves workspace state standalone until interrupt, then closes', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'dash-ws-'));
-    writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
-      project: 'offline-view', branchName: 'ralph/x', description: 'd',
-      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
-        priority: 1, passes: true, notes: '', retryCount: 0, blocked: false }],
-    }));
+    writeFileSync(
+      join(workspace, 'prd.json'),
+      JSON.stringify({
+        project: 'offline-view',
+        branchName: 'ralph/x',
+        description: 'd',
+        userStories: [
+          {
+            id: 'US-001',
+            title: 't',
+            description: 'd',
+            acceptanceCriteria: ['ac'],
+            priority: 1,
+            passes: true,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+          },
+        ],
+      }),
+    );
     const port = 20100 + (process.pid % 1000);
     let release!: () => void;
-    const interrupt = new Promise<void>((r) => { release = r; });
+    const interrupt = new Promise<void>((r) => {
+      release = r;
+    });
     try {
       const running = runDashboard({ workspace, port, openBrowser: false }, interrupt);
       // Must not resolve on its own — it serves until interrupted.
@@ -555,7 +645,7 @@ describe('runDashboard', () => {
       expect(pending).toBe('pending');
       const res = await fetch(`http://127.0.0.1:${port}/api/state`);
       expect(res.status).toBe(200);
-      const body = await res.json() as { project: string; stories: unknown[] };
+      const body = (await res.json()) as { project: string; stories: unknown[] };
       expect(body.project).toBe('offline-view');
       expect(body.stories).toHaveLength(1);
       release();
@@ -581,29 +671,34 @@ describe('permissionWarning', () => {
 
 describe('main — models subcommand', () => {
   it.each(['claude', 'codex', 'cursor'] as const)(
-    '%s 只读全局目录输出单个可解析对象，不拉起任何 runner CLI', async (runner) => {
-    const dir = mkdtempSync(join(tmpdir(), 'models-cli-'));
-    const configPath = join(dir, 'config.json');
-    process.env.CODING_X_CONFIG = configPath;
-    process.env.CODING_X_CLAUDE_BIN = join(dir, 'definitely-missing-claude');
-    process.env.CODING_X_CODEX_BIN = join(dir, 'definitely-missing-codex');
-    process.env.CODING_X_CURSOR_BIN = join(dir, 'definitely-missing-cursor');
-    writeFileSync(configPath, JSON.stringify({
-      version: 1,
-      models: { [runner]: [{ id: 'model-a', label: 'Model A' }, { id: 'model-b' }] },
-    }));
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    try {
-      expect(await main(['models', runner, '--json'])).toBe(0);
-      expect(logSpy).toHaveBeenCalledTimes(1);
-      const result = JSON.parse(logSpy.mock.calls[0][0] as string);
-      expect(result).toMatchObject({ status: 'available', runner, source: 'global-config' });
-      expect(result.models.map((m: { id: string }) => m.id)).toEqual(['model-a', 'model-b']);
-    } finally {
-      logSpy.mockRestore();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+    '%s 只读全局目录输出单个可解析对象，不拉起任何 runner CLI',
+    async (runner) => {
+      const dir = mkdtempSync(join(tmpdir(), 'models-cli-'));
+      const configPath = join(dir, 'config.json');
+      process.env.CODING_X_CONFIG = configPath;
+      process.env.CODING_X_CLAUDE_BIN = join(dir, 'definitely-missing-claude');
+      process.env.CODING_X_CODEX_BIN = join(dir, 'definitely-missing-codex');
+      process.env.CODING_X_CURSOR_BIN = join(dir, 'definitely-missing-cursor');
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          models: { [runner]: [{ id: 'model-a', label: 'Model A' }, { id: 'model-b' }] },
+        }),
+      );
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        expect(await main(['models', runner, '--json'])).toBe(0);
+        expect(logSpy).toHaveBeenCalledTimes(1);
+        const result = JSON.parse(logSpy.mock.calls[0][0] as string);
+        expect(result).toMatchObject({ status: 'available', runner, source: 'global-config' });
+        expect(result.models.map((m: { id: string }) => m.id)).toEqual(['model-a', 'model-b']);
+      } finally {
+        logSpy.mockRestore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('配置缺失输出机器可读 error 并退出 1', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'models-cli-'));
@@ -641,22 +736,40 @@ describe('main — models subcommand', () => {
     const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
     const configPath = join(workspace, 'global-config.json');
     process.env.CODING_X_CONFIG = configPath;
-    writeFileSync(configPath, JSON.stringify({
-      version: 1, models: { codex: [{ id: 'model-a' }, { id: 'model-b' }] },
-    }));
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        version: 1,
+        models: { codex: [{ id: 'model-a' }, { id: 'model-b' }] },
+      }),
+    );
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
-      writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd',
-        models: {
-          runner: 'codex', builder: { low: 'model-a', medium: 'model-a', high: 'model-b' },
-          validator: 'model-b', escalation: 'model-b',
-        },
-        userStories: [{
-          id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
-          difficulty: 'low', difficultyReason: '命中 low-1',
-        }],
-      }));
+      writeFileSync(
+        join(workspace, 'prd.json'),
+        JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          models: {
+            runner: 'codex',
+            builder: { low: 'model-a', medium: 'model-a', high: 'model-b' },
+            validator: 'model-b',
+            escalation: 'model-b',
+          },
+          userStories: [
+            {
+              id: 'US-001',
+              title: 't',
+              description: 'd',
+              acceptanceCriteria: ['ac'],
+              priority: 1,
+              difficulty: 'low',
+              difficultyReason: '命中 low-1',
+            },
+          ],
+        }),
+      );
       expect(await main(['models', '--workspace', workspace, '--json'])).toBe(0);
       expect(JSON.parse(logSpy.mock.calls[0][0] as string).runner).toBe('codex');
     } finally {
@@ -669,13 +782,23 @@ describe('main — models subcommand', () => {
     const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
     const configPath = join(workspace, 'global-config.json');
     process.env.CODING_X_CONFIG = configPath;
-    writeFileSync(configPath, JSON.stringify({
-      version: 1, models: { claude: [{ id: 'model-a' }] },
-    }));
-    writeFileSync(join(workspace, 'prd.json'), JSON.stringify({
-      project: 'p', branchName: 'b', description: 'd',
-      models: { runner: 'unknown' }, userStories: [],
-    }));
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        version: 1,
+        models: { claude: [{ id: 'model-a' }] },
+      }),
+    );
+    writeFileSync(
+      join(workspace, 'prd.json'),
+      JSON.stringify({
+        project: 'p',
+        branchName: 'b',
+        description: 'd',
+        models: { runner: 'unknown' },
+        userStories: [],
+      }),
+    );
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       expect(await main(['models', '--workspace', workspace, '--json'])).toBe(1);
@@ -710,13 +833,18 @@ describe('main — models subcommand', () => {
   });
 
   it.each(['1', 'false', '"text"', '[]'])(
-    '未显式指定 runner 时拒绝合法 JSON 的错误根形状：%s', async (rawPrd) => {
+    '未显式指定 runner 时拒绝合法 JSON 的错误根形状：%s',
+    async (rawPrd) => {
       const workspace = mkdtempSync(join(tmpdir(), 'models-cli-'));
       const configPath = join(workspace, 'global-config.json');
       process.env.CODING_X_CONFIG = configPath;
-      writeFileSync(configPath, JSON.stringify({
-        version: 1, models: { claude: [{ id: 'model-a' }] },
-      }));
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          version: 1,
+          models: { claude: [{ id: 'model-a' }] },
+        }),
+      );
       writeFileSync(join(workspace, 'prd.json'), rawPrd);
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       try {
@@ -807,18 +935,31 @@ describe('main — report subcommand', () => {
   it('writes report.html and returns 0 on a valid workspace', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
     try {
-      writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd',
-        userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
-      }));
+      writeFileSync(
+        join(dir, 'prd.json'),
+        JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: [
+            { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['ac'], priority: 1 },
+          ],
+        }),
+      );
       const logs: string[] = [];
       const orig = console.log;
-      console.log = (...a: unknown[]) => { logs.push(a.join(' ')); };
+      console.log = (...a: unknown[]) => {
+        logs.push(a.join(' '));
+      };
       try {
         expect(await main(['report', '--workspace', dir])).toBe(0);
-      } finally { console.log = orig; }
+      } finally {
+        console.log = orig;
+      }
       expect(logs.some((l) => l.includes('report.html'))).toBe(true);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns 2 when the workspace is missing', async () => {
@@ -826,45 +967,80 @@ describe('main — report subcommand', () => {
     try {
       const errs: string[] = [];
       const orig = console.error;
-      console.error = (...a: unknown[]) => { errs.push(a.join(' ')); };
+      console.error = (...a: unknown[]) => {
+        errs.push(a.join(' '));
+      };
       try {
         expect(await main(['report', '--workspace', dir])).toBe(2);
-      } finally { console.error = orig; }
+      } finally {
+        console.error = orig;
+      }
       expect(errs.some((e) => e.includes('prd-to-json'))).toBe(true);
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('returns 1 when writing report.html fails', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
     try {
-      writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd',
-        userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
-      }));
+      writeFileSync(
+        join(dir, 'prd.json'),
+        JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: [
+            { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['ac'], priority: 1 },
+          ],
+        }),
+      );
       mkdirSync(join(dir, 'report.html')); // 同名目录占位 → writeFileSync 抛 EISDIR
       const orig = console.error;
       console.error = () => {};
       try {
         expect(await main(['report', '--workspace', dir])).toBe(1);
-      } finally { console.error = orig; }
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+      } finally {
+        console.error = orig;
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('state.json 损坏时写出保守诊断报告但返回 1，绝不假绿', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
     try {
-      writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-        project: 'p', branchName: 'b', description: 'd',
-        userStories: [{
-          id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1,
-          passes: true, notes: '', retryCount: 0, blocked: false,
-        }],
-      }));
+      writeFileSync(
+        join(dir, 'prd.json'),
+        JSON.stringify({
+          project: 'p',
+          branchName: 'b',
+          description: 'd',
+          userStories: [
+            {
+              id: 'US-001',
+              title: 't',
+              description: 'd',
+              acceptanceCriteria: ['ac'],
+              priority: 1,
+              passes: true,
+              notes: '',
+              retryCount: 0,
+              blocked: false,
+            },
+          ],
+        }),
+      );
       writeFileSync(join(dir, 'state.json'), '{ broken');
       const logs: string[] = [];
       const errs: string[] = [];
-      const log = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => { logs.push(a.join(' ')); });
-      const error = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => { errs.push(a.join(' ')); });
+      const log = vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+        logs.push(a.join(' '));
+      });
+      const error = vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+        errs.push(a.join(' '));
+      });
       try {
         expect(await main(['report', '--workspace', dir])).toBe(1);
       } finally {
@@ -876,23 +1052,34 @@ describe('main — report subcommand', () => {
       const html = readFileSync(join(dir, 'report.html'), 'utf-8');
       expect(html).toContain('状态不可验证');
       expect(html).not.toContain('全部通过');
-    } finally { rmSync(dir, { recursive: true, force: true }); }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
 describe('repair 与工作区锁', () => {
   const validPrd = JSON.stringify({
-    project: 'p', branchName: 'ralph/x', description: 'd',
-    userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
+    project: 'p',
+    branchName: 'ralph/x',
+    description: 'd',
+    userStories: [
+      { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['ac'], priority: 1 },
+    ],
   });
 
   it('refuses to repair while an alive lock exists (exit 2, files untouched)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-repair-lock-'));
     const brokenRaw = '{"project":"p","branchName":"b","description":"d","userStories":[],}'; // 尾逗号：可修复的坏 JSON
     writeFileSync(join(dir, 'prd.json'), brokenRaw);
-    writeFileSync(join(dir, 'engine.lock'), JSON.stringify({
-      pid: process.pid, startedAt: '2026-07-16T00:00:00.000Z', command: 'run',
-    }));
+    writeFileSync(
+      join(dir, 'engine.lock'),
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: '2026-07-16T00:00:00.000Z',
+        command: 'run',
+      }),
+    );
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const code = await main(['repair', '--workspace', dir]);

@@ -11,12 +11,13 @@ import {
   type ModelPreflightResult,
 } from './model-preflight.js';
 import { createPrdGuard } from './prd-guard.js';
-import type { Prd } from './prd.js';
+import { validatePrdStoryDefinitions, type Prd } from './prd.js';
 import {
   allStoriesResolved,
   blankStateFor,
   ensureStateFile,
-  rollbackUnvalidatedPasses,
+  reconcileValidationReceipts,
+  validationReceiptsDigest,
   tryReadState,
   type RunState,
 } from './state.js';
@@ -29,7 +30,7 @@ import {
   type FrozenQualityChecks,
   type QualityContractReadResult,
 } from '../quality/contract.js';
-import { invalidateFinalReviewState, readFinalReviewState } from '../review/state.js';
+import { invalidateFinalReviewState } from '../review/state.js';
 import { CODING_X_VERSION } from '../version.js';
 
 type QualityReader = NonNullable<LoopConfig['qualityContractReader']>;
@@ -96,56 +97,46 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   // 启动时保证 state.json 存在：v0.4 及更早的 prd.json 把状态写在 story 上，
   // ensureStateFile 会把它们抽取成 state.json（一次性迁移）。
   const bootPrd = guard.read().prd;
+  if (bootPrd) {
+    const storyDefinitions = validatePrdStoryDefinitions(bootPrd);
+    if (!storyDefinitions.ok) {
+      console.error(`❌ PRD Story 定义无效：${storyDefinitions.error}`);
+      return { status: 'failed', exitCode: 2 };
+    }
+  }
   if (bootPrd) ensureStateFile(cfg.workspace, bootPrd);
   // ensureStateFile 为了 legacy 迁移会在损坏 state 时返回内嵌旧状态，但运行期
   // 绝不能因此“复活”旧 passes。重读磁盘：新迁移文件可读则正常使用，
   // 仍损坏则与轮内 readRunState 一样按全未开始处理，且不覆盖原文件。
   let bootState = bootPrd ? (tryReadState(statePath) ?? blankStateFor(bootPrd)) : null;
-  // 最终 Review 后的任何新提交都会使旧 Review 失效。Story 与变更文件没有可靠的
-  // 多对多映射，因此首版保守重验全部已通过 Story，绝不猜测“只影响哪几个”。
-  // 这里同时撤销候选通过与引擎凭证，让既有 Developer → 门禁 → Validator 顺序完整重跑。
-  if (bootState && bootPrd) {
-    const previousReview = readFinalReviewState(cfg.workspace);
-    const currentHead = readGitHead(projectRoot);
-    if (
-      previousReview.status === 'ready' &&
-      currentHead &&
-      previousReview.state.binding.headSha !== currentHead
-    ) {
-      // 失效必须同时落到 Story 凭证与 Review 文件。否则本轮重验 Story 后若只因
-      // PR 尚未同步而退出，下一次启动仍会读到旧 head 的 Review，并重复重验同一提交。
-      invalidateFinalReviewState(cfg.workspace);
-      const invalidated: string[] = [];
-      const next = structuredClone(bootState);
-      for (const story of bootPrd.userStories) {
-        const current = next[story.id];
-        if (!current || current.blocked || !current.passes || !current.validated) continue;
-        next[story.id] = { ...current, passes: false, validated: false };
-        invalidated.push(story.id);
-      }
-      if (invalidated.length > 0) {
-        bootState = next;
-        writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
-        console.warn(
-          `⚠️  最终 Review 后提交已变化，旧 Validator 凭证失效；` +
-            `将保守重验：${invalidated.join(', ')}`,
-        );
-      }
-    }
+  const currentGitHead = readGitHead(projectRoot);
+  if (!cfg.legacyValidatorProtocolForTests && currentGitHead === null) {
+    console.error('❌ 无法读取当前 Git HEAD；正式运行不会在缺少提交身份时启动 Agent');
+    return { status: 'failed', exitCode: 2 };
   }
-  // 进程可能在 builder 写 passes=true 后、validator 签发凭证前被杀。显式
-  // validated=false 是 v0.25 的待验收残态；启动时回写成可被 builder 重新选中的状态。
-  // 旧 state 缺字段时 tryReadState 已按历史 passes 兼容，不会在这里被误重验。
-  if (bootState) {
-    const recovered = rollbackUnvalidatedPasses(bootState);
-    if (recovered.storyIds.length > 0) {
-      bootState = recovered.state;
+  // Validator 新鲜度直接由持久 Story 凭证与当前 HEAD/AC 对账，不再依赖旧 Final Review
+  // 是否存在或可读。旧 workspace 可解析，但缺少结构化凭证时必须重新验收。
+  if (bootState && bootPrd) {
+    const reconciled = reconcileValidationReceipts(bootPrd, bootState, currentGitHead);
+    if (reconciled.changed) {
+      bootState = reconciled.state;
       writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
+    }
+    if (reconciled.invalidated.length > 0) {
+      invalidateFinalReviewState(cfg.workspace);
       console.warn(
-        `⚠️  检测到未完成 validator 的待验收状态，已回写待复核：${recovered.storyIds.join(', ')}`,
+        `⚠️  Validator 凭证已失效，将在实现完成后重新验收：` +
+          reconciled.invalidated.map((item) => `${item.storyId}(${item.reason})`).join(', '),
       );
     }
   }
+  const bootBlockedResolved = Boolean(
+    bootPrd &&
+    bootState &&
+    bootPrd.userStories.some((story) => bootState?.[story.id]?.blocked) &&
+    allStoriesResolved(bootPrd, bootState) &&
+    validationReceiptsDigest(bootPrd, bootState, currentGitHead) !== null,
+  );
 
   const agentEnv: NodeJS.ProcessEnv = {
     CODING_X_WORKSPACE: resolve(cfg.workspace),
@@ -236,6 +227,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
       validatorOverride: cfg.validatorModel,
       escalationOverride: cfg.escalationModel,
       reviewOverride: cfg.reviewModel,
+      reviewRequired: !bootBlockedResolved,
       ...(cfg.modelCatalog ? { catalog: cfg.modelCatalog } : {}),
     });
   } catch (err) {
@@ -247,7 +239,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   }
   // 生产最终 Review 必须绑定一个明确模型；测试可注入不调用模型的评审器。
   // 在任何 Story agent 启动前拒绝，避免实现全部完成后才发现结果无法签发。
-  if (!modelPreflight.review.model && !cfg.finalReviewRunner) {
+  if (!bootBlockedResolved && !modelPreflight.review.model && !cfg.finalReviewRunner) {
     console.error(
       '❌ 模型路由预检失败：最终 Review 必须使用明确模型；' +
         '请在 prd.json models.validator 中固定，或传 --review-model',
@@ -287,7 +279,9 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
     : structuredClone(qualityRead.contract.checks);
   const runKind = modelPreflight.runner;
   const readyState = bootState ?? blankStateFor(bootPrd);
-  const bootResolved = allStoriesResolved(bootPrd, readyState);
+  const bootResolved =
+    allStoriesResolved(bootPrd, readyState) &&
+    validationReceiptsDigest(bootPrd, readyState, currentGitHead) !== null;
   for (const warning of modelPreflight.warnings) console.warn(`⚠️  ${warning}`);
   console.log(renderPreflightSummary(modelPreflight));
   if (!bootResolved) console.warn(permissionWarning(runKind));

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import type { ModelsConfig } from '../engine/prd.js';
 
 export function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -14,6 +15,14 @@ export function canonicalize(value: unknown): unknown {
 export function digest(value: unknown): string {
   const data = typeof value === 'string' ? value : JSON.stringify(canonicalize(value));
   return `sha256:${createHash('sha256').update(data).digest('hex')}`;
+}
+
+/**
+ * 最终 Review 只绑定 PRD 内冻结的路由政策；CLI 临时覆盖由
+ * binding.runner/model 另行记录，不得反向改写项目政策摘要。
+ */
+export function reviewRoutingDigest(models: ModelsConfig | undefined): string {
+  return digest({ schemaVersion: 1, models: models ?? null });
 }
 
 export function normalizeText(value: string): string {

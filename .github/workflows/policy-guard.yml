@@ -6,16 +6,17 @@ on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
 
-permissions:
-  contents: read
-  pull-requests: read
-  issues: read
+permissions: {}
 
 jobs:
   policy-guard:
     name: policy-guard-source
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
     steps:
       - name: Check protected policy changes through the GitHub API
         id: evaluate
@@ -55,14 +56,61 @@ jobs:
           # opened/labeled can race: the event payload is an immutable snapshot, so policy
           # decisions must read the current labels and body from GitHub.
           pr = api(f"/repos/{repo}/pulls/{number}")
-          files = []
+          changed_files = pr.get("changed_files")
+          if (
+              isinstance(changed_files, bool)
+              or not isinstance(changed_files, int)
+              or changed_files < 0
+          ):
+              raise SystemExit("GitHub PR changed_files is missing or invalid")
+          # GitHub's pull-request-files API exposes at most 3000 entries. At the
+          # boundary we cannot prove that every changed path was returned, so a
+          # policy decision must fail closed and require a smaller PR.
+          if changed_files >= 3000:
+              raise SystemExit(
+                  "Policy Guard cannot verify pull requests with 3000 or more changed files; "
+                  "split the pull request"
+              )
+
+          file_entries = []
           page = 1
           while True:
               batch = api(f"/repos/{repo}/pulls/{number}/files?per_page=100&page={page}")
-              files.extend(item["filename"] for item in batch)
+              if not isinstance(batch, list):
+                  raise SystemExit("GitHub pull request files response is invalid")
+              file_entries.extend(batch)
+              if len(file_entries) > changed_files:
+                  raise SystemExit(
+                      "GitHub pull request files response exceeds declared changed_files"
+                  )
               if len(batch) < 100:
                   break
               page += 1
+
+          if len(file_entries) != changed_files:
+              raise SystemExit(
+                  "GitHub pull request files response is incomplete: "
+                  f"expected {changed_files}, received {len(file_entries)}"
+              )
+
+          files = set()
+          for item in file_entries:
+              if not isinstance(item, dict):
+                  raise SystemExit("GitHub pull request files response contains an invalid item")
+              filename = item.get("filename")
+              if not isinstance(filename, str) or not filename:
+                  raise SystemExit("GitHub pull request file is missing filename")
+              files.add(filename)
+              # For a rename, GitHub's filename is the destination. The source
+              # must be checked too, otherwise moving a protected policy file to
+              # an ordinary path silently evades the old-rule guard.
+              previous_filename = item.get("previous_filename")
+              if previous_filename is not None:
+                  if not isinstance(previous_filename, str) or not previous_filename:
+                      raise SystemExit(
+                          "GitHub pull request file contains an invalid previous_filename"
+                      )
+                  files.add(previous_filename)
 
           changed = sorted({
               path for path in files

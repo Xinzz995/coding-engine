@@ -19,7 +19,16 @@ const prd = (difficulty: 'low' | 'medium' | 'high' = 'medium'): Prd => ({
 });
 
 const state = (over: Partial<RunState[string]> = {}): RunState => ({
-  'US-001': { passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false, ...over },
+  'US-001': {
+    passes: false,
+    validated: false,
+    validationReceipt: null,
+    notes: '',
+    retryCount: 0,
+    blocked: false,
+    escalated: false,
+    ...over,
+  },
 });
 
 const available = (...ids: string[]): ModelCatalogResult => ({
@@ -167,22 +176,35 @@ describe('preflightModelRouting', () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it('excludes blocked stories but still validates the final reviewer model', async () => {
+  it('skips the final reviewer catalog when blocked convergence cannot enter Review', async () => {
     let called = false;
     const result = await preflightModelRouting({
       prd: prd(), state: state({ blocked: true }), requestedRunner: 'codex', runnerExplicit: true,
+      reviewRequired: false,
       catalog: async () => { called = true; return available('val-m'); },
     });
     expect(result.storyRoutes).toEqual([]);
-    expect(result.catalog.status).toBe('available');
+    expect(result.catalog.status).toBe('skipped');
     expect(result.review.model).toBe('val-m');
-    expect(called).toBe(true);
+    expect(called).toBe(false);
   });
 
   it('已收敛 workspace 仍校验 schema、runner 与即将调用的 final reviewer', async () => {
     let called = false;
     const result = await preflightModelRouting({
-      prd: prd(), state: state({ passes: true, validated: true }), requestedRunner: 'claude', runnerExplicit: false,
+      prd: prd(),
+      state: state({
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'resolved-fixture',
+          gitHead: 'a'.repeat(40),
+          acceptanceHash: `sha256:${'b'.repeat(64)}`,
+        },
+      }),
+      requestedRunner: 'claude',
+      runnerExplicit: false,
       catalog: async () => { called = true; return available('val-m'); },
     });
     expect(result.runner).toBe('codex');
@@ -191,14 +213,20 @@ describe('preflightModelRouting', () => {
     expect(called).toBe(true);
   });
 
-  it('把 passes=true 但无验收凭证的 story 继续视为待执行', async () => {
+  it('纯重验只要求 Validator 与 Final Reviewer，不要求 Builder 或 escalation', async () => {
     let called = false;
     const result = await preflightModelRouting({
       prd: prd(), state: state({ passes: true, validated: false }),
       requestedRunner: 'codex', runnerExplicit: true,
-      catalog: async () => { called = true; return available('mid-m', 'esc-m', 'val-m'); },
+      builderOverride: 'not-in-catalog-builder',
+      escalationOverride: 'not-in-catalog-escalation',
+      catalog: async () => { called = true; return available('val-m'); },
     });
     expect(result.storyRoutes).toHaveLength(1);
+    expect(result.storyRoutes[0].mode).toBe('validation-only');
+    expect(result.validator.model).toBe('val-m');
+    expect(result.review.model).toBe('val-m');
+    expect(result.warnings).toEqual([]);
     expect(called).toBe(true);
   });
 });

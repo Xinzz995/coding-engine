@@ -1,4 +1,5 @@
 import { writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { assertRegisteredWorkspacePath, assertWorkspaceDirectory } from './workspace-identity.js';
 
 /**
  * 覆盖写的原子替代：写 `<path>.tmp-<pid>` 后 rename（同目录 rename 在 POSIX 原子；
@@ -7,12 +8,22 @@ import { writeFileSync, renameSync, unlinkSync } from 'node:fs';
  * tmp 命名模式与 lock.ts 的 acquire 后残留清理（/\.tmp-\d+$/）配对，改动需两处同步。
  */
 export function writeFileAtomicSync(path: string, data: string): void {
+  const workspaceIdentity = assertRegisteredWorkspacePath(path);
   const tmp = `${path}.tmp-${process.pid}`;
   try {
-    writeFileSync(tmp, data, 'utf-8');
+    // wx 同时拒绝预先放置的软链/文件；项目进程知道 pid 也只能让本次写入失败，
+    // 不能借可预测临时名把内容重定向到 workspace 外。
+    writeFileSync(tmp, data, { encoding: 'utf-8', flag: 'wx' });
+    if (workspaceIdentity) assertWorkspaceDirectory(workspaceIdentity);
     renameSync(tmp, path);
+    if (workspaceIdentity) assertWorkspaceDirectory(workspaceIdentity);
   } catch (err) {
-    try { unlinkSync(tmp); } catch { /* 尽力清理；失败无害（acquire 时兜底清） */ }
+    try {
+      if (workspaceIdentity) assertWorkspaceDirectory(workspaceIdentity);
+      unlinkSync(tmp);
+    } catch {
+      /* 尽力清理；身份变化时绝不能沿新路径删除（其余残留由 acquire 兜底） */
+    }
     throw err;
   }
 }

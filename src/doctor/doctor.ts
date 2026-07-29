@@ -1,15 +1,13 @@
-import { readdirSync, readFileSync, existsSync, realpathSync, statSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { existsSync, lstatSync, opendirSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { AgentKind } from '../engine/agent.js';
-import {
-  readGlobalModelConfig,
-  resolveGlobalConfigPath,
-} from '../engine/model-catalog.js';
+import { execTrustedToolSync } from '../engine/trusted-tool.js';
+import { readGlobalModelConfig, resolveGlobalConfigPath } from '../engine/model-catalog.js';
 import { readModelRouting } from '../engine/models.js';
-import { tryReadPrd } from '../engine/prd.js';
+import { tryReadPrd, validatePrdStoryDefinitions } from '../engine/prd.js';
 import { isPidAlive, readLockInfo, LOCK_FILE } from '../engine/lock.js';
 import { checkTddPolicy, readTddConfig } from '../engine/tdd-gate.js';
+import { readSafeProjectFileUtf8Sync } from '../engine/safe-control-file.js';
 import {
   assessQualityRuntime,
   deriveQualityChecks,
@@ -88,6 +86,16 @@ export interface QualityContractCheckResult {
   issues: DoctorIssue[];
 }
 
+const SAFE_GIT_CONFIG = ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'] as const;
+
+function git(root: string, args: readonly string[]): string {
+  return execTrustedToolSync('git', [...SAFE_GIT_CONFIG, ...args], {
+    cwd: root,
+    projectRoot: root,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
 export interface TddConfigCheckResult {
   /** 展示用的 workspace/prd.json 路径。 */
   prdPath: string;
@@ -157,6 +165,12 @@ export interface DoctorReport {
 const REQUIRED_FIELDS = ['title', 'status', 'updated', 'scope'] as const;
 const DEFAULT_STALE_DAYS = 30;
 const DAY_MS = 86_400_000;
+const DOCTOR_DIRECTORY_ENTRY_LIMIT = 4_096;
+const DOCTOR_MARKDOWN_FILE_LIMIT = 2_048;
+const DOCTOR_DIRECTORY_DEPTH_LIMIT = 64;
+const DOCTOR_MARKDOWN_FILE_MAX_BYTES = 4 * 1024 * 1024;
+const DOCTOR_MARKDOWN_TOTAL_MAX_BYTES = 64 * 1024 * 1024;
+const AGENTS_FILE_MAX_BYTES = 1024 * 1024;
 
 /**
  * 简单行解析（零依赖，ADR 见 PRD 技术考量）：内容须以 `---` 行开头，
@@ -236,14 +250,72 @@ export function extractInlineLinkTargets(content: string): string[] {
   return targets;
 }
 
-function walkMarkdownFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walkMarkdownFiles(full));
-    else if (entry.isFile() && entry.name.endsWith('.md')) out.push(full);
+function walkMarkdownFiles(root: string): { files: string[]; issues: DoctorIssue[] } {
+  const files: string[] = [];
+  const issues: DoctorIssue[] = [];
+  const pending = [{ dir: root, depth: 0 }];
+  let entries = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    let handle: ReturnType<typeof opendirSync> | null = null;
+    try {
+      handle = opendirSync(current.dir);
+      let entry = handle.readSync();
+      while (entry !== null) {
+        entries += 1;
+        if (entries > DOCTOR_DIRECTORY_ENTRY_LIMIT) {
+          issues.push({
+            file: relative(dirname(root), root),
+            message: `目录条目超过 ${DOCTOR_DIRECTORY_ENTRY_LIMIT} 个，已停止扫描`,
+          });
+          return { files: files.sort(), issues };
+        }
+        const full = join(current.dir, entry.name);
+        if (entry.isSymbolicLink()) {
+          issues.push({
+            file: relative(dirname(root), full),
+            message: '文档目录不读取软链',
+          });
+        } else if (entry.isDirectory()) {
+          if (current.depth >= DOCTOR_DIRECTORY_DEPTH_LIMIT) {
+            issues.push({
+              file: relative(dirname(root), full),
+              message: `目录深度超过 ${DOCTOR_DIRECTORY_DEPTH_LIMIT} 层，已停止向下扫描`,
+            });
+          } else {
+            pending.push({ dir: full, depth: current.depth + 1 });
+          }
+        } else if (entry.isFile() && entry.name.endsWith('.md')) {
+          files.push(full);
+          if (files.length > DOCTOR_MARKDOWN_FILE_LIMIT) {
+            issues.push({
+              file: relative(dirname(root), root),
+              message: `Markdown 文件超过 ${DOCTOR_MARKDOWN_FILE_LIMIT} 个，已停止扫描`,
+            });
+            return { files: files.slice(0, DOCTOR_MARKDOWN_FILE_LIMIT).sort(), issues };
+          }
+        } else if (entry.name.endsWith('.md')) {
+          issues.push({
+            file: relative(dirname(root), full),
+            message: 'Markdown 路径不是普通文件',
+          });
+        }
+        entry = handle.readSync();
+      }
+    } catch (error) {
+      issues.push({
+        file: relative(dirname(root), current.dir),
+        message: `目录不可读取：${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      try {
+        handle?.closeSync();
+      } catch {
+        // 扫描失败已经记录；关闭错误不覆盖原诊断。
+      }
+    }
   }
-  return out.sort();
+  return { files: files.sort(), issues };
 }
 
 /** 严格 YYYY-MM-DD → UTC 毫秒；格式不符或日期不存在（如 2026-13-01）返回 null。 */
@@ -259,11 +331,7 @@ function parseDateUTC(value: string): number | null {
 
 function isGitWorkTree(root: string): boolean {
   try {
-    const out = execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd: root,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    const out = git(root, ['rev-parse', '--is-inside-work-tree']);
     return out.trim() === 'true';
   } catch {
     return false;
@@ -274,7 +342,10 @@ function isGitWorkTree(root: string): boolean {
  * 只读检查运行时 workspace 是否与 story commit 隔离。ignore 规则只能阻止
  * 新文件进入索引，所以已跟踪文件必须单独列出，且由用户决定如何停止跟踪。
  */
-export function checkWorkspaceGitIsolation(root: string, workspace: string): WorkspaceGitCheckResult {
+export function checkWorkspaceGitIsolation(
+  root: string,
+  workspace: string,
+): WorkspaceGitCheckResult {
   const workspacePath = workspace;
   // macOS 的临时目录常同时以 /var 与 /private/var 表示；比较仓库边界前先消除该别名。
   const canonicalRoot = realpathSync(root);
@@ -292,11 +363,7 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
   };
 
   try {
-    execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd: root,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    git(root, ['rev-parse', '--is-inside-work-tree']);
   } catch {
     return base;
   }
@@ -304,10 +371,11 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
   // 以调用目录为相对基准，不比较 Git 输出的绝对路径。Windows runner 可能让 Node 返回
   // 8.3 短路径、Git 返回长路径；二者指向同一目录却不能按字符串比较。
   const relFromProjectRoot = relative(canonicalRoot, workspaceAbs);
-  const insideRepository = relFromProjectRoot === ''
-    || (!isAbsolute(relFromProjectRoot)
-      && relFromProjectRoot !== '..'
-      && !relFromProjectRoot.startsWith(`..${sep}`));
+  const insideRepository =
+    relFromProjectRoot === '' ||
+    (!isAbsolute(relFromProjectRoot) &&
+      relFromProjectRoot !== '..' &&
+      !relFromProjectRoot.startsWith(`..${sep}`));
   if (!insideRepository) return { ...base, gitAvailable: true };
 
   // Git 的 pathspec 固定使用正斜杠；workspace=仓库根时不能把整个仓库误列为运行时文件。
@@ -315,11 +383,7 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
   let trackedFiles: string[] = [];
   if (pathspec !== '') {
     try {
-      const tracked = execFileSync('git', ['ls-files', '-z', '--', pathspec], {
-        cwd: root,
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      const tracked = git(root, ['ls-files', '-z', '--', pathspec]);
       trackedFiles = tracked.split('\0').filter(Boolean).sort();
     } catch {
       // rev-parse 已确认仓库；单项查询失败时保守地保持空列表并继续给出 ignore 建议。
@@ -329,10 +393,7 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
   let ignored = false;
   if (pathspec !== '') {
     try {
-      execFileSync('git', ['check-ignore', '-q', '--no-index', '--', `${pathspec}/`], {
-        cwd: root,
-        stdio: 'ignore',
-      });
+      git(root, ['check-ignore', '-q', '--no-index', '--', `${pathspec}/`]);
       ignored = true;
     } catch {
       // exit 1 表示未命中 ignore；其他错误同样不冒充已受保护。
@@ -351,11 +412,7 @@ export function checkWorkspaceGitIsolation(root: string, workspace: string): Wor
 /** 文件在 git 的最后提交日期（%cs，YYYY-MM-DD）；尚无提交记录或 git 失败返回 null。 */
 function gitLastCommitDate(root: string, relFile: string): string | null {
   try {
-    const out = execFileSync('git', ['log', '-1', '--format=%cs', '--', relFile], {
-      cwd: root,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    const out = git(root, ['log', '-1', '--format=%cs', '--', relFile]).trim();
     return out === '' ? null : out;
   } catch {
     return null;
@@ -390,23 +447,33 @@ function checkModelCatalog(
     if (prd === null) {
       prdIssues.push({ file: prdDisplayPath, message: 'prd.json 无法解析，不能检查全局模型目录' });
     } else {
-      routing = readModelRouting(prd);
-      if (routing.status === 'invalid') {
-        prdIssues.push(...routing.errors.map((message) => ({ file: prdDisplayPath, message })));
+      const storyDefinitions = validatePrdStoryDefinitions(prd);
+      if (!storyDefinitions.ok) {
+        prdIssues.push({
+          file: prdDisplayPath,
+          message: `PRD Story 定义无效，不能检查全局模型目录：${storyDefinitions.error}`,
+        });
+      } else {
+        routing = readModelRouting(prd);
+        if (routing.status === 'invalid') {
+          prdIssues.push(...routing.errors.map((message) => ({ file: prdDisplayPath, message })));
+        }
       }
     }
   }
 
   const enabledRouting = routing?.status === 'enabled' ? routing.config : null;
-  const withRouting = enabledRouting === null
-    ? base
-    : { ...base, routingEnabled: true, runner: enabledRouting.runner };
+  const withRouting =
+    enabledRouting === null
+      ? base
+      : { ...base, routingEnabled: true, runner: enabledRouting.runner };
   const config = readGlobalModelConfig(configPath);
   if (config.status === 'error') {
     const missing = !existsSync(configPath);
-    const configIssues = missing && enabledRouting === null
-      ? []
-      : config.errors.map((message) => ({ file: configPath, message }));
+    const configIssues =
+      missing && enabledRouting === null
+        ? []
+        : config.errors.map((message) => ({ file: configPath, message }));
     return {
       ...withRouting,
       configStatus: missing ? 'missing' : 'error',
@@ -414,10 +481,11 @@ function checkModelCatalog(
     };
   }
 
-  const configuredRunners = (Object.entries(config.config.models) as Array<[
-    AgentKind,
-    NonNullable<(typeof config.config.models)[AgentKind]>,
-  ]>).map(([runner, models]) => ({ runner, count: models.length }));
+  const configuredRunners = (
+    Object.entries(config.config.models) as Array<
+      [AgentKind, NonNullable<(typeof config.config.models)[AgentKind]>]
+    >
+  ).map(([runner, models]) => ({ runner, count: models.length }));
   const available = {
     ...withRouting,
     configStatus: 'available' as const,
@@ -487,9 +555,8 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     if (contractRead.status === 'missing') {
       quality.issues.push({ file: contractRel, message: '质量契约不存在；请先运行 coding-x init' });
     } else if (contractRead.status !== 'ready') {
-      const details = contractRead.status === 'invalid'
-        ? contractRead.errors
-        : [contractRead.error];
+      const details =
+        contractRead.status === 'invalid' ? contractRead.errors : [contractRead.error];
       quality = {
         ...quality,
         status: 'invalid',
@@ -507,9 +574,9 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
         const policy = contractRead.contract.checks[category];
         return count + ('checks' in policy ? policy.checks.length : 0);
       }, 0);
-      const notApplicableCategories = categories.filter((category) => (
-        'notApplicable' in contractRead.contract.checks[category]
-      ));
+      const notApplicableCategories = categories.filter(
+        (category) => 'notApplicable' in contractRead.contract.checks[category],
+      );
       quality = {
         ...quality,
         status: runtime.mode === 'formal' ? 'ready' : 'version-mismatch',
@@ -529,22 +596,31 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
         if (prd === null) {
           quality.issues.push({ file: prdRel, message: 'prd.json 无法解析，不能核对质量契约摘要' });
         } else {
-          quality.prdDigestMatches = prd.qualityContractDigest === contractRead.digest;
-          if (!quality.prdDigestMatches) {
+          const storyDefinitions = validatePrdStoryDefinitions(prd);
+          if (!storyDefinitions.ok) {
+            quality.status = 'invalid';
             quality.issues.push({
               file: prdRel,
-              message: `质量契约摘要不匹配（期望 ${contractRead.digest}，收到 ${prd.qualityContractDigest ?? 'missing'}）`,
+              message: `PRD Story 定义无效，不能核对质量契约：${storyDefinitions.error}`,
             });
-          }
-          quality.prdChecksMatch = qualityChecksMatchContract(
-            prd.qualityChecks,
-            contractRead.contract,
-          );
-          if (!quality.prdChecksMatch) {
-            quality.issues.push({
-              file: prdRel,
-              message: 'qualityChecks 不是当前质量契约的完整派生快照；请重新派生 PRD',
-            });
+          } else {
+            quality.prdDigestMatches = prd.qualityContractDigest === contractRead.digest;
+            if (!quality.prdDigestMatches) {
+              quality.issues.push({
+                file: prdRel,
+                message: `质量契约摘要不匹配（期望 ${contractRead.digest}，收到 ${prd.qualityContractDigest ?? 'missing'}）`,
+              });
+            }
+            quality.prdChecksMatch = qualityChecksMatchContract(
+              prd.qualityChecks,
+              contractRead.contract,
+            );
+            if (!quality.prdChecksMatch) {
+              quality.issues.push({
+                file: prdRel,
+                message: 'qualityChecks 不是当前质量契约的完整派生快照；请重新派生 PRD',
+              });
+            }
           }
         }
       }
@@ -571,27 +647,43 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
         issues: [{ file: prdRel, message: 'prd.json 无法解析，不能检查 TDD 政策' }],
       };
     } else {
-      const parsed = readTddConfig(prd);
-      if (parsed.status === 'disabled') {
-        tdd = { prdPath: prdRel, status: 'disabled', issues: [] };
-      } else if (parsed.status === 'invalid') {
+      const storyDefinitions = validatePrdStoryDefinitions(prd);
+      if (!storyDefinitions.ok) {
         tdd = {
           prdPath: prdRel,
           status: 'invalid',
-          issues: [{ file: prdRel, message: parsed.error }],
+          issues: [
+            {
+              file: prdRel,
+              message: `PRD Story 定义无效，不能检查 TDD 政策：${storyDefinitions.error}`,
+            },
+          ],
         };
       } else {
-        const policy = checkTddPolicy(parsed.config, root);
-        tdd = policy.ok
-          ? { prdPath: prdRel, status: 'ready', issues: [] }
-          : {
-              prdPath: prdRel,
-              status: 'policy-error',
-              issues: [{
-                file: prdRel,
-                message: policy.failure?.outputTail || 'TDD 政策完整性检查失败',
-              }],
-            };
+        const parsed = readTddConfig(prd);
+        if (parsed.status === 'disabled') {
+          tdd = { prdPath: prdRel, status: 'disabled', issues: [] };
+        } else if (parsed.status === 'invalid') {
+          tdd = {
+            prdPath: prdRel,
+            status: 'invalid',
+            issues: [{ file: prdRel, message: parsed.error }],
+          };
+        } else {
+          const policy = checkTddPolicy(parsed.config, root);
+          tdd = policy.ok
+            ? { prdPath: prdRel, status: 'ready', issues: [] }
+            : {
+                prdPath: prdRel,
+                status: 'policy-error',
+                issues: [
+                  {
+                    file: prdRel,
+                    message: policy.failure?.outputTail || 'TDD 政策完整性检查失败',
+                  },
+                ],
+              };
+        }
       }
     }
   }
@@ -602,23 +694,75 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     lock = { found: true, stale: !(info !== null && isPidAlive(info.pid)), pid: info?.pid ?? null };
   }
   const docsDir = join(root, 'docs');
-  if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
+  if (!existsSync(docsDir)) {
     return {
-      docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null,
-      quality, delivery, tdd, modelCatalog, workspaceGit, lock,
+      docsFound: false,
+      frontmatter: null,
+      freshness: null,
+      agentsIndex: null,
+      links: null,
+      quality,
+      delivery,
+      tdd,
+      modelCatalog,
+      workspaceGit,
+      lock,
     };
   }
-  const files = walkMarkdownFiles(docsDir);
+  let walked: ReturnType<typeof walkMarkdownFiles>;
+  try {
+    const docsStat = lstatSync(docsDir);
+    walked =
+      docsStat.isSymbolicLink() || !docsStat.isDirectory()
+        ? {
+            files: [],
+            issues: [{ file: 'docs', message: 'docs 必须是真实目录，不能是软链或其他文件' }],
+          }
+        : walkMarkdownFiles(docsDir);
+  } catch (error) {
+    walked = {
+      files: [],
+      issues: [
+        {
+          file: 'docs',
+          message: `docs 目录不可读取：${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
+    };
+  }
+  const files = walked.files;
   const gitAvailable = isGitWorkTree(root);
-  const fmIssues: DoctorIssue[] = [];
+  const fmIssues: DoctorIssue[] = [...walked.issues];
   const freshnessIssues: DoctorIssue[] = [];
   const linkIssues: DoctorIssue[] = [];
   let checked = 0;
   let freshnessChecked = 0;
   let archivedFreshnessSkipped = 0;
   let linksChecked = 0;
+  let markdownBytes = 0;
   for (const file of files) {
-    const content = readFileSync(file, 'utf-8');
+    let content: string;
+    try {
+      const value = readSafeProjectFileUtf8Sync(root, file, {
+        maxBytes: DOCTOR_MARKDOWN_FILE_MAX_BYTES,
+      });
+      if (value === null) throw new Error('文件在扫描期间消失');
+      content = value;
+    } catch (error) {
+      fmIssues.push({
+        file: relative(root, file),
+        message: `文档不是可安全读取的小型普通文件：${error instanceof Error ? error.message : String(error)}`,
+      });
+      continue;
+    }
+    markdownBytes += Buffer.byteLength(content);
+    if (markdownBytes > DOCTOR_MARKDOWN_TOTAL_MAX_BYTES) {
+      fmIssues.push({
+        file: 'docs',
+        message: `Markdown 总量超过 ${DOCTOR_MARKDOWN_TOTAL_MAX_BYTES} bytes，已停止扫描`,
+      });
+      break;
+    }
     const fm = parseFrontmatter(content);
     if (fm === null) continue; // 无 frontmatter 的 .md（README 占位、工作产物）不参与本项检查
     checked++;
@@ -645,7 +789,10 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     freshnessChecked++;
     const updatedTs = parseDateUTC(fm.updated);
     if (updatedTs === null) {
-      freshnessIssues.push({ file: rel, message: `updated 值「${fm.updated}」不是 YYYY-MM-DD 格式` });
+      freshnessIssues.push({
+        file: rel,
+        message: `updated 值「${fm.updated}」不是 YYYY-MM-DD 格式`,
+      });
       continue;
     }
     if (!gitAvailable) continue; // 非 git 仓库：跳过新鲜度比较，不报错
@@ -663,17 +810,34 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
   }
   const agentsFile = join(root, 'AGENTS.md');
   let agentsIndex: AgentsIndexCheckResult;
-  if (existsSync(agentsFile)) {
-    const indexPaths = extractAgentsIndexPaths(readFileSync(agentsFile, 'utf-8'));
+  try {
+    const agentsContent = readSafeProjectFileUtf8Sync(root, agentsFile, {
+      maxBytes: AGENTS_FILE_MAX_BYTES,
+      allowMissing: true,
+    });
+    if (agentsContent === null) {
+      agentsIndex = { agentsFound: false, checked: 0, issues: [] };
+    } else {
+      const indexPaths = extractAgentsIndexPaths(agentsContent);
+      agentsIndex = {
+        agentsFound: true,
+        checked: indexPaths.length,
+        issues: indexPaths
+          .filter((p) => !existsSync(join(root, p)))
+          .map((p) => ({ file: 'AGENTS.md', message: `索引路径 ${p} 不存在` })),
+      };
+    }
+  } catch (error) {
     agentsIndex = {
       agentsFound: true,
-      checked: indexPaths.length,
-      issues: indexPaths
-        .filter((p) => !existsSync(join(root, p)))
-        .map((p) => ({ file: 'AGENTS.md', message: `索引路径 ${p} 不存在` })),
+      checked: 0,
+      issues: [
+        {
+          file: 'AGENTS.md',
+          message: `文件不可安全读取：${error instanceof Error ? error.message : String(error)}`,
+        },
+      ],
     };
-  } else {
-    agentsIndex = { agentsFound: false, checked: 0, issues: [] };
   }
   return {
     docsFound: true,
@@ -706,9 +870,7 @@ function renderQualityLines(result: QualityContractCheckResult): string[] {
     for (const issue of result.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
     return lines;
   }
-  lines.push(
-    `  ✅ 契约有效；已声明 ${result.configuredChecks} 项机械检查，摘要 ${result.digest}`,
-  );
+  lines.push(`  ✅ 契约有效；已声明 ${result.configuredChecks} 项机械检查，摘要 ${result.digest}`);
   if (result.notApplicableCategories.length > 0) {
     lines.push(`  ℹ️  明确不适用：${result.notApplicableCategories.join('、')}`);
   }
@@ -731,7 +893,7 @@ function renderDeliveryLines(result: DeliveryGateCheckResult): string[] {
     lines.push(
       result.remoteChecked
         ? `  ✅ 本地 ${result.managedFilesChecked} 个托管文件与 GitHub ` +
-          `${result.releaseRulesetId === null ? '默认分支 Ruleset' : '默认分支、发布标签 Ruleset'} 均一致`
+            `${result.releaseRulesetId === null ? '默认分支 Ruleset' : '默认分支、发布标签 Ruleset'} 均一致`
         : `  ✅ 本地 ${result.managedFilesChecked} 个托管文件一致（--local 已跳过 GitHub）`,
     );
     if (result.remoteChecked && result.immutableReleases === true) {
@@ -770,9 +932,10 @@ function renderModelCatalogLines(result: ModelCatalogCheckResult): string[] {
     if (!result.prdFound) lines.push(`  ℹ️  未找到 ${result.prdPath}：无需项目模型映射复核`);
     else lines.push('  ℹ️  prd.json 未启用 models：无需项目模型映射复核');
   } else if (!result.routingEnabled) {
-    const summary = result.configuredRunners.length === 0
-      ? '尚未声明 runner'
-      : result.configuredRunners.map(({ runner, count }) => `${runner} ${count} 项`).join('、');
+    const summary =
+      result.configuredRunners.length === 0
+        ? '尚未声明 runner'
+        : result.configuredRunners.map(({ runner, count }) => `${runner} ${count} 项`).join('、');
     lines.push(`  ✅ 配置 schema 合法（${summary}）`);
     if (!result.prdFound) lines.push(`  ℹ️  未找到 ${result.prdPath}：无需项目模型映射复核`);
     else lines.push('  ℹ️  prd.json 未启用 models：无需项目模型映射复核');
@@ -790,7 +953,9 @@ function renderLockLines(lock: LockCheckResult): string[] {
   if (!lock.found) {
     lines.push('  ✅ 无 engine.lock（当前没有引擎实例在运行）');
   } else if (lock.stale) {
-    lines.push(`  💡 发现 stale 锁${lock.pid !== null ? `（pid ${lock.pid} 已不存在）` : '（锁文件损坏）'}：上次异常退出遗留，下次 coding-x 运行将自动接管（建议项，不计失败）`);
+    lines.push(
+      `  💡 发现 stale 锁${lock.pid !== null ? `（pid ${lock.pid} 已不存在）` : '（锁文件损坏）'}：上次异常退出遗留，下次 coding-x 运行将自动接管（建议项，不计失败）`,
+    );
   } else {
     lines.push(`  ℹ️  引擎运行中（pid ${lock.pid}）：请勿对同一 workspace 并行启动 run/repair`);
   }
@@ -813,26 +978,39 @@ function renderWorkspaceGitLines(result: WorkspaceGitCheckResult): string[] {
   } else if (result.ignored) {
     lines.push(`  ✅ ${result.workspacePath} 已被 Git 忽略（运行时文件不会进入 story commit）`);
   } else if (result.workspaceFound) {
-    lines.push(`  💡 ${result.workspacePath} 未被 Git 忽略：建议先配置忽略规则；doctor 不会自动修改 .gitignore（建议项，不计失败）`);
+    lines.push(
+      `  💡 ${result.workspacePath} 未被 Git 忽略：建议先配置忽略规则；doctor 不会自动修改 .gitignore（建议项，不计失败）`,
+    );
   } else {
-    lines.push(`  💡 ${result.workspacePath} 尚未创建且未命中 Git 忽略规则：创建前请确认忽略配置；doctor 不会自动修改 .gitignore（建议项，不计失败）`);
+    lines.push(
+      `  💡 ${result.workspacePath} 尚未创建且未命中 Git 忽略规则：创建前请确认忽略配置；doctor 不会自动修改 .gitignore（建议项，不计失败）`,
+    );
   }
   return lines;
 }
 
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
   if (!report.docsFound) {
-    const total = report.modelCatalog.issues.length + report.tdd.issues.length
-      + report.quality.issues.length + report.delivery.issues.length;
+    const total =
+      report.modelCatalog.issues.length +
+      report.tdd.issues.length +
+      report.quality.issues.length +
+      report.delivery.issues.length;
     return {
       text: [
         'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
-        '', ...renderQualityLines(report.quality),
-        '', ...renderDeliveryLines(report.delivery),
-        '', ...renderTddLines(report.tdd),
-        '', ...renderModelCatalogLines(report.modelCatalog),
-        '', ...renderWorkspaceGitLines(report.workspaceGit),
-        '', ...renderLockLines(report.lock),
+        '',
+        ...renderQualityLines(report.quality),
+        '',
+        ...renderDeliveryLines(report.delivery),
+        '',
+        ...renderTddLines(report.tdd),
+        '',
+        ...renderModelCatalogLines(report.modelCatalog),
+        '',
+        ...renderWorkspaceGitLines(report.workspaceGit),
+        '',
+        ...renderLockLines(report.lock),
       ].join('\n'),
       exitCode: total === 0 ? 0 : 1,
     };
@@ -841,7 +1019,9 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   const fresh = report.freshness!;
   const lines: string[] = ['🩺 docs/ 知识库健康检查', '', '📋 frontmatter 完整性'];
   if (fm.issues.length === 0) {
-    lines.push(`  ✅ 通过（已检查 ${fm.checked} 个带 frontmatter 文件 / 共扫描 ${fm.scanned} 个 .md）`);
+    lines.push(
+      `  ✅ 通过（已检查 ${fm.checked} 个带 frontmatter 文件 / 共扫描 ${fm.scanned} 个 .md）`,
+    );
   } else {
     for (const issue of fm.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
   }
@@ -851,10 +1031,13 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
       ...(fresh.gitAvailable ? [] : ['非 git 仓库，已跳过 git 日期比较']),
       ...(fresh.archivedSkipped === 0 ? [] : [`冷档案 ${fresh.archivedSkipped} 份已跳过`]),
     ];
-    lines.push(`  ✅ 通过（已检查 ${fresh.checked} 个含 updated 文件${notes.length === 0 ? '' : `；${notes.join('；')}`}）`);
+    lines.push(
+      `  ✅ 通过（已检查 ${fresh.checked} 个含 updated 文件${notes.length === 0 ? '' : `；${notes.join('；')}`}）`,
+    );
   } else {
     for (const issue of fresh.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
-    if (fresh.archivedSkipped > 0) lines.push(`  ℹ️  冷档案 ${fresh.archivedSkipped} 份未参与新鲜度检查`);
+    if (fresh.archivedSkipped > 0)
+      lines.push(`  ℹ️  冷档案 ${fresh.archivedSkipped} 份未参与新鲜度检查`);
   }
   const idx = report.agentsIndex!;
   lines.push('', '📇 AGENTS.md 索引');
@@ -878,9 +1061,15 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   lines.push('', ...renderModelCatalogLines(report.modelCatalog));
   lines.push('', ...renderWorkspaceGitLines(report.workspaceGit));
   lines.push('', ...renderLockLines(report.lock));
-  const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
-    + report.modelCatalog.issues.length + report.tdd.issues.length + report.quality.issues.length
-    + report.delivery.issues.length;
+  const total =
+    fm.issues.length +
+    fresh.issues.length +
+    idx.issues.length +
+    links.issues.length +
+    report.modelCatalog.issues.length +
+    report.tdd.issues.length +
+    report.quality.issues.length +
+    report.delivery.issues.length;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
 }

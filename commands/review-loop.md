@@ -14,6 +14,7 @@ description: 处理 coding-x 针对当前 PR 最新提交产生的结构化 Revi
 4. 不自动推送、合并、创建标签或发布。创建延期 Issue 也要先取得用户明确同意。
 5. 不采信 Developer、Validator、计划或 PRD 的自述作为反证。黄金原则不是自述；涉及原则的 finding 必须逐条独立复核代码、测试或可观察证据。
 6. finding 的严重度和评审轴由引擎保留；本命令不得重新降级、合并或隐藏。
+7. `.workspace/engine.lock` 表示 coding-x 正在运行时，不得写入裁决，也不得删除或接管该锁；等待运行结束后再执行本命令。裁决文件是本地工作流记录，不是密码学签名或独立的人类身份证明。
 
 ## 第一步：验证输入
 
@@ -23,6 +24,7 @@ description: 处理 coding-x 针对当前 PR 最新提交产生的结构化 Revi
   - 当前 HEAD 与 `binding.headSha` 完全相同；
   - `axes` 中每个 finding 都有稳定 ID、评审轴、严重度、位置、规则来源、影响和建议。
 - 读取已有 `.workspace/review-decisions.json`。格式非法时停止，不得覆盖；旧提交上的决定只展示为历史，不得用于当前提交。
+- 首次读取及每次实际写入前都确认 `.workspace/engine.lock` 不存在；存在时停止，避免与已冻结裁决输入的 coding-x 运行并发。
 - 展示三条彼此独立的状态：Story 实现验证、本地三层 Review、GitHub 交付。不得把任意一条包装成另外两条的证明。
 
 ## 第二步：逐项裁决
@@ -61,6 +63,7 @@ description: 处理 coding-x 针对当前 PR 最新提交产生的结构化 Revi
 
 - 不猜操作者身份；无法从已登录 GitHub 账户可靠取得时询问用户。
 - 写入前再次核对 HEAD，防止裁决过程中提交已经变化。
+- 写入前再次确认 `.workspace/engine.lock` 仍不存在；不能通过删除锁来强行写入。
 - 同一 finding 有多条当前提交记录时，最后一条是当前决定；保留历史，不原地改写。
 - Markdown 可作为阅读副本，但不得由本命令生成或修改后充当完成状态。
 

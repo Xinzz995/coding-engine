@@ -4,7 +4,11 @@ import { INITIAL_STORY_STATE } from './state.js';
 import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
-import { terminateProcessTree } from './process-tree.js';
+import {
+  forceTerminateProcessTree,
+  hasLiveProcessGroup,
+  terminateProcessTree,
+} from './process-tree.js';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 import type { ValidationCheck } from './validation-protocol.js';
 import type {
@@ -116,32 +120,71 @@ function runSpawnedGate(spec: SpawnedGateSpec): Promise<GateFailure | null> {
     child.stderr.on('data', (c: Buffer) => { process.stderr.write(c); keep(c); });
     let settled = false;
     let terminating = false;
+    let rootExitCode: number | null = null;
+    const finish = (failure: GateFailure | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(failure);
+    };
     const timer = setTimeout(() => {
       if (settled || terminating) return;
       terminating = true;
-      void terminateProcessTree(child).then(() => {
-        if (settled) return;
-        settled = true;
-        resolve({ command: spec.label, exitCode: null, timedOut: true, outputTail: tail });
-      }, (err) => {
-        if (settled) return;
-        settled = true;
-        reject(err instanceof Error ? err : new Error(String(err)));
-      });
+      void terminateProcessTree(child).then(
+        () => {
+          finish({ command: spec.label, exitCode: null, timedOut: true, outputTail: tail });
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
     }, spec.timeoutMs);
     child.once('exit', (code) => {
       if (settled || terminating) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(code === 0 ? null : {
-        command: spec.label, exitCode: code, timedOut: false, outputTail: tail,
-      });
+      rootExitCode = code;
+      if (hasLiveProcessGroup(child) !== true) return;
+      terminating = true;
+      const diagnostic = '门禁主进程退出后仍有后台子进程；已终止整组并拒绝本次结果';
+      keep(Buffer.from(`\n${diagnostic}`));
+      void forceTerminateProcessTree(child).then(
+        () => {
+          finish({
+            command: spec.label,
+            exitCode: code,
+            timedOut: false,
+            outputTail: tail,
+          });
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
+      );
+    });
+    // exit 只说明根进程结束；close 才说明它持有的 stdio 已关闭。没有残留
+    // 进程组时也必须等到这里，避免输出尚未排空就把检查判为成功。
+    child.once('close', (code) => {
+      if (settled || terminating) return;
+      const exitCode = rootExitCode ?? code;
+      finish(
+        exitCode === 0
+          ? null
+          : {
+              command: spec.label,
+              exitCode,
+              timedOut: false,
+              outputTail: tail,
+            },
+      );
     });
     child.once('error', (err) => {
       if (settled || terminating) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ command: spec.label, exitCode: null, timedOut: false, outputTail: err.message });
+      finish({ command: spec.label, exitCode: null, timedOut: false, outputTail: err.message });
     });
   });
 }
@@ -336,7 +379,15 @@ export function applyGateFailure(
   if (blocked && !prev.blocked) lines.push(`${BLOCKED_LINE_PREFIX}: 已达到最大重试次数，跳过此 story]`);
   return {
     ...state,
-    [storyId]: { ...prev, passes: false, validated: false, notes: lines.join('\n'), retryCount, blocked },
+    [storyId]: {
+      ...prev,
+      passes: false,
+      validated: false,
+      validationReceipt: null,
+      notes: lines.join('\n'),
+      retryCount,
+      blocked,
+    },
   };
 }
 
@@ -352,6 +403,7 @@ export function applyValidatorSuccess(state: RunState, storyId: string): RunStat
     [storyId]: {
       ...prev,
       validated: false,
+      validationReceipt: null,
       notes: arbitrationLines.join('\n'),
       retryCount: 0,
     },
@@ -393,6 +445,7 @@ export function applyValidatorFailure(
       ...prev,
       passes: false,
       validated: false,
+      validationReceipt: null,
       notes: lines.join('\n'),
       retryCount,
       blocked,
@@ -437,6 +490,14 @@ export function applyAbortRollback(
   ];
   return {
     ...state,
-    [storyId]: { ...prev, passes: false, validated: false, notes: lines.join('\n'), retryCount: prev.retryCount, blocked: prev.blocked },
+    [storyId]: {
+      ...prev,
+      passes: false,
+      validated: false,
+      validationReceipt: null,
+      notes: lines.join('\n'),
+      retryCount: prev.retryCount,
+      blocked: prev.blocked,
+    },
   };
 }

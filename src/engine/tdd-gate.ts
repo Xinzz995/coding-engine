@@ -1,13 +1,10 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep, win32 } from 'node:path';
-import {
-  GATE_TIMEOUT_MS,
-  runGateCommand,
-  type GateFailure,
-} from './gate.js';
+import { GATE_TIMEOUT_MS, runGateCommand, type GateFailure } from './gate.js';
 import type { Prd, TddConfig, TddPolicyFile } from './prd.js';
+import { readSafeControlFileSync, readSafeControlFileUtf8Sync } from './safe-control-file.js';
+import { execTrustedToolSync } from './trusted-tool.js';
 
 export type { TddConfig, TddPolicyFile } from './prd.js';
 
@@ -59,18 +56,32 @@ const CONFIG_KEYS = [
 ] as const;
 const POLICY_FILE_KEYS = ['path', 'sha256'] as const;
 const GIT_OUTPUT_LIMIT = 4 * 1024 * 1024;
+const TDD_POLICY_FILE_MAX_BYTES = 4 * 1024 * 1024;
+const TDD_UNTRACKED_SOURCE_MAX_BYTES = 16 * 1024 * 1024;
+const TDD_UNTRACKED_SOURCE_FILE_LIMIT = 4_096;
+const TDD_UNTRACKED_SOURCE_TOTAL_MAX_BYTES = 64 * 1024 * 1024;
+const SAFE_GIT_CONFIG = ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'] as const;
+
+interface TddUntrackedScanLimits {
+  fileLimit: number;
+  totalBytes: number;
+}
+
+const DEFAULT_UNTRACKED_SCAN_LIMITS: TddUntrackedScanLimits = {
+  fileLimit: TDD_UNTRACKED_SOURCE_FILE_LIMIT,
+  totalBytes: TDD_UNTRACKED_SOURCE_TOTAL_MAX_BYTES,
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasExactKeys(
-  value: Record<string, unknown>,
-  expected: readonly string[],
-): boolean {
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
-  return actual.length === expected.length
-    && [...expected].sort().every((key, index) => actual[index] === key);
+  return (
+    actual.length === expected.length &&
+    [...expected].sort().every((key, index) => actual[index] === key)
+  );
 }
 
 function invalid(error: string): TddConfigReadResult {
@@ -90,7 +101,10 @@ function pathspecBody(pathspec: string): string | null {
   if (!pathspec.startsWith(':(')) return null;
   const close = pathspec.indexOf(')');
   if (close < 3) return null;
-  const magic = pathspec.slice(2, close).split(',').map((part) => part.trim());
+  const magic = pathspec
+    .slice(2, close)
+    .split(',')
+    .map((part) => part.trim());
   if (magic.length === 0 || magic.some((part) => !['glob', 'top', 'literal'].includes(part))) {
     return null;
   }
@@ -106,12 +120,14 @@ function isSafeSourcePathspec(value: unknown): value is string {
 }
 
 function isSafePolicyPath(value: unknown): value is string {
-  return isNonBlankString(value)
-    && value !== '.'
-    && !isAbsolute(value)
-    && !win32.isAbsolute(value)
-    && !hasParentSegment(value)
-    && !value.includes('\\');
+  return (
+    isNonBlankString(value) &&
+    value !== '.' &&
+    !isAbsolute(value) &&
+    !win32.isAbsolute(value) &&
+    !hasParentSegment(value) &&
+    !value.includes('\\')
+  );
 }
 
 function readUniqueStringArray(
@@ -170,7 +186,10 @@ export function readTddConfig(prd: Prd | null): TddConfigReadResult {
     policyFiles.push({ path: item.path, sha256: item.sha256 });
   }
 
-  if (typeof raw.baselineRef !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(raw.baselineRef)) {
+  if (
+    typeof raw.baselineRef !== 'string' ||
+    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(raw.baselineRef)
+  ) {
     return invalid('tdd.baselineRef 必须是完整 Git commit id');
   }
   const forbiddenAddedPatterns = readUniqueStringArray(
@@ -221,26 +240,36 @@ interface GitResult {
 }
 
 function runGit(root: string, args: string[]): GitResult {
-  const result = spawnSync('git', args, {
-    cwd: root,
-    encoding: 'utf8',
-    maxBuffer: GIT_OUTPUT_LIMIT,
-  });
-  const stdout = result.stdout ?? '';
-  const stderr = result.stderr ?? '';
-  const diagnostic = (stderr || result.error?.message || stdout).slice(-2000);
-  return {
-    ok: !result.error && result.status === 0,
-    stdout,
-    diagnostic,
-    exitCode: result.status,
-  };
+  try {
+    const stdout = execTrustedToolSync('git', [...SAFE_GIT_CONFIG, ...args], {
+      cwd: root,
+      projectRoot: root,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: GIT_OUTPUT_LIMIT,
+    });
+    return { ok: true, stdout, diagnostic: '', exitCode: 0 };
+  } catch (error) {
+    const detail =
+      typeof error === 'object' && error !== null
+        ? (error as { stdout?: string | Buffer; stderr?: string | Buffer; status?: number | null })
+        : {};
+    const stdout = Buffer.isBuffer(detail.stdout)
+      ? detail.stdout.toString('utf8')
+      : (detail.stdout ?? '');
+    const stderr = Buffer.isBuffer(detail.stderr)
+      ? detail.stderr.toString('utf8')
+      : (detail.stderr ?? '');
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      stdout,
+      diagnostic: (stderr || message || stdout).slice(-2000),
+      exitCode: typeof detail.status === 'number' ? detail.status : null,
+    };
+  }
 }
 
-function findForbiddenAddedLine(
-  diff: string,
-  patterns: readonly string[],
-): string | null {
+function findForbiddenAddedLine(diff: string, patterns: readonly string[]): string | null {
   const lowered = patterns.map((pattern) => pattern.toLowerCase());
   let file = 'unknown';
   for (const line of diff.split(/\r?\n/)) {
@@ -259,6 +288,7 @@ function findForbiddenAddedLine(
 function scanUntracked(
   root: string,
   config: TddConfig,
+  limits: TddUntrackedScanLimits,
 ): TddGateFailure | null {
   const listed = runGit(root, [
     'ls-files',
@@ -277,7 +307,22 @@ function scanUntracked(
     );
   }
   const lowered = config.forbiddenAddedPatterns.map((pattern) => pattern.toLowerCase());
-  for (const relPath of listed.stdout.split('\0').filter(Boolean)) {
+  let cursor = 0;
+  let files = 0;
+  let totalBytes = 0;
+  while (cursor < listed.stdout.length) {
+    const separator = listed.stdout.indexOf('\0', cursor);
+    const end = separator === -1 ? listed.stdout.length : separator;
+    const relPath = listed.stdout.slice(cursor, end);
+    cursor = end + 1;
+    if (!relPath) continue;
+    files += 1;
+    if (files > limits.fileLimit) {
+      return fail(
+        'source-scan-failed',
+        `未跟踪生产文件超过 ${limits.fileLimit} 个，拒绝执行无界扫描`,
+      );
+    }
     let real: string;
     let content: string;
     try {
@@ -285,7 +330,16 @@ function scanUntracked(
       if (!isInside(root, real)) {
         return fail('source-scan-failed', `未跟踪生产文件越出项目根：${relPath}`);
       }
-      content = readFileSync(real, 'utf8');
+      content = readSafeControlFileUtf8Sync(real, {
+        maxBytes: TDD_UNTRACKED_SOURCE_MAX_BYTES,
+      })!;
+      totalBytes += Buffer.byteLength(content);
+      if (totalBytes > limits.totalBytes) {
+        return fail(
+          'source-scan-failed',
+          `未跟踪生产文件总量超过 ${limits.totalBytes} bytes，拒绝执行无界扫描`,
+        );
+      }
     } catch (err) {
       return fail(
         'source-scan-failed',
@@ -308,8 +362,24 @@ function scanUntracked(
 /**
  * 验证受保护政策面，不运行覆盖率命令。启动预检与每轮最终门禁共用。
  */
-export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolicyResult {
+export function checkTddPolicy(
+  config: TddConfig,
+  projectRoot: string,
+  untrackedScanLimits: TddUntrackedScanLimits = DEFAULT_UNTRACKED_SCAN_LIMITS,
+): TddPolicyResult {
   const started = Date.now();
+  if (
+    !Number.isSafeInteger(untrackedScanLimits.fileLimit) ||
+    untrackedScanLimits.fileLimit < 1 ||
+    !Number.isSafeInteger(untrackedScanLimits.totalBytes) ||
+    untrackedScanLimits.totalBytes < 1
+  ) {
+    return {
+      ok: false,
+      failure: fail('source-scan-failed', 'TDD 未跟踪文件扫描上限无效'),
+      ms: Date.now() - started,
+    };
+  }
   let root: string;
   try {
     root = realpathSync(projectRoot);
@@ -377,12 +447,16 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
     try {
       real = realpathSync(lexical);
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code === 'ENOENT'
-        ? 'policy-file-missing'
-        : 'policy-file-unreadable';
+      const code =
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? 'policy-file-missing'
+          : 'policy-file-unreadable';
       return {
         ok: false,
-        failure: fail(code, `政策文件不可用 ${policy.path}：${err instanceof Error ? err.message : String(err)}`),
+        failure: fail(
+          code,
+          `政策文件不可用 ${policy.path}：${err instanceof Error ? err.message : String(err)}`,
+        ),
         ms: Date.now() - started,
       };
     }
@@ -403,7 +477,9 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
     policyTargets.add(real);
     let actual: string;
     try {
-      actual = createHash('sha256').update(readFileSync(real)).digest('hex');
+      actual = createHash('sha256')
+        .update(readSafeControlFileSync(real, { maxBytes: TDD_POLICY_FILE_MAX_BYTES })!)
+        .digest('hex');
     } catch (err) {
       return {
         ok: false,
@@ -429,6 +505,7 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
   const diff = runGit(root, [
     'diff',
     '--no-ext-diff',
+    '--no-textconv',
     '--no-color',
     '--unified=0',
     config.baselineRef,
@@ -455,7 +532,7 @@ export function checkTddPolicy(config: TddConfig, projectRoot: string): TddPolic
       ms: Date.now() - started,
     };
   }
-  const untrackedFailure = scanUntracked(root, config);
+  const untrackedFailure = scanUntracked(root, config, untrackedScanLimits);
   if (untrackedFailure) {
     return { ok: false, failure: untrackedFailure, ms: Date.now() - started };
   }

@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { readQualityContract } from '../quality/contract.js';
 import { createReviewPackage, reviewOutputSchema } from './package.js';
 import type { ReviewPreflightContext } from './preflight.js';
@@ -10,10 +13,19 @@ function context(): ReviewPreflightContext {
   const baseSha = 'a'.repeat(40);
   const headSha = 'b'.repeat(40);
   return {
-    root: process.cwd(), branch: 'feature/review', baseSha, headSha,
+    root: process.cwd(),
+    workspace: join(process.cwd(), '.workspace'),
+    branch: 'feature/review',
+    baseSha,
+    headSha,
     pullRequest: {
-      number: 1, headSha, baseBranch: 'main', baseSha,
-      url: 'https://example.test/1', title: 'review', labels: [],
+      number: 1,
+      headSha,
+      baseBranch: 'main',
+      baseSha,
+      url: 'https://example.test/1',
+      title: 'review',
+      labels: [],
       body: '## 本次目标\nreview',
     },
     baseContract: contract.contract,
@@ -25,9 +37,11 @@ function context(): ReviewPreflightContext {
     engineeringStandards: [{ path: 'AGENTS.md', content: '# Rules' }],
     history: `${headSha}\treview`,
     prSections: {
-      '本次目标': 'review', '明确的非目标': 'none',
-      'Spec 与验收标准来源': 'docs/specs/review.md', '验证方式': 'tests',
-      '风险说明': 'local',
+      本次目标: 'review',
+      明确的非目标: 'none',
+      'Spec 与验收标准来源': 'docs/specs/review.md',
+      验证方式: 'tests',
+      风险说明: 'local',
     },
   };
 }
@@ -39,7 +53,7 @@ describe('createReviewPackage', () => {
     expect(schema.required).toEqual(Object.keys(properties));
     expect(properties.unverifiableReason.type).toEqual(['string', 'null']);
 
-    const finding = (properties.findings.items as Record<string, unknown>);
+    const finding = properties.findings.items as Record<string, unknown>;
     const findingProperties = finding.properties as Record<string, Record<string, unknown>>;
     expect(finding.required).toEqual(Object.keys(findingProperties));
 
@@ -93,7 +107,9 @@ describe('createReviewPackage', () => {
 
   it('rejects mechanical evidence copied from another commit or scope', () => {
     const ctx = context();
-    const create = (over: Partial<Parameters<typeof createReviewPackage>[0]['mechanicalEvidence']>) => (
+    const create = (
+      over: Partial<Parameters<typeof createReviewPackage>[0]['mechanicalEvidence']>,
+    ) =>
       createReviewPackage({
         context: ctx,
         risk: assessReviewRisk(ctx),
@@ -107,11 +123,92 @@ describe('createReviewPackage', () => {
           scope: 'all-current-platform-applicable-contract-checks',
           ...over,
         },
-      })
-    );
+      });
     expect(() => create({ headSha: 'c'.repeat(40) })).toThrow('未绑定当前 Review 上下文');
-    expect(() => create({
-      scope: 'different-scope' as 'all-current-platform-applicable-contract-checks',
-    })).toThrow('未绑定当前 Review 上下文');
+    expect(() =>
+      create({
+        scope: 'different-scope' as 'all-current-platform-applicable-contract-checks',
+      }),
+    ).toThrow('未绑定当前 Review 上下文');
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects an expected package file replaced with a FIFO',
+    () => {
+      const ctx = context();
+      const reviewPackage = createReviewPackage({
+        context: ctx,
+        risk: assessReviewRisk(ctx),
+        axis: 'engineering',
+        runner: 'codex',
+        model: 'gpt-5.6-terra',
+        mechanicalEvidence: {
+          status: 'passed',
+          headSha: ctx.headSha,
+          qualityContractDigest: ctx.baseContractDigest,
+          scope: 'all-current-platform-applicable-contract-checks',
+        },
+      });
+      try {
+        chmodSync(reviewPackage.root, 0o700);
+        rmSync(reviewPackage.inputPath);
+        execFileSync('mkfifo', [reviewPackage.inputPath]);
+        chmodSync(reviewPackage.root, 0o500);
+        expect(() => reviewPackage.assertUnchanged()).toThrow(/不是普通文件|安全读取/);
+      } finally {
+        reviewPackage.cleanup();
+      }
+    },
+  );
+
+  it('rejects a package file that grows beyond its original size', () => {
+    const ctx = context();
+    const reviewPackage = createReviewPackage({
+      context: ctx,
+      risk: assessReviewRisk(ctx),
+      axis: 'engineering',
+      runner: 'codex',
+      model: 'gpt-5.6-terra',
+      mechanicalEvidence: {
+        status: 'passed',
+        headSha: ctx.headSha,
+        qualityContractDigest: ctx.baseContractDigest,
+        scope: 'all-current-platform-applicable-contract-checks',
+      },
+    });
+    try {
+      chmodSync(reviewPackage.root, 0o700);
+      chmodSync(reviewPackage.inputPath, 0o600);
+      writeFileSync(reviewPackage.inputPath, `${reviewPackage.input}extra`);
+      chmodSync(reviewPackage.root, 0o500);
+      expect(() => reviewPackage.assertUnchanged()).toThrow(/超过|安全读取/);
+    } finally {
+      reviewPackage.cleanup();
+    }
+  });
+
+  it('stops after the bounded package directory entry count', () => {
+    const ctx = context();
+    const reviewPackage = createReviewPackage({
+      context: ctx,
+      risk: assessReviewRisk(ctx),
+      axis: 'engineering',
+      runner: 'codex',
+      model: 'gpt-5.6-terra',
+      mechanicalEvidence: {
+        status: 'passed',
+        headSha: ctx.headSha,
+        qualityContractDigest: ctx.baseContractDigest,
+        scope: 'all-current-platform-applicable-contract-checks',
+      },
+    });
+    try {
+      chmodSync(reviewPackage.root, 0o700);
+      writeFileSync(join(reviewPackage.root, 'unexpected'), 'unexpected\n');
+      chmodSync(reviewPackage.root, 0o500);
+      expect(() => reviewPackage.assertUnchanged()).toThrow('超过 3 个目录项');
+    } finally {
+      reviewPackage.cleanup();
+    }
   });
 });

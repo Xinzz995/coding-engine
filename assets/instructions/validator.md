@@ -6,7 +6,7 @@
 
 - 唯一目标是引擎注入的 validation request；不得从 `{{WORKSPACE}}/progress.md`、最近提交说明或其他 agent 输出猜测 story。
 - `request.storyId` 指定 story；`request.acceptanceCriteria` 是本轮唯一验收标准，数组顺序就是 `acIndex` 的 1 基序号。
-- `request.acceptanceHash`、`request.requestId`、`request.gitHead` 必须原样回显，不能自行重算或替换。
+- `request.acceptanceHash`、`request.requestId`、`request.gitHead` 必须原样回显，不能自行重算或替换；正式请求的 `gitHead` 必须是非空提交标识，若意外收到 null，按非法请求报错退出，不开始验收。
 - 可读取 `{{WORKSPACE}}/prd.json` 中同一 story 的标题/描述作为背景，但不得从中增删、替换 request 内的 AC。
 - 若 prompt 中没有合法 request、resultPath 不可写或无法完成验证，明确报错并退出；引擎会 fail closed，不得改写 state 来代替结果。
 
@@ -33,7 +33,7 @@
   "requestId": "原样回显 request.requestId",
   "storyId": "原样回显 request.storyId",
   "acceptanceHash": "原样回显 request.acceptanceHash",
-  "gitHead": "原样回显 request.gitHead；null 仍为 null",
+  "gitHead": "原样回显 request.gitHead",
   "verdict": "passed 或 failed",
   "checks": [
     {
@@ -69,7 +69,7 @@
 
 ## 不可越权的边界
 
-- 不得修改 `{{WORKSPACE}}/state.json`。`passes`、`validated`、`notes`、`retryCount`、`blocked`、`escalated` 全部由引擎根据 result 写入。
+- 不得修改 `{{WORKSPACE}}/state.json`。`passes`、`validated`、`validationReceipt`、`notes`、`retryCount`、`blocked`、`escalated` 全部由引擎根据 result 写入。
 - 不得修改 `{{WORKSPACE}}/prd.json`、`{{WORKSPACE}}/progress.md`、项目源码或提交历史；你只验证，不修复、不提交。
 - 可写范围仅限 request.resultPath、必要的验证临时产物、screenshots 和 `screenshot-claim` evidence。不要覆盖引擎的 iteration/validation evidence。
 - 验收判定只以 request.acceptanceCriteria 为准；不得因 AGENTS.md、golden-principles、源 PRD、代码风格或个人品味追加失败项。

@@ -1,20 +1,27 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readFileSync,
-  unlinkSync,
-} from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import type { Story } from './prd.js';
+import { SafeControlFileError, readSafeControlFileUtf8Sync } from './safe-control-file.js';
+import { execTrustedToolSync } from './trusted-tool.js';
+import { removeRegisteredWorkspaceFileSync } from './workspace-identity.js';
 
 export const VALIDATION_PROTOCOL_VERSION = 1 as const;
 export const VALIDATION_RESULT_FILE = 'validation-result.json';
 export const VALIDATION_RESULT_MAX_BYTES = 64 * 1024;
 export const VALIDATION_TEXT_MAX_CHARS = 2000;
+const SAFE_GIT_CONFIG = ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'] as const;
+
+function execTrustedGit(
+  cwd: string,
+  args: readonly string[],
+  options: Omit<Parameters<typeof execTrustedToolSync>[2], 'cwd' | 'projectRoot'> = {},
+): string {
+  return execTrustedToolSync('git', [...SAFE_GIT_CONFIG, ...args], {
+    ...options,
+    cwd,
+    projectRoot: cwd,
+  });
+}
 
 export interface ValidationRequest {
   version: typeof VALIDATION_PROTOCOL_VERSION;
@@ -70,13 +77,17 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
 }
 
 function isGitHead(value: unknown): value is string | null {
-  return value === null || (typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value));
+  return (
+    value === null || (typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value))
+  );
 }
 
 function isBoundedText(value: unknown): value is string {
-  return typeof value === 'string'
-    && value.trim().length > 0
-    && value.length <= VALIDATION_TEXT_MAX_CHARS;
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= VALIDATION_TEXT_MAX_CHARS
+  );
 }
 
 /** AC 快照身份：只编码 story ID 与有序 AC 数组，避免标题/描述改写造成无关失效。 */
@@ -86,20 +97,175 @@ export function acceptanceHash(storyId: string, acceptanceCriteria: readonly str
 }
 
 /**
- * 读取当前提交身份。无法读取时返回 null，由协议显式标记降级；绝不把错误文案
- * 或空字符串伪装成 artifact identity。
+ * 读取当前提交身份。无法读取时返回 null，供协议兼容、历史诊断与上层拒绝正式运行；
+ * 绝不把错误文案或空字符串伪装成 artifact identity。
  */
 export function readGitHead(cwd: string): string | null {
   try {
-    const value = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
-      cwd,
-      encoding: 'utf8',
+    const value = execTrustedGit(cwd, ['rev-parse', '--verify', 'HEAD'], {
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 5_000,
-    }).trim().toLowerCase();
+    })
+      .trim()
+      .toLowerCase();
     return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value) ? value : null;
   } catch {
     return null;
+  }
+}
+
+export type ValidationArtifactIdentity =
+  { ok: true; gitHead: string } | { ok: false; diagnostic: string };
+
+export type GitObjectClosureResult = { ok: true } | { ok: false; diagnostic: string };
+
+/**
+ * 项目 Agent 可以写 .git/objects；只相信对象名会允许被覆盖的压缩对象冒充同一 SHA。
+ * 对即将绑定的精确提交闭包强制重算对象哈希，损坏或错名对象一律 fail closed。
+ */
+export function verifyGitObjectClosure(
+  cwd: string,
+  refs: readonly string[],
+): GitObjectClosureResult {
+  if (refs.length === 0) return { ok: false, diagnostic: 'Git 对象核对缺少绑定提交' };
+  const nullDevice = process.platform === 'win32' ? 'NUL' : '/dev/null';
+  try {
+    execTrustedGit(
+      cwd,
+      [
+        '-c',
+        `fsck.skipList=${nullDevice}`,
+        'fsck',
+        '--full',
+        '--strict',
+        '--no-reflogs',
+        '--no-dangling',
+        '--no-progress',
+        ...refs,
+      ],
+      {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        timeout: 120_000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostic:
+        `Git 提交对象闭包损坏或无法重算：` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function gitStatusPaths(cwd: string): string[] {
+  const raw = execTrustedGit(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 10_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const entries = raw.split('\0');
+  const paths: string[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry) continue;
+    if (entry.length < 4) throw new Error('git status 返回非法记录');
+    paths.push(entry.slice(3));
+    if (entry[0] === 'R' || entry[0] === 'C' || entry[1] === 'R' || entry[1] === 'C') {
+      const previous = entries[index + 1];
+      if (!previous) throw new Error('git status rename 记录不完整');
+      paths.push(previous);
+      index += 1;
+    }
+  }
+  return [...new Set(paths)];
+}
+
+function gitIndexHiddenPaths(cwd: string): string[] {
+  const raw = execTrustedGit(cwd, ['ls-files', '-v', '-z'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 10_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const hidden: string[] = [];
+  for (const entry of raw.split('\0')) {
+    if (!entry) continue;
+    if (entry.length < 3 || entry[1] !== ' ') throw new Error('git ls-files 返回非法记录');
+    // 普通 stage-0 tracked 文件标记为 H。小写标记表示 assume-unchanged，S 表示
+    // skip-worktree；其他标记也不是可绑定的普通干净输入，统一 fail closed。
+    if (entry[0] !== 'H') hidden.push(entry.slice(2));
+  }
+  return [...new Set(hidden)];
+}
+
+function assertTrackedContentMatchesHead(cwd: string): void {
+  try {
+    execTrustedGit(
+      cwd,
+      ['diff', '--no-ext-diff', '--quiet', '--ignore-submodules=none', 'HEAD', '--'],
+      {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        timeout: 30_000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+  } catch {
+    throw new Error('已跟踪文件内容或索引与 HEAD 不一致');
+  }
+}
+
+/**
+ * Validator 凭证绑定 Git HEAD，并在调用前后拒绝已跟踪内容、索引或未忽略
+ * 的未跟踪路径变化。workspace 是引擎控制面，允许变化。Git ignored 输入仍属于
+ * 本地执行环境，当前凭证不绑定它们；改为精确 HEAD 干净检出执行由 Issue #91 跟踪。
+ */
+export function readValidationArtifactIdentity(
+  cwd: string,
+  workspace: string,
+): ValidationArtifactIdentity {
+  try {
+    const before = readGitHead(cwd);
+    if (before === null) return { ok: false, diagnostic: '无法读取 Validator 调用前 Git HEAD' };
+    const objects = verifyGitObjectClosure(cwd, [before]);
+    if (!objects.ok) return objects;
+    const hidden = gitIndexHiddenPaths(cwd);
+    if (hidden.length > 0) {
+      return {
+        ok: false,
+        diagnostic:
+          `Validator 不接受 assume-unchanged、skip-worktree 或其他隐藏索引状态：` +
+          hidden.join('、'),
+      };
+    }
+    const workspaceRelative = relative(resolve(cwd), resolve(cwd, workspace)).split(sep).join('/');
+    const dirty = gitStatusPaths(cwd).filter(
+      (path) =>
+        !(
+          workspaceRelative !== '' &&
+          !workspaceRelative.startsWith('../') &&
+          (path === workspaceRelative || path.startsWith(`${workspaceRelative}/`))
+        ),
+    );
+    if (dirty.length > 0) {
+      return {
+        ok: false,
+        diagnostic:
+          `Validator 要求已跟踪内容与 HEAD 一致，且不存在未允许的未忽略改动：` + dirty.join('、'),
+      };
+    }
+    assertTrackedContentMatchesHead(cwd);
+    const after = readGitHead(cwd);
+    if (after === null || after !== before) {
+      return { ok: false, diagnostic: '核对工作树期间 Git HEAD 发生变化' };
+    }
+    return { ok: true, gitHead: after };
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostic: `无法核对 Validator 工作树：${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 }
 
@@ -145,11 +311,7 @@ ${JSON.stringify(request, null, 2)}
 
 /** 每轮前只清理引擎固定的临时 result 路径；ENOENT 是合法空态。 */
 export function clearValidationResult(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-  }
+  removeRegisteredWorkspaceFileSync(path, true);
 }
 
 function invalidSchema(diagnostic: string): ValidationProtocolOutcome {
@@ -157,22 +319,36 @@ function invalidSchema(diagnostic: string): ValidationProtocolOutcome {
 }
 
 function parseValidationResult(value: unknown, acCount: number): ValidationProtocolOutcome {
-  if (!isRecord(value) || !hasExactKeys(value, [
-    'version', 'requestId', 'storyId', 'acceptanceHash', 'gitHead',
-    'verdict', 'checks', 'summary',
-  ])) return invalidSchema('result 必须是且只能包含 v1 schema 字段的对象');
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      'version',
+      'requestId',
+      'storyId',
+      'acceptanceHash',
+      'gitHead',
+      'verdict',
+      'checks',
+      'summary',
+    ])
+  )
+    return invalidSchema('result 必须是且只能包含 v1 schema 字段的对象');
 
   if (value.version !== VALIDATION_PROTOCOL_VERSION) {
     return invalidSchema(`不支持的 validation result version: ${String(value.version)}`);
   }
-  if (typeof value.requestId !== 'string' || value.requestId.length === 0
-      || typeof value.storyId !== 'string' || value.storyId.length === 0
-      || typeof value.acceptanceHash !== 'string'
-      || !/^sha256:[a-f0-9]{64}$/.test(value.acceptanceHash)
-      || !isGitHead(value.gitHead)
-      || (value.verdict !== 'passed' && value.verdict !== 'failed')
-      || !Array.isArray(value.checks)
-      || !isBoundedText(value.summary)) {
+  if (
+    typeof value.requestId !== 'string' ||
+    value.requestId.length === 0 ||
+    typeof value.storyId !== 'string' ||
+    value.storyId.length === 0 ||
+    typeof value.acceptanceHash !== 'string' ||
+    !/^sha256:[a-f0-9]{64}$/.test(value.acceptanceHash) ||
+    !isGitHead(value.gitHead) ||
+    (value.verdict !== 'passed' && value.verdict !== 'failed') ||
+    !Array.isArray(value.checks) ||
+    !isBoundedText(value.summary)
+  ) {
     return invalidSchema('result 顶层字段类型、格式或长度非法');
   }
   if (value.checks.length !== acCount) {
@@ -182,10 +358,13 @@ function parseValidationResult(value: unknown, acCount: number): ValidationProto
   const checks: ValidationCheck[] = [];
   for (let index = 0; index < value.checks.length; index++) {
     const check: unknown = value.checks[index];
-    if (!isRecord(check) || !hasExactKeys(check, ['acIndex', 'passed', 'evidence'])
-        || check.acIndex !== index + 1
-        || typeof check.passed !== 'boolean'
-        || !isBoundedText(check.evidence)) {
+    if (
+      !isRecord(check) ||
+      !hasExactKeys(check, ['acIndex', 'passed', 'evidence']) ||
+      check.acIndex !== index + 1 ||
+      typeof check.passed !== 'boolean' ||
+      !isBoundedText(check.evidence)
+    ) {
       return invalidSchema(`checks[${index}] 未按 AC ${index + 1} 的 schema 提交`);
     }
     checks.push({ acIndex: check.acIndex, passed: check.passed, evidence: check.evidence });
@@ -221,41 +400,32 @@ export function readValidationResult(
   actualGitHead: string | null,
 ): ValidationProtocolOutcome {
   let raw: string;
-  let descriptor: number | null = null;
   try {
-    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-    descriptor = openSync(path, constants.O_RDONLY | noFollow);
-    const stat = fstatSync(descriptor);
-    if (!stat.isFile()) {
-      return { ok: false, code: 'unreadable-result', diagnostic: 'validation result 不是普通文件' };
-    }
-    if (stat.size > VALIDATION_RESULT_MAX_BYTES) {
+    const value = readSafeControlFileUtf8Sync(path, {
+      maxBytes: VALIDATION_RESULT_MAX_BYTES,
+      allowMissing: true,
+    });
+    if (value === null) {
       return {
         ok: false,
-        code: 'result-too-large',
-        diagnostic: `validation result 超过 ${VALIDATION_RESULT_MAX_BYTES} bytes`,
+        code: 'missing-result',
+        diagnostic: 'Validator 未写 validation result',
       };
     }
-    // 始终从完成 fstat 的同一文件描述符读取，路径随后被替换也不会改读其他文件。
-    raw = readFileSync(descriptor, 'utf8');
-    if (Buffer.byteLength(raw, 'utf8') > VALIDATION_RESULT_MAX_BYTES) {
-      return {
-        ok: false,
-        code: 'result-too-large',
-        diagnostic: `validation result 超过 ${VALIDATION_RESULT_MAX_BYTES} bytes`,
-      };
-    }
+    raw = value;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { ok: false, code: 'missing-result', diagnostic: 'Validator 未写 validation result' };
+    if (err instanceof SafeControlFileError && err.code === 'too-large') {
+      return {
+        ok: false,
+        code: 'result-too-large',
+        diagnostic: `validation result 超过 ${VALIDATION_RESULT_MAX_BYTES} bytes`,
+      };
     }
     return {
       ok: false,
       code: 'unreadable-result',
       diagnostic: `validation result 不可读：${err instanceof Error ? err.message : String(err)}`,
     };
-  } finally {
-    if (descriptor !== null) closeSync(descriptor);
   }
 
   let parsed: unknown;
@@ -268,10 +438,12 @@ export function readValidationResult(
   if (!shaped.ok) return shaped;
 
   const result = shaped.result;
-  if (result.requestId !== expected.requestId
-      || result.storyId !== expected.storyId
-      || result.acceptanceHash !== expected.acceptanceHash
-      || result.gitHead !== expected.gitHead) {
+  if (
+    result.requestId !== expected.requestId ||
+    result.storyId !== expected.storyId ||
+    result.acceptanceHash !== expected.acceptanceHash ||
+    result.gitHead !== expected.gitHead
+  ) {
     return {
       ok: false,
       code: 'binding-mismatch',

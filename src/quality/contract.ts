@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readSafeProjectFileUtf8Sync } from '../engine/safe-control-file.js';
 
 export const QUALITY_CONTRACT_SCHEMA_VERSION = 1 as const;
 export const QUALITY_CONTRACT_RELATIVE_PATH = '.coding-x/quality.json';
+export const QUALITY_CONTRACT_MAX_BYTES = 4 * 1024 * 1024;
 export const QUALITY_GATE_REQUIRED_CHECK = 'quality-gate';
 export const POLICY_GUARD_REQUIRED_CHECK = 'policy-guard-source';
 export const REQUIRED_GITHUB_CHECKS = [
@@ -101,18 +102,10 @@ export interface QualityGitHubJob {
   checkIds: string[];
 }
 
-export type QualityCodeScanningAlertsThreshold =
-  | 'none'
-  | 'errors'
-  | 'errors_and_warnings'
-  | 'all';
+export type QualityCodeScanningAlertsThreshold = 'none' | 'errors' | 'errors_and_warnings' | 'all';
 
 export type QualityCodeScanningSecurityAlertsThreshold =
-  | 'none'
-  | 'critical'
-  | 'high_or_higher'
-  | 'medium_or_higher'
-  | 'all';
+  'none' | 'critical' | 'high_or_higher' | 'medium_or_higher' | 'all';
 
 export interface QualityCodeScanningTool {
   tool: string;
@@ -120,9 +113,7 @@ export interface QualityCodeScanningTool {
   securityAlertsThreshold: QualityCodeScanningSecurityAlertsThreshold;
 }
 
-export type QualityCheckPolicy =
-  | { checks: QualityCheck[] }
-  | { notApplicable: string };
+export type QualityCheckPolicy = { checks: QualityCheck[] } | { notApplicable: string };
 
 export interface QualityContract {
   schemaVersion: typeof QUALITY_CONTRACT_SCHEMA_VERSION;
@@ -200,17 +191,38 @@ type UnknownRecord = Record<string, unknown>;
 const PLATFORMS = new Set<QualityPlatform>(['linux', 'macos', 'windows']);
 const CHECK_CATEGORIES: QualityCheckCategory[] = ['test', 'build', 'static', 'security'];
 const CODE_SCANNING_ALERTS_THRESHOLDS = new Set<QualityCodeScanningAlertsThreshold>([
-  'none', 'errors', 'errors_and_warnings', 'all',
+  'none',
+  'errors',
+  'errors_and_warnings',
+  'all',
 ]);
 const CODE_SCANNING_SECURITY_ALERTS_THRESHOLDS =
   new Set<QualityCodeScanningSecurityAlertsThreshold>([
-    'none', 'critical', 'high_or_higher', 'medium_or_higher', 'all',
+    'none',
+    'critical',
+    'high_or_higher',
+    'medium_or_higher',
+    'all',
   ]);
 const RISK_CATEGORIES = new Set<QualityRiskCategory>([
-  'policy', 'public-contract', 'state', 'migration', 'recovery', 'idempotency',
-  'concurrency', 'timeout', 'retry', 'subprocess', 'security', 'privacy',
-  'untrusted-input', 'cross-module', 'large-file', 'high-risk-path',
-  'reviewer-request', 'release',
+  'policy',
+  'public-contract',
+  'state',
+  'migration',
+  'recovery',
+  'idempotency',
+  'concurrency',
+  'timeout',
+  'retry',
+  'subprocess',
+  'security',
+  'privacy',
+  'untrusted-input',
+  'cross-module',
+  'large-file',
+  'high-risk-path',
+  'reviewer-request',
+  'release',
 ]);
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -276,14 +288,15 @@ function repoPath(
   allowDot = false,
 ): value is string {
   if (!nonEmptyString(value, path, errors)) return false;
-  if ((value === '.' && allowDot)) return true;
+  if (value === '.' && allowDot) return true;
   const segments = value.split('/');
-  const invalid = value === '.'
-    || value.startsWith('/')
-    || /^[A-Za-z]:/.test(value)
-    || value.includes('\\')
-    || value.includes('//')
-    || segments.some((segment) => segment === '' || segment === '..');
+  const invalid =
+    value === '.' ||
+    value.startsWith('/') ||
+    /^[A-Za-z]:/.test(value) ||
+    value.includes('\\') ||
+    value.includes('//') ||
+    segments.some((segment) => segment === '' || segment === '..');
   if (invalid) {
     errors.push(`${path} 必须是使用 / 的仓库相对路径且不能越界`);
     return false;
@@ -295,7 +308,11 @@ function stringArray(
   value: unknown,
   path: string,
   errors: string[],
-  options: { nonEmpty?: boolean; unique?: boolean; validate?: (v: unknown, p: string, e: string[]) => boolean } = {},
+  options: {
+    nonEmpty?: boolean;
+    unique?: boolean;
+    validate?: (v: unknown, p: string, e: string[]) => boolean;
+  } = {},
 ): value is string[] {
   if (!Array.isArray(value)) {
     errors.push(`${path} 必须是数组`);
@@ -386,7 +403,10 @@ function command(value: unknown, path: string, errors: string[]): void {
     );
     if (item) {
       nonEmptyString(item.executable, `${path}.executable`, errors);
-      if (!Array.isArray(item.args) || !item.args.every((arg) => typeof arg === 'string' && !arg.includes('\0'))) {
+      if (
+        !Array.isArray(item.args) ||
+        !item.args.every((arg) => typeof arg === 'string' && !arg.includes('\0'))
+      ) {
         errors.push(`${path}.args 必须是字符串数组`);
       }
     }
@@ -438,8 +458,7 @@ function toolchain(value: unknown, path: string, errors: string[]): void {
   if (kind !== 'node' && kind !== 'go' && kind !== 'python') {
     errors.push(`${path}.kind 必须是 node、go 或 python`);
   }
-  if (nonEmptyString(item.version, `${path}.version`, errors)
-      && /[\r\n]/.test(item.version)) {
+  if (nonEmptyString(item.version, `${path}.version`, errors) && /[\r\n]/.test(item.version)) {
     errors.push(`${path}.version 不能包含换行`);
   }
   if (Object.hasOwn(item, 'cache')) {
@@ -459,14 +478,31 @@ function toolchain(value: unknown, path: string, errors: string[]): void {
 
 function validateContract(value: unknown): string[] {
   const errors: string[] = [];
-  const root = objectShape(value, '', [
-    'schemaVersion', 'codingXVersion', 'repository', 'release', 'sources', 'modules',
-    'generatedPaths', 'checks', 'risk', 'github', 'exceptions',
-  ], [], errors);
+  const root = objectShape(
+    value,
+    '',
+    [
+      'schemaVersion',
+      'codingXVersion',
+      'repository',
+      'release',
+      'sources',
+      'modules',
+      'generatedPaths',
+      'checks',
+      'risk',
+      'github',
+      'exceptions',
+    ],
+    [],
+    errors,
+  );
   if (!root) return errors;
 
   if (root.schemaVersion !== QUALITY_CONTRACT_SCHEMA_VERSION) {
-    errors.push(`不支持 schemaVersion ${String(root.schemaVersion)}；当前只支持 ${QUALITY_CONTRACT_SCHEMA_VERSION}`);
+    errors.push(
+      `不支持 schemaVersion ${String(root.schemaVersion)}；当前只支持 ${QUALITY_CONTRACT_SCHEMA_VERSION}`,
+    );
   }
   exactVersion(root.codingXVersion, 'codingXVersion', errors);
 
@@ -479,27 +515,46 @@ function validateContract(value: unknown): string[] {
   );
   if (repository) {
     if (repository.provider !== 'github') errors.push('repository.provider 必须是 github');
-    if (typeof repository.fullName !== 'string'
-        || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.fullName)) {
+    if (
+      typeof repository.fullName !== 'string' ||
+      !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository.fullName)
+    ) {
       errors.push('repository.fullName 必须是 owner/repo');
     }
-    if (nonEmptyString(repository.defaultBranch, 'repository.defaultBranch', errors)
-        && /[\s~^:?*\[\\]/.test(repository.defaultBranch)) {
+    if (
+      nonEmptyString(repository.defaultBranch, 'repository.defaultBranch', errors) &&
+      /[\s~^:?*\[\\]/.test(repository.defaultBranch)
+    ) {
       errors.push('repository.defaultBranch 不是合法分支名');
     }
   }
 
-  const release = objectShape(root.release, 'release', ['protectedRefs'], ['notApplicable'], errors);
+  const release = objectShape(
+    root.release,
+    'release',
+    ['protectedRefs'],
+    ['notApplicable'],
+    errors,
+  );
   if (release) {
     stringArray(release.protectedRefs, 'release.protectedRefs', errors, {
       unique: true,
       validate: (entry, path, target) => {
         if (!nonEmptyString(entry, path, target)) return false;
-        if (entry !== entry.trim() || entry.startsWith('/') || entry.startsWith('refs/')
-            || /[\u0000-\u0020\u007f~^:?\[\\]/.test(entry)
-            || entry.includes('..') || entry.includes('//') || entry.includes('@{')
-            || entry.endsWith('/') || entry.endsWith('.') || entry.endsWith('.lock')
-            || entry === '*' || entry === '@') {
+        if (
+          entry !== entry.trim() ||
+          entry.startsWith('/') ||
+          entry.startsWith('refs/') ||
+          /[\u0000-\u0020\u007f~^:?\[\\]/.test(entry) ||
+          entry.includes('..') ||
+          entry.includes('//') ||
+          entry.includes('@{') ||
+          entry.endsWith('/') ||
+          entry.endsWith('.') ||
+          entry.endsWith('.lock') ||
+          entry === '*' ||
+          entry === '@'
+        ) {
           target.push(`${path} 必须是明确的 Git tag 模式，例如 v* 或 releases/v*`);
           return false;
         }
@@ -567,7 +622,13 @@ function validateContract(value: unknown): string[] {
   if (checks) {
     for (const category of CHECK_CATEGORIES) {
       const groupPath = `checks.${category}`;
-      const group = objectShape(checks[category], groupPath, [], ['checks', 'notApplicable'], errors);
+      const group = objectShape(
+        checks[category],
+        groupPath,
+        [],
+        ['checks', 'notApplicable'],
+        errors,
+      );
       if (!group) continue;
       const hasChecks = Object.hasOwn(group, 'checks');
       const hasReason = Object.hasOwn(group, 'notApplicable');
@@ -595,8 +656,10 @@ function validateContract(value: unknown): string[] {
           checkIds.add(item.id);
           checkId = item.id;
         }
-        if (nonEmptyString(item.module, `${checkPath}.module`, errors)
-            && !moduleIds.has(item.module)) {
+        if (
+          nonEmptyString(item.module, `${checkPath}.module`, errors) &&
+          !moduleIds.has(item.module)
+        ) {
           errors.push(`${checkPath} 引用未知 module ${item.module}`);
         }
         if (Object.hasOwn(item, 'paths')) {
@@ -608,11 +671,15 @@ function validateContract(value: unknown): string[] {
         }
         command(item.command, `${checkPath}.command`, errors);
         if (checkId && isRecord(item.command) && Array.isArray(item.command.platforms)) {
-          checkPlatformsById.set(checkId, new Set(
-            item.command.platforms.filter((platform): platform is QualityPlatform => (
-              typeof platform === 'string' && PLATFORMS.has(platform as QualityPlatform)
-            )),
-          ));
+          checkPlatformsById.set(
+            checkId,
+            new Set(
+              item.command.platforms.filter(
+                (platform): platform is QualityPlatform =>
+                  typeof platform === 'string' && PLATFORMS.has(platform as QualityPlatform),
+              ),
+            ),
+          );
         }
       });
     }
@@ -691,7 +758,8 @@ function validateContract(value: unknown): string[] {
           item.toolchains.forEach((entryValue, toolIndex) => {
             toolchain(entryValue, `${path}.toolchains[${toolIndex}]`, errors);
             if (isRecord(entryValue) && typeof entryValue.kind === 'string') {
-              if (kinds.has(entryValue.kind)) errors.push(`${path}.toolchains 含重复 ${entryValue.kind}`);
+              if (kinds.has(entryValue.kind))
+                errors.push(`${path}.toolchains 含重复 ${entryValue.kind}`);
               kinds.add(entryValue.kind);
             }
           });
@@ -701,36 +769,49 @@ function validateContract(value: unknown): string[] {
         } else {
           item.setup.forEach((entryValue, setupIndex) => {
             command(entryValue, `${path}.setup[${setupIndex}]`, errors);
-            if (typeof platform === 'string' && PLATFORMS.has(platform as QualityPlatform)
-                && isRecord(entryValue) && Array.isArray(entryValue.platforms)
-                && !entryValue.platforms.includes(platform)) {
+            if (
+              typeof platform === 'string' &&
+              PLATFORMS.has(platform as QualityPlatform) &&
+              isRecord(entryValue) &&
+              Array.isArray(entryValue.platforms) &&
+              !entryValue.platforms.includes(platform)
+            ) {
               errors.push(`${path}.setup[${setupIndex}] 不适用于任务系统 ${platform}`);
             }
           });
         }
-        if (stringArray(item.checkIds, `${path}.checkIds`, errors, { nonEmpty: true, unique: true })) {
+        if (
+          stringArray(item.checkIds, `${path}.checkIds`, errors, { nonEmpty: true, unique: true })
+        ) {
           for (const checkId of item.checkIds) {
             if (!checkIds.has(checkId)) {
               errors.push(`${path}.checkIds 引用未知检查 ${checkId}`);
               continue;
             }
             coveredChecks.add(checkId);
-            if (typeof platform === 'string' && PLATFORMS.has(platform as QualityPlatform)
-                && !checkPlatformsById.get(checkId)?.has(platform as QualityPlatform)) {
+            if (
+              typeof platform === 'string' &&
+              PLATFORMS.has(platform as QualityPlatform) &&
+              !checkPlatformsById.get(checkId)?.has(platform as QualityPlatform)
+            ) {
               errors.push(`${path} 在 ${platform} 运行不适用的检查 ${checkId}`);
             }
           }
         }
       });
       for (const checkId of checkIds) {
-        if (!coveredChecks.has(checkId)) errors.push(`项目检查 ${checkId} 未被任何 GitHub job 覆盖`);
+        if (!coveredChecks.has(checkId))
+          errors.push(`项目检查 ${checkId} 未被任何 GitHub job 覆盖`);
       }
     }
   }
-  if (github && stringArray(github.requiredChecks, 'github.requiredChecks', errors, {
-    nonEmpty: true,
-    unique: true,
-  })) {
+  if (
+    github &&
+    stringArray(github.requiredChecks, 'github.requiredChecks', errors, {
+      nonEmpty: true,
+      unique: true,
+    })
+  ) {
     if (Array.isArray(github.requiredChecks)) {
       for (const required of REQUIRED_GITHUB_CHECKS) {
         if (!github.requiredChecks.includes(required)) {
@@ -760,26 +841,30 @@ function validateContract(value: unknown): string[] {
         if (nonEmptyString(item.tool, `${path}.tool`, errors)) {
           if (/[\r\n]/.test(item.tool)) errors.push(`${path}.tool 不能包含换行`);
           const identity = item.tool.toLowerCase();
-          if (tools.has(identity)) errors.push(`github.requiredCodeScanning 含重复工具 ${item.tool}`);
+          if (tools.has(identity))
+            errors.push(`github.requiredCodeScanning 含重复工具 ${item.tool}`);
           tools.add(identity);
         }
-        if (typeof item.alertsThreshold !== 'string'
-            || !CODE_SCANNING_ALERTS_THRESHOLDS.has(
-              item.alertsThreshold as QualityCodeScanningAlertsThreshold,
-            )) {
+        if (
+          typeof item.alertsThreshold !== 'string' ||
+          !CODE_SCANNING_ALERTS_THRESHOLDS.has(
+            item.alertsThreshold as QualityCodeScanningAlertsThreshold,
+          )
+        ) {
           errors.push(`${path}.alertsThreshold 是未知阈值`);
         }
-        if (typeof item.securityAlertsThreshold !== 'string'
-            || !CODE_SCANNING_SECURITY_ALERTS_THRESHOLDS.has(
-              item.securityAlertsThreshold as QualityCodeScanningSecurityAlertsThreshold,
-            )) {
+        if (
+          typeof item.securityAlertsThreshold !== 'string' ||
+          !CODE_SCANNING_SECURITY_ALERTS_THRESHOLDS.has(
+            item.securityAlertsThreshold as QualityCodeScanningSecurityAlertsThreshold,
+          )
+        ) {
           errors.push(`${path}.securityAlertsThreshold 是未知阈值`);
         }
       });
     }
   }
-  if (github && Object.hasOwn(github, 'immutableReleases')
-      && github.immutableReleases !== true) {
+  if (github && Object.hasOwn(github, 'immutableReleases') && github.immutableReleases !== true) {
     errors.push('github.immutableReleases 只能声明为 true');
   }
   if (github && Object.hasOwn(github, 'securityFeatures')) {
@@ -825,7 +910,9 @@ function canonicalize(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalize);
   if (!isRecord(value)) return value;
   return Object.fromEntries(
-    Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]),
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalize(value[key])]),
   );
 }
 
@@ -839,8 +926,7 @@ export function qualityChecksMatchContract(
   value: unknown,
   contract: QualityContract,
 ): value is FrozenQualityChecks {
-  return JSON.stringify(canonicalize(value))
-    === JSON.stringify(canonicalize(contract.checks));
+  return JSON.stringify(canonicalize(value)) === JSON.stringify(canonicalize(contract.checks));
 }
 
 export function digestQualityContract(contract: QualityContract): string {
@@ -860,11 +946,18 @@ export function readQualityContract(projectRoot: string): QualityContractReadRes
   const path = join(projectRoot, QUALITY_CONTRACT_RELATIVE_PATH);
   let raw: string;
   try {
-    raw = readFileSync(path, 'utf8');
+    const value = readSafeProjectFileUtf8Sync(projectRoot, path, {
+      maxBytes: QUALITY_CONTRACT_MAX_BYTES,
+      allowMissing: true,
+    });
+    if (value === null) return { status: 'missing', path };
+    raw = value;
   } catch (error) {
-    const code = isRecord(error) && typeof error.code === 'string' ? error.code : null;
-    if (code === 'ENOENT') return { status: 'missing', path };
-    return { status: 'io-error', path, error: error instanceof Error ? error.message : String(error) };
+    return {
+      status: 'io-error',
+      path,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
   let parsed: unknown;
   try {

@@ -13,16 +13,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  CURSOR_HOOK_COMMAND,
-  CURSOR_HOOK_MATCHER,
-  runCursorHookAction,
-} from './cursor-hooks.js';
+import { CURSOR_HOOK_COMMAND, CURSOR_HOOK_MATCHER, runCursorHookAction } from './cursor-hooks.js';
 
 const cleanups: Array<() => void> = [];
 
 afterEach(() => {
-  cleanups.splice(0).reverse().forEach((cleanup) => cleanup());
+  cleanups
+    .splice(0)
+    .reverse()
+    .forEach((cleanup) => cleanup());
 });
 
 function git(root: string, ...args: string[]): string {
@@ -44,14 +43,18 @@ function fixture(prefix = 'coding-x cursor hooks repo with spaces-'): {
 }
 
 function config(root: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(root, '.cursor', 'hooks.json'), 'utf8')) as Record<string, unknown>;
+  return JSON.parse(readFileSync(join(root, '.cursor', 'hooks.json'), 'utf8')) as Record<
+    string,
+    unknown
+  >;
 }
 
 function managedEntries(root: string): Array<Record<string, unknown>> {
   const value = config(root);
   const hooks = value.hooks as Record<string, unknown>;
-  return (hooks.beforeShellExecution as Array<Record<string, unknown>>)
-    .filter((entry) => entry.command === CURSOR_HOOK_COMMAND);
+  return (hooks.beforeShellExecution as Array<Record<string, unknown>>).filter(
+    (entry) => entry.command === CURSOR_HOOK_COMMAND,
+  );
 }
 
 function sha256(path: string): string {
@@ -134,10 +137,9 @@ describe('Cursor project TDD hook management', () => {
       status: 'stale',
     });
     expect(runCursorHookAction('install', value).exitCode).toBe(0);
-    expect(readFileSync(
-      join(value.root, '.cursor', 'coding-x', 'tdd-commit-check.mjs'),
-      'utf8',
-    )).toContain('bundle-v2');
+    expect(
+      readFileSync(join(value.root, '.cursor', 'coding-x', 'tdd-commit-check.mjs'), 'utf8'),
+    ).toContain('bundle-v2');
     expect(runCursorHookAction('status', value).exitCode).toBe(0);
   });
 
@@ -154,6 +156,54 @@ describe('Cursor project TDD hook management', () => {
     });
     expect(readFileSync(path, 'utf8')).toBe('{ invalid');
     expect(existsSync(join(cursorDir, 'coding-x'))).toBe(false);
+  });
+
+  it('rejects an oversized Cursor config before parsing or copying it', () => {
+    const value = fixture();
+    const cursorDir = join(value.root, '.cursor');
+    mkdirSync(cursorDir);
+    const path = join(cursorDir, 'hooks.json');
+    writeFileSync(path, Buffer.alloc(2 * 1024 * 1024 + 1, 0x78));
+
+    expect(runCursorHookAction('install', value)).toMatchObject({
+      exitCode: 1,
+      status: 'conflict',
+      message: expect.stringContaining('超过 2097152 bytes'),
+    });
+    expect(existsSync(join(cursorDir, 'coding-x'))).toBe(false);
+  });
+
+  it('rejects invalid UTF-8 even when the surrounding Cursor config is valid JSON text', () => {
+    const value = fixture();
+    const cursorDir = join(value.root, '.cursor');
+    mkdirSync(cursorDir);
+    writeFileSync(
+      join(cursorDir, 'hooks.json'),
+      Buffer.concat([
+        Buffer.from('{"version":1,"hooks":{},"note":"'),
+        Buffer.from([0xff]),
+        Buffer.from('"}\n'),
+      ]),
+    );
+
+    expect(runCursorHookAction('install', value)).toMatchObject({
+      exitCode: 1,
+      status: 'conflict',
+      message: expect.stringContaining('不是合法 UTF-8'),
+    });
+    expect(existsSync(join(cursorDir, 'coding-x'))).toBe(false);
+  });
+
+  it('rejects an oversized published hook without creating project files', () => {
+    const value = fixture();
+    writeFileSync(value.bundle, Buffer.alloc(4 * 1024 * 1024 + 1, 0x78));
+
+    expect(runCursorHookAction('install', value)).toMatchObject({
+      exitCode: 1,
+      status: 'error',
+      message: expect.stringContaining('TDD hook 无效（too-large）'),
+    });
+    expect(existsSync(join(value.root, '.cursor'))).toBe(false);
   });
 
   it('refuses a conflicting hooks structure without changing it', () => {

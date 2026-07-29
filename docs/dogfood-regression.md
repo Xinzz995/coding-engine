@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-07-27
+updated: 2026-07-29
 scope: root
 
 ---
@@ -30,7 +30,7 @@ scope: root
 | 11 | 循环结束（完成或跑满）workspace 根自动生成验证报告 report.html：标明 PRD 来自引擎启动快照，Story 实现、本地最终 Review 与 GitHub 交付分栏显示，story 卡片截图与 screenshots/ 对账，存在 prd.tampered-* 时红旗区必亮；旧 review-*.md 只标为不可作为通过证明的历史本地反馈；state 损坏时红色“状态不可验证”且绝无通过 badge | 0.19.0 / 0.25.4 / ADR-018 | 打开 report.html 与工件对账；只完成 Story 时确认不显示可交付；损坏 state 后手动 report 应写诊断报告并退出 1 |
 | 12 | 证据索引真实链路：evidence.jsonl 含三类 engine 记录且时间线可重建（iteration 记录每轮一条（时间线零空洞），异常轮带 outcome/noop/gateRejected/abortRollback 标注可直读还原）；builder/validator 按指令登记 screenshot-claim（grep acIndex 分布核对输入质量：整数、1 起、无越界泛滥）；报告 AC 对账区与门禁执行历史真实渲染 | 0.20.0（终审风险②③④固化）；0.22.0 还原链重构 | 真实跑后逐类 grep evidence.jsonl + 打开 report.html 对账 |
 | 13 | 启用按难度模型路由时，真实 builder/validator 分别命中 story 档位与 validator 映射；启动摘要、evidence、status JSON 与 report 时间线里的模型 ID 和 route source 四处一致 | 0.23.0 / 0.24.0 | 对账控制台、iteration 记录、`status --json.recentActual` 与 report 时间线 |
-| 14 | builder 原样保留 `validated`/`escalated`；Validator 不修改任何 state 字段，只提交结构化 claim；只有引擎接受 passed claim 后签发 `validated=true`，status/report 才显示全绿 | 0.25.0–0.25.1 / ADR-015 收紧 | builder 后候选态、Validator 前后 state、最终 state、iteration.validationReceipt、status/report 对账 |
+| 14 | builder 原样保留 `validated`/`validationReceipt`/`escalated`；Validator 不修改任何 state 字段，只提交结构化 claim；只有引擎接受 passed claim 后同时签发 `validated=true` 与结构化凭证，且凭证仍匹配当前 HEAD/有序 AC 时，status/report 才显示全绿 | 0.25.0–0.25.1 / ADR-015、020 收紧 | builder 后候选态、Validator 前后 state、最终 state、iteration.validationReceipt、status/report 对账 |
 | 15 | 使用 npm 正式发布物运行时，全局模型目录、预检与真实 runner 调用贯通；目录不做在线发现，provider 的非阻断诊断噪声不得改变引擎对进程结局和验收凭证的机械判定 | 0.24.0 / 0.25.2 | `config validate`、启动目录摘要、runner 实际结局、最终退出码与锁释放对账 |
 | 16 | builder 的 story 提交只包含实现与测试，不包含 prd/state/progress/evidence/report/lock 等 workspace 运行时文件；即使目标仓尚未 gitignore workspace，也必须先提交业务改动，再单独回写 state/progress | 0.25.2 真实链路发现 | `git show --name-only` 对账 story commit，循环结束后检查 runtime diff 只留在 workspace |
 | 17 | prd-to-json 在归档、再派生或首次创建 workspace 前先运行 doctor 检查工作区锁；发现“引擎运行中”或无法判定时停止且保持零写入，不删除 `engine.lock` | 0.25.4 可信收口 | 持活锁触发 skill，前后对账 workspace 文件哈希与锁内容均不变 |
@@ -42,3 +42,4 @@ scope: root
 | 23 | 无论宿主 hook 是否触发或曾通过，引擎都在契约派生检查后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |
 | 24 | 候选 coding-x 只有显式 `--shadow` 才能越过固定版本不匹配；原本成功的收敛固定退出 7，失败仍保留真实失败码，任何 shadow 结果都不能显示为交付就绪 | ADR-018 | 用契约版本 N 运行候选 N+1 的成功、配置失败和门禁失败三条链，对账退出码与终端/状态文案 |
 | 25 | Spec Review 只判断改动行为，不循环证明本轮三轴 Review、GitHub 门禁或发布已经完成；这些后置条件由引擎独立判定 | 0.33.0 / ADR-018 | 在 PR 验证计划中声明本地 Review 与 GitHub 检查，确认审查包带当前 head 的机械检查事实和明确责任边界，Spec 轴不会因未来状态缺席而误报不可验证 |
+| 26 | 多 Story 运行中，后续提交会使此前 Story 的结构化凭证立即失效；旧 Story 以 validation-only 跳过 Developer，重跑机械检查和 Validator，最终所有凭证收敛到同一当前 HEAD。缺凭证、AC 文字/数量/顺序变化或无法读取 HEAD 时都不得进入任何 Agent/Review 模型，也不得从旧 evidence 或 Final Review 补造绿灯 | 0.34.0 / ADR-020 | 真实两 Story H1→H2 运行对账 Builder 调用数与 Validator 重验；再分别改 AC 顺序、删除凭证、隔离 Git，核对 state/status/report/dashboard 与模型零调用 |

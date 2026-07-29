@@ -3,7 +3,15 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
-import { setState, buildApiResponse, start, configureWorkspace, browserOpenCommand } from './server.js';
+import {
+  setState,
+  buildApiResponse,
+  start,
+  configureWorkspace,
+  browserOpenCommand,
+} from './server.js';
+import { acceptanceHash, readGitHead } from '../engine/validation-protocol.js';
+import type { ValidationReceipt } from '../engine/state.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -12,17 +20,48 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function validationReceipt(
+  storyId = 'US-001',
+  acceptanceCriteria: readonly string[] = ['ac'],
+): ValidationReceipt {
+  const gitHead = readGitHead(process.cwd());
+  if (gitHead === null) throw new Error('dashboard test fixture requires a Git HEAD');
+  return {
+    schemaVersion: 1,
+    requestId: `request-${storyId}`,
+    gitHead,
+    acceptanceHash: acceptanceHash(storyId, acceptanceCriteria),
+  };
+}
+
 function tempWorkspace(): string {
   const dir = mkdtempSync(join(tmpdir(), 'ws-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-    project: '任务应用', branchName: 'ralph/x', description: 'd',
-    sourcePrd: 'docs/prds/prd-x.md',
-    userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
-  }));
-  writeFileSync(join(dir, 'state.json'), JSON.stringify({
-    'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-  }));
+  writeFileSync(
+    join(dir, 'prd.json'),
+    JSON.stringify({
+      project: '任务应用',
+      branchName: 'ralph/x',
+      description: 'd',
+      sourcePrd: 'docs/prds/prd-x.md',
+      userStories: [
+        { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['ac'], priority: 1 },
+      ],
+    }),
+  );
+  writeFileSync(
+    join(dir, 'state.json'),
+    JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: validationReceipt(),
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+      },
+    }),
+  );
   writeFileSync(join(dir, 'progress.md'), '## US-001\n- done');
   return dir;
 }
@@ -31,14 +70,25 @@ type DashboardStory = {
   id: string;
   passes: boolean;
   validated: boolean;
+  validationReceipt: ValidationReceipt | null;
   notes: string;
   retryCount: number;
   blocked: boolean;
 };
 
 const dashboardAssets = [
-  { label: '普通页', file: 'dashboard.html', stateFunction: 'getState', currentStoryArgument: true },
-  { label: '像素页', file: 'dashboard-p.html', stateFunction: 'getStoryState', currentStoryArgument: false },
+  {
+    label: '普通页',
+    file: 'dashboard.html',
+    stateFunction: 'getState',
+    currentStoryArgument: true,
+  },
+  {
+    label: '像素页',
+    file: 'dashboard-p.html',
+    stateFunction: 'getStoryState',
+    currentStoryArgument: false,
+  },
 ] as const;
 
 function readDashboardAsset(file: string): string {
@@ -46,7 +96,9 @@ function readDashboardAsset(file: string): string {
 }
 
 function extractStateFunction(html: string, name: string): string {
-  const source = html.match(new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}`));
+  const source = html.match(
+    new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\s*\\}`),
+  );
   expect(source, `${name} should remain an inline dashboard function`).not.toBeNull();
   return source![0];
 }
@@ -57,9 +109,13 @@ function dashboardState(
   currentStory: string | null = null,
 ): string {
   const source = extractStateFunction(readDashboardAsset(asset.file), asset.stateFunction);
+  const receiptSource = extractStateFunction(
+    readDashboardAsset(asset.file),
+    'hasValidationReceipt',
+  );
   const invocation = asset.currentStoryArgument
-    ? `(${source})(story, currentStory)`
-    : `(${source})(story)`;
+    ? `${receiptSource}\n(${source})(story, currentStory)`
+    : `${receiptSource}\n(${source})(story)`;
   return runInNewContext(invocation, {
     story,
     currentStory,
@@ -69,23 +125,40 @@ function dashboardState(
 
 describe.each(dashboardAssets)('$label dashboard published-state contract', (asset) => {
   const story = (over: Partial<DashboardStory> = {}): DashboardStory => ({
-    id: 'US-001', passes: false, validated: false, notes: '', retryCount: 0, blocked: false, ...over,
+    id: 'US-001',
+    passes: false,
+    validated: false,
+    validationReceipt: null,
+    notes: '',
+    retryCount: 0,
+    blocked: false,
+    ...over,
   });
 
   it('按 active/blocked/passed/awaiting/failed/pending 状态矩阵分类', () => {
     expect(dashboardState(asset, story(), 'US-001')).toBe('active');
     expect(dashboardState(asset, story({ blocked: true }))).toBe('blocked');
-    expect(dashboardState(asset, story({ passes: true, validated: true }))).toBe('passed');
+    expect(
+      dashboardState(
+        asset,
+        story({
+          passes: true,
+          validated: true,
+          validationReceipt: validationReceipt(),
+        }),
+      ),
+    ).toBe('passed');
+    expect(dashboardState(asset, story({ passes: true, validated: true }))).toBe('awaiting');
     expect(dashboardState(asset, story({ passes: true, validated: false }))).toBe('awaiting');
     expect(dashboardState(asset, story({ retryCount: 1 }))).toBe('failed');
     expect(dashboardState(asset, story())).toBe('pending');
   });
 
-  it('将待验收标记为「待引擎验收」，且完成计数必须同时要求 passes 与 validated', () => {
+  it('无有效凭证时标记为「实现候选待验收」，且完成计数必须同时要求完整凭证', () => {
     const html = readDashboardAsset(asset.file);
-    expect(html).toMatch(/awaiting\s*:\s*(?:\{[^}]*label\s*:\s*)?['"]待引擎验收['"]/);
+    expect(html).toMatch(/awaiting\s*:\s*(?:\{[^}]*label\s*:\s*)?['"]实现候选待验收['"]/);
     expect(html).toMatch(
-      /stories\.filter\(s\s*=>\s*!s\.blocked\s*&&\s*s\.passes\s*===\s*true\s*&&\s*s\.validated\s*===\s*true\)\.length/,
+        /stories\.filter\(\s*\(?\s*s\s*\)?\s*=>\s*!s\.blocked\s*&&\s*s\.passes\s*===\s*true\s*&&\s*s\.validated\s*===\s*true\s*&&\s*hasValidationReceipt\(s\)\s*,?\s*\)\.length/,
     );
   });
 
@@ -93,6 +166,20 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
     const html = readDashboardAsset(asset.file);
     expect(html).toContain('state.json 已损坏');
     expect(html).toContain('stateCorrupted');
+  });
+
+  it('PRD Story 定义无效时展示明确的未就绪警告', () => {
+    const html = readDashboardAsset(asset.file);
+    expect(html).toContain('PRD 未就绪');
+    expect(html).toContain('prdReady');
+  });
+
+  it('消费 validationInvalidations 并显示具体待验收原因', () => {
+    const html = readDashboardAsset(asset.file);
+    expect(html).toContain('validationInvalidations');
+    expect(html).toContain('待验收原因');
+    expect(html).toContain('代码提交已变化，需要重新验收');
+    expect(html).toContain('验收标准已变化，需要重新验收');
   });
 });
 
@@ -109,48 +196,145 @@ describe('buildApiResponse', () => {
     expect(r.sourcePrd).toBe('docs/prds/prd-x.md');
     expect(r.stories.length).toBe(1);
     expect(r.stories[0].passes).toBe(true); // 状态来自 state.json
-    expect(r.stories[0].validated).toBe(true); // 旧 passed state 兼容为已验收
+    expect(r.stories[0].validated).toBe(true);
+    expect(r.stories[0].validationReceipt).toEqual(validationReceipt());
     expect(r.logs).toContain('US-001');
+    expect(r.prdReady).toBe(true);
+    expect(r.prdError).toBeNull();
+  });
+
+  it.each([
+    [
+      'duplicate IDs',
+      [
+        { id: 'US-001', title: 'one', description: 'd', acceptanceCriteria: ['ac'], priority: 1 },
+        { id: ' US-001 ', title: 'two', description: 'd', acceptanceCriteria: ['ac'], priority: 2 },
+      ],
+    ],
+    [
+      'empty acceptance criteria',
+      [{ id: 'US-001', title: 'one', description: 'd', acceptanceCriteria: [], priority: 1 }],
+    ],
+  ])('fails closed for %s instead of exposing green stories', (_name, userStories) => {
+    const ws = tempWorkspace();
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({ project: 'p', branchName: 'b', description: 'd', userStories }),
+    );
+    configureWorkspace(ws, 50);
+
+    const response = buildApiResponse();
+    expect(response.prdReady).toBe(false);
+    expect(response.prdError).toBeTruthy();
+    expect(response.stories).toEqual([]);
   });
 
   it('falls back to legacy in-story state when state.json is absent (v0.4 workspace)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ws-legacy-'));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-      project: 'p', branchName: 'ralph/x', description: 'd',
-      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
-        priority: 1, passes: true, notes: '', retryCount: 0, blocked: false }],
-    }));
+    writeFileSync(
+      join(dir, 'prd.json'),
+      JSON.stringify({
+        project: 'p',
+        branchName: 'ralph/x',
+        description: 'd',
+        userStories: [
+          {
+            id: 'US-001',
+            title: 't',
+            description: 'd',
+            acceptanceCriteria: ['ac'],
+            priority: 1,
+            passes: true,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+          },
+        ],
+      }),
+    );
     writeFileSync(join(dir, 'progress.md'), '');
     configureWorkspace(dir, 50);
     const r = buildApiResponse();
     expect(r.stateCorrupted).toBe(false);
     expect(r.stories[0].passes).toBe(true);
-    expect(r.stories[0].validated).toBe(true);
+    expect(r.stories[0].validated).toBe(false);
+    expect(r.stories[0].validationReceipt).toBeNull();
   });
 
   it('fails closed and exposes a warning flag when state.json exists but is corrupt', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ws-corrupt-'));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-      project: 'p', branchName: 'ralph/x', description: 'd',
-      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
-        priority: 1, passes: true, notes: '旧备注', retryCount: 2, blocked: false }],
-    }));
+    writeFileSync(
+      join(dir, 'prd.json'),
+      JSON.stringify({
+        project: 'p',
+        branchName: 'ralph/x',
+        description: 'd',
+        userStories: [
+          {
+            id: 'US-001',
+            title: 't',
+            description: 'd',
+            acceptanceCriteria: ['ac'],
+            priority: 1,
+            passes: true,
+            notes: '旧备注',
+            retryCount: 2,
+            blocked: false,
+          },
+        ],
+      }),
+    );
     writeFileSync(join(dir, 'state.json'), '{ broken');
     writeFileSync(join(dir, 'progress.md'), '');
     configureWorkspace(dir, 50);
     const r = buildApiResponse();
     expect(r.stateCorrupted).toBe(true);
     expect(r.stories[0]).toMatchObject({
-      passes: false, validated: false, notes: '', retryCount: 0, blocked: false,
+      passes: false,
+      validated: false,
+      validationReceipt: null,
+      notes: '',
+      retryCount: 0,
+      blocked: false,
     });
+  });
+
+  it('exposes the reason when a previously valid receipt no longer matches HEAD', () => {
+    const ws = tempWorkspace();
+    const path = join(ws, 'state.json');
+    const state = JSON.parse(readFileSync(path, 'utf-8')) as Record<
+      string,
+      {
+        validationReceipt: ValidationReceipt;
+      }
+    >;
+    state['US-001'].validationReceipt.gitHead = 'f'.repeat(40);
+    writeFileSync(path, JSON.stringify(state));
+    configureWorkspace(ws, 50);
+
+    const r = buildApiResponse();
+    expect(r.stories[0]).toMatchObject({
+      passes: true,
+      validated: false,
+      validationReceipt: null,
+    });
+    expect(r.validationInvalidations).toEqual([
+      {
+        storyId: 'US-001',
+        reason: 'git-head-mismatch',
+      },
+    ]);
   });
 
   it('exposes the current actual route in runtime and defaults it to null', () => {
     setState({
-      phase: 'developing', model: 'opus', routeSource: 'difficulty',
-      storyDifficulty: 'high', runner: 'claude',
+      phase: 'developing',
+      model: 'opus',
+      routeSource: 'difficulty',
+      storyDifficulty: 'high',
+      runner: 'claude',
     });
     expect(buildApiResponse().runtime.model).toBe('opus');
     expect(buildApiResponse().runtime.route_source).toBe('difficulty');
@@ -165,15 +349,18 @@ describe('buildApiResponse', () => {
     const path = join(ws, 'prd.json');
     const prd = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
     prd.models = {
-      runner: 'codex', builder: { low: 'lo', medium: 'mid', high: 'hi' },
-      validator: 'val', escalation: 'esc',
+      runner: 'codex',
+      builder: { low: 'lo', medium: 'mid', high: 'hi' },
+      validator: 'val',
+      escalation: 'esc',
     };
     (prd.userStories as Array<Record<string, unknown>>)[0].difficulty = 'medium';
     (prd.userStories as Array<Record<string, unknown>>)[0].difficultyReason = '命中 medium-1';
     writeFileSync(path, JSON.stringify(prd));
     configureWorkspace(ws, 50);
     expect(buildApiResponse().modelRouting).toMatchObject({
-      status: 'enabled', config: { runner: 'codex', validator: 'val', escalation: 'esc' },
+      status: 'enabled',
+      config: { runner: 'codex', validator: 'val', escalation: 'esc' },
     });
   });
 });
@@ -183,10 +370,16 @@ describe('browserOpenCommand', () => {
     expect(browserOpenCommand('darwin', 'http://x')).toEqual({ cmd: 'open', args: ['http://x'] });
   });
   it('win32 → cmd /c start "" url', () => {
-    expect(browserOpenCommand('win32', 'http://x')).toEqual({ cmd: 'cmd', args: ['/c', 'start', '', 'http://x'] });
+    expect(browserOpenCommand('win32', 'http://x')).toEqual({
+      cmd: 'cmd',
+      args: ['/c', 'start', '', 'http://x'],
+    });
   });
   it('linux → xdg-open', () => {
-    expect(browserOpenCommand('linux', 'http://x')).toEqual({ cmd: 'xdg-open', args: ['http://x'] });
+    expect(browserOpenCommand('linux', 'http://x')).toEqual({
+      cmd: 'xdg-open',
+      args: ['http://x'],
+    });
   });
 });
 
@@ -199,7 +392,13 @@ describe('start', () => {
     writeFileSync(join(pub, 'dashboard.html'), '<html>main</html>');
     writeFileSync(join(pub, 'dashboard-p.html'), '<html>pixel</html>');
 
-    const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
+    const srv = start({
+      workspace: ws,
+      maxIterations: 50,
+      port: 0,
+      publicDir: pub,
+      openBrowser: false,
+    });
     cleanup.push(() => srv.close());
     const addr = await srv.ready;
     expect(srv.address()).toEqual(addr);
@@ -216,7 +415,13 @@ describe('start', () => {
     cleanup.push(() => rmSync(pub, { recursive: true, force: true }));
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
+    const srv = start({
+      workspace: ws,
+      maxIterations: 50,
+      port: 0,
+      publicDir: pub,
+      openBrowser: false,
+    });
     cleanup.push(() => srv.close());
     const addr = await srv.ready;
     const res = await fetch(`http://127.0.0.1:${addr.port}/`);

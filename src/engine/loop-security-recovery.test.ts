@@ -191,7 +191,7 @@ describe('runLoop prd freeze', () => {
         port: 0,
         openBrowser: false,
       });
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       // 写回失败 → 本轮 validator 被跳过：stub 只跑了一次
       expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(1);
       expect(warns.some((w) => w.includes('快照写回失败'))).toBe(true);
@@ -208,7 +208,7 @@ describe('runLoop prd freeze', () => {
     }
   });
 
-  it('快照写回失败跳过 validator 时不会保留 builder 的 passes=true', async () => {
+  it('快照写回失败跳过 validator 时保留实现候选但绝不签发凭证', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const prdPath = join(workspace, 'prd.json');
     const statePath = join(workspace, 'state.json');
@@ -243,11 +243,12 @@ describe('runLoop prd freeze', () => {
           port: 0,
           openBrowser: false,
         }),
-      ).toBe(1);
+      ).toBe(2);
       expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(1);
       expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toMatchObject({
-        passes: false,
+        passes: true,
         validated: false,
+        validationReceipt: null,
       });
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
       expect(iteration).toMatchObject({
@@ -255,7 +256,7 @@ describe('runLoop prd freeze', () => {
         validatorRan: false,
         validatorOutcome: 'skipped',
         skippedValidator: true,
-        validationRollback: true,
+        validationPending: true,
       });
       expect(iteration).not.toHaveProperty('validationReceipt');
     } finally {

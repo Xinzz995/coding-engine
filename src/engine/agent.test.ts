@@ -1,19 +1,37 @@
 import { describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { buildAgentArgs, resolveBinary, runAgent } from './agent.js';
+import {
+  assertFrozenAgentRunner,
+  buildAgentArgs,
+  freezeAgentRunner,
+  resolveBinary,
+  runAgent,
+} from './agent.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fake = join(here, '__fixtures__', 'fake-agent.mjs');
+
+function nativeRunner(path: string, body: string): void {
+  const source = `${path}.c`;
+  writeFileSync(
+    source,
+    `#include <stdio.h>\n#include <unistd.h>\n#include <sys/types.h>\nint main(void) { ${body} }\n`,
+  );
+  execFileSync('cc', [source, '-o', path]);
+  chmodSync(path, 0o755);
+}
 
 async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise<void> {
   const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-tree-'));
@@ -32,7 +50,9 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
     expect(Number.isSafeInteger(childPid) && childPid > 0).toBe(true);
 
     let probeError: string | undefined;
-    try { process.kill(childPid, 0); } catch (err) {
+    try {
+      process.kill(childPid, 0);
+    } catch (err) {
       probeError = (err as NodeJS.ErrnoException).code;
     }
     childConfirmedGone = probeError === 'ESRCH';
@@ -47,7 +67,9 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
         try {
           process.kill(childPid, 0);
           process.kill(childPid, 'SIGKILL');
-        } catch { /* 已退出 */ }
+        } catch {
+          /* 已退出 */
+        }
       }
     }
     rmSync(cwd, { recursive: true, force: true });
@@ -57,21 +79,25 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
 describe('buildAgentArgs', () => {
   it('builds claude print command by default', () => {
     expect(buildAgentArgs('claude', 'P')).toEqual([
-      'claude', '--print', '--dangerously-skip-permissions', 'P',
+      'claude',
+      '--print',
+      '--dangerously-skip-permissions',
+      'P',
     ]);
   });
   it('builds codex exec command', () => {
     expect(buildAgentArgs('codex', 'P')).toEqual([
-      'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', 'P',
+      'codex',
+      'exec',
+      '--dangerously-bypass-approvals-and-sandbox',
+      'P',
     ]);
   });
   it('builds cursor headless force command', () => {
     const original = process.env.CODING_X_CURSOR_BIN;
     process.env.CODING_X_CURSOR_BIN = 'agent';
     try {
-      expect(buildAgentArgs('cursor', 'P')).toEqual([
-        'agent', '-p', '--force', 'P',
-      ]);
+      expect(buildAgentArgs('cursor', 'P')).toEqual(['agent', '-p', '--force', 'P']);
     } finally {
       if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
       else process.env.CODING_X_CURSOR_BIN = original;
@@ -79,12 +105,22 @@ describe('buildAgentArgs', () => {
   });
   it('appends --model before the prompt for claude when a model is given', () => {
     expect(buildAgentArgs('claude', 'P', 'opus')).toEqual([
-      'claude', '--print', '--dangerously-skip-permissions', '--model', 'opus', 'P',
+      'claude',
+      '--print',
+      '--dangerously-skip-permissions',
+      '--model',
+      'opus',
+      'P',
     ]);
   });
   it('appends --model before the prompt for codex when a model is given', () => {
     expect(buildAgentArgs('codex', 'P', 'gpt-5')).toEqual([
-      'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5', 'P',
+      'codex',
+      'exec',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--model',
+      'gpt-5',
+      'P',
     ]);
   });
   it('appends --model before the prompt for cursor when a model is given', () => {
@@ -92,7 +128,12 @@ describe('buildAgentArgs', () => {
     process.env.CODING_X_CURSOR_BIN = 'agent';
     try {
       expect(buildAgentArgs('cursor', 'P', 'composer-1')).toEqual([
-        'agent', '-p', '--force', '--model', 'composer-1', 'P',
+        'agent',
+        '-p',
+        '--force',
+        '--model',
+        'composer-1',
+        'P',
       ]);
     } finally {
       if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
@@ -144,18 +185,196 @@ describe('resolveBinary', () => {
 });
 
 describe('runAgent', () => {
+  it.runIf(process.platform !== 'win32')(
+    'reuses the pre-frozen absolute Runner after a project-local command appears',
+    async () => {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-frozen-project-'));
+      const externalRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-frozen-external-'));
+      const projectBin = join(projectRoot, 'node_modules', '.bin');
+      const externalBin = join(externalRoot, 'bin');
+      const trustedMarker = join(externalRoot, 'trusted-ran');
+      const projectMarker = join(projectRoot, 'project-ran');
+      const originalPath = process.env.PATH;
+      const originalBin = process.env.CODING_X_CLAUDE_BIN;
+      try {
+        for (const directory of [projectBin, externalBin]) {
+          mkdirSync(directory, { recursive: true });
+        }
+        const trusted = join(externalBin, 'claude');
+        nativeRunner(
+          trusted,
+          `FILE *file = fopen(${JSON.stringify(trustedMarker)}, "w"); if (!file) return 2; fputs("trusted", file); fclose(file); return 0;`,
+        );
+        process.env.CODING_X_CLAUDE_BIN = 'claude';
+        process.env.PATH = [projectBin, externalBin, originalPath ?? '']
+          .filter(Boolean)
+          .join(delimiter);
+        const frozen = freezeAgentRunner('claude', projectRoot);
+        writeFileSync(
+          join(projectBin, 'claude'),
+          `#!/bin/sh\nprintf project > ${JSON.stringify(projectMarker)}\n`,
+        );
+        chmodSync(join(projectBin, 'claude'), 0o755);
+
+        const result = await runAgent({
+          kind: 'claude',
+          prompt: 'fixture',
+          cwd: projectRoot,
+          timeoutMs: 5_000,
+          frozenRunner: frozen,
+        });
+
+        expect(result.exitCode).toBe(0);
+        expect(readFileSync(trustedMarker, 'utf8')).toBe('trusted');
+        expect(existsSync(projectMarker)).toBe(false);
+        expect(() => assertFrozenAgentRunner(frozen)).not.toThrow();
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+        if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+        else process.env.CODING_X_CLAUDE_BIN = originalBin;
+        rmSync(projectRoot, { recursive: true, force: true });
+        rmSync(externalRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses a changed frozen Runner without executing the replacement',
+    async () => {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-changed-project-'));
+      const externalRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-changed-external-'));
+      const runner = join(externalRoot, 'claude');
+      const marker = join(externalRoot, 'replacement-ran');
+      const originalBin = process.env.CODING_X_CLAUDE_BIN;
+      try {
+        nativeRunner(runner, 'return 0;');
+        process.env.CODING_X_CLAUDE_BIN = runner;
+        const frozen = freezeAgentRunner('claude', projectRoot);
+        nativeRunner(
+          runner,
+          `FILE *file = fopen(${JSON.stringify(marker)}, "w"); if (!file) return 2; fputs("changed", file); fclose(file); return 0;`,
+        );
+
+        const result = await runAgent({
+          kind: 'claude',
+          prompt: 'fixture',
+          cwd: projectRoot,
+          timeoutMs: 5_000,
+          frozenRunner: frozen,
+        });
+
+        expect(result.exitCode).toBe(1);
+        expect(result.outputTail).toContain('已变化');
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+        else process.env.CODING_X_CLAUDE_BIN = originalBin;
+        rmSync(projectRoot, { recursive: true, force: true });
+        rmSync(externalRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a script Runner before it can become a frozen Developer or Validator entry',
+    () => {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-script-project-'));
+      const externalRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-script-external-'));
+      const runner = join(externalRoot, 'claude');
+      const marker = join(externalRoot, 'script-ran');
+      const originalBin = process.env.CODING_X_CLAUDE_BIN;
+      try {
+        writeFileSync(runner, `#!/bin/sh\nprintf ran > ${JSON.stringify(marker)}\n`);
+        chmodSync(runner, 0o755);
+        process.env.CODING_X_CLAUDE_BIN = runner;
+
+        expect(() => freezeAgentRunner('claude', projectRoot)).toThrow(/原生单文件/);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+        else process.env.CODING_X_CLAUDE_BIN = originalBin;
+        rmSync(projectRoot, { recursive: true, force: true });
+        rmSync(externalRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects an MZ-prefixed non-PE file instead of treating two magic bytes as a native Runner',
+    () => {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-fake-pe-project-'));
+      const externalRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-fake-pe-external-'));
+      const runner = join(externalRoot, 'claude');
+      const originalBin = process.env.CODING_X_CLAUDE_BIN;
+      try {
+        writeFileSync(runner, Buffer.concat([Buffer.from('MZ'), Buffer.alloc(126)]));
+        chmodSync(runner, 0o755);
+        process.env.CODING_X_CLAUDE_BIN = runner;
+
+        expect(() => freezeAgentRunner('claude', projectRoot)).toThrow(/原生单文件/);
+      } finally {
+        if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+        else process.env.CODING_X_CLAUDE_BIN = originalBin;
+        rmSync(projectRoot, { recursive: true, force: true });
+        rmSync(externalRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'kills detached background descendants and fails after the Agent root exits',
+    async () => {
+      const projectRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-background-project-'));
+      const externalRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-background-external-'));
+      const runner = join(externalRoot, 'claude');
+      const marker = join(projectRoot, 'descendant-survived');
+      const originalBin = process.env.CODING_X_CLAUDE_BIN;
+      try {
+        nativeRunner(
+          runner,
+          `pid_t child = fork(); if (child < 0) return 2; if (child == 0) { close(0); close(1); close(2); usleep(350000); FILE *file = fopen(${JSON.stringify(marker)}, "w"); if (file) { fputs("survived", file); fclose(file); } _exit(0); } return 0;`,
+        );
+        process.env.CODING_X_CLAUDE_BIN = runner;
+        const frozenRunner = freezeAgentRunner('claude', projectRoot);
+
+        const result = await runAgent({
+          kind: 'claude',
+          prompt: 'fixture',
+          cwd: projectRoot,
+          timeoutMs: 5_000,
+          frozenRunner,
+        });
+
+        expect(result.timedOut).toBe(false);
+        expect(result.exitCode).toBe(1);
+        expect(result.outputTail).toContain('仍有后台后代');
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+        else process.env.CODING_X_CLAUDE_BIN = originalBin;
+        rmSync(projectRoot, { recursive: true, force: true });
+        rmSync(externalRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('merges explicit coding-x context into the child environment', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-env-'));
     const script = join(cwd, 'capture-env.mjs');
     const output = join(cwd, 'env.json');
     const originalBin = process.env.CODING_X_CLAUDE_BIN;
-    writeFileSync(script, `
+    writeFileSync(
+      script,
+      `
       import { writeFileSync } from 'node:fs';
       writeFileSync(${JSON.stringify(output)}, JSON.stringify({
         workspace: process.env.CODING_X_WORKSPACE,
         projectRoot: process.env.CODING_X_PROJECT_ROOT,
       }));
-    `);
+    `,
+    );
     process.env.CODING_X_CLAUDE_BIN = `node ${script}`;
     try {
       const result = await runAgent({
@@ -231,11 +450,18 @@ describe('runAgent', () => {
     delete process.env.CODING_X_CLAUDE_BIN;
   });
 
-  it.runIf(process.platform !== 'win32')('does not resolve a timeout until the whole agent process tree has exited', async () => {
-    await expectTimedOutTreeExited('tree');
-  });
+  it.runIf(process.platform !== 'win32')(
+    'does not resolve a timeout until the whole agent process tree has exited',
+    async () => {
+      await expectTimedOutTreeExited('tree');
+    },
+  );
 
-  it.runIf(process.platform !== 'win32')('escalates to SIGKILL before resolving when an agent descendant traps SIGTERM', async () => {
-    await expectTimedOutTreeExited('stubborn-tree');
-  }, 12_000);
+  it.runIf(process.platform !== 'win32')(
+    'escalates to SIGKILL before resolving when an agent descendant traps SIGTERM',
+    async () => {
+      await expectTimedOutTreeExited('stubborn-tree');
+    },
+    12_000,
+  );
 });

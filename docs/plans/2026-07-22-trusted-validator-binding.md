@@ -7,6 +7,12 @@ scope: root
 
 # 可信 Validator 目标绑定实施计划
 
+> **继任说明（2026-07-29）：** 本计划记录 v0.25.1 的已完成实现，不再作为当前完成判定与
+> Git 身份缺失处理的实现指引。裸 `passes && validated`、正式模式允许 `gitHead:null` 以及
+> 缺少提交身份时的降级签发，已由 [ADR-020](../decisions/020-persist-validator-receipt-binding.md)
+> 和 [Validator 凭证持续绑定与最终提交收敛计划](2026-07-29-validator-receipt-freshness.md)
+> 取代；下文保留为历史实施记录。
+
 **Goal:** 把“Validator 正常退出且 `passes` 仍为 true”收紧为“Validator 对引擎指定的 story、验收标准快照和产物身份提交了新鲜、结构化且自洽的结论”，关闭未验证、错目标和旧结果复用仍可签发 `validated` 的假绿路径。
 
 **Baseline:** `docs/decisions/013-engine-validation-receipt.md` 已让 `validated` 归引擎独占，但 Validator 仍从 `progress.md` 猜测目标并直接改写 verdict 状态；本计划将 supersede ADR-013 中“不引入结构化 verdict 协议”的范围裁决，不改变 `passes && validated && !blocked` 的最终通过语义。

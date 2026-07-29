@@ -237,8 +237,8 @@ const FALLBACK = {
   project: "AI 自动化 Coding2.0",
   branchName: "ralph/AI Auto Coding",
   stories: [
-    { id: "US-001", title: "初始化项目结构与静态导出配置", description: "搭建 Next.js 项目骨架，配置 Tailwind CSS 与静态导出", acceptanceCriteria: ["App Router 模式", "output: 'export'", "两栏布局骨架", "next build 成功", "Typecheck passes"], priority: 1, passes: true, validated: true, notes: "", retryCount: 0, blocked: false },
-    { id: "US-002", title: "定义 Note 数据类型与示例数据预加载", description: "定义笔记数据结构，预加载示例数据", acceptanceCriteria: ["Note 类型定义", "预加载 2 条示例", "默认选中第一条", "Typecheck passes"], priority: 2, passes: true, validated: true, notes: "", retryCount: 0, blocked: false },
+    { id: "US-001", title: "初始化项目结构与静态导出配置", description: "搭建 Next.js 项目骨架，配置 Tailwind CSS 与静态导出", acceptanceCriteria: ["App Router 模式", "output: 'export'", "两栏布局骨架", "next build 成功", "Typecheck passes"], priority: 1, passes: true, validated: true, validationReceipt: { schemaVersion: 1, requestId: "demo-1", gitHead: "a".repeat(40), acceptanceHash: "sha256:" + "b".repeat(64) }, notes: "", retryCount: 0, blocked: false },
+    { id: "US-002", title: "定义 Note 数据类型与示例数据预加载", description: "定义笔记数据结构，预加载示例数据", acceptanceCriteria: ["Note 类型定义", "预加载 2 条示例", "默认选中第一条", "Typecheck passes"], priority: 2, passes: true, validated: true, validationReceipt: { schemaVersion: 1, requestId: "demo-2", gitHead: "a".repeat(40), acceptanceHash: "sha256:" + "c".repeat(64) }, notes: "", retryCount: 0, blocked: false },
     { id: "US-003", title: "笔记列表组件（左侧栏）", description: "左侧栏显示笔记列表，含标题、预览和时间", acceptanceCriteria: ["列表渲染", "倒序排列", "高亮选中", "过渡动画", "点击切换"], priority: 3, passes: false, validated: false, notes: "列表项点击事件未正确绑定", retryCount: 2, blocked: false },
     { id: "US-004", title: "笔记详情展示（右侧区域）", description: "点击列表笔记后，右侧显示完整内容", acceptanceCriteria: ["显示完整标题与内容", "空状态占位文本", "Typecheck passes"], priority: 4, passes: false, validated: false, notes: "", retryCount: 0, blocked: false },
     { id: "US-005", title: "新建笔记功能", description: "通过按钮快速新建空白笔记", acceptanceCriteria: ["新建按钮", "插入列表顶端", "焦点落在标题", "过渡动画"], priority: 5, passes: false, validated: false, notes: "", retryCount: 0, blocked: false },
@@ -273,6 +273,9 @@ const FALLBACK = {
   - 类型定义放在 app/types.ts，示例数据放在 app/sample-data.ts`,
   runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus", route_source: "difficulty", story_difficulty: "medium", runner: "claude" },
   stateCorrupted: false,
+  prdReady: true,
+  prdError: null,
+  validationInvalidations: [],
   modelRouting: { status: "disabled", config: null, errors: [] }
 };
 
@@ -341,11 +344,16 @@ function getRuntime() {
   return dashboardData.runtime || FALLBACK.runtime;
 }
 
+function hasValidationReceipt(story) {
+  const receipt = story.validationReceipt;
+  return receipt && receipt.schemaVersion === 1 && typeof receipt.requestId === 'string' && receipt.requestId.length > 0 && typeof receipt.gitHead === 'string' && typeof receipt.acceptanceHash === 'string';
+}
+
 function getStoryState(story) {
   const runtime = getRuntime();
   if (story.id === runtime.current_story) return 'active';
   if (story.blocked) return 'blocked';
-  if (story.passes === true && story.validated === true) return 'passed';
+  if (story.passes === true && story.validated === true && hasValidationReceipt(story)) return 'passed';
   if (story.passes === true) return 'awaiting';
   if (story.passes === false && (story.retryCount > 0 || story.notes)) return 'failed';
   return 'pending';
@@ -357,10 +365,20 @@ function formatElapsed(sec) {
   return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
 }
 
-const stateLabel = { active:'进行中', passed:'已通过', failed:'未通过', blocked:'已阻塞', awaiting:'待引擎验收', pending:'待执行' };
+const stateLabel = { active:'进行中', passed:'已通过', failed:'未通过', blocked:'已阻塞', awaiting:'实现候选待验收', pending:'待执行' };
 const stateColor = { active:'#4a9eff', passed:'#4ade80', failed:'#f87171', blocked:'#fb923c', awaiting:'#c084fc', pending:'#6b7280' };
+const validationReason = {
+  'candidate-not-passing': '实现候选已不再通过',
+  'story-blocked': 'Story 已阻塞',
+  'validated-false': '验收状态未完成',
+  'missing-receipt': '缺少 Validator 验证凭证',
+  'invalid-receipt': 'Validator 验证凭证损坏',
+  'git-head-unavailable': '无法确认当前提交',
+  'git-head-mismatch': '代码提交已变化，需要重新验收',
+  'acceptance-hash-mismatch': '验收标准已变化，需要重新验收'
+};
 const phaseEmoji = { idle:'⏸', developing:'🤖', validating:'🔍', done:'✅', error:'❌' };
-const phaseText = { idle:'等待启动', developing:'开发中', validating:'验证中', done:'全部完成', error:'出现错误' };
+const phaseText = { idle:'等待启动', developing:'开发中', validating:'验证中', done:'Story 已收敛', error:'出现错误' };
 
 // ═══════ CHARACTER ANIMATION ═══════
 const IDLE_ACTIONS = ['coffee','stretch','walk'];
@@ -484,15 +502,17 @@ function render() {
   ensureCharStates();
   const stories = getStories();
   const runtime = getRuntime();
-  const passedCount = stories.filter(s => !s.blocked && s.passes === true && s.validated === true).length;
+  const passedCount = stories.filter(s => !s.blocked && s.passes === true && s.validated === true && hasValidationReceipt(s)).length;
   const pct = stories.length ? Math.round((passedCount / stories.length) * 100) : 0;
   const isActive = runtime.phase === 'developing' || runtime.phase === 'validating';
   const routing = dashboardData.modelRouting;
-  const routeConfig = dashboardData.stateCorrupted
-    ? '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair'
-    : routing && routing.status === 'enabled'
-      ? `${routing.config.runner} · L:${routing.config.builder.low} M:${routing.config.builder.medium} H:${routing.config.builder.high} · V:${routing.config.validator} · E:${routing.config.escalation}`
-      : `${runtime.runner || '默认 runner'} · ${routing && routing.status === 'invalid' ? '模型路由无效' : '未启用 PRD 模型路由'}`;
+  const routeConfig = dashboardData.prdReady === false
+    ? '⚠ PRD 未就绪：' + (dashboardData.prdError || 'Story 定义无效')
+    : dashboardData.stateCorrupted
+      ? '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair'
+      : routing && routing.status === 'enabled'
+        ? `${routing.config.runner} · L:${routing.config.builder.low} M:${routing.config.builder.medium} H:${routing.config.builder.high} · V:${routing.config.validator} · E:${routing.config.escalation}`
+        : `${runtime.runner || '默认 runner'} · ${routing && routing.status === 'invalid' ? '模型路由无效' : '未启用 PRD 模型路由'}`;
   const actualRoute = `${runtime.current_story ? ' · '+runtime.current_story : ''}${runtime.story_difficulty ? ' · '+runtime.story_difficulty : ''}${runtime.model ? ' · '+runtime.model+(runtime.route_source ? ' ['+runtime.route_source+']' : '') : ''}`;
 
   let html = '';
@@ -520,6 +540,8 @@ function render() {
     const cs = updateCharacter(story, i);
     const isSel = selectedStory === story.id;
     const cacheKey = cs.spriteKey + '_' + i;
+    const invalidation = (dashboardData.validationInvalidations || []).find(item => item.storyId === story.id);
+    const pendingReason = invalidation ? (validationReason[invalidation.reason] || 'Validator 验证凭证已失效') : '';
 
     const screenColor = state==='active'?'#1a3a5e':state==='passed'?'#1a3e1a':state==='failed'?'#3e1a1a':state==='blocked'?'#3e2e1a':'#1a1a1a';
     const glowColor = state==='active'?'rgba(74,158,255,0.4)':state==='passed'?'rgba(74,222,128,0.3)':state==='failed'?'rgba(248,113,113,0.3)':state==='blocked'?'rgba(251,146,60,0.3)':'rgba(100,100,100,0.1)';
@@ -547,6 +569,7 @@ function render() {
         <div class="ws-detail-desc">${story.description}</div>
         ${story.difficulty ? '<div class="ws-detail-retry">难度 '+story.difficulty+(story.escalated?' · ⬆ 已升级':'')+'</div>' : ''}
         ${story.difficultyReason ? '<div class="ws-detail-desc">'+story.difficultyReason+'</div>' : ''}
+        ${pendingReason ? '<div class="ws-detail-notes">待验收原因：'+pendingReason+'</div>' : ''}
         ${story.notes ? '<div class="ws-detail-notes">⚠ '+story.notes+'</div>' : ''}
         ${story.retryCount > 0 ? '<div class="ws-detail-retry">重试 ×'+story.retryCount+'</div>' : ''}
         <div class="ws-detail-criteria">${story.acceptanceCriteria.map(c=>'<div class="ws-detail-criterion">• '+c+'</div>').join('')}</div>
@@ -575,6 +598,7 @@ function render() {
           <span class="ws-status" style="color:${stateColor[state]};border-color:${stateColor[state]}">${stateLabel[state]}</span>
         </div>
         <div class="ws-title">${story.title}</div>
+        ${pendingReason ? '<div class="ws-notes">待验收原因：'+pendingReason+'</div>' : ''}
         ${story.notes ? '<div class="ws-notes">⚠ '+story.notes+'</div>' : ''}
       </div>
       ${detail}

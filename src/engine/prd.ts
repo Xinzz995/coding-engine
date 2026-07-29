@@ -1,6 +1,8 @@
-import { readFileSync } from 'node:fs';
 import type { AgentKind } from './agent.js';
 import type { FrozenQualityChecks } from '../quality/contract.js';
+import { readSafeControlFileUtf8Sync } from './safe-control-file.js';
+
+export const PRD_CONTROL_FILE_MAX_BYTES = 16 * 1024 * 1024;
 
 export type StoryDifficulty = 'low' | 'medium' | 'high';
 
@@ -63,9 +65,70 @@ export interface Prd {
   userStories: Story[];
 }
 
+export type PrdStoryDefinitionsValidation = { ok: true } | { ok: false; error: string };
+
+/**
+ * 只校验会决定状态键、Validator 目标与完成判定的最小 Story 身份面。
+ * 其余 legacy PRD 字段继续由既有读取方兼容，避免把本次安全修复扩成全量 schema 迁移。
+ */
+export function validatePrdStoryDefinitions(value: unknown): PrdStoryDefinitionsValidation {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { ok: false, error: 'prd.json 顶层必须是对象' };
+  }
+  const storiesValue = (value as Record<string, unknown>).userStories;
+  if (!Array.isArray(storiesValue)) {
+    return { ok: false, error: 'prd.json.userStories 必须是数组' };
+  }
+  const stories = storiesValue as unknown[];
+  if (stories.length === 0) {
+    return { ok: false, error: 'prd.json.userStories 至少必须包含一个 Story' };
+  }
+
+  const seenIds = new Set<string>();
+  for (let index = 0; index < stories.length; index += 1) {
+    const raw = stories[index];
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return { ok: false, error: `prd.json.userStories[${index}] 必须是对象` };
+    }
+    const story = raw as Record<string, unknown>;
+    if (typeof story.id !== 'string' || story.id.trim() === '') {
+      return { ok: false, error: `prd.json.userStories[${index}].id 必须是非空字符串` };
+    }
+    const normalizedId = story.id.trim();
+    if (seenIds.has(normalizedId)) {
+      return { ok: false, error: `prd.json.userStories 含重复 Story ID：${normalizedId}` };
+    }
+    seenIds.add(normalizedId);
+
+    const acceptanceCriteriaValue = story.acceptanceCriteria;
+    if (!Array.isArray(acceptanceCriteriaValue) || acceptanceCriteriaValue.length === 0) {
+      return {
+        ok: false,
+        error: `prd.json.userStories[${index}].acceptanceCriteria 必须是非空数组`,
+      };
+    }
+    const acceptanceCriteria = acceptanceCriteriaValue as unknown[];
+    for (let criterion = 0; criterion < acceptanceCriteria.length; criterion += 1) {
+      const text = acceptanceCriteria[criterion];
+      if (typeof text !== 'string' || text.trim() === '') {
+        return {
+          ok: false,
+          error:
+            `prd.json.userStories[${index}].acceptanceCriteria[${criterion}] ` + '必须是非空字符串',
+        };
+      }
+    }
+  }
+  return { ok: true };
+}
+
 export function tryReadPrd(path: string): Prd | null {
   try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as Prd;
+    const raw = readSafeControlFileUtf8Sync(path, {
+      maxBytes: PRD_CONTROL_FILE_MAX_BYTES,
+      allowMissing: true,
+    });
+    return raw === null ? null : (JSON.parse(raw) as Prd);
   } catch {
     return null;
   }

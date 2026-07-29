@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-07-26
+updated: 2026-07-29
 scope: root
 ---
 
@@ -29,7 +29,11 @@ scope: root
 - 2026-07-22 可变状态里的瞬时失败详情必须在机械确认失败的同一时点快照进 append-only 证据，不能等收口时从最终 state/progress 反推——成功重试会清空 notes、覆盖现场。生产端只保留接近失败点的有界尾部，读取端对同名字段逐类型/长度守卫，报告端折叠并按纯文本转义；当前门禁 outputTail 与引擎接受的 Validator failed claim 共用 2000 字符单源边界（见 `clipEvidenceDiagnostic`、`diagnosticTail`、`validatorDiagnostic`）。
 - 2026-07-08 新增 workspace 运行产物时三处必须同步：prd-to-json 归档清单的**复制**动作、**删除**动作（残留旧轮数据会污染新轮）、以及报告等消费端的文件集合——任何一处缺席都是「归档回看断链」或「新轮红旗区被旧轮污染」（0.20.0 终审实证：tampered 存档曾三处全缺）。
 - 2026-07-16 workspace 中需要“旧版或新版、绝不半份”的覆盖写一律走 `writeFileAtomicSync`（fs-atomic 的 tmp+rename），不裸用 `writeFileSync`——包括 prd.json/state.json 及其归档，也包括可重生成但会被人直接打开裁决的 report.html。进程中途被杀只损失 tmp、目标文件永远完整；append-only 信道（evidence.jsonl）不适用此模式。
-- 2026-07-22 共享 state 里的 agent 声明与引擎事实必须分层：builder 只能写 `passes=true` 候选，Validator 只能写 `source=validator` 的结构化 claim，`validated`、retry/blocked/notes 与最终 verdict 全由引擎消费 claim 后写入；所有选 story、收敛、status、dashboard、report 统一复用 `isStoryPassed`（或等价的 `passes && validated`）。异常/跳过/协议 invalid 与启动恢复都要清掉未签发凭证的候选 true（ADR-013、015）。
+- 2026-07-29 共享 state 里的 agent 声明与引擎事实必须分层：builder 只能写 `passes=true` 候选，Validator 只能写 `source=validator` 的结构化 claim；`validated`、`validationReceipt`、retry/blocked/notes 与最终 verdict 全由引擎写入。选 story、收敛、status、dashboard、report 与 Final Review 前置统一复用同一裁决：候选通过、已验证、未阻断，且结构化凭证匹配当前 Git HEAD 与当前有序 AC，缺一不可。旧 state/evidence/Final Review 不得补造凭证；单纯过期保留候选并走 validation-only，跳过 Developer，机械检查或 Validator 真失败后才回到实现（ADR-013、015、020）。
+- 2026-07-29 项目机械检查会执行仓库代码，但没有 workspace 状态所有权：普通检查和 TDD 检查前后必须比较并恢复完整 `state.json` 快照，以 `gate` 来源记录篡改；不能只恢复 `validated`，否则检查脚本仍可从 `passes`、`blocked` 或其他 Story 绕路。validation-only 的总余量按“Story 数量 × `stall-limit`”计算，不能让确定性的最终提交重验吞掉 `--max-iter` 的实现预算（ADR-020）。
+- 2026-07-29 最终 Review 的可复用身份必须覆盖 Story 凭证、人工裁决原始字节、PRD `models` 路由政策、实际 Runner/模型和唯一风险结论。裁决在任何项目代码前冻结；最终机械检查前建立 Git 可见状态与凭证基线，检查后以及 Review、远端查询、结果写入后继续复核。Reviewer 主动升级 deep 时用固定类别/原因更新风险，并从保存的评审轴确定性重建；任一处无法对账就删除结果并 fail closed。Git ignored 执行环境不在当前凭证内，由 Issue #91 的干净检出执行收口（ADR-020）。
+- 2026-07-29 持久 Review schema 增加影响通过身份的必填字段时，旧结果只能失效重跑，不能“迁移补字段”后继续变绿；Final Review v1 必须重跑生成 v2。相关 status JSON/dashboard API 新字段属于公开合同，需升 minor 并同步 README。冻结、摘要和恢复只防正常流程与运行内改写；同权限进程仍可伪造本地文件，不得表述为密码学防伪或独立身份认证（ADR-020）。
+- 2026-07-29 不可信项目检查之前要冻结真正会执行的 Agent，而不只是命令名或版本字符串：正式模式只接受项目外原生单文件入口，Developer、Validator 与 Reviewer 共用绝对 realpath、文件身份和内容摘要，后续不再查 PATH；Developer/Validator 保留项目执行环境，只有 Reviewer 使用受控 HOME/TMP/系统 PATH/认证快照。所有关键边界持续复核，Git 可执行程序、控制配置、替代引用与绑定提交对象也必须复核；脚本入口和未证明整树收口的平台 fail closed。状态/报告做远端查询时仍要在返回前重读最终本地快照；外部延期 Issue 属于易变证据，必须刷新后才能继续沿用（ADR-020）。
 - 2026-07-22 agent 结果协议不能把“文件存在/进程退出 0”当成功：request 必须带一次性 ID、精确 story、输入快照 hash 和可用的产物身份，result 要版本化、逐字段/大小守卫并回显绑定；每轮先清旧文件，缺失/畸形/错配/输入变化一律 fail closed。claim 与 engine protocol verdict 分 source 留痕，nonce/hash 只提供新鲜度和身份对账，不得文案升级成密码学防伪（见 `validation-protocol.ts`、ADR-015）。
 - 2026-07-22 workspace 是运行时边界，不是功能提交的一部分：prd-to-json 首次写入前用 `git ls-files` + `git check-ignore --no-index` 检查“已跟踪/未忽略”两种风险，doctor 只读复核；builder 只显式 stage story 文件、检查暂存清单、提交成功后才回写 state/progress。自动化不得替用户修改 `.gitignore`、执行 `git rm --cached` 或重置既有暂存区。
 - 2026-07-22 收口副产物必须沿用主流程已经建立的信任来源：loop 自动报告只消费终轮 PRD guard 返回的冻结快照并显式标注来源，不能在裁决完成后重新读取 agent 可改写的磁盘 PRD；手动报告没有该信任来源，只能标成磁盘读取（ADR-014）。

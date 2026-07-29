@@ -31,6 +31,28 @@ const CATEGORY_PATTERNS: Partial<Record<QualityRiskCategory, RegExp>> = {
   release: /(?:publish|release|version|dist-tag|provenance|oidc)/i,
 };
 
+export const REVIEWER_DEEP_REVIEW_REASON = 'Spec 或工程 Reviewer 主动升级为深度结构评审';
+
+/**
+ * Reviewer 的深度升级与初始风险评估共用同一个确定性收口。
+ * PR 作者、项目规则已经触发 reviewer-request 时，仍会补齐 Reviewer
+ * 实际请求的独立原因，使持久状态可从 axes 无损重现。
+ */
+export function applyReviewerDeepReviewRequest(
+  risk: ReviewRiskAssessment,
+  requested: boolean,
+): ReviewRiskAssessment {
+  if (!requested) return risk;
+  const value = {
+    triggered: true,
+    categories: [...new Set([...risk.categories, 'reviewer-request' as const])].sort(),
+    reasons: [...new Set([...risk.reasons, REVIEWER_DEEP_REVIEW_REASON])].sort(),
+    changedFiles: [...risk.changedFiles],
+    changedModules: [...risk.changedModules],
+  };
+  return { ...value, digest: digest(value) };
+}
+
 function moduleOf(contract: QualityContract, path: string): string | null {
   const candidates = contract.modules.filter((module) => (
     module.path === '.' || path === module.path || path.startsWith(`${module.path}/`)

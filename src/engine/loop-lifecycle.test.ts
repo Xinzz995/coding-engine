@@ -1,8 +1,17 @@
 import { describe, it, expect } from 'vitest';
 import { writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { readEvidence } from './evidence.js';
-import { setup, story, runLoop } from './loop-test-support.js';
+import { runLoop as runProductionLoop } from './loop.js';
+import {
+  setup,
+  setupGitProject,
+  story,
+  runLoop,
+  strictConfig,
+  currentGitHead,
+} from './loop-test-support.js';
 describe('runLoop', () => {
   it('returns 0 when all stories are already resolved after one pass', async () => {
     // fake agent: developer pass marks the only story passes=true by writing state.json
@@ -40,7 +49,7 @@ describe('runLoop', () => {
     delete process.env.CODING_X_CLAUDE_BIN;
   });
 
-  it('does not accept a builder-only passes=true when validator.md is missing', async () => {
+  it('keeps a builder candidate pending when validator.md is missing', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     rmSync(join(instructionsDir, 'validator.md'));
     const fake = join(workspace, 'fake-builder-only.mjs');
@@ -71,12 +80,12 @@ describe('runLoop', () => {
       expect(code).toBe(1);
       expect(
         JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'],
-      ).toMatchObject({ passes: false, validated: false });
+      ).toMatchObject({ passes: true, validated: false, validationReceipt: null });
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
       expect(iteration).toMatchObject({
         validatorRan: false,
         validatorOutcome: 'skipped',
-        validationRollback: true,
+        validationPending: true,
       });
       expect(iteration).not.toHaveProperty('validationReceipt');
     } finally {
@@ -84,7 +93,7 @@ describe('runLoop', () => {
     }
   });
 
-  it('does not issue a receipt from a restored candidate when validator deletes the story', async () => {
+  it('restores a deleted candidate but keeps it pending without a Validator receipt', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake-validator-delete-story.mjs');
     const calls = join(workspace, 'calls.txt');
@@ -121,13 +130,14 @@ describe('runLoop', () => {
         }),
       ).toBe(1);
       expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toMatchObject({
-        passes: false,
+        passes: true,
         validated: false,
+        validationReceipt: null,
       });
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
       expect(iteration).toMatchObject({
         validatorOutcome: 'completed',
-        validationRollback: true,
+        validationPending: true,
         stateValidationTamper: [{ expected: false, received: 'missing', side: 'validator' }],
       });
       expect(iteration).not.toHaveProperty('validationReceipt');
@@ -186,7 +196,7 @@ describe('runLoop', () => {
     }
   });
 
-  it('restores builder-forged ownership fields on a non-current story instead of exiting false-green', async () => {
+  it('restores builder-forged validation ownership but preserves the other Story candidate', async () => {
     const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
     const fake = join(workspace, 'fake-builder-cross-story.mjs');
     const calls = join(workspace, 'calls.txt');
@@ -233,7 +243,7 @@ describe('runLoop', () => {
       const state = JSON.parse(readFileSync(statePath, 'utf-8'));
       expect(state['US-001']).toMatchObject({ passes: true, validated: true });
       expect(state['US-002']).toMatchObject({ passes: true, validated: true, escalated: false });
-      expect(readFileSync(observed, 'utf-8')).toBe('false');
+      expect(readFileSync(observed, 'utf-8')).toBe('true');
       const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
       expect(iterations).toHaveLength(2);
       const iteration = iterations[0];
@@ -245,13 +255,18 @@ describe('runLoop', () => {
           { storyId: 'US-002', expected: false, received: true, side: 'builder' },
         ],
       });
-      expect(iterations[1]).toMatchObject({ storyId: 'US-002', validationReceipt: true });
+      expect(iterations[1]).toMatchObject({
+        storyId: 'US-002',
+        builderRan: false,
+        validatorRan: true,
+        validationReceipt: true,
+      });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
 
-  it('restores validator-forged ownership fields on a non-current story instead of exiting false-green', async () => {
+  it('restores validator-forged validation ownership but preserves the other Story candidate', async () => {
     const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
     const fake = join(workspace, 'fake-validator-cross-story.mjs');
     const calls = join(workspace, 'calls.txt');
@@ -299,7 +314,7 @@ describe('runLoop', () => {
       const state = JSON.parse(readFileSync(statePath, 'utf-8'));
       expect(state['US-001']).toMatchObject({ passes: true, validated: true });
       expect(state['US-002']).toMatchObject({ passes: true, validated: true, escalated: false });
-      expect(readFileSync(observed, 'utf-8')).toBe('false');
+      expect(readFileSync(observed, 'utf-8')).toBe('true');
       const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
       expect(iterations).toHaveLength(2);
       const iteration = iterations[0];
@@ -313,7 +328,12 @@ describe('runLoop', () => {
           { storyId: 'US-002', expected: false, received: true, side: 'validator' },
         ],
       });
-      expect(iterations[1]).toMatchObject({ storyId: 'US-002', validationReceipt: true });
+      expect(iterations[1]).toMatchObject({
+        storyId: 'US-002',
+        builderRan: false,
+        validatorRan: true,
+        validationReceipt: true,
+      });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -373,7 +393,7 @@ describe('runLoop', () => {
     }
   });
 
-  it('rolls a crash-left passes=true validated=false back before selecting work', async () => {
+  it('resumes a crash-left candidate with validation-only instead of rerunning Developer', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     writeFileSync(
       join(workspace, 'state.json'),
@@ -407,15 +427,220 @@ describe('runLoop', () => {
         port: 0,
         openBrowser: false,
       });
-      expect(code).toBe(1);
+      expect(code).toBe(0);
       expect(
         JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'],
-      ).toMatchObject({ passes: false, validated: false, notes: 'builder done' });
-      expect(warnings.some((line) => line.includes('待验收状态') && line.includes('US-001'))).toBe(
-        true,
+      ).toMatchObject({
+        passes: true,
+        validated: true,
+        validationReceipt: { gitHead: expect.stringMatching(/^[a-f0-9]{40}$/) },
+        notes: 'builder done',
+      });
+      const iteration = readEvidence(workspace).records.find(
+        (record) => record.type === 'iteration',
       );
+      expect(iteration).toMatchObject({
+        storyId: 'US-001',
+        builderRan: false,
+        validatorRan: true,
+        validationReceipt: true,
+      });
+      expect(warnings.some((line) => line.includes('US-001'))).toBe(true);
     } finally {
       console.warn = originalWarn;
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('implements all Stories first, then converges stale receipts once on the final commit', async () => {
+    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
+    const projectRoot = setupGitProject();
+    const fake = join(workspace, 'fake-final-convergence.mjs');
+    const calls = join(workspace, 'final-convergence-calls.txt');
+    const statePath = join(workspace, 'state.json');
+    writeFileSync(
+      fake,
+      String.raw`
+      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      import { execFileSync } from 'node:child_process';
+      const prompt = process.argv.at(-1) ?? '';
+      const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+      if (markerAt < 0) {
+        const state = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf8'));
+        const storyId = ['US-001', 'US-002'].find((id) => state[id].passes === false);
+        if (!storyId) process.exit(8);
+        state[storyId].passes = true;
+        state[storyId].validated = false;
+        state[storyId].validationReceipt = null;
+        writeFileSync(${JSON.stringify(statePath)}, JSON.stringify(state, null, 2));
+        appendFileSync(${JSON.stringify(calls)}, 'builder:' + storyId + '\n');
+        appendFileSync('source.txt', storyId + '\n');
+        execFileSync('git', ['add', 'source.txt']);
+        execFileSync('git', ['commit', '-m', 'implement ' + storyId], { stdio: 'ignore' });
+        process.exit(0);
+      }
+      const jsonAt = prompt.indexOf('{', markerAt);
+      const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);
+      const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+      appendFileSync(${JSON.stringify(calls)}, 'validator:' + request.storyId + '\n');
+      writeFileSync(request.resultPath, JSON.stringify({
+        version: 1,
+        requestId: request.requestId,
+        storyId: request.storyId,
+        acceptanceHash: request.acceptanceHash,
+        gitHead: request.gitHead,
+        verdict: 'passed',
+        checks: request.acceptanceCriteria.map((_, index) => ({
+          acIndex: index + 1,
+          passed: true,
+          evidence: 'fixture passed',
+        })),
+        summary: 'fixture passed',
+      }));
+      process.exit(0);
+    `,
+    );
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    let finalReviewCalls = 0;
+    try {
+      const code = await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
+        projectRoot,
+        // 两轮实现预算必须足够完成两个 Story；最后一次旧凭证重验使用独立余量，
+        // 不能因为总调用轮数为 3 就要求用户提高 --max-iter。
+        maxIterations: 2,
+        finalReviewRunner: async (options) => {
+          expect(options.validateStoryReceipts()).toMatchObject({
+            ok: true,
+            digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+          });
+          finalReviewCalls += 1;
+          return { exitCode: 0, message: 'final receipts current' };
+        },
+      });
+      expect(code).toBe(0);
+      expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
+        'builder:US-001',
+        'validator:US-001',
+        'builder:US-002',
+        'validator:US-002',
+        'validator:US-001',
+      ]);
+
+      const head = currentGitHead(projectRoot);
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      expect(state['US-001'].validationReceipt.gitHead).toBe(head);
+      expect(state['US-002'].validationReceipt.gitHead).toBe(head);
+      const iterations = readEvidence(workspace).records.filter(
+        (record) => record.type === 'iteration',
+      );
+      expect(
+        iterations.map((record) => ({
+          storyId: record.storyId,
+          builderRan: record.builderRan,
+          validatorRan: record.validatorRan,
+        })),
+      ).toEqual([
+        { storyId: 'US-001', builderRan: true, validatorRan: true },
+        { storyId: 'US-002', builderRan: true, validatorRan: true },
+        { storyId: 'US-001', builderRan: false, validatorRan: true },
+      ]);
+      expect(finalReviewCalls).toBe(1);
+      expect(
+        execFileSync('git', ['status', '--short'], { cwd: projectRoot, encoding: 'utf8' }),
+      ).toBe('');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('reserves transient validation retries for every pending Story', async () => {
+    const stories = [
+      story(),
+      story({ id: 'US-002', priority: 2 }),
+      story({ id: 'US-003', priority: 3 }),
+    ];
+    const { workspace, instructionsDir } = setup(stories);
+    const projectRoot = setupGitProject();
+    const statePath = join(workspace, 'state.json');
+    const calls = join(workspace, 'transient-validation-calls.txt');
+    writeFileSync(
+      statePath,
+      JSON.stringify(
+        Object.fromEntries(
+          stories.map((item) => [
+            item.id,
+            {
+              passes: true,
+              validated: false,
+              validationReceipt: null,
+              notes: 'implementation candidate',
+              retryCount: 0,
+              blocked: false,
+              escalated: false,
+            },
+          ]),
+        ),
+      ),
+    );
+    const fake = join(workspace, 'fake-transient-validation.mjs');
+    writeFileSync(
+      fake,
+      String.raw`
+      import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      const prompt = process.argv.at(-1) ?? '';
+      const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+      if (markerAt < 0) process.exit(8);
+      const jsonAt = prompt.indexOf('{', markerAt);
+      const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);
+      const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+      const previous = existsSync(${JSON.stringify(calls)})
+        ? readFileSync(${JSON.stringify(calls)}, 'utf8').trim().split('\n').filter(Boolean)
+        : [];
+      const attempt = previous.filter((storyId) => storyId === request.storyId).length + 1;
+      appendFileSync(${JSON.stringify(calls)}, request.storyId + '\n');
+      if (attempt === 1) process.exit(9);
+      writeFileSync(request.resultPath, JSON.stringify({
+        version: 1,
+        requestId: request.requestId,
+        storyId: request.storyId,
+        acceptanceHash: request.acceptanceHash,
+        gitHead: request.gitHead,
+        verdict: 'passed',
+        checks: request.acceptanceCriteria.map((_, index) => ({
+          acIndex: index + 1,
+          passed: true,
+          evidence: 'fixture passed after one transient failure',
+        })),
+        summary: 'fixture passed after one transient failure',
+      }));
+      process.exit(0);
+    `,
+    );
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    let finalReviewCalls = 0;
+    try {
+      const code = await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
+        projectRoot,
+        maxIterations: 1,
+        stallLimit: 3,
+        finalReviewRunner: async () => {
+          finalReviewCalls += 1;
+          return { exitCode: 0, message: 'transient validation retries converged' };
+        },
+      });
+      expect(code).toBe(0);
+      expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
+        'US-001',
+        'US-001',
+        'US-002',
+        'US-002',
+        'US-003',
+        'US-003',
+      ]);
+      expect(finalReviewCalls).toBe(1);
+    } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
@@ -773,7 +998,7 @@ describe('runLoop', () => {
           port: 0,
           openBrowser: false,
         }),
-      ).toBe(1);
+      ).toBe(2);
       const html = readFileSync(join(workspace, 'report.html'), 'utf-8');
       expect(html).toContain('US-001');
       expect(html).toContain('引擎启动快照');

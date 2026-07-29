@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -29,7 +29,9 @@ afterEach(() => {
 });
 
 const repository = {
-  fullName: 'example/project', defaultBranch: 'main', isPrivate: true,
+  fullName: 'example/project',
+  defaultBranch: 'main',
+  isPrivate: true,
 };
 
 describe('discoverQualityContract', () => {
@@ -48,9 +50,14 @@ describe('discoverQualityContract', () => {
       { id: 'services-worker', path: 'services/worker' },
     ]);
     expect(draft.unresolvedCategories).toEqual(['security']);
-    expect(draft.contract.github.jobs[0].toolchains).toEqual([{
-      kind: 'go', version: '1.24', cache: true, cacheDependencyPath: '**/go.sum',
-    }]);
+    expect(draft.contract.github.jobs[0].toolchains).toEqual([
+      {
+        kind: 'go',
+        version: '1.24',
+        cache: true,
+        cacheDependencyPath: '**/go.sum',
+      },
+    ]);
 
     const contract = resolveNotApplicableReasons(draft, {
       security: '试点仓库当前没有独立安全扫描器；由仓库所有者确认。',
@@ -87,11 +94,10 @@ line-length = 100
       { id: 'packages-api', path: 'packages/api' },
       { id: 'packages-worker', path: 'packages/worker' },
     ]);
-    expect(draft.contract.github.jobs[0].toolchains).toEqual([
-      { kind: 'python', version: '3.12' },
-    ]);
+    expect(draft.contract.github.jobs[0].toolchains).toEqual([{ kind: 'python', version: '3.12' }]);
     expect(draft.contract.github.jobs[0].setup.map((command) => command.cwd)).toEqual([
-      'packages/api', 'packages/worker',
+      'packages/api',
+      'packages/worker',
     ]);
     const contract = resolveNotApplicableReasons(draft, {
       security: '试点仓库暂未配置独立依赖审计；由仓库所有者确认。',
@@ -103,7 +109,7 @@ line-length = 100
   });
 
   it('refuses to invent unsupported project rules or silently accept an empty reason', () => {
-    const root = fixture({ 'README.md': '# Unknown project\n', 'Makefile': 'test:\n\ttrue\n' });
+    const root = fixture({ 'README.md': '# Unknown project\n', Makefile: 'test:\n\ttrue\n' });
     expect(() => discoverQualityContract(root, repository, '0.30.0')).toThrow('未发现受支持');
 
     const goRoot = fixture({
@@ -112,6 +118,26 @@ line-length = 100
       'go.sum': '',
     });
     const draft = discoverQualityContract(goRoot, repository, '0.30.0');
-    expect(() => resolveNotApplicableReasons(draft, { security: '   ' })).toThrow('缺少具体不适用理由');
+    expect(() => resolveNotApplicableReasons(draft, { security: '   ' })).toThrow(
+      '缺少具体不适用理由',
+    );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a tracked project-config symlink outside the repository',
+    () => {
+      const root = fixture({
+        'README.md': '# Node project\n',
+        'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      });
+      const outside = mkdtempSync(join(tmpdir(), 'coding-x-discovery-outside-'));
+      roots.push(outside);
+      const outsidePackage = join(outside, 'package.json');
+      writeFileSync(outsidePackage, JSON.stringify({ scripts: { test: 'node --test' } }));
+      rmSync(join(root, 'package.json'));
+      symlinkSync(outsidePackage, join(root, 'package.json'));
+
+      expect(() => discoverQualityContract(root, repository, '0.30.0')).toThrow('安全读取');
+    },
+  );
 });
