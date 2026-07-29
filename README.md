@@ -677,7 +677,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | 位置参数 `repair` | — | 修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；引擎运行中（engine.lock 活锁）时以退出码 2 拒绝 |
 | 位置参数 `dashboard` | — | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告 |
 | 位置参数 `doctor` | — | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库，硬错误以退出码 1 结束 |
-| 位置参数 `status` | — | 终端速览 story、最终 Review 与 GitHub 交付状态，并显示重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`。退出码：`0`=全部 Story 已有效通过、本地最终 Review 已通过且 GitHub 交付 ready；`1`=Story 未完成、state 损坏或 PRD 无 Story；`2`=workspace 不可读或最终 Review 状态损坏；`3`=存在 blocked Story；`4`=最终 Review 有待人工处理 finding；`5`=最终 Review 无法可靠验证；`6`=最终 Review 未完成/已失效或 GitHub CI/Ruleset 未就绪；`7`=shadow 已完成，不能表示可交付 |
+| 位置参数 `status` | — | 终端速览 story、最终 Review 与 GitHub 交付状态，并显示重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`；退出码见下方独立表格 |
 | 位置参数 `report` | — | （重）生成 `<workspace>/report.html` 静态验证报告（story+AC、门禁、分源 Validator claim/engine 裁决、截图、review、篡改红旗）；循环结束也从冻结 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏 / 2=无可读工作区 |
 | `--max-iter <n>` | `50` | 最大迭代轮数 |
 | `--dev-timeout <分钟>` | `30` | 单轮开发阶段超时（分钟） |
@@ -698,7 +698,20 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `--shadow` | 关闭 | 只供候选版本 Dogfood；原本成功的收敛固定退出 7，不能表示正式通过；真实失败仍保留原失败码 |
 | `--review-model <id>` | — | 最终 Review 的精确模型 ID；不能使用 runner 默认值，因为结果必须能绑定并复现实际模型 |
 
-### 退出码
+### `status` 子命令退出码
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部 Story 已有效通过、本地最终 Review 已通过且 GitHub 交付 ready |
+| `1` | Story 未完成、state 损坏或 PRD 没有 Story |
+| `2` | workspace 不可读或最终 Review 状态损坏 |
+| `3` | 存在 `blocked` Story |
+| `4` | 最终 Review 有待人工处理的 finding |
+| `5` | 最终 Review 无法可靠验证 |
+| `6` | 最终 Review 未完成、已失效，或 GitHub CI / Ruleset 未就绪 |
+| `7` | shadow 已完成，但不能表示可交付 |
+
+### 默认运行退出码
 
 默认命令（`run`，即无 `init`/`repair`/`dashboard`/`doctor`/`status`/`report`/`models`/`config`
 位置参数时；位置参数 `claude`/`codex`/`cursor` 只切换 runner，仍属 `run`，退出码规则相同）
@@ -745,7 +758,7 @@ npx coding-x report             # 手动（重）生成 .workspace/report.html�
 | `/init-docs` | 一个仓库第一次建立 AI 知识入口时 | 项目形态、配置、目录、技术栈；monorepo 候选需人确认 | 只创建缺失的 `AGENTS.md`、`CLAUDE.md` 和 docs 骨架；已有文件不覆盖 | 基线初始化；可幂等重跑补缺，之后人工确认黄金原则/占位并由 `/compound-docs` 持续维护 |
 | `/planning <功能描述>` | 编码前需要完整技术路线时；输入可为原始需求或 align/tech 对齐稿 | 项目文档、相关代码/测试、官方资料和黄金原则 | `docs/plans/<feature>.md`，含任务顺序、风险、验证命令和原则对照；不写代码 | 初始 `active`；供人/agent 实施和 review 定位，合并后置 `done`，可显式归档；不替代正式 PRD |
 | `/review-loop` | 最终 Review 返回待人工处理 finding 时 | `.workspace/final-review.json`、当前 HEAD 和已有结构化决定 | 经用户确认后追加 `.workspace/review-decisions.json`；只有明确授权才修复 | 一次处理一个 finding；修复提交后重跑 `coding-x`，旧结果失效；不自动推送、合并或发布 |
-| `/compound-docs` | 功能分支/引擎轮次收口，推荐合并后、推送前 | 当前代码（最高事实）、Git、progress、PRD 范围和 active 文档 | 只修改文档：沉淀、增量熵 GC、状态收尾、取舍账本；物理归档需明确授权 | 默认只处理本轮；“全量 GC”才全库审计；完成后长期知识继续 active，任务文档可 done/superseded → archive |
+| `/compound-docs` | 功能分支/引擎轮次收口，推荐功能合并后、发布前 | 当前代码（最高事实）、Git、progress、PRD 范围和 active 文档 | 只修改文档：沉淀、增量熵 GC、状态收尾、取舍账本；物理归档需明确授权 | 默认只处理本轮；“全量 GC”才全库审计；完成后长期知识继续 active，任务文档可 done/superseded → archive |
 
 ### Skills（按语境使用）
 
