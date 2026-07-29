@@ -110,8 +110,28 @@ runner:
 更多说明: https://github.com/Xinzz995/coding-engine#readme`;
 
 export function parseCliArgs(argv: string[]): CliConfig {
+  const normalizedArgs: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg !== '--port') {
+      normalizedArgs.push(arg);
+      continue;
+    }
+    const raw = argv[i + 1];
+    if (raw === undefined || raw === '--help' || raw === '-h' || raw.startsWith('--')) {
+      normalizedArgs.push('--port=');
+      continue;
+    }
+    if (raw.startsWith('-')) {
+      normalizedArgs.push(`--port=${raw}`);
+      i++;
+      continue;
+    }
+    normalizedArgs.push(arg);
+  }
+
   const { values, positionals } = parseArgs({
-    args: argv,
+    args: normalizedArgs,
     allowPositionals: true,
     options: {
       'max-iter': { type: 'string' },
@@ -218,6 +238,17 @@ export function parseCliArgs(argv: string[]): CliConfig {
     stallLimit = Number(raw);
   }
 
+  let port = 7331;
+  if (values.port !== undefined) {
+    const raw = values.port;
+    const parsed = Number(raw);
+    const valid = /^\d+$/.test(raw) && parsed <= 65535;
+    if (!help && !valid) {
+      throw new Error(`❌ --port 必须是 0 到 65535（含边界）的十进制整数，收到「${raw}」`);
+    }
+    if (valid) port = parsed;
+  }
+
   return {
     command,
     help,
@@ -235,7 +266,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     workspace: values.workspace ?? '.workspace',
     openBrowser: !values['no-open'],
     keepOpen: values['keep-open'] ?? false,
-    port: values.port ? Number(values.port) : 7331,
+    port,
     staleDays,
     json: values.json ?? false,
     stallLimit,
