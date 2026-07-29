@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { readQualityContract, type QualityContract } from '../quality/contract.js';
 import type { GitHubQualityClient } from '../quality/github.js';
 import {
+  containsGitBinaryPatch,
   revalidateReviewContext,
   runReviewPreflight,
   validatePullRequestIntent,
@@ -55,9 +56,53 @@ describe('validatePullRequestIntent', () => {
   });
 });
 
+describe('containsGitBinaryPatch', () => {
+  it('accepts only markers emitted as complete Git diff lines', () => {
+    expect(containsGitBinaryPatch('diff --git a/a b/a\nGIT binary patch\nliteral 1\n')).toBe(true);
+    expect(containsGitBinaryPatch('Binary files a/a.bin and b/a.bin differ\n')).toBe(true);
+    expect(containsGitBinaryPatch('+const marker = "GIT binary patch";\n')).toBe(false);
+    expect(containsGitBinaryPatch('+Binary files a/a.bin and b/a.bin differ\n')).toBe(false);
+    expect(containsGitBinaryPatch('+before\rGIT binary patch\rafter\n')).toBe(false);
+    expect(containsGitBinaryPatch('+before\u2028GIT binary patch\u2028after\n')).toBe(false);
+  });
+});
+
 function run(root: string, args: string[]): string {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 }
+
+describe('containsGitBinaryPatch integration', () => {
+  it('distinguishes real git diff --binary output from added marker text', () => {
+    const root = mkdtempSync(join(tmpdir(), 'review-binary-marker-'));
+    try {
+      run(root, ['init', '-q', '-b', 'main']);
+      run(root, ['config', 'user.email', 'review@test.local']);
+      run(root, ['config', 'user.name', 'review-test']);
+      writeFileSync(join(root, 'binary.bin'), Buffer.from([0, 1, 2, 3]));
+      writeFileSync(join(root, 'marker.txt'), '');
+      run(root, ['add', '-A']);
+      run(root, ['commit', '-q', '-m', 'base']);
+
+      writeFileSync(join(root, 'binary.bin'), Buffer.from([0, 1, 2, 4]));
+      const binaryDiff = execFileSync('git', ['diff', '--binary', 'HEAD', '--'], {
+        cwd: root,
+        encoding: 'utf8',
+      });
+      expect(containsGitBinaryPatch(binaryDiff)).toBe(true);
+
+      run(root, ['restore', 'binary.bin']);
+      writeFileSync(join(root, 'marker.txt'), 'GIT binary patch\nBinary files a and b differ\n');
+      const textDiff = execFileSync('git', ['diff', '--binary', 'HEAD', '--'], {
+        cwd: root,
+        encoding: 'utf8',
+      });
+      expect(textDiff).toContain('+GIT binary patch');
+      expect(containsGitBinaryPatch(textDiff)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('runReviewPreflight old-policy boundary', () => {
   it('does not mistake binary-marker text inside source code for an actual binary patch', () => {
