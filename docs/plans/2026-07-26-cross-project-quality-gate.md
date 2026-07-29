@@ -1,7 +1,7 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁实施计划"
 status: done
-updated: 2026-07-28
+updated: 2026-07-29
 scope: root
 ---
 
@@ -334,3 +334,27 @@ scope: root
 | GitHub Issue #62 | `open` → `closed` | 0.33.0 过渡候选的跟踪与后续裁决已经完成 |
 | GitHub Issue #69 | `open` → `closed` | 暂存前固定候选验证的跟进事项已经完成 |
 | npm 0.33.0 过期 stage `7a4e4795-...-7931` | `pending` → `rejected` | 2FA 拒绝后暂存页回读为空；公开 `latest`/`next` 保持 0.33.1 |
+
+## 后续稳定版复验事实（2026-07-29）
+
+- 0.33.2 发布提交为 `e141853d8d31159680a11d696f4f1f51faa3f8a0`；候选构建运行
+  #30418096133 的 tarball SHA-256 为
+  `8dedbca1bb2b95c4f78b18deaf9e58f2a27cea5029e1e3d5e46a9f2fcf7ff0c6`。暂存运行
+  #30444501474 创建 stage `09a46d7f-dc83-4f21-9226-48743c05b2c6`；人工批准、公开精确版本
+  冒烟与稳定提升完成后，npm `latest` 和 `next` 均指向 0.33.2。
+- 注解标签 `v0.33.2`、npm `gitHead` 和不可变 GitHub Release 均指向上述发布提交；Release
+  中的 registry tarball 摘要与候选摘要一致。0.33.1 的事实继续作为首次 Bootstrap 历史，
+  不再代表当前稳定版本。
+- 三个项目分别通过独立 Policy PR 将正式裁判固定为 0.33.2，再用公开安装的 0.33.2 对原
+  Dogfood PR 最新提交执行非 shadow 的 Validator 与三层 Review。coding-engine PR #87、Go
+  PR #6 和 Python PR #6 均无遗留 finding 并已合并；对应主分支合并提交分别为
+  `2ee5941c06e143ee2b78a38afa0a85468de1a266`、
+  `7f9b4797557a2e250fb071a133a3045c2e9be705` 和
+  `3a2f2f3b61059547140984ae1ccf815496ecfbd3`。
+- 合并后的 coding-engine Quality Gate #30449850165 与 CodeQL #30449855412、Go Quality Gate
+  #30449555193、Python Quality Gate #30449734644 均成功。三个仓库随后使用公开 0.33.2
+  再次运行 doctor，质量契约与 GitHub 交付状态均为 `ready`，本地 `main` 与远端同步且工作树
+  干净。
+- 本次复验继续保持责任边界：模型只在本地正式 Review 中运行；GitHub 只执行项目原生机械
+  检查，不保存或证明本地 AI Review。候选证据、npm/标签/Release 身份、本地 Review 与远端
+  检查分别证明不同事实，不能互相替代。
