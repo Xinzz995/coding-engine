@@ -23,7 +23,8 @@ v0.25.5 将同一 state 语义扩展到所有展示消费方：`readDisplayState
 
 ADR-020 进一步收紧“state 缺失仍兼容 legacy”的含义：历史 `passes` 和 notes 仍可供离线回看，但
 缺少结构化 Validator 凭证时不能恢复为有效通过。report/status/dashboard 必须以当前 Git HEAD 和
-有序验收标准调用同一凭证当前性判断；HEAD 不可读、凭证缺失或错绑时统一显示待重验或不可验证。
+当前 Story `acceptanceHash` 调用同一凭证当前性判断；该摘要精确绑定 Story ID 和有序验收标准。
+HEAD 不可读、凭证缺失或错绑时统一显示待重验或不可验证。
 
 `report.html` 使用与关键 JSON 相同的同目录 tmp+rename 原子覆盖，保证目标始终是完整旧版或完整新版。report 子命令仍不获取工作区锁：它不修改执行状态，原子覆盖足以避免并发写出半份文件，竞态时接受“最后一份完整报告生效”。
 

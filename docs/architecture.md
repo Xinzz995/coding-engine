@@ -25,7 +25,7 @@ scope: root
 | Agent 进程 | `src/engine/agent.ts` | 拉起 claude/codex/cursor headless 子进程、模型参数与超时控制；stdout/stderr 实时 tee 并滚动保留有界尾部，正常路径等 pipe 关闭再返回 duration/exit/output，超时路径计入整棵进程树终止等待 |
 | 进程树终止 | `src/engine/process-tree.ts` | agent 与机械门禁共享的跨平台超时收口：POSIX 进程组 SIGTERM→SIGKILL 并确认退出；Windows 等待 `taskkill /T /F`，调用方只在整棵树停止后继续写 workspace |
 | PRD 读取 | `src/engine/prd.ts` | 读 prd.json（需求内容） |
-| 执行状态 | `src/engine/state.ts` | state.json 读写与迁移、选 story、完成判定、合并视图；`validated` 与结构化 Validator 目标凭证、`escalated` 路由状态由引擎独占；当前 HEAD/有序 AC 的同一判断供循环与展示消费 |
+| 执行状态 | `src/engine/state.ts` | state.json 读写与迁移、选 story、完成判定、合并视图；`validated` 验收凭证与 `escalated` 路由状态由引擎独占 |
 | 验收协议 | `src/engine/validation-protocol.ts` | v1 validation request/result 单源：一次性 request、story/AC hash/Git HEAD 绑定、runner-neutral prompt 合同、固定临时结果路径、64 KiB 严格解析与 fail-closed 错误码（ADR-015） |
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
@@ -58,7 +58,7 @@ cli → quality + engine（loop → loop-preflight / agent / state / gate / tdd-
 
 项目知识也分冷热生命周期：`/compound-docs` 默认只对本轮相关 active 文档做沉淀与增量熵 GC，用户显式要求全量时才逐条审计 patterns/glossary/architecture/golden-principles/prompt-writing；任务型文档先以证据收尾 status，再在用户明确授权物理归档后镜像原相对树移入 `docs/archive/`。冷档案继续由 doctor 检查 frontmatter 与相对链接，但不参与 updated 新鲜度，也不进入日常实现/沉淀上下文。
 
-`.coding-x/quality.json` 是项目检查唯一人工维护来源；prd-to-json 先用 doctor 取得规范化摘要和结构化派生快照，再把它们连同源 PRD（意图真相）一起冻结到 workspace `prd.json`（执行需求）并初始化 `state.json`。正式运行要求精确版本、摘要和快照全部一致；候选版本只能 shadow。builder 只实现一个 story 并留下 `passes=true` 候选。契约检查与 TDD 政策/覆盖命令都通过后，引擎才把 story ID、有序 AC 快照/hash、一次性 request ID 与 Git HEAD 注入 Validator；Validator 只写逐 AC 结构化 claim，引擎核对绑定与 state 不变式后才写 retry/blocked/notes 或签发结构化凭证。机械检查失败或合法 Validator failed 才清除实现候选；缺结果、错目标、旧结果、超时或协议异常只撤销验收结论并保留候选进入 validation-only，仍失败关闭且不能进入最终 Review（ADR-009、013、015、017、018、020）。
+`.coding-x/quality.json` 是项目检查唯一人工维护来源；prd-to-json 先用 doctor 取得规范化摘要和结构化派生快照，再把它们连同源 PRD（意图真相）一起冻结到 workspace `prd.json`（执行需求）并初始化 `state.json`。正式运行要求精确版本、摘要和快照全部一致；候选版本只能 shadow。builder 只实现一个 story并留下 `passes=true` 候选。契约检查与 TDD 政策/覆盖命令都通过后，引擎才把 story ID、有序 AC 快照/hash、一次性 request ID 与 Git HEAD 注入 Validator；Validator 只写逐 AC 结构化 claim，引擎核对绑定与 state 不变式后才写 retry/blocked/notes 或签发 `validated=true`。缺结果、错目标、旧结果、产物变化或 state 改写全部回滚候选态（ADR-009、013、015、017、018）。
 
 coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。它们运行仓库机械健康检查，
 只验证文档、契约结构和契约生成文件；完整 doctor 继续拒绝候选版本与固定版本不一致。
@@ -73,7 +73,7 @@ coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。
 移动 `latest` 后才创建标签；标签固定所选暂存任务、npm stage ID 与候选摘要，标签工作流沿
 stage 证据找到原候选运行，分别对账后创建不可变 Release（ADR-018、019）。
 
-workspace 是运行边界：progress 记录学习，evidence 追加普通/TDD 门禁、轮次、篡改、Validator claim、调用凭证、截图等事件；Agent stdout/stderr 实时 tee，异常时只留最近 2000 字符，成功 transcript 不落盘。引擎把绝对项目根和实际 workspace 注入 agent，宿主 hook 只在二者与当前 Git 根配对时使用外部 workspace。`validation-result.json` 只作为单轮瞬时 IPC，调用前清旧、消费后删除，崩溃残留由新 request ID 拒绝。report 从需求、状态与分源证据派生静态报告；`engine.lock` 让 run/repair 单写，关键覆盖写走原子替换。PRD guard 冻结运行期需求并恢复篡改；自动报告沿用该冻结快照，手动报告才读磁盘。state 缺失可迁移 legacy 候选，但缺少与当前 HEAD/有序 AC 一致的结构化凭证时不能恢复绿灯；存在但损坏则所有展示面统一 fail-closed 为未验证（ADR-007、008、014、015、016、017、020）。
+workspace 是运行边界：progress 记录学习，evidence 追加普通/TDD 门禁、轮次、篡改、Validator claim、调用凭证、截图等事件；Agent stdout/stderr 实时 tee，异常时只留最近 2000 字符，成功 transcript 不落盘。引擎把绝对项目根和实际 workspace 注入 agent，宿主 hook 只在二者与当前 Git 根配对时使用外部 workspace。`validation-result.json` 只作为单轮瞬时 IPC，调用前清旧、消费后删除，崩溃残留由新 request ID 拒绝。report 从需求、状态与分源证据派生静态报告；`engine.lock` 让 run/repair 单写，关键覆盖写走原子替换。PRD guard 冻结运行期需求并恢复篡改；自动报告沿用该冻结快照，手动报告才读磁盘。state 缺失可迁移 legacy，存在但损坏则所有展示面统一 fail-closed 为未验证（ADR-007、008、014、015、016、017）。
 
 全局模型目录声明 runner 可选择的 ID，项目 `prd.json.models` 保存 runner 与五项映射；preflight 只在显式模型策略可能被调用时检查目录成员，loop 再按 difficulty、escalated 与 CLI 覆盖解析本轮模型，并把实际命中写入 evidence。目录是静态允许清单，不证明 provider、认证、配额或网络实时可用；runner-default 与已收敛 workspace 跳过目录（ADR-011、012）。
 

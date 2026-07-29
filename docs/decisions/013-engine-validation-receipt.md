@@ -21,8 +21,9 @@ builder 与 validator 共享 `state.json`：builder 完成时先写 `passes=true
 实现应继续遵循的现行规则。
 
 以上关于裸布尔凭证、跨轮回写与 legacy 自动置绿的范围只描述本 ADR 发布时的行为。ADR-020
-引入可持续核对的结构化凭证后，`validated` 不能脱离当前 HEAD/有序 AC 绑定证明通过；旧状态缺少
-结构化凭证时保留实现候选但必须重新验收。
+引入可持续核对的结构化凭证后，`validated` 不能脱离当前 HEAD 与 `acceptanceHash` 证明通过；
+`acceptanceHash` 精确绑定当前 Story ID 和有序 AC。旧状态缺少结构化凭证时保留实现候选但必须
+重新验收。
 
 ## 理由与备选
 
@@ -42,7 +43,10 @@ builder 与 validator 共享 `state.json`：builder 完成时先写 `passes=true
   同时承担凭证过期后的稳定 validation-only 状态，不再一律跨轮回写为 `passes=false`。
 - “未签发凭证的候选 true 不跨轮保留”是本 ADR 发布时的历史要求，已由 ADR-020 取代。现行出口审计
   只禁止缺少当前结构化凭证的候选被算作通过或进入最终 Review；`passes=true` 可以跨轮保留并进入
-  validation-only，只有机械检查失败或合法 Validator failed 才清除候选。
+  validation-only。仅在这种“凭证过期但实现候选已存在”的纯重验中，机械检查/TDD 明确不通过、
+  确定的 TDD 政策违规或合法 Validator failed 才清除候选并沿用既有 retry、升级与 blocked 规则；
+  不可验证只撤销验收、保留候选且不增加 retry。普通 Builder 新候选仍沿用 ADR-009、ADR-017 的
+  现有异常回写语义。
 - 版本随新增公开状态字段与展示语义升到 0.25.0。
 
 ## 后续修订
@@ -50,4 +54,4 @@ builder 与 validator 共享 `state.json`：builder 完成时先写 `passes=true
 ADR-015 supersede 了“只凭正常退出和 state 前后值签发、暂不引入结构化 verdict”的范围裁决：所有
 新 Validator 轮次必须绑定引擎 request，并由引擎消费结构化 claim 后写 verdict 状态。ADR-020
 进一步 supersede 裸 `passes && validated` 与 legacy 自动置绿的最终语义：正式通过还必须持有与当前
-HEAD 和有序验收标准一致的结构化持久凭证。
+HEAD 和当前 Story `acceptanceHash` 一致的结构化持久凭证。
