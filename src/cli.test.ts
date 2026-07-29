@@ -294,6 +294,9 @@ describe('main — help', () => {
     ['dashboard', '--port', '1e2', '-h'],
     ['dashboard', '--port', '--help'],
     ['help', '--port', '0x10'],
+    ['dashboard', '--port', 'abc', 'help'],
+    ['dashboard', 'help', '--port', '0x10'],
+    ['dashboard', '--port', 'help'],
   ])('prioritizes help over invalid --port for %j', async (...args) => {
     const dashboardStart = vi.spyOn(dashboard, 'start');
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});

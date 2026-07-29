@@ -118,7 +118,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       continue;
     }
     const raw = argv[i + 1];
-    if (raw === undefined || raw === '--help' || raw === '-h' || raw.startsWith('--')) {
+    if (raw === undefined || raw === '--help' || raw === '-h' || raw === 'help' || raw.startsWith('--')) {
       normalizedArgs.push('--port=');
       continue;
     }
@@ -157,7 +157,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
   });
 
   const first = positionals[0];
-  const help = values.help === true || first === 'help';
+  const help = values.help === true || positionals.includes('help');
   const command: CliConfig['command'] =
     first === 'init' ? 'init'
     : first === 'repair' ? 'repair'
