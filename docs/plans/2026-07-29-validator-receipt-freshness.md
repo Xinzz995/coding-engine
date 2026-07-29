@@ -30,6 +30,7 @@ Issue #91 的精确 HEAD 干净检出。
 | validation-only 只有明确失败才清除旧候选                          | 环境/协议异常也触发重复 Builder                 | 纯重验三类结果分支测试           |
 | validation-only failed 沿用 retry 和 blocked 上限                 | 达到上限后仍重复调用 Builder                    | 上限轮 blocked 与零 Builder 测试 |
 | 无 HEAD 的启动预检不修改 Story                                    | 尚未选择 Story 就清除候选或增加 retry           | 预检前后 state 相等测试          |
+| 稳定约定区分当前行为与 ADR-020 目标规则                           | 实现者同时收到“保留”和“清除”两套相反指令        | patterns/ADR/计划一致性审计      |
 | 全部 Story 在进入 Final Review 前绑定同一当前 HEAD                | 混合 H1/H2 凭证时仍调用 Review 模型             | 多 Story 收敛与模型零调用测试    |
 | 正式模式无法读取 HEAD 时提前停止                                  | 任一 Agent 或模型已经启动后才报错               | 非 Git 项目调用计数为零          |
 | Final Review 绑定精确凭证集合并在模型前后复核                     | 项目检查或 Review 期间替换凭证后仍接受结果      | 摘要变化、结果不落盘回归         |
@@ -103,7 +104,8 @@ Review binding 保存该摘要。旧 Review 缺少摘要时仍可作为历史记
    保留跨轮旧候选；实现两遍 Story 选择，普通 Builder 轮不变。
 4. 在启动、轮界、Builder/Validator 后和完成出口接入对账；正式 HEAD 缺失提前停止。
 5. 给 Final Review binding 增加凭证集合摘要，并在模型前后复核。
-6. 让 status、report、dashboard 使用同一当前性判断；同步最小用户文档和指令。
+6. 让 status、report、dashboard 使用同一当前性判断；实现与测试通过后同步 architecture，并把
+   patterns 中明确标注的目标规则改为已验证事实；在此之前不宣称当前程序具备该能力。
 7. 先运行定向失败回归，再运行格式、静态检查、类型检查、全量测试、构建和成品 CLI 冒烟。
 
 ## 计划测试范围
