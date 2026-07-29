@@ -40,7 +40,9 @@ builder 与 validator 共享 `state.json`：builder 完成时先写 `passes=true
 - `state.json`、status JSON、dashboard API 增加 `validated`；属于兼容新增字段。
 - `passes=true, validated=false` 成为可观察的“待验收”态，任何消费端都不得算作通过；ADR-020 使它
   同时承担凭证过期后的稳定 validation-only 状态，不再一律跨轮回写为 `passes=false`。
-- 异常轮、门禁、升级与 blocked 语义保持；实现需审计循环的全部 continue/break/自然耗尽出口，保证未签发凭证的 true 不跨轮泄漏。
+- “未签发凭证的候选 true 不跨轮保留”是本 ADR 发布时的历史要求，已由 ADR-020 取代。现行出口审计
+  只禁止缺少当前结构化凭证的候选被算作通过或进入最终 Review；`passes=true` 可以跨轮保留并进入
+  validation-only，只有机械检查失败或合法 Validator failed 才清除候选。
 - 版本随新增公开状态字段与展示语义升到 0.25.0。
 
 ## 后续修订
