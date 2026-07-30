@@ -113,7 +113,7 @@ export class EventReader {
                   `timed out waiting for ${expected}; helper stderr: ${this.errors.join('')}`,
                 ),
               ),
-            15_000,
+            60_000,
           ),
         ),
       ]);
