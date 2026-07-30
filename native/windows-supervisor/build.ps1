@@ -176,6 +176,7 @@ function Invoke-DeterministicBuild {
   )
   $objectDirectory = [System.IO.Path]::Combine($SlotRoot, 'obj')
   $outputDirectory = [System.IO.Path]::Combine($SlotRoot, 'out')
+  $packageDirectory = [System.IO.Path]::Combine($SlotRoot, 'packages')
   [System.IO.Directory]::CreateDirectory($objectDirectory) | Out-Null
   [System.IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
   $objectDirectoryProperty = $objectDirectory + [System.IO.Path]::DirectorySeparatorChar
@@ -185,6 +186,7 @@ function Invoke-DeterministicBuild {
     "-p:MSBuildProjectExtensionsPath=$objectDirectoryProperty",
     "-p:CodingXSourceRoot=$sourceDirectory",
     "-p:CodingXBuildRoot=$SlotRoot",
+    "-p:CodingXPackageRoot=$packageDirectory",
     '-p:RestoreLockedMode=true',
     '-p:Deterministic=true',
     '-p:ContinuousIntegrationBuild=true',
@@ -195,6 +197,9 @@ function Invoke-DeterministicBuild {
       'restore',
       $isolatedProjectPath,
       '--locked-mode',
+      '--no-cache',
+      '--packages',
+      $packageDirectory,
       '--nologo',
       '--verbosity',
       'minimal',

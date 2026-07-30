@@ -26,7 +26,8 @@
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
     <CodingXSourceRoot Condition="'$(CodingXSourceRoot)' == ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..'))</CodingXSourceRoot>
     <CodingXBuildRoot Condition="'$(CodingXBuildRoot)' == ''">$(MSBuildProjectDirectory)</CodingXBuildRoot>
-    <PathMap>$(CodingXSourceRoot)=/_/repo,$(CodingXBuildRoot)=/_/build</PathMap>
+    <CodingXPackageRoot Condition="'$(CodingXPackageRoot)' == ''">$(NuGetPackageRoot)</CodingXPackageRoot>
+    <PathMap>$(CodingXSourceRoot)=/_/repo,$(CodingXBuildRoot)=/_/build,$(CodingXPackageRoot)=/_/packages</PathMap>
   </PropertyGroup>
 
   <ItemGroup>
