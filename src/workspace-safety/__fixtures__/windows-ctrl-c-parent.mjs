@@ -1,11 +1,12 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { join, win32 } from 'node:path';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-const SOURCE_NAMES = ['WindowsJobSupervisor.cs', 'WindowsJobProcess.cs', 'WindowsJobAuthority.cs'];
+const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe';
+const SUPERVISOR_DOMAIN = Buffer.from('coding-x-windows-supervisor-exe-v1\0', 'utf8');
 const OPERATION_ID = '12345678-1234-4234-8234-123456789abc';
 const OWNER_ID = 'abcdefab-cdef-4abc-8def-abcdefabcdef';
 
@@ -14,15 +15,7 @@ function digest(value) {
 }
 
 function helperBundle(assetRoot) {
-  const parts = [
-    Buffer.from('coding-x-windows-supervisor-powershell-v1\0', 'utf8'),
-    readFileSync(join(assetRoot, 'windows-job-supervisor.ps1')),
-  ];
-  for (const name of SOURCE_NAMES) {
-    parts.push(Buffer.from(`\0coding-x-windows-supervisor-csharp-v1:${name}\0`, 'utf8'));
-    parts.push(readFileSync(join(assetRoot, name)));
-  }
-  return Buffer.concat(parts);
+  return Buffer.concat([SUPERVISOR_DOMAIN, readFileSync(join(assetRoot, SUPERVISOR_EXECUTABLE))]);
 }
 
 function send(child, type, message, extra = {}) {
@@ -156,15 +149,8 @@ async function main() {
   }
   const assetRoot = realpathSync(assetRootInput);
   const workspace = realpathSync(workspaceInput);
-  const sourcePaths = SOURCE_NAMES.map((name) => join(assetRoot, name));
   const helperDigest = digest(helperBundle(assetRoot));
-  const powershell = win32.join(
-    process.env.SystemRoot,
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe',
-  );
+  const supervisor = join(assetRoot, SUPERVISOR_EXECUTABLE);
   const timeouts = Buffer.from(
     JSON.stringify({
       handshakeMs: 10_000,
@@ -176,24 +162,8 @@ async function main() {
     'utf8',
   ).toString('base64');
   const helper = spawn(
-    powershell,
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-File',
-      join(assetRoot, 'windows-job-supervisor.ps1'),
-      '-SourcePath',
-      sourcePaths[0],
-      '-ProcessSourcePath',
-      sourcePaths[1],
-      '-AuthoritySourcePath',
-      sourcePaths[2],
-      '-ExpectedHelperDigest',
-      helperDigest,
-      '-TimeoutsBase64',
-      timeouts,
-    ],
+    supervisor,
+    ['--expected-helper-digest', helperDigest, '--timeouts-base64', timeouts],
     {
       cwd: assetRoot,
       env: {
@@ -201,7 +171,7 @@ async function main() {
         TEMP: process.env.TEMP,
         TMP: process.env.TMP,
       },
-      detached: false,
+      detached: true,
       windowsHide: true,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -209,6 +179,9 @@ async function main() {
   );
   const events = new Events(helper);
   const bound = await events.next('BOUND');
+  if (bound.supervisorPid !== helper.pid) {
+    throw new Error('BOUND pid does not identify the directly spawned supervisor');
+  }
   const authority = installPrepared(workspace, helperDigest, bound);
   const targetReady = join(workspace, 'target-ready.txt');
   const targetSawCtrl = join(workspace, 'target-saw-ctrl-c.txt');

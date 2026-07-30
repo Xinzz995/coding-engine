@@ -4,16 +4,9 @@ import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } fr
 import { isAbsolute, join, resolve, win32 } from 'node:path';
 import { WorkspaceSafetyError } from './types.js';
 
-export const WINDOWS_SUPERVISOR_SCRIPT = 'windows-job-supervisor.ps1';
-export const WINDOWS_SUPERVISOR_SOURCES = Object.freeze([
-  'WindowsJobSupervisor.cs',
-  'WindowsJobProcess.cs',
-  'WindowsJobAuthority.cs',
-] as const);
+export const WINDOWS_SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe';
 
-const POWERSHELL_DOMAIN = Buffer.from('coding-x-windows-supervisor-powershell-v1\0', 'utf8');
-const csharpDomain = (name: string): Buffer =>
-  Buffer.from(`\0coding-x-windows-supervisor-csharp-v1:${name}\0`, 'utf8');
+const EXECUTABLE_DOMAIN = Buffer.from('coding-x-windows-supervisor-exe-v1\0', 'utf8');
 
 export interface WindowsSupervisorTimeouts {
   readonly handshakeMs: number;
@@ -25,8 +18,7 @@ export interface WindowsSupervisorTimeouts {
 
 export interface WindowsSupervisorAssets {
   readonly root: string;
-  readonly scriptPath: string;
-  readonly sourcePaths: readonly string[];
+  readonly executablePath: string;
   readonly helperBytes: Buffer;
   readonly helperDigest: string;
 }
@@ -36,7 +28,7 @@ export interface WindowsSupervisorLaunch {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
-  readonly detached: false;
+  readonly detached: true;
   readonly windowsHide: true;
   readonly stdio: readonly ['pipe', 'pipe', 'pipe'];
   readonly assets: WindowsSupervisorAssets;
@@ -180,20 +172,11 @@ export function readWindowsSupervisorAssets(assetRoot: string): WindowsSuperviso
   if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) {
     return invalid('assetRoot must be an ordinary directory');
   }
-  const scriptPath = join(root, WINDOWS_SUPERVISOR_SCRIPT);
-  const scriptBytes = stableAssetBytes(scriptPath);
-  const sourcePaths = WINDOWS_SUPERVISOR_SOURCES.map((name) => join(root, name));
-  const sourceBytes = sourcePaths.map(stableAssetBytes);
-  const helperBytes = Buffer.concat([
-    POWERSHELL_DOMAIN,
-    scriptBytes,
-    ...WINDOWS_SUPERVISOR_SOURCES.flatMap((name, index) => [
-      csharpDomain(name),
-      sourceBytes[index],
-    ]),
-  ]);
+  const executablePath = join(root, WINDOWS_SUPERVISOR_EXECUTABLE);
+  const executableBytes = stableAssetBytes(executablePath);
+  const helperBytes = Buffer.concat([EXECUTABLE_DOMAIN, executableBytes]);
   const helperDigest = `sha256:${createHash('sha256').update(helperBytes).digest('hex')}`;
-  return { root, scriptPath, sourcePaths, helperBytes, helperDigest };
+  return { root, executablePath, helperBytes, helperDigest };
 }
 
 export function createWindowsSupervisorLaunch(
@@ -210,33 +193,16 @@ export function createWindowsSupervisorLaunch(
   if (!win32.isAbsolute(systemRoot) || !win32.isAbsolute(temp) || !win32.isAbsolute(tmp)) {
     return invalid('SystemRoot, TEMP, and TMP must be absolute paths');
   }
-  const command = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   const timeoutsBase64 = Buffer.from(
     JSON.stringify(resolveWindowsSupervisorTimeouts(options.timeouts)),
     'utf8',
   ).toString('base64');
   return {
-    command,
-    args: [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-File',
-      assets.scriptPath,
-      '-SourcePath',
-      assets.sourcePaths[0],
-      '-ProcessSourcePath',
-      assets.sourcePaths[1],
-      '-AuthoritySourcePath',
-      assets.sourcePaths[2],
-      '-ExpectedHelperDigest',
-      assets.helperDigest,
-      '-TimeoutsBase64',
-      timeoutsBase64,
-    ],
+    command: assets.executablePath,
+    args: ['--expected-helper-digest', assets.helperDigest, '--timeouts-base64', timeoutsBase64],
     cwd: assets.root,
     env: { SystemRoot: systemRoot, TEMP: temp, TMP: tmp },
-    detached: false,
+    detached: true,
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],
     assets,

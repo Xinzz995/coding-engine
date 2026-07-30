@@ -21,20 +21,10 @@ namespace CodingX.WorkspaceSafety
         {
             try
             {
-                StartupTrace.Stage("run-entered");
                 if (!Patterns.Digest.IsMatch(expectedHelperDigest ?? String.Empty))
                     throw new SafetyException("invalid fixed helper digest");
-                Console.InputEncoding = new UTF8Encoding(false, true);
-                StartupTrace.Stage("input-encoding-set");
-                Console.OutputEncoding = new UTF8Encoding(false, true);
-                StartupTrace.Stage("output-encoding-set");
                 Timeouts timeouts = Timeouts.Parse(timeoutsBase64);
-                StartupTrace.Stage("timeouts-parsed");
-                if (!Native.SetConsoleCtrlHandler(IntPtr.Zero, true))
-                    throw Native.Failure("SetConsoleCtrlHandler");
-                StartupTrace.Stage("ctrl-handler-set");
                 SupervisorSession session = new SupervisorSession(expectedHelperDigest, timeouts);
-                StartupTrace.Stage("session-created");
                 return session.Run();
             }
             catch (Exception error)
@@ -42,16 +32,6 @@ namespace CodingX.WorkspaceSafety
                 ProtocolWriter.TryFailure(error is SafetyException ? error.Message : "Windows supervisor failed");
                 return ExitFailure;
             }
-        }
-    }
-
-    internal static class StartupTrace
-    {
-        internal static void Stage(string name)
-        {
-            Console.Error.WriteLine("coding-x-supervisor-stage:{0}:{1}",
-                name, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
-            Console.Error.Flush();
         }
     }
 
@@ -207,6 +187,7 @@ namespace CodingX.WorkspaceSafety
         internal const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
         internal const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
         internal const uint CREATE_SUSPENDED = 0x00000004;
+        internal const uint CREATE_NO_WINDOW = 0x08000000;
         internal const uint STARTF_USESTDHANDLES = 0x00000100;
         internal const uint HANDLE_FLAG_INHERIT = 0x00000001;
         internal const uint GENERIC_READ = 0x80000000;
@@ -218,10 +199,6 @@ namespace CodingX.WorkspaceSafety
         internal const uint WAIT_TIMEOUT = 0x00000102;
         internal const uint STILL_ACTIVE = 259;
         internal const uint TERMINATION_EXIT_CODE = 0xC000013A;
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool SetConsoleCtrlHandler(IntPtr handlerRoutine, bool add);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
         internal static extern IntPtr CreateJobObjectW(IntPtr jobAttributes, string name);

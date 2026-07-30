@@ -17,7 +17,7 @@ import {
   type SupervisorTerminationReason,
 } from './supervisor-protocol.js';
 import {
-  WINDOWS_SUPERVISOR_SCRIPT,
+  WINDOWS_SUPERVISOR_EXECUTABLE,
   createWindowsSupervisorLaunch,
   readWindowsSupervisorAssets,
   resolveWindowsSupervisorTimeouts,
@@ -41,12 +41,12 @@ import { WorkspaceSafetyError } from './types.js';
 function fixedWindowsAssetRoot(): string {
   const candidates = [
     dirname(
-      fileURLToPath(new URL('./workspace-safety/windows-job-supervisor.ps1', import.meta.url)),
+      fileURLToPath(new URL('./workspace-safety/coding-x-windows-supervisor.exe', import.meta.url)),
     ),
     fileURLToPath(new URL('../../assets/workspace-safety', import.meta.url)),
   ];
   const root = candidates.find((candidate) =>
-    existsSync(join(candidate, WINDOWS_SUPERVISOR_SCRIPT)),
+    existsSync(join(candidate, WINDOWS_SUPERVISOR_EXECUTABLE)),
   );
   if (!root) {
     throw new WorkspaceSafetyError('unsupported', 'Fixed Windows supervisor assets are missing');

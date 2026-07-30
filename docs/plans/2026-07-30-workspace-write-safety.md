@@ -40,8 +40,9 @@ Issue #91 干净检出。
 - 实现显式 bootstrap、永久 protocol root + owner-safe active lease、WorkspaceSession/Writer、
   delegated baseline/delta evaluator、coordinator 和
   supervisor IPC 状态机；
-- POSIX 用组外 supervisor + START barrier launcher 建立独占目标 pgid；Windows 分发固定
-  PowerShell/C# Job Object helper，使用 JOB_LIST 原子纳管、CREATE_SUSPENDED、KILL_ON_CLOSE 与
+- POSIX 用组外 supervisor + START barrier launcher 建立独占目标 pgid；Windows 分发由固定源码
+  确定性重建且逐字节核验的 C# Job Object EXE，使用 JOB_LIST 原子纳管、CREATE_SUSPENDED、
+  CREATE_NO_WINDOW、KILL_ON_CLOSE 与
   ActiveProcesses；两个平台的 supervisor 都在 START 前缓存 owner/protocol/active/baseline 摘要，并在
   集合清空后写 owner-bound drained receipt；
 - 实现新版 lock recovery、同机 reboot-proof、attempt lease 单赢家、recovery-of-recovery 和 exact
@@ -64,8 +65,8 @@ Issue #91 干净检出。
 - supervisor 在 receipt 前 hard kill 时三平台终态隔离/新 workspace；receipt 后 hard kill 可精确续做；
 - child 改写 active-child/owner identity 后 parent hard kill，receipt/current bytes 冲突必须 invalid，旧
   grandchild 仍活时绝不能 recoverable；
-- POSIX receipt/pgid/EOF 错绑，以及 Windows handle 关闭顺序、receipt 错绑、Add-Type/Job/Query/
-  Terminate 失败；
+- POSIX receipt/pgid/EOF 错绑，以及 Windows handle 关闭顺序、receipt 错绑、固定 EXE 摘要/
+  确定性重建/Job/Query/Terminate 失败；
 - recovery 与 normal acquire 双赢、recovery 自己崩溃；
 - 两个 resume 同时接管 dead lease；
 - operation baseline + prepared 整体安装，以及 settle 前后每个 hard-kill 窗口；
@@ -79,7 +80,7 @@ Issue #91 干净检出。
   lease；POSIX 返回 130/143、Windows 返回 130，内部失败为 2；
 - Windows 使用真实 CTRL_C_EVENT 验证优雅收口；SIGTERM/TerminateProcess 按 hard crash 验证，禁止
   用 coordinator 注入冒充系统信号；
-- POSIX supervisor 独立 session/process group、Windows supervisor 独立 process group 且忽略 Ctrl+C；
+- POSIX supervisor 独立 session/process group、Windows supervisor 以 detached 新进程组且不连接控制台；
   三平台真实终端中断都断言 parent 收到、supervisor 存活至平台 receipt、目标 containment 已空；
 - recovery-active 在 mutation committed 后、final manifest 前、manifest 后、finalizing 后与最终
   lease rename 竞态中收到中断：rename 前一律保留 recovery+lease 并 exact resume，rename 后旧 owner
@@ -179,7 +180,7 @@ Issue #91 干净检出。
 
 - `src/engine/lock.ts`：只保留旧实现到 activation；新版拆为 safety evaluator 与 owner lease；
 - 新增 workspace session/writer、operation coordinator、supervisor protocol、platform identity；
-- 固定 POSIX supervisor 与 Windows PowerShell/C# Job helper；
+- 固定 POSIX supervisor 与 Windows 预编译 C# Job helper；
 - `agent.ts`、`gate.ts`、`tdd-gate.ts`、review runner：统一受管 spawn；
 - loop/preflight/state/evidence/guard/validation protocol/report/repair：传递 session/writer；
 - CLI、doctor、status/dashboard：嵌套 workspace init/apply/decision/recover 与安全分类；
@@ -200,8 +201,10 @@ dark foundation 不得被 production import；静态边界测试在 activation �
   0.34.0；切换前停止所有 0.33.x 写命令。
 - 永久 lock directory 只持续阻断尚未持锁的新启动 0.33.3 run/repair；冻结 binary 必须在三平台实际
   验证 ready/active acquire/verify/release，并以旧 report 成功写入反测诚实保留无锁入口边界。
-- Windows 要求 Windows 10 / Server 2016+ 与可用 FullLanguage Add-Type；能力不足时项目代码零
-  执行、退出 2，不回退 taskkill。任一平台 armed operation 的 supervisor hard crash 若未留下精确
+- Windows 要求 Windows 10 / Server 2016+ 与 .NET Framework 4.6+；能力不足时项目代码零
+  执行、退出 2，不回退运行时编译或 taskkill。固定 EXE 由锁定 SDK/引用程序集在不同目录重复构建，
+  并与仓库及 npm 产物逐字节核验；现有真机证据只覆盖 x64，ARM64 保持未验证。任一平台 armed
+  operation 的 supervisor hard crash 若未留下精确
   drained receipt，即使同机重启也保持终态 isolated 并改用新 workspace；reboot proof 只处理完整安全
   记录允许继续裁决的 containment 不确定态。存在 armed operation 时，receipt 必须已经有效，reboot
   只能补 supervisor dead/identity 结论；不存在 armed operation 时按对应的 mechanical-empty 路径裁决。

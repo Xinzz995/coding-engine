@@ -181,13 +181,13 @@ POSIX drained receipt。父进程硬崩溃时 supervisor 只经仍绑定原 Chil
 自己不在该组，因此能观察终点。若 supervisor 也被硬杀，已持久 pgid 继续阻断；pgid 被复用或成员
 身份无法判断时保持隔离。
 
-Windows 不再用 `taskkill /T` 证明整树退出。npm 包分发固定 PowerShell + 内联 C# P/Invoke
-supervisor。它在回报可持久化 identity 前进入独立 process group，并调用
-`SetConsoleCtrlHandler(NULL, TRUE)` 忽略且让后续 target 继承忽略 Ctrl+C；parent 仍是用户 Ctrl+C 的
-唯一接收者，并通过 IPC 要求 supervisor 终止 Job。之后 supervisor 创建 Job Object，启用
+Windows 不再用 `taskkill /T` 证明整树退出。npm 包分发由固定源码确定性构建、并随包携带的
+`.NET Framework 4.6` C# P/Invoke supervisor。Node 直接以 detached、新进程组、无窗口和三条继承
+pipe 启动该 EXE；supervisor 不连接 parent 控制台，parent 仍是用户 Ctrl+C 的唯一接收者，并通过
+IPC 要求 supervisor 终止 Job。supervisor 先用继承 pipe 建立严格 UTF-8 协议，再创建 Job Object，启用
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 且不允许 breakaway；
 用 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 在 `CreateProcessW` 时原子纳入 Job，并保持
-`CREATE_SUSPENDED`，确认 `ActiveProcesses == 1` 后才回报 armed；父进程落盘后才
+`CREATE_SUSPENDED | CREATE_NO_WINDOW`，确认 `ActiveProcesses == 1` 后才回报 armed；父进程落盘后才
 `ResumeThread`。恢复线程后立即关闭 thread handle；自然路径取得并缓存根结果后关闭 process
 handle，timeout/用户中断/parent 断链允许没有 STARTED/RESULT，也必须关闭 process handle；然后
 才能等待 `ActiveProcesses == 0` 与 stdout/stderr EOF。固定 supervisor 在仍持有 Job handle
@@ -202,8 +202,11 @@ workspace 写权。
 原始 containment identity 均无法独立对账，即使同机重启也保持终态 isolated，只能改用新 workspace。
 
 Windows 方案要求 Node 22 支持范围内的 Windows 10 / Server 2016+、同用户同 session 和可用的
-FullLanguage `Add-Type`。Job、原子关联、查询或 Add-Type 任一步不可用时，真实命令零执行并返回
-配置/隔离错误；不回退直接 spawn 或 taskkill。官方依据：
+.NET Framework 4.6+。Job、原子关联、查询或固定 supervisor 任一步不可用时，真实命令零执行并返回
+配置/隔离错误；不回退直接 spawn、运行时编译或 taskkill。提交的 EXE 必须由固定 SDK、锁定引用程序集
+和同一组源码在两个不同绝对路径下确定性重建，二者逐字节一致后再与仓库及 npm 产物逐字节比较；
+CI 实际证明 x64 Windows，AnyCPU 不等于已经证明 ARM64。helper 摘要绑定实际 EXE 字节，但包安装目录
+仍属于可信边界：本决策不声称能防御同一账号在读取后、启动前恶意替换可执行文件。官方依据：
 [Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)、
 [原子 Job 列表属性](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)、
 [KILL_ON_JOB_CLOSE](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information)、

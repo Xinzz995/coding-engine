@@ -430,13 +430,10 @@ namespace CodingX.WorkspaceSafety
 
         internal SupervisorSession(string digest, Timeouts values)
         {
-            StartupTrace.Stage("session-constructor-entered");
             helperDigest = digest;
             timeouts = values;
             supervisorPid = System.Diagnostics.Process.GetCurrentProcess().Id;
-            StartupTrace.Stage("supervisor-pid-read");
             supervisorIdentity = Native.ProcessIdentity(Native.GetCurrentProcess());
-            StartupTrace.Stage("supervisor-identity-read");
         }
 
         private static Dictionary<string, object> Message(ControlFrame frame, string label)
@@ -611,12 +608,9 @@ namespace CodingX.WorkspaceSafety
 
         internal int Run()
         {
-            StartupTrace.Stage("session-run-entered");
             using (control = new ControlReader())
             {
-                StartupTrace.Stage("control-reader-created");
                 SendBound();
-                StartupTrace.Stage("bound-sent");
                 Dictionary<string, object> dataEnvelope = Message(control.Take(timeouts.HandshakeMs), "DATA envelope");
                 if (dataEnvelope == null) return 0;
                 string firstType = StrictJson.String(dataEnvelope, "type", "initial envelope type", false);

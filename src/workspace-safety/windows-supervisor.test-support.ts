@@ -35,9 +35,6 @@ export const OUTER_JOB_PARENT = fileURLToPath(
 export const OUTER_JOB_DRIVER = fileURLToPath(
   new URL('./__fixtures__/windows-outer-job-driver.ps1', import.meta.url),
 );
-export const CONSTRAINED_LANGUAGE_DRIVER = fileURLToPath(
-  new URL('./__fixtures__/windows-constrained-language-driver.ps1', import.meta.url),
-);
 export const BREAKAWAY_TARGET = fileURLToPath(
   new URL('./__fixtures__/windows-breakaway-target.ps1', import.meta.url),
 );
@@ -113,7 +110,7 @@ export class EventReader {
                   `timed out waiting for ${expected}; helper stderr: ${this.errors.join('')}`,
                 ),
               ),
-            60_000,
+            15_000,
           ),
         ),
       ]);

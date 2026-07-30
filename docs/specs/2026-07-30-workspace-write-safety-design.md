@@ -58,7 +58,7 @@ Issue #91 的干净检出不在本 Issue 内。
 | root exit 0 但有孙进程不能通过                                 | 结果被记录为 passed/completed             | 正常退出残留孙进程回归                              |
 | 只有确认 containment 空才清 activity                           | 第二 writer 进入后旧孙进程仍能写          | 新 owner 获取后再释放旧 child 写动作                |
 | Windows 使用 Job Object，而非 taskkill 证明                    | 中间根退出后孤儿孙进程未被统计            | Windows Job ActiveProcesses 真实测试                |
-| containment 不可用时项目代码零执行                             | Add-Type/Job/PGID 失败却直接 spawn        | capability 故障注入 + marker 反测                   |
+| containment 不可用时项目代码零执行                             | 固定 EXE/Job/PGID 失败却直接 spawn        | capability 故障注入 + marker 反测                   |
 | parent 与 delegated child 不并发写业务文件                     | START 后 parent 写 state/evidence         | writer phase 断言与字节不变测试                     |
 | child 只能写声明范围                                           | 越界后回 idle 或继续写普通 evidence       | delta violation → quarantine/lease-lost 测试        |
 | parent 崩溃不能绕过 child delta                                | drained 后不复核 baseline 就回 ready      | hard kill + recovery delta/quarantine 三平台测试    |
@@ -757,15 +757,17 @@ supervisor 存活至 receipt 落盘、目标 pgid 为空，而不是只调用 co
 
 ### Windows
 
-打包的 PowerShell 以 `-NoProfile -NonInteractive` 运行固定脚本，`Add-Type` 只编译包内固定 C#：
+包内携带由固定源码确定性构建的 `.NET Framework 4.6` C# EXE。parent 直接以 `detached: true`、
+`windowsHide: true`、`shell: false` 和三条 pipe 启动它；运行时不再调用 PowerShell 或编译源码：
 
-1. parent 以 `CREATE_NEW_PROCESS_GROUP` 创建 supervisor；supervisor 调用
-   `SetConsoleCtrlHandler(NULL, TRUE)`，验证成功后才发送 BOUND；该忽略属性由后续 target 继承；
+1. supervisor 通过继承的标准 pipe 建立严格 UTF-8 输入输出，验证自身 EXE 摘要后才发送 BOUND；
+   detached 新进程组不连接 parent 控制台，parent 是用户 Ctrl+C 的唯一接收者；
 2. CreateJobObject；
 3. SetInformationJobObject(KILL_ON_JOB_CLOSE)，不设置 breakaway；
 4. 解析完整 executable；`.cmd/.bat` 通过受测的 `cmd.exe` 规则；
 5. STARTUPINFOEX 同时传 JOB_LIST 与最小 HANDLE_LIST；
-6. CreateProcessW 使用 EXTENDED_STARTUPINFO_PRESENT、UNICODE_ENVIRONMENT、CREATE_SUSPENDED；
+6. CreateProcessW 使用 EXTENDED_STARTUPINFO_PRESENT、UNICODE_ENVIRONMENT、CREATE_SUSPENDED 与
+   CREATE_NO_WINDOW；
 7. Query Job，确认 ActiveProcesses == 1，回报 target FILETIME identity；
 8. parent 持久化 armed 并发送 frozen digest；supervisor 重读 active/baseline、缓存摘要后才
    ResumeThread；
@@ -784,11 +786,16 @@ Job；没有 receipt 就保持 isolated，不以 supervisor/target pid dead 代�
 已经取得的根结果；即使 STARTED/RESULT 尚未出现也要关闭 hProcess，再等待 ActiveProcesses 归零，
 避免 supervisor 自己的 handle 让计数无法收敛。
 
-Add-Type 被 ConstrainedLanguage/AppLocker/策略阻止、外层 Job 不兼容、原子 Job 关联失败、查询失败或
-handle 继承不明时，target 保持未运行/被终止，返回 2。绝不以 `taskkill` 成功代替 Job 归零。
+固定 EXE 缺失、损坏、摘要错误或不可执行，以及外层 Job 不兼容、原子 Job 关联失败、查询失败或
+handle 继承不明时，target 保持未运行/被终止，返回 2。绝不回退运行时编译，也不以 `taskkill`
+成功代替 Job 归零。EXE 由固定 SDK、锁定引用程序集和同一组源码在两个不同绝对路径下重建，先证明
+两次输出逐字节一致，再与仓库及 npm 包内字节比较。CI 的真机证据覆盖 x64 Windows；AnyCPU 只说明
+二进制格式兼容，不把 ARM64 宣称为已验证。helper 摘要绑定实际 EXE 字节，但包安装目录仍是可信
+边界，不声称能防御同一账号在读取后、启动前主动替换可执行文件。
 
-真实 Windows Ctrl+C 测试在共享 console 中发出 CTRL_C_EVENT：parent 必须进入 130 收口，supervisor
-与 target 因独立 process group/ignore 属性不直接退出，supervisor 只在收到 parent IPC 后终止 Job、
+真实 Windows Ctrl+C 测试在 parent 所在 console 中发出 CTRL_C_EVENT：parent 必须进入 130 收口，
+detached supervisor 不连接该 console，target 也以 CREATE_NO_WINDOW 启动；supervisor 只在收到
+parent IPC 后终止 Job、
 确认 ActiveProcesses=0、写 receipt 再退出。若信号发生在 BOUND/armed 前则走 prestart-abort；不能用
 测试内直接调用 coordinator 代替这个系统事件。
 
@@ -1053,8 +1060,8 @@ recovery 仍在。
 | reboot 不补 armed receipt/不越过 integrity     |   adapter fixture |   adapter fixture |       adapter fixture |
 | 未选择的普通 secret canary 不落安全元数据      |              真机 |              真机 |                  真机 |
 
-Windows 另测 Node 22 与当前 Node、普通用户、嵌套外层 Job、不兼容 Job、ConstrainedLanguage/Add-Type
-拒绝、breakaway 尝试、`.cmd` shim、Unicode/空参数、stdin/大 stdout/stderr、thread/process handle
+Windows 另测 Node 22 与当前 Node、普通用户、嵌套外层 Job、不兼容 Job、固定 EXE 缺失/损坏/摘要错误、
+确定性重建与逐字节比较、breakaway 尝试、`.cmd` shim、Unicode/空参数、stdin/大 stdout/stderr、thread/process handle
 关闭顺序、ActiveProcesses 归零、receipt 损坏/错绑、supervisor 在 receipt 前后 hard kill 和 handle leak。
 同一普通用户证明还必须真实创建 Unicode/空格路径上的 WOF 压缩普通文件和“父目录 junction、子文件
 表面普通”的场景，先证明 Node `lstat` 未识别，再证明 readReady、bootstrap/recovery 和 evaluator

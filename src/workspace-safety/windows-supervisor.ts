@@ -1,7 +1,6 @@
 export {
   DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS,
-  WINDOWS_SUPERVISOR_SCRIPT,
-  WINDOWS_SUPERVISOR_SOURCES,
+  WINDOWS_SUPERVISOR_EXECUTABLE,
   createWindowsSupervisorLaunch,
   readWindowsSupervisorAssets,
   spawnWindowsJobSupervisor,

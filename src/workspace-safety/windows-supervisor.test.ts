@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
 import {
-  cpSync,
+  closeSync,
   existsSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   realpathSync,
   writeFileSync,
@@ -15,11 +16,11 @@ import {
   ASSET_ROOT,
   BREAKAWAY_SOURCE,
   BREAKAWAY_TARGET,
-  CONSTRAINED_LANGUAGE_DRIVER,
   created,
   CTRL_C_DRIVER,
   CTRL_C_DRIVER_SOURCE,
   CTRL_C_PARENT,
+  createWindowsWorkspace,
   DIGEST,
   EventReader,
   installArmedAuthority,
@@ -37,7 +38,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
   it('fails before BOUND when the fixed helper digest is wrong', async () => {
     const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
     const args = [...launch.args];
-    args[args.indexOf('-ExpectedHelperDigest') + 1] = `sha256:${'0'.repeat(64)}`;
+    args[args.indexOf('--expected-helper-digest') + 1] = `sha256:${'0'.repeat(64)}`;
     const child = spawn(launch.command, args, {
       cwd: launch.cwd,
       env: { ...launch.env },
@@ -59,83 +60,55 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     expect(stdout).not.toContain('BOUND');
   });
 
-  it('fails before BOUND under ConstrainedLanguage without starting a target', async () => {
-    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-windows-constrained-')));
-    created.push(workspace);
-    const marker = join(workspace, 'target-ran.txt');
+  it.each([
+    ['extra', (args: readonly string[]) => [...args, '--unexpected']],
+    ['reordered', (args: readonly string[]) => [args[2], args[3], args[0], args[1]]],
+    ['missing', (args: readonly string[]) => args.slice(0, 2)],
+  ] as const)('rejects %s executable arguments before BOUND', async (_label, mutate) => {
     const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
-    const sourcePaths = launch.assets.sourcePaths;
-    const powershell = win32.join(
-      process.env.SystemRoot!,
-      'System32',
-      'WindowsPowerShell',
-      'v1.0',
-      'powershell.exe',
-    );
-    const child = spawn(
-      powershell,
-      [
-        '-NoLogo',
-        '-NoProfile',
-        '-NonInteractive',
-        '-File',
-        CONSTRAINED_LANGUAGE_DRIVER,
-        '-SupervisorPath',
-        join(ASSET_ROOT, 'windows-job-supervisor.ps1'),
-        '-SourcePath',
-        sourcePaths[0],
-        '-ProcessSourcePath',
-        sourcePaths[1],
-        '-AuthoritySourcePath',
-        sourcePaths[2],
-        '-ExpectedHelperDigest',
-        launch.assets.helperDigest,
-        '-TimeoutsBase64',
-        launch.args[launch.args.indexOf('-TimeoutsBase64') + 1],
-      ],
-      {
-        cwd: workspace,
-        env: { ...launch.env },
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+    const child = spawn(launch.command, mutate(launch.args), {
+      cwd: launch.cwd,
+      env: { ...launch.env },
+      detached: launch.detached,
+      windowsHide: launch.windowsHide,
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     let stdout = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
     });
-    const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-      (resolve) => child.once('exit', (code, signal) => resolve({ code, signal })),
-    );
-    expect(exit.code).not.toBe(0);
-    expect(stdout).not.toContain('BOUND');
-    expect(existsSync(marker)).toBe(false);
-  });
-
-  it('fails before BOUND when Add-Type cannot compile the fixed source bundle', async () => {
-    const copy = realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-windows-add-type-')));
-    created.push(copy);
-    cpSync(ASSET_ROOT, copy, { recursive: true });
-    const brokenSource = join(copy, 'WindowsJobProcess.cs');
-    writeFileSync(
-      brokenSource,
-      Buffer.concat([readFileSync(brokenSource), Buffer.from('\nthis is not valid C sharp\n')]),
-    );
-    const launch = createWindowsSupervisorLaunch({ assetRoot: copy });
-    const child = spawnWindowsJobSupervisor(launch);
-    let stdout = '';
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stdin.end();
     const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
       (resolve) => child.once('exit', (code, signal) => resolve({ code, signal })),
     );
     expect(exit).toEqual({ code: 2, signal: null });
     expect(stdout).not.toContain('BOUND');
+  });
+
+  it('rejects a non-pipe protocol handle before BOUND', async () => {
+    const workspace = createWindowsWorkspace('non-pipe-stdio');
+    const outputPath = join(workspace, 'supervisor-output.log');
+    const output = openSync(outputPath, 'w');
+    try {
+      const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+      const child = spawn(launch.command, [...launch.args], {
+        cwd: launch.cwd,
+        env: { ...launch.env },
+        detached: launch.detached,
+        windowsHide: launch.windowsHide,
+        shell: false,
+        stdio: ['pipe', output, 'pipe'],
+      });
+      child.stdin?.end();
+      const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolve) => child.once('exit', (code, signal) => resolve({ code, signal })),
+      );
+      expect(exit).toEqual({ code: 2, signal: null });
+    } finally {
+      closeSync(output);
+    }
+    expect(readFileSync(outputPath, 'utf8')).not.toContain('BOUND');
   });
 
   it('rejects case-insensitive duplicate target environment before target creation', async () => {
@@ -206,7 +179,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const drained = await events.next('PRESTART_DRAINED');
     expect(drained.messageBase64).toEqual(expect.any(String));
     await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
-    expect(bound.supervisorPid).toBeGreaterThan(0);
+    expect(bound.supervisorPid).toBe(child.pid);
   });
 
   it.each([

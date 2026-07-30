@@ -320,7 +320,8 @@ namespace CodingX.WorkspaceSafety
                 startup.lpAttributeList = attributes;
                 PROCESS_INFORMATION created;
                 uint flags = Native.EXTENDED_STARTUPINFO_PRESENT |
-                    Native.CREATE_UNICODE_ENVIRONMENT | Native.CREATE_SUSPENDED;
+                    Native.CREATE_UNICODE_ENVIRONMENT | Native.CREATE_SUSPENDED |
+                    Native.CREATE_NO_WINDOW;
                 if (!Native.CreateProcessW(application, commandLine, IntPtr.Zero, IntPtr.Zero,
                     true, flags, environment, target.WorkingDirectory, ref startup, out created))
                     throw Native.Failure("CreateProcessW");

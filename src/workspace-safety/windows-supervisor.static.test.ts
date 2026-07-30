@@ -1,11 +1,12 @@
-import { cpSync, linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createWindowsSupervisorLaunch,
   readWindowsSupervisorAssets,
-  WINDOWS_SUPERVISOR_SOURCES,
+  WINDOWS_SUPERVISOR_EXECUTABLE,
 } from './windows-supervisor.js';
 import {
   ASSET_ROOT,
@@ -18,10 +19,28 @@ import {
   windowsEnvironment,
 } from './windows-supervisor.test-support.js';
 
+const REVIEWED_WINDOWS_SOURCES = [
+  'WindowsJobSupervisor.cs',
+  'WindowsJobProcess.cs',
+  'WindowsJobAuthority.cs',
+  'WindowsSupervisorProgram.cs',
+] as const;
+
+function createExecutableFixture(label: string): string {
+  const root = mkdtempSync(join(tmpdir(), `coding-x-windows-${label}-`));
+  created.push(root);
+  writeFileSync(
+    join(root, WINDOWS_SUPERVISOR_EXECUTABLE),
+    Buffer.from('MZ\0coding-x static executable fixture', 'utf8'),
+  );
+  return root;
+}
+
 describe('fixed Windows Job supervisor assets', () => {
-  it('builds one deterministic, minimal, no-shell PowerShell launch', () => {
+  it('builds one deterministic, minimal direct executable launch', () => {
+    const assetRoot = createExecutableFixture('launch');
     const launch = createWindowsSupervisorLaunch({
-      assetRoot: ASSET_ROOT,
+      assetRoot,
       environment: windowsEnvironment({
         CODING_X_SECRET: 'must-not-cross',
         PATH: 'C:\\untrusted',
@@ -29,55 +48,65 @@ describe('fixed Windows Job supervisor assets', () => {
       platform: 'win32',
     });
 
-    expect(launch.command).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
-    expect(launch.args.slice(0, 5)).toEqual([
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-File',
-      join(ASSET_ROOT, 'windows-job-supervisor.ps1'),
+    expect(launch.command).toBe(join(assetRoot, WINDOWS_SUPERVISOR_EXECUTABLE));
+    expect(launch.args).toEqual([
+      '--expected-helper-digest',
+      launch.assets.helperDigest,
+      '--timeouts-base64',
+      expect.any(String),
     ]);
-    expect(launch.args).not.toContain('-ExecutionPolicy');
-    expect(launch.assets.sourcePaths.map((path) => basename(path))).toEqual([
-      ...WINDOWS_SUPERVISOR_SOURCES,
-    ]);
+    expect(JSON.parse(Buffer.from(launch.args[3], 'base64').toString('utf8'))).toEqual({
+      handshakeMs: 5000,
+      naturalDrainMs: 5000,
+      terminateMs: 5000,
+      ackMs: 5000,
+      pollMs: 25,
+    });
+    expect(launch.assets.executablePath).toBe(launch.command);
+    expect(launch.args.join(' ')).not.toMatch(/PowerShell|SourcePath|ExecutionPolicy/iu);
     expect(launch.env).toEqual({
       SystemRoot: 'C:\\Windows',
       TEMP: 'C:\\Windows\\Temp',
       TMP: 'C:\\Windows\\Temp',
     });
-    expect(launch.detached).toBe(false);
+    expect(launch.detached).toBe(true);
     expect(launch.windowsHide).toBe(true);
     expect(launch.stdio).toEqual(['pipe', 'pipe', 'pipe']);
   });
 
-  it('binds every fixed source byte and rejects helper drift by digest', () => {
-    const original = readWindowsSupervisorAssets(ASSET_ROOT);
+  it('binds the exact executable bytes behind a domain-separated digest', () => {
+    const assetRoot = createExecutableFixture('digest');
+    const original = readWindowsSupervisorAssets(assetRoot);
     expect(original.helperDigest).toMatch(/^sha256:[0-9a-f]{64}$/u);
-    expect(readWindowsSupervisorAssets(ASSET_ROOT).helperDigest).toBe(original.helperDigest);
+    expect(readWindowsSupervisorAssets(assetRoot).helperDigest).toBe(original.helperDigest);
+    expect(original.helperBytes).toEqual(
+      Buffer.concat([
+        Buffer.from('coding-x-windows-supervisor-exe-v1\0', 'utf8'),
+        readFileSync(original.executablePath),
+      ]),
+    );
+    expect(original.helperDigest).toBe(
+      `sha256:${createHash('sha256').update(original.helperBytes).digest('hex')}`,
+    );
 
-    const copy = mkdtempSync(join(tmpdir(), 'coding-x-windows-helper-'));
-    created.push(copy);
-    cpSync(ASSET_ROOT, copy, { recursive: true });
-    const authority = join(copy, 'WindowsJobAuthority.cs');
-    writeFileSync(authority, Buffer.concat([readFileSync(authority), Buffer.from('\n// drift\n')]));
-    expect(readWindowsSupervisorAssets(copy).helperDigest).not.toBe(original.helperDigest);
+    const executable = join(assetRoot, WINDOWS_SUPERVISOR_EXECUTABLE);
+    writeFileSync(executable, Buffer.concat([readFileSync(executable), Buffer.from('drift')]));
+    expect(readWindowsSupervisorAssets(assetRoot).helperDigest).not.toBe(original.helperDigest);
   });
 
   it('rejects a fixed helper with an external hard-link alias', () => {
-    const copy = mkdtempSync(join(tmpdir(), 'coding-x-windows-helper-link-'));
-    created.push(copy);
-    cpSync(ASSET_ROOT, copy, { recursive: true });
-    const authority = join(copy, 'WindowsJobAuthority.cs');
-    linkSync(authority, join(copy, 'external-alias.cs'));
+    const assetRoot = createExecutableFixture('helper-link');
+    const executable = join(assetRoot, WINDOWS_SUPERVISOR_EXECUTABLE);
+    linkSync(executable, join(assetRoot, 'external-alias.exe'));
 
-    expect(() => readWindowsSupervisorAssets(copy)).toThrow(/single-link/u);
+    expect(() => readWindowsSupervisorAssets(assetRoot)).toThrow(/single-link/u);
   });
 
   it('rejects ambiguous case-insensitive Windows launch environment keys', () => {
+    const assetRoot = createExecutableFixture('environment');
     expect(() =>
       createWindowsSupervisorLaunch({
-        assetRoot: ASSET_ROOT,
+        assetRoot,
         platform: 'win32',
         environment: windowsEnvironment({ temp: 'C:\\different' }),
       }),
@@ -85,19 +114,26 @@ describe('fixed Windows Job supervisor assets', () => {
   });
 
   it('keeps each native source reviewable and preserves the fail-closed Windows sequence', () => {
-    const powershell = readFileSync(join(ASSET_ROOT, 'windows-job-supervisor.ps1'), 'utf8');
-    const sources = WINDOWS_SUPERVISOR_SOURCES.map((name) =>
+    const sources = REVIEWED_WINDOWS_SOURCES.map((name) =>
       readFileSync(join(ASSET_ROOT, name), 'utf8'),
     );
-    const [core, processSource, authority] = sources;
-    const all = `${powershell}\n${sources.join('\n')}`;
+    const [core, processSource, authority, program] = sources;
+    const all = sources.join('\n');
 
     for (const source of sources) expect(source.split('\n').length).toBeLessThan(1000);
-    expect(powershell).toContain("$ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage'");
-    expect(powershell).toContain('Add-Type -TypeDefinition $sourceText');
-    expect(core.indexOf('SetConsoleCtrlHandler(IntPtr.Zero, true)')).toBeLessThan(
-      core.indexOf('session.Run()'),
-    );
+    expect(program).toContain('coding-x-windows-supervisor-exe-v1');
+    expect(program).toContain('OpenStandardInput');
+    expect(program).toContain('OpenStandardOutput');
+    expect(program).toContain('new UTF8Encoding(false, true)');
+    expect(program).toContain('GetConsoleWindow() != IntPtr.Zero');
+    expect(program).toContain('GetFileType(handle) != FileTypePipe');
+    expect(program).toContain('--expected-helper-digest');
+    expect(program).toContain('--timeouts-base64');
+    expect(program).toContain('arguments.Length != 4');
+    expect(program).toContain('Assembly.Location');
+    expect(core).not.toContain('Console.InputEncoding');
+    expect(core).not.toContain('Console.OutputEncoding');
+    expect(core).not.toContain('SetConsoleCtrlHandler');
     expect(processSource.indexOf('CreateJobObjectW')).toBeLessThan(
       processSource.indexOf('CreateProcessW'),
     );
@@ -107,6 +143,7 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(processSource).toContain('EXTENDED_STARTUPINFO_PRESENT');
     expect(processSource).toContain('CREATE_UNICODE_ENVIRONMENT');
     expect(processSource).toContain('CREATE_SUSPENDED');
+    expect(processSource).toContain('CREATE_NO_WINDOW');
     expect(processSource.indexOf('Native.ResumeThread(thread)')).toBeLessThan(
       processSource.indexOf('Native.Close(ref thread)'),
     );
@@ -148,6 +185,8 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(ctrlDriver).toContain('GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)');
     expect(ctrlParent).toContain("process.on('SIGINT'");
     expect(ctrlParent).toContain("reason: 'user-interrupt'");
+    expect(ctrlParent).toContain("const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe'");
+    expect(ctrlParent).toContain('detached: true');
     expect(ctrlParent).toContain("new URL('./windows-ctrl-c-target.mjs', import.meta.url)");
     expect(ctrlParent).not.toContain("args: ['-e'");
     expect(ctrlTarget).toContain("process.on('SIGINT'");
@@ -160,6 +199,10 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(handleInventory).toContain('NtQuerySystemInformation');
     expect(handleInventory).toContain('HANDLE_FLAG_INHERIT');
     expect(parentCrash).toContain('supervisorPid: bound.supervisorPid');
+    expect(parentCrash).toContain(
+      "const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe'",
+    );
+    expect(parentCrash).toContain('detached: true');
     expect(parentCrash).toContain('await new Promise(() => {})');
     expect(`${breakaway}\n${handleInventory}\n${parentCrash}`).not.toContain('vi.mock');
   });
