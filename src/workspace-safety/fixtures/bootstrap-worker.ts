@@ -35,6 +35,7 @@ async function runBootstrap(): Promise<void> {
       typeof error === 'object' && error !== null && 'code' in error
         ? String((error as { code?: unknown }).code)
         : 'unknown';
-    process.stdout.write(`${JSON.stringify({ status: 'rejected', code })}\n`);
+    const message = error instanceof Error ? error.message : String(error);
+    process.stdout.write(`${JSON.stringify({ status: 'rejected', code, message })}\n`);
   }
 }

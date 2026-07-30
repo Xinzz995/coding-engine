@@ -92,14 +92,26 @@ export function parseTimeouts(value) {
 export function readStableFile(path, maximumBytes) {
   let descriptor;
   try {
-    const before = lstatSync(path, { bigint: true });
-    if (before.isSymbolicLink() || !before.isFile() || before.size > BigInt(maximumBytes)) {
-      throw new Error('not an ordinary bounded file');
-    }
-    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Open first and keep this inode alive. O_NOFOLLOW rejects a final symlink and O_NONBLOCK
+    // keeps a raced or pre-existing FIFO from waiting for a writer before fstat can reject it.
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const opened = fstatSync(descriptor, { bigint: true });
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) {
-      throw new Error('file identity changed before read');
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size > BigInt(maximumBytes)) {
+      throw new Error('not an ordinary bounded single-link file');
+    }
+    const openedPath = lstatSync(path, { bigint: true });
+    if (
+      openedPath.isSymbolicLink() ||
+      !openedPath.isFile() ||
+      openedPath.nlink !== 1n ||
+      opened.dev !== openedPath.dev ||
+      opened.ino !== openedPath.ino ||
+      opened.nlink !== openedPath.nlink ||
+      opened.size !== openedPath.size ||
+      opened.mtimeNs !== openedPath.mtimeNs ||
+      opened.ctimeNs !== openedPath.ctimeNs
+    ) {
+      throw new Error('file identity changed after open');
     }
     const bytes = readFileSync(descriptor);
     const afterHandle = fstatSync(descriptor, { bigint: true });
@@ -107,14 +119,21 @@ export function readStableFile(path, maximumBytes) {
     if (
       afterPath.isSymbolicLink() ||
       !afterPath.isFile() ||
+      afterHandle.nlink !== 1n ||
+      afterPath.nlink !== 1n ||
       opened.dev !== afterHandle.dev ||
       opened.ino !== afterHandle.ino ||
+      opened.nlink !== afterHandle.nlink ||
       opened.size !== afterHandle.size ||
       opened.mtimeNs !== afterHandle.mtimeNs ||
+      opened.ctimeNs !== afterHandle.ctimeNs ||
       afterHandle.dev !== afterPath.dev ||
       afterHandle.ino !== afterPath.ino ||
+      afterHandle.nlink !== afterPath.nlink ||
       afterHandle.size !== afterPath.size ||
       afterHandle.mtimeNs !== afterPath.mtimeNs ||
+      afterHandle.ctimeNs !== afterPath.ctimeNs ||
+      afterHandle.size > BigInt(maximumBytes) ||
       BigInt(bytes.length) !== afterHandle.size
     ) {
       throw new Error('file changed during read');

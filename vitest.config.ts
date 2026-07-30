@@ -1,22 +1,18 @@
 import { defineConfig } from 'vitest/config';
 import { fileURLToPath } from 'node:url';
 
+export const ordinaryWindowsPathAttributesTransportAlias = {
+  // Vite can present this import either as the original relative specifier or as a resolved
+  // platform path. Match the whole id so replacement never retains a stale path prefix.
+  find: /^(?:.*[\\/])?windows-path-attributes-transport\.js$/u,
+  replacement: fileURLToPath(
+    new URL('./src/workspace-safety/windows-path-attributes-test-transport.ts', import.meta.url),
+  ),
+};
+
 export default defineConfig({
   resolve: {
-    alias:
-      process.platform === 'win32'
-        ? [
-            {
-              find: /\/windows-path-attributes-transport\.js$/u,
-              replacement: fileURLToPath(
-                new URL(
-                  './src/workspace-safety/windows-path-attributes-test-transport.ts',
-                  import.meta.url,
-                ),
-              ),
-            },
-          ]
-        : [],
+    alias: process.platform === 'win32' ? [ordinaryWindowsPathAttributesTransportAlias] : [],
   },
   test: {
     include: ['src/**/*.test.ts', 'build/**/*.test.mjs'],

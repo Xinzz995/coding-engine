@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   REQUIRED_WINDOWS_NATIVE_SUITES,
+  summarizeFailedWindowsNativeVitestReport,
   verifyWindowsNativeVitestReport,
 } from './windows-native-proof.mjs';
 
@@ -74,6 +75,28 @@ describe('Windows native proof report', () => {
     expect(() => verifyWindowsNativeVitestReport(negativeDuration)).toThrow(/duration/u);
   });
 
+  it('prints bounded failing test details when the hosted native proof fails', () => {
+    const failed = report({ success: false, numFailedTestSuites: 1, numFailedTests: 1 });
+    failed.testResults[0] = {
+      ...failed.testResults[0],
+      status: 'failed',
+      assertionResults: [
+        {
+          status: 'failed',
+          fullName: 'rejects a native reparse point',
+          failureMessages: ['expected native rejection but received success'],
+        },
+      ],
+      message: 'suite failed',
+    };
+
+    const summary = summarizeFailedWindowsNativeVitestReport(failed);
+    expect(summary).toContain('windows-supervisor.test.ts');
+    expect(summary).toContain('rejects a native reparse point');
+    expect(summary).toContain('expected native rejection but received success');
+    expect(summary).not.toContain('windows-supervisor.crash.test.ts');
+  });
+
   it('runs through a disposable standard account and fails outside Server 2022 CI', () => {
     const script = readFileSync('build/run-windows-native-proof.ps1', 'utf8');
     expect(script).toContain("$env:ImageOS -ne 'win22'");
@@ -82,11 +105,12 @@ describe('Windows native proof report', () => {
     expect(script).not.toContain('runas.exe');
   });
 
-  it('forces an isolated native config with no deterministic transport seam', () => {
+  it('forces an isolated native config that resolves only the production transport', () => {
     const runner = readFileSync('build/windows-native-proof.mjs', 'utf8');
     const nativeConfig = readFileSync('build/vitest.windows-native.config.mjs', 'utf8');
     expect(runner).toContain("join(projectRoot, 'build', 'vitest.windows-native.config.mjs')");
     expect(runner).toContain("'--config'");
-    expect(nativeConfig).not.toMatch(/alias|setupFiles|test-transport|process\.env/u);
+    expect(nativeConfig).toContain('windows-path-attributes-transport.ts');
+    expect(nativeConfig).not.toMatch(/setupFiles|test-transport|process\.env/u);
   });
 });

@@ -85,6 +85,41 @@ describe.runIf(process.platform !== 'win32')('fixed POSIX helper assets', () => 
     }
   });
 
+  it('opens fixed helpers before binding their path identity and rejects FIFOs without waiting', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'coding-x-posix-helper-fifo-'));
+    const fifo = join(root, 'core.fifo');
+    try {
+      const created = spawnSync('mkfifo', [fifo], { encoding: 'utf8' });
+      expect(created.status, created.stderr).toBe(0);
+
+      const assetSource = readFileSync(corePath, 'utf8');
+      expect(assetSource).toContain('constants.O_NONBLOCK');
+      expect(assetSource.indexOf('descriptor = openSync')).toBeLessThan(
+        assetSource.indexOf('const openedPath = lstatSync'),
+      );
+
+      const loaderSource = readFileSync(
+        join(workspaceSafetyRoot, 'posix-supervisor-assets.ts'),
+        'utf8',
+      );
+      expect(loaderSource).toContain('constants.O_NONBLOCK');
+      expect(loaderSource.indexOf('descriptor = openSync')).toBeLessThan(
+        loaderSource.indexOf('const openedPath = lstatSync'),
+      );
+
+      expect(() => readPosixHelperBundleFromPaths([supervisorPath, fifo, launcherPath])).toThrow(
+        /ordinary bounded single-link file/u,
+      );
+
+      const core = (await import(pathToFileURL(corePath).href)) as {
+        readStableFile(path: string, maximumBytes: number): Buffer;
+      };
+      expect(() => core.readStableFile(fifo, 1024)).toThrow(/ordinary bounded single-link file/u);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps each fixed helper below the deep-review size trigger and confines group signalling to the live launcher', () => {
     const supervisor = readFileSync(supervisorPath, 'utf8');
     const core = readFileSync(corePath, 'utf8');

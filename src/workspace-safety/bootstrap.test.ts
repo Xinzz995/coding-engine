@@ -37,7 +37,12 @@ const BOOTSTRAP_OWNER = '00000000-0000-4000-8000-000000000001';
 interface WorkerCapture {
   readonly child: ChildProcessWithoutNullStreams;
   readonly ready: Promise<void>;
-  readonly result: Promise<{ status: string; code?: string; created?: boolean }>;
+  readonly result: Promise<{
+    status: string;
+    code?: string;
+    message?: string;
+    created?: boolean;
+  }>;
 }
 
 function startBootstrapWorker(workspace: string, ownerId: string, pid: number): WorkerCapture {
@@ -55,31 +60,41 @@ function startBootstrapWorker(workspace: string, ownerId: string, pid: number): 
     markReady = resolve;
   });
   let readySeen = false;
-  const result = new Promise<{ status: string; code?: string; created?: boolean }>(
-    (resolve, reject) => {
-      child.stdout.setEncoding('utf8');
-      child.stdout.on('data', (chunk: string) => {
-        output += chunk;
-        if (!readySeen && output.includes('READY\n')) {
-          readySeen = true;
-          markReady();
-        }
-      });
-      child.once('error', reject);
-      child.once('close', (code) => {
-        if (code !== 0) {
-          reject(new Error(`bootstrap worker exited ${code}: ${child.stderr.read() ?? ''}`));
-          return;
-        }
-        const line = output.trim().split('\n').at(-1);
-        if (!line || line === 'READY') {
-          reject(new Error(`bootstrap worker returned no result: ${output}`));
-          return;
-        }
-        resolve(JSON.parse(line) as { status: string; code?: string; created?: boolean });
-      });
-    },
-  );
+  const result = new Promise<{
+    status: string;
+    code?: string;
+    message?: string;
+    created?: boolean;
+  }>((resolve, reject) => {
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      output += chunk;
+      if (!readySeen && output.includes('READY\n')) {
+        readySeen = true;
+        markReady();
+      }
+    });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`bootstrap worker exited ${code}: ${child.stderr.read() ?? ''}`));
+        return;
+      }
+      const line = output.trim().split('\n').at(-1);
+      if (!line || line === 'READY') {
+        reject(new Error(`bootstrap worker returned no result: ${output}`));
+        return;
+      }
+      resolve(
+        JSON.parse(line) as {
+          status: string;
+          code?: string;
+          message?: string;
+          created?: boolean;
+        },
+      );
+    });
+  });
   return { child, ready, result };
 }
 
@@ -211,6 +226,52 @@ describe('workspace bootstrap', () => {
     expect(existsSync(join(workspace, WORKSPACE_MARKER_FILE))).toBe(true);
   });
 
+  it('classifies a partial-to-ready inspection race as a concurrent bootstrap', async () => {
+    const workspace = temporaryWorkspace();
+    let rootInstalled!: () => void;
+    const installed = new Promise<void>((resolve) => {
+      rootInstalled = resolve;
+    });
+    let releaseWinner!: () => void;
+    const winnerBarrier = new Promise<void>((resolve) => {
+      releaseWinner = resolve;
+    });
+    const winner = bootstrapWorkspace({
+      workspacePath: workspace,
+      identity,
+      ownerId: '00000000-0000-4000-8000-000000000021',
+      hooks: {
+        afterProtocolRootInstalled: async () => {
+          rootInstalled();
+          await winnerBarrier;
+        },
+      },
+    });
+    await installed;
+
+    let released = false;
+    const loser = bootstrapWorkspace({
+      workspacePath: workspace,
+      identity,
+      ownerId: '00000000-0000-4000-8000-000000000022',
+      hooks: {
+        afterExistingPresenceRead: async ({ markerExists, protocolRootExists }) => {
+          if (!released && !markerExists && protocolRootExists) {
+            released = true;
+            releaseWinner();
+            await winner;
+          }
+        },
+      },
+    });
+
+    await expect(loser).rejects.toMatchObject({
+      code: 'conflict',
+      message: expect.stringContaining('并发 bootstrap'),
+    });
+    await expect(winner).resolves.toMatchObject({ created: true });
+  });
+
   it('keeps the canonical lease when bootstrap fails after installing the protocol root', async () => {
     const workspace = temporaryWorkspace();
 
@@ -305,6 +366,33 @@ describe('workspace bootstrap', () => {
       }),
     ).rejects.toMatchObject({ code: 'invalid' });
     expect(readFileSync(ownerPath, 'utf8')).toBe('{}');
+  });
+
+  it('keeps a missing bootstrap owner invalid when no exact ready workspace exists', async () => {
+    const workspace = temporaryWorkspace();
+    await expect(
+      bootstrapWorkspace({
+        workspacePath: workspace,
+        identity,
+        ownerId: BOOTSTRAP_OWNER,
+        hooks: {
+          afterProtocolRootInstalled: () => {
+            throw new Error('stop before marker install');
+          },
+        },
+      }),
+    ).rejects.toThrow('stop before marker install');
+    const ownerPath = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, 'owner.json');
+    rmSync(ownerPath);
+
+    await expect(
+      bootstrapWorkspace({
+        workspacePath: workspace,
+        identity,
+        ownerId: '00000000-0000-4000-8000-000000000003',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+    expect(existsSync(join(workspace, WORKSPACE_MARKER_FILE))).toBe(false);
   });
 
   it('does not report ready when the permanent protocol root has an unknown canonical entry', async () => {

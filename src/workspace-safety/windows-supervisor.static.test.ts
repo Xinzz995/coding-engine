@@ -1,6 +1,6 @@
 import { cpSync, linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   createWindowsSupervisorLaunch,
@@ -140,11 +140,18 @@ describe('fixed Windows Job supervisor assets', () => {
     );
     const ctrlDriver = readFileSync(CTRL_C_DRIVER_SOURCE, 'utf8');
     const ctrlParent = readFileSync(CTRL_C_PARENT, 'utf8');
+    const ctrlTarget = readFileSync(
+      join(dirname(CTRL_C_PARENT), 'windows-ctrl-c-target.mjs'),
+      'utf8',
+    );
     expect(ctrlDriver).toContain('CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP');
     expect(ctrlDriver).toContain('GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)');
     expect(ctrlParent).toContain("process.on('SIGINT'");
     expect(ctrlParent).toContain("reason: 'user-interrupt'");
-    expect(`${ctrlDriver}\n${ctrlParent}`).not.toContain('process.kill');
+    expect(ctrlParent).toContain("new URL('./windows-ctrl-c-target.mjs', import.meta.url)");
+    expect(ctrlParent).not.toContain("args: ['-e'");
+    expect(ctrlTarget).toContain("process.on('SIGINT'");
+    expect(`${ctrlDriver}\n${ctrlParent}\n${ctrlTarget}`).not.toContain('process.kill');
 
     const breakaway = readFileSync(BREAKAWAY_SOURCE, 'utf8');
     const handleInventory = readFileSync(HANDLE_INVENTORY_SOURCE, 'utf8');

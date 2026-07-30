@@ -57,6 +57,63 @@ export function verifyWindowsNativeVitestReport(value) {
   return { passedTests: value.numPassedTests, suites };
 }
 
+function boundedText(value, maximum = 4_000) {
+  const text = String(value ?? '');
+  return text.length <= maximum ? text : `${text.slice(0, maximum)}\n[truncated]`;
+}
+
+export function summarizeFailedWindowsNativeVitestReport(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return 'Vitest JSON report is not an object';
+  }
+  const failedSuites = Array.isArray(value.testResults)
+    ? value.testResults
+        .filter(
+          (result) =>
+            result?.status !== 'passed' ||
+            result?.assertionResults?.some((entry) => entry?.status !== 'passed'),
+        )
+        .slice(0, REQUIRED_WINDOWS_NATIVE_SUITES.length)
+        .map((result) => ({
+          name: basename(String(result?.name ?? 'unknown suite')),
+          status: result?.status ?? null,
+          failures: Array.isArray(result?.assertionResults)
+            ? result.assertionResults
+                .filter((entry) => entry?.status !== 'passed')
+                .slice(0, 10)
+                .map((entry) => ({
+                  title: boundedText(entry?.fullName ?? entry?.title ?? 'unknown test', 1_000),
+                  status: entry?.status ?? null,
+                  messages: Array.isArray(entry?.failureMessages)
+                    ? entry.failureMessages.slice(0, 3).map((message) => boundedText(message))
+                    : [],
+                }))
+            : [],
+          message: boundedText(result?.message),
+        }))
+    : [];
+  return JSON.stringify(
+    {
+      success: value.success ?? null,
+      numFailedTestSuites: value.numFailedTestSuites ?? null,
+      numFailedTests: value.numFailedTests ?? null,
+      numPendingTestSuites: value.numPendingTestSuites ?? null,
+      numPendingTests: value.numPendingTests ?? null,
+      failedSuites,
+    },
+    null,
+    2,
+  );
+}
+
+function readFailedVitestReport(reportPath) {
+  try {
+    return summarizeFailedWindowsNativeVitestReport(JSON.parse(readFileSync(reportPath, 'utf8')));
+  } catch (error) {
+    return `Vitest JSON report unavailable: ${boundedText(error instanceof Error ? error.message : error)}`;
+  }
+}
+
 function parseArgs(argv) {
   const parsed = { expectedUser: undefined, result: undefined };
   for (let index = 0; index < argv.length; index += 1) {
@@ -132,7 +189,7 @@ function main() {
   if (run.error) throw run.error;
   if (run.status !== 0) {
     fail(
-      `Vitest exited ${String(run.status)}\nstdout:\n${run.stdout ?? ''}\nstderr:\n${run.stderr ?? ''}`,
+      `Vitest exited ${String(run.status)}\nreport:\n${readFailedVitestReport(reportPath)}\nstdout:\n${boundedText(run.stdout)}\nstderr:\n${boundedText(run.stderr)}`,
     );
   }
   const totalDurationMs = Date.now() - startedAt;

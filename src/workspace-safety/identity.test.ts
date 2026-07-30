@@ -3,8 +3,10 @@ import type { OwnerRecord, ProcessIdentityKind } from './types.js';
 import {
   createIdentityProbe,
   hashPlatformIdentity,
+  POSIX_IDENTITY_COMMAND_TIMEOUT_MS,
   resolveWindowsIdentityPowerShellLaunch,
   resolveWindowsPowerShellPath,
+  WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
   type IdentityProbeAdapter,
 } from './identity.js';
 import { WorkspaceSafetyError } from './types.js';
@@ -48,6 +50,11 @@ function ownerFrom(
 }
 
 describe('platform identity probe', () => {
+  it('gives Windows cold-start probes a bounded CI budget without weakening POSIX bounds', () => {
+    expect(POSIX_IDENTITY_COMMAND_TIMEOUT_MS).toBe(5_000);
+    expect(WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS).toBe(30_000);
+  });
+
   it('resolves Windows PowerShell from the system directory without consulting PATH or cwd', () => {
     const launch = resolveWindowsIdentityPowerShellLaunch({
       SystemRoot: 'D:\\Windows',

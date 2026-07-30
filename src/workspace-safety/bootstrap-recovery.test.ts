@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from './workspace-authority-test-seam.js';
+import { readExactFile } from './filesystem.js';
 import { createIdentityProbe } from './identity.js';
 import {
   captureBootstrapRecoverySourceSnapshotDigest,
@@ -121,7 +122,7 @@ describe('bootstrap-complete recovery', () => {
   it('only revalidates an already complete marker and preserves its exact file identity', async () => {
     const workspace = await unfinishedBootstrap('marker');
     const markerPath = join(workspace, WORKSPACE_MARKER_FILE);
-    const beforeBytes = readFileSync(markerPath);
+    const beforeBytes = await readExactFile(markerPath);
     const before = statSync(markerPath, { bigint: true });
     const handle = await installFirstAttempt(workspace);
 
@@ -130,8 +131,9 @@ describe('bootstrap-complete recovery', () => {
       now: () => new Date('2026-07-30T00:20:00.000Z'),
     });
 
+    const afterBytes = await readExactFile(markerPath);
     const after = statSync(markerPath, { bigint: true });
-    expect(readFileSync(markerPath)).toEqual(beforeBytes);
+    expect(afterBytes).toEqual(beforeBytes);
     expect(after.ino).toBe(before.ino);
     expect(after.mtimeNs).toBe(before.mtimeNs);
     await expect(

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, win32 } from 'node:path';
 import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 const SOURCE_NAMES = ['WindowsJobSupervisor.cs', 'WindowsJobProcess.cs', 'WindowsJobAuthority.cs'];
 const OPERATION_ID = '12345678-1234-4234-8234-123456789abc';
@@ -211,9 +212,7 @@ async function main() {
   const authority = installPrepared(workspace, helperDigest, bound);
   const targetReady = join(workspace, 'target-ready.txt');
   const targetSawCtrl = join(workspace, 'target-saw-ctrl-c.txt');
-  const targetScript = `const fs=require('node:fs');process.on('SIGINT',()=>fs.writeFileSync(${JSON.stringify(
-    targetSawCtrl,
-  )},'saw-ctrl'));fs.writeFileSync(${JSON.stringify(targetReady)},'ready');setInterval(()=>{},1000)`;
+  const targetProgram = fileURLToPath(new URL('./windows-ctrl-c-target.mjs', import.meta.url));
   send(
     helper,
     'DATA',
@@ -223,7 +222,7 @@ async function main() {
       operationId: OPERATION_ID,
       target: {
         executable: realpathSync(process.execPath),
-        args: ['-e', targetScript],
+        args: [targetProgram, targetSawCtrl, targetReady],
         cwd: workspace,
         environment: [],
       },

@@ -29,25 +29,25 @@ function invalid(message: string): never {
 function stableHelperBytes(path: string): Buffer {
   let descriptor: number | undefined;
   try {
-    const before = lstatSync(path, { bigint: true });
-    if (
-      before.isSymbolicLink() ||
-      !before.isFile() ||
-      before.nlink !== 1n ||
-      before.size > 4n * 1024n * 1024n
-    ) {
+    const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+    descriptor = openSync(path, flags);
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size > 4n * 1024n * 1024n) {
       invalid('fixed POSIX helper must be an ordinary bounded single-link file');
     }
-    const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-    descriptor = openSync(path, constants.O_RDONLY | noFollow);
-    const opened = fstatSync(descriptor, { bigint: true });
+    const openedPath = lstatSync(path, { bigint: true });
     if (
-      !opened.isFile() ||
-      opened.nlink !== 1n ||
-      opened.dev !== before.dev ||
-      opened.ino !== before.ino
+      openedPath.isSymbolicLink() ||
+      !openedPath.isFile() ||
+      openedPath.nlink !== 1n ||
+      opened.dev !== openedPath.dev ||
+      opened.ino !== openedPath.ino ||
+      opened.nlink !== openedPath.nlink ||
+      opened.size !== openedPath.size ||
+      opened.mtimeNs !== openedPath.mtimeNs ||
+      opened.ctimeNs !== openedPath.ctimeNs
     ) {
-      invalid('fixed POSIX helper identity changed before read');
+      invalid('fixed POSIX helper identity changed after open');
     }
     const bytes = readFileSync(descriptor);
     const afterHandle = fstatSync(descriptor, { bigint: true });
@@ -67,6 +67,7 @@ function stableHelperBytes(path: string): Buffer {
       afterHandle.size !== afterPath.size ||
       afterHandle.mtimeNs !== afterPath.mtimeNs ||
       afterHandle.ctimeNs !== afterPath.ctimeNs ||
+      afterHandle.size > 4n * 1024n * 1024n ||
       BigInt(bytes.length) !== afterHandle.size
     ) {
       invalid('fixed POSIX helper changed during read');

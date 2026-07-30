@@ -497,7 +497,7 @@ async function proveInFlightOldHandleCannotBeFenced(
     );
     assert.equal(
       readFileSync(join(control, 'agent-count'), 'utf8'),
-      '2',
+      'invoked\ninvoked\n',
       'legacy verify unexpectedly fenced the already-running writer before its second iteration',
     );
     assert.equal(

@@ -183,6 +183,9 @@ interface CommandResult {
   error?: Error;
 }
 
+export const POSIX_IDENTITY_COMMAND_TIMEOUT_MS = 5_000;
+export const WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS = 30_000;
+
 export interface WindowsIdentityPowerShellLaunch {
   readonly command: string;
   readonly env: NodeJS.ProcessEnv;
@@ -202,17 +205,13 @@ function probePidExistence(pid: number): 'present' | 'missing' | 'unknown' {
 function runCommand(
   command: string,
   args: string[],
-  environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    LANG: 'C',
-    LC_ALL: 'C',
-    TZ: 'UTC',
-  },
+  environment: NodeJS.ProcessEnv,
+  timeoutMs: number,
 ): CommandResult {
   const result = spawnSync(command, args, {
     encoding: 'utf8',
     env: environment,
-    timeout: 5000,
+    timeout: timeoutMs,
     windowsHide: true,
   });
   return {
@@ -223,7 +222,12 @@ function runCommand(
 }
 
 function requireCommandText(command: string, args: string[], name: string): string {
-  const result = runCommand(command, args);
+  const result = runCommand(
+    command,
+    args,
+    { ...process.env, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+    POSIX_IDENTITY_COMMAND_TIMEOUT_MS,
+  );
   if (result.error || result.status !== 0) {
     throw new WorkspaceSafetyError('unsupported', `${name} is unavailable`);
   }
@@ -270,6 +274,7 @@ function runWindowsPowerShell(args: string[]): CommandResult {
     launch.command,
     ['-NoLogo', '-NoProfile', '-NonInteractive', ...args],
     launch.env,
+    WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
   );
 }
 
@@ -282,7 +287,12 @@ function requireWindowsPowerShellText(args: string[], name: string): string {
 }
 
 function readDarwinProcessIdentity(pid: number): ProcessIdentityLookup {
-  const result = runCommand('/bin/ps', ['-p', String(pid), '-o', 'lstart=']);
+  const result = runCommand(
+    '/bin/ps',
+    ['-p', String(pid), '-o', 'lstart='],
+    { ...process.env, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+    POSIX_IDENTITY_COMMAND_TIMEOUT_MS,
+  );
   if (result.status === 1) {
     const existence = probePidExistence(pid);
     return existence === 'missing' ? { status: 'missing' } : { status: 'unknown' };

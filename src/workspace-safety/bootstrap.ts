@@ -52,6 +52,10 @@ import {
 } from './windows-path-attributes.js';
 
 export interface BootstrapHooks {
+  readonly afterExistingPresenceRead?: (facts: {
+    readonly markerExists: boolean;
+    readonly protocolRootExists: boolean;
+  }) => void | Promise<void>;
   readonly beforeProtocolRootInstall?: (stagingPath: string) => void | Promise<void>;
   readonly afterProtocolRootInstalled?: () => void | Promise<void>;
   readonly beforeMarkerSourceUnlink?: () => void | Promise<void>;
@@ -119,12 +123,14 @@ async function assertBootstrapEligible(
 
 async function inspectExistingWorkspace(
   workspace: WorkspaceDirectory,
+  hooks: BootstrapHooks = {},
 ): Promise<BootstrapWorkspaceResult | undefined> {
   const workspacePath = workspace.path;
   const markerPath = join(workspacePath, WORKSPACE_MARKER_FILE);
   const protocolRoot = join(workspacePath, PROTOCOL_ROOT_DIR);
   const markerExists = await pathExists(markerPath);
   const protocolRootExists = await pathExists(protocolRoot);
+  await hooks.afterExistingPresenceRead?.({ markerExists, protocolRootExists });
 
   if (markerExists && protocolRootExists) {
     const records = await readReadyWorkspaceRecords(workspacePath);
@@ -149,7 +155,22 @@ async function inspectExistingWorkspace(
     }
     const protocolBytes = await readExactFile(join(protocolRoot, PROTOCOL_FILE));
     const protocol = parseJsonRecord(protocolBytes, parseProtocolRecord);
-    const ownerBytes = await readExactFile(join(protocolRoot, ACTIVE_LEASE_DIR, OWNER_FILE));
+    let ownerBytes: Buffer;
+    try {
+      ownerBytes = await readExactFile(join(protocolRoot, ACTIVE_LEASE_DIR, OWNER_FILE));
+    } catch (error) {
+      const cause =
+        error instanceof Error && 'cause' in error
+          ? (error as Error & { readonly cause?: unknown }).cause
+          : undefined;
+      if (errorCode(cause) === 'ENOENT' && (await isReadyAfterConcurrentBootstrap(workspace))) {
+        throw new WorkspaceSafetyError(
+          'conflict',
+          'workspace 已由并发 bootstrap 完成，当前初始化不能继续',
+        );
+      }
+      throw error;
+    }
     const owner = parseJsonRecord(ownerBytes, parseOwnerRecord);
     const incidentsInfo = await lstat(join(protocolRoot, INCIDENTS_DIR));
     if (
@@ -169,11 +190,30 @@ async function inspectExistingWorkspace(
   return undefined;
 }
 
-async function assertInitialBootstrapEligibility(workspace: WorkspaceDirectory): Promise<void> {
+async function isReadyAfterConcurrentBootstrap(workspace: WorkspaceDirectory): Promise<boolean> {
+  try {
+    if (
+      !(await pathExists(join(workspace.path, WORKSPACE_MARKER_FILE))) ||
+      !(await pathExists(join(workspace.path, PROTOCOL_ROOT_DIR)))
+    ) {
+      return false;
+    }
+    const records = await readReadyWorkspaceRecords(workspace);
+    await readActiveLeaseOwner(records);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function assertInitialBootstrapEligibility(
+  workspace: WorkspaceDirectory,
+  hooks: BootstrapHooks = {},
+): Promise<void> {
   try {
     await assertBootstrapEligible(workspace.path);
   } catch (error) {
-    const concurrent = await inspectExistingWorkspace(workspace);
+    const concurrent = await inspectExistingWorkspace(workspace, hooks);
     if (concurrent !== undefined) {
       throw new WorkspaceSafetyError(
         'conflict',
@@ -191,9 +231,9 @@ export async function bootstrapWorkspaceControlled(
   await options.verifySystemAuthority?.();
   const workspace = await canonicalizeWorkspaceDirectory(options.workspacePath, { create: true });
   assertWindowsWorkspaceTreeHasNoReparsePoints(workspace.path);
-  const existing = await inspectExistingWorkspace(workspace);
+  const existing = await inspectExistingWorkspace(workspace, options.hooks);
   if (existing !== undefined) return existing;
-  await assertInitialBootstrapEligibility(workspace);
+  await assertInitialBootstrapEligibility(workspace, options.hooks);
   await assertWorkspaceDirectoryUnchanged(workspace);
 
   const ownerId = options.ownerId ?? randomUUID();
@@ -235,7 +275,7 @@ export async function bootstrapWorkspaceControlled(
   await options.verifySystemAuthority?.();
   const protocolRoot = join(workspace.path, PROTOCOL_ROOT_DIR);
   if (!(await pathExists(protocolRoot))) {
-    await assertInitialBootstrapEligibility(workspace);
+    await assertInitialBootstrapEligibility(workspace, options.hooks);
   }
   assertWindowsWorkspaceTreeHasNoReparsePoints(workspace.path);
   await installDirectoryNoReplace(staging, protocolRoot);
