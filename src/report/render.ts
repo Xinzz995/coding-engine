@@ -293,11 +293,14 @@ function renderGateHistory(records: EvidenceRecord[]): string {
   const runs = gateRunsOf(records);
   if (runs.length === 0) return '';
   const rows = runs.map((r) => {
-    const failNote = r.ok ? '' : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
-    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
+    const result = r.artifactChanged ? '⚠️ 未接受' : r.ok ? '✅ 通过' : '❌ 未通过';
+    const artifactNote = r.artifactChanged ? '提交身份变化或不可读，结果未接受' : '';
+    const failure = r.ok ? '' : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
+    const note = [artifactNote, failure].filter(Boolean).join('；');
+    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${result}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${note}</td></tr>`;
   }).join('');
   return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
-    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>`;
 }
 
@@ -311,18 +314,21 @@ function renderTddHistory(records: EvidenceRecord[]): string {
     const command = !run.commandRan
       ? '未执行'
       : run.ok ? '覆盖命令通过' : '覆盖命令未通过';
+    const result = run.artifactChanged ? '⚠️ 未接受' : run.ok ? '✅ 通过' : '❌ 未通过';
+    const artifactNote = run.artifactChanged ? '提交身份变化或不可读，结果未接受' : '';
     const failure = run.ok
       ? ''
       : `${text(run.failureCode ?? '')} · ${text(run.failedCommand ?? '')}`
         + `${run.timedOut ? '（超时）' : run.exitCode !== undefined && run.exitCode !== null ? `（退出码 ${run.exitCode}）` : ''}`
         + renderDiagnostic('TDD 门禁输出尾部', run.diagnosticTail);
+    const note = [artifactNote, failure].filter(Boolean).join('；');
     return `<tr><td>${phase}</td><td>${text(run.storyId ?? '—')}</td>`
-      + `<td>${run.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${policy}</td><td>${command}</td>`
-      + `<td>${(run.ms / 1000).toFixed(1)}s</td><td>${stampOf(run.at)}</td><td>${failure}</td></tr>`;
+      + `<td>${result}</td><td>${policy}</td><td>${command}</td>`
+      + `<td>${(run.ms / 1000).toFixed(1)}s</td><td>${stampOf(run.at)}</td><td>${note}</td></tr>`;
   }).join('');
   return '<div class="meta-line">TDD 门禁执行历史（engine 记录）：</div>'
     + '<table class="evidence-table"><thead><tr><th>阶段</th><th>story</th><th>结果</th>'
-    + '<th>政策</th><th>覆盖命令</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead>'
+      + '<th>政策</th><th>覆盖命令</th><th>耗时</th><th>时刻</th><th>说明</th></tr></thead>'
     + `<tbody>${rows}</tbody></table>`;
 }
 

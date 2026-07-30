@@ -94,6 +94,8 @@ export interface LoopConfig {
     shadow: boolean;
     timeoutMs: number;
   }) => Promise<FinalReviewOutcome>;
+  /** 只供提交身份竞态测试：在 Validator request 读取 HEAD 的最后边界同步执行。 */
+  beforeValidatorRequestForTests?: () => void;
   /**
    * 仅供历史单测 fixture：允许旧 Validator 直接改 state。CLI 从不设置；生产默认
    * 必须提交结构化 validation result，禁止静默降级。
@@ -494,6 +496,59 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ...over,
         });
       };
+      const observeValidationHead = (
+        expectedGitHead: string | null,
+        context: string,
+        observedGitHead = readGitHead(agentCwd),
+      ): string | null => {
+        if (expectedGitHead && observedGitHead === expectedGitHead) return null;
+
+        if (before && observedGitHead) {
+          const state = tryReadState(statePath);
+          if (state) {
+            const reconciled = reconcileValidationReceipts(before, state, observedGitHead);
+            if (reconciled.invalidatedStoryIds.length > 0) {
+              writeFileAtomicSync(statePath, JSON.stringify(reconciled.state, null, 2));
+              console.warn(
+                `⚠️  ${context}检测到提交变化，旧 Validator 凭证已撤销：` +
+                reconciled.invalidatedStoryIds.join(', '),
+              );
+            }
+          }
+        }
+
+        const expected = expectedGitHead ?? 'unavailable';
+        const observed = observedGitHead ?? 'unavailable';
+        return `${context}Git HEAD 与本轮检查目标不一致（期望 ${expected}，当前 ${observed}）`;
+      };
+      const stopForValidationHeadChange = (
+        expectedGitHead: string | null,
+        context: string,
+        builderOutcome?: 'completed' | 'timeout' | 'error',
+        observedGitHead = readGitHead(agentCwd),
+      ): boolean => {
+        const diagnostic = observeValidationHead(expectedGitHead, context, observedGitHead);
+        if (!diagnostic) return false;
+        const validationRollback = !validationOnly
+          && rollbackPendingValidation('检查期间 Git HEAD 发生变化');
+        const recovery = validationOnly
+          ? '保留已有实现候选且不增加重试'
+          : '撤销本轮尚未验收的候选且不增加重试';
+        console.error(`\n⏸️  ${diagnostic}；${recovery}，本次运行停止且不启动 Validator`);
+        recordIteration({
+          ...(builderOutcome ? { builderOutcome } : {}),
+          validatorOutcome: 'skipped',
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed', diagnostic },
+          ...(validationRollback ? { validationRollback: true as const } : {}),
+        });
+        dashboard.setState({
+          phase: 'idle', model: null, routeSource: null, storyDifficulty: null,
+        });
+        exitCode = 1;
+        tamperCheckBeforeExit(i);
+        return true;
+      };
 
       dashboard.setState({
         iteration: i, phase: validationOnly ? 'gating' : 'developing', currentStory,
@@ -604,6 +659,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         continue;
       }
 
+      const verificationHead = currentGitHead;
+
       // 机械门禁：builder 之后、validator 之前确定性执行质量检查（fail-fast）。
       // 失败即机械打回并跳过本轮 validator——builder 谎报「检查通过」在此被零成本戳穿。
       // 第四检测点：builder 刚跑完、validator 未拉起——本轮 builder 的篡改必须在此恢复，
@@ -617,6 +674,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const agentBlocked = !!(currentStory && tryReadState(statePath)?.[currentStory]?.blocked);
       if (agentBlocked) {
         console.log(`⏭️  ${currentStory} 已被置 blocked（待人工处理），本轮跳过门禁与验收`);
+      }
+      if (!agentBlocked && currentStory
+          && stopForValidationHeadChange(verificationHead, '项目机械检查启动前', builderOutcome)) {
+        break;
       }
       const legacyChecks = cfg.legacyValidatorProtocolForTests
         && Array.isArray(gateRead.prd?.qualityChecks)
@@ -666,14 +727,20 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const gateDiagnostic = gate.failure
           ? clipEvidenceDiagnostic(gate.failure.outputTail).trim()
           : '';
+        const gateHeadAfter = readGitHead(agentCwd);
+        const gateArtifactChanged = !verificationHead || gateHeadAfter !== verificationHead;
         recordEvidence({
           type: 'gate-run', source: 'engine', at: new Date().toISOString(), iteration: i,
           storyId: currentStory, ok: gate.ok, total: gate.total, ran: gate.ran, ms: gate.ms,
+          ...(gateArtifactChanged ? { artifactChanged: true as const } : {}),
           ...(gate.failure ? {
             failedCommand: gate.failure.command, exitCode: gate.failure.exitCode, timedOut: gate.failure.timedOut,
             ...(gateDiagnostic ? { diagnosticTail: gateDiagnostic } : {}),
           } : {}),
         });
+        if (gateArtifactChanged && stopForValidationHeadChange(
+          verificationHead, '项目机械检查结束后', builderOutcome, gateHeadAfter,
+        )) break;
         if (!gate.ok) {
           const classification = validationOnly
             ? classifyValidationOnlyGateFailure(gate.failure!)
@@ -727,6 +794,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // TDD 最终门禁：普通检查之后、Validator 之前重新校验受保护政策面并运行
       // coverageCheck。它不消费或信任宿主 hook 的结果。
       if (!agentBlocked && tddConfig && currentStory) {
+        if (stopForValidationHeadChange(
+          verificationHead, 'TDD 门禁启动前', builderOutcome,
+        )) break;
         dashboard.setState({
           phase: 'gating', model: null, routeSource: null,
           storyDifficulty: currentStoryObj?.difficulty ?? null,
@@ -752,11 +822,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const diagnostic = tddGate.failure
           ? clipEvidenceDiagnostic(tddGate.failure.outputTail).trim()
           : '';
+        const tddHeadAfter = readGitHead(agentCwd);
+        const tddArtifactChanged = !verificationHead || tddHeadAfter !== verificationHead;
         recordEvidence({
           type: 'tdd-gate', source: 'engine', at: new Date().toISOString(),
           phase: 'post-builder', iteration: i, storyId: currentStory,
           ok: tddGate.ok, policyOk: tddGate.policyOk,
           commandRan: tddGate.commandRan, ms: tddGate.ms,
+          ...(tddArtifactChanged ? { artifactChanged: true as const } : {}),
           ...(tddGate.failure ? {
             failureCode: tddGate.failure.code,
             failedCommand: tddGate.failure.command,
@@ -765,6 +838,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             diagnosticTail: diagnostic || 'TDD 门禁失败',
           } : {}),
         });
+        if (tddArtifactChanged && stopForValidationHeadChange(
+          verificationHead, 'TDD 门禁结束后', builderOutcome, tddHeadAfter,
+        )) break;
         if (!tddGate.ok) {
           const classification = validationOnly
             ? classifyValidationOnlyTddFailure(tddGate.failure!)
@@ -817,6 +893,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
 
       // Validator
+      if (!agentBlocked && currentStory
+          && stopForValidationHeadChange(verificationHead, 'Validator 启动前', builderOutcome)) {
+        break;
+      }
       const validatorChoice = resolveValidatorModel({ cliOverride: cfg.validatorModel, config: preflight.config });
       const validatorModel = validatorChoice.model;
       const structuredValidation = !cfg.legacyValidatorProtocolForTests;
@@ -867,13 +947,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         let canStartValidator = true;
 
         if (currentStoryObj) {
+          cfg.beforeValidatorRequestForTests?.();
           const validatorHead = readGitHead(agentCwd);
-          if (!validatorHead) {
+          const headDiagnostic = observeValidationHead(
+            verificationHead, 'Validator 请求建立前', validatorHead,
+          );
+          if (headDiagnostic) {
             canStartValidator = false;
             validatorOutcome = 'skipped';
             rejectProtocol(
               'artifact-changed',
-              'Validator 启动前无法读取当前 Git HEAD',
+              headDiagnostic,
             );
           } else {
             validationRequest = createValidationRequest(
@@ -921,8 +1005,21 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             }
             console.warn(`⚠️  ${currentStory} Validator 修改了 state.json，已恢复调用前快照并拒绝本轮结论`);
           }
+          const validatorHeadAfter = readGitHead(agentCwd);
+          const validatorHeadDiagnostic = observeValidationHead(
+            verificationHead, 'Validator 返回后', validatorHeadAfter,
+          );
 
-          if (!structuredValidation) {
+          if (validatorHeadDiagnostic) {
+            if (structuredValidation && validationRequest) {
+              try {
+                clearValidationResult(validationRequest.resultPath);
+              } catch (err) {
+                console.warn(`⚠️  validation result 清理失败，下轮会再次拒绝旧文件：${err instanceof Error ? err.message : String(err)}`);
+              }
+            }
+            rejectProtocol('artifact-changed', validatorHeadDiagnostic);
+          } else if (!structuredValidation) {
             // 历史单测专用兼容路径：生产 CLI 永不进入。旧 Validator 直接写 state，
             // 仍按 v0.25 receipt 语义恢复引擎字段并判定。
             if (validatorOutcome !== 'completed') {
@@ -957,7 +1054,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             const protocol = readValidationResult(
               validationRequest.resultPath,
               validationRequest,
-              readGitHead(agentCwd),
+              validatorHeadAfter,
             );
             try {
               clearValidationResult(validationRequest.resultPath);
@@ -1032,7 +1129,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Validator 运行或协议不可验证时保留候选、不增加 retry，并立即非绿结束。
       if (!validationReceipt && !validatorRollback) {
         const current = currentStory ? tryReadState(statePath)?.[currentStory] : undefined;
-        if (validationOnly && !agentBlocked && current?.passes !== false) {
+        if (validationProtocolError?.code === 'artifact-changed') {
+          if (!validationOnly) {
+            validationRollback = rollbackPendingValidation('检查期间 Git HEAD 发生变化');
+          }
+          validationUnverifiable = true;
+        } else if (validationOnly && !agentBlocked && current?.passes !== false) {
           validationUnverifiable = true;
         } else if (!validationOnly) {
           validationRollback = rollbackPendingValidation(

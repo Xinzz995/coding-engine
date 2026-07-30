@@ -368,13 +368,23 @@ describe('renderReportHtml evidence 增强', () => {
     const html = renderReportHtml(data(ev([
       { type: 'gate-run', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', ok: true, total: 2, ran: 2, ms: 8000 },
       { type: 'gate-run', source: 'engine', at: '2026-07-08T06:10:00.000Z', iteration: 2, storyId: 'US-001', ok: false, total: 2, ran: 1, ms: 500, failedCommand: 'npm test', exitCode: 7, timedOut: false, diagnosticTail: 'FAIL test_x\n<b>expected 1</b>' },
+      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:20:00.000Z', iteration: 3, storyId: 'US-001', ok: true, artifactChanged: true, total: 2, ran: 2, ms: 900 },
+      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:30:00.000Z', iteration: 4, storyId: 'US-001', ok: false, artifactChanged: true, total: 2, ran: 1, ms: 700, failedCommand: 'npm run lint', exitCode: 9, timedOut: false, diagnosticTail: 'lint failed before HEAD check' },
     ])));
     expect(html).toContain('门禁执行历史');
     expect(html).toContain('✅ 通过');
     expect(html).toContain('❌ 未通过');
+    expect(html).toContain('⚠️ 未接受');
+    expect(html).toContain('<td>3</td><td>US-001</td><td>⚠️ 未接受</td>');
+    expect(html).not.toContain('<td>3</td><td>US-001</td><td>✅ 通过</td>');
+    expect(html).toContain('<td>4</td><td>US-001</td><td>⚠️ 未接受</td>');
+    expect(html).not.toContain('<td>4</td><td>US-001</td><td>❌ 未通过</td>');
+    expect(html).toContain('提交身份变化或不可读，结果未接受');
     expect(html).toContain('2/2');
     expect(html).toContain('1/2');
     expect(html).toContain('npm test');
+    expect(html).toContain('npm run lint（退出码 9）');
+    expect(html).toContain('lint failed before HEAD check');
     expect(html).toContain('退出码 7');
     expect(html).toContain('门禁输出尾部');
     expect(html).toContain('FAIL test_x');
@@ -397,6 +407,18 @@ describe('renderReportHtml evidence 增强', () => {
         failureCode: 'coverage-check-failed', failedCommand: 'npm run coverage',
         exitCode: 7, timedOut: false, diagnosticTail: 'branch 80% < 90%',
       },
+      {
+        type: 'tdd-gate', source: 'engine', at: '2026-07-23T06:20:00.000Z',
+        phase: 'post-builder', iteration: 2, storyId: 'US-001',
+        ok: true, policyOk: true, commandRan: true, ms: 400, artifactChanged: true,
+      },
+      {
+        type: 'tdd-gate', source: 'engine', at: '2026-07-23T06:30:00.000Z',
+        phase: 'post-builder', iteration: 3, storyId: 'US-001',
+        ok: false, policyOk: true, commandRan: true, ms: 450, artifactChanged: true,
+        failureCode: 'coverage-check-failed', failedCommand: 'npm run coverage:changed',
+        exitCode: 8, timedOut: false, diagnosticTail: 'coverage failed before HEAD check',
+      },
     ]));
     input.prd.tdd = {
       coverageCheck: 'npm run coverage',
@@ -412,6 +434,14 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('启动预检');
     expect(html).toContain('政策通过');
     expect(html).toContain('覆盖命令未通过');
+    expect(html).toContain('⚠️ 未接受');
+    expect(html).toContain('<td>第 2 轮</td><td>US-001</td><td>⚠️ 未接受</td>');
+    expect(html).not.toContain('<td>第 2 轮</td><td>US-001</td><td>✅ 通过</td>');
+    expect(html).toContain('<td>第 3 轮</td><td>US-001</td><td>⚠️ 未接受</td>');
+    expect(html).not.toContain('<td>第 3 轮</td><td>US-001</td><td>❌ 未通过</td>');
+    expect(html).toContain('提交身份变化或不可读，结果未接受');
+    expect(html).toContain('npm run coverage:changed（退出码 8）');
+    expect(html).toContain('coverage failed before HEAD check');
     expect(html).toContain('branch 80% &lt; 90%');
   });
 
