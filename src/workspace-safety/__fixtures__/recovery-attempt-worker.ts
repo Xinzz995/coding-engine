@@ -1,8 +1,18 @@
 import { existsSync } from 'node:fs';
-import { createIdentityProbe } from '../identity.js';
 import { acquireRecoveryAttemptWithAuthority as acquireRecoveryAttempt } from '../recovery-authority-test-seam.js';
+import type { ProcessIdentitySnapshot } from '../types.js';
 
 const [workspacePath, attemptId, barrierPath] = process.argv.slice(2);
+
+function workerIdentity(): ProcessIdentitySnapshot {
+  return {
+    pid: process.pid,
+    processIdentity: { kind: 'linux-boot-start', value: String(100_000 + process.pid) },
+    bootIdentity: `sha256:${'a'.repeat(64)}`,
+    hostId: `sha256:${'b'.repeat(64)}`,
+  };
+}
+
 if (!workspacePath || !attemptId || !barrierPath || typeof process.send !== 'function') {
   process.exitCode = 2;
 } else {
@@ -14,7 +24,9 @@ if (!workspacePath || !attemptId || !barrierPath || typeof process.send !== 'fun
     await acquireRecoveryAttempt({
       workspacePath,
       attemptId,
-      identity: createIdentityProbe().current(),
+      identity: workerIdentity(),
+      probeSourceOwner: () => 'dead',
+      probeAttemptOwner: (owner) => (owner.pid === 2_000_000_001 ? 'dead' : 'alive'),
     });
     const stopped = new Promise<void>((resolve) => {
       process.once('message', (message) => {

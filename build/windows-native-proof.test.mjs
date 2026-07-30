@@ -1,9 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  combineWindowsNativeVitestReports,
   REQUIRED_WINDOWS_NATIVE_SUITES,
   summarizeFailedWindowsNativeVitestReport,
+  verifyWindowsNativeSuiteReport,
   verifyWindowsNativeVitestReport,
+  WINDOWS_NATIVE_TOTAL_TIMEOUT_MS,
 } from './windows-native-proof.mjs';
 
 function report(overrides = {}) {
@@ -48,6 +51,39 @@ describe('Windows native proof report', () => {
     });
   });
 
+  it('combines separately executed suites without losing fail or skip counters', () => {
+    const separate = REQUIRED_WINDOWS_NATIVE_SUITES.map((name) => {
+      const value = report();
+      value.numPassedTests = 1;
+      value.testResults = value.testResults.filter((entry) => entry.name.endsWith(name));
+      return value;
+    });
+
+    expect(verifyWindowsNativeVitestReport(combineWindowsNativeVitestReports(separate))).toEqual({
+      passedTests: REQUIRED_WINDOWS_NATIVE_SUITES.length,
+      suites: REQUIRED_WINDOWS_NATIVE_SUITES.map((name) => ({
+        name,
+        passedTests: 1,
+        durationMs: 25,
+      })),
+    });
+
+    const malformed = separate.map((value) => structuredClone(value));
+    malformed[0].numFailedTestSuites = null;
+    expect(() => combineWindowsNativeVitestReports(malformed)).toThrow(/non-negative integer/u);
+
+    const failed = separate.map((value) => structuredClone(value));
+    failed[0].success = false;
+    failed[0].numFailedTests = 1;
+    expect(() =>
+      verifyWindowsNativeVitestReport(combineWindowsNativeVitestReports(failed)),
+    ).toThrow(/did not report success/u);
+
+    expect(() => combineWindowsNativeVitestReports(separate.slice(1))).toThrow(
+      /expected 5 reports/u,
+    );
+  });
+
   it('rejects an all-skip, missing, or partly skipped report', () => {
     expect(() =>
       verifyWindowsNativeVitestReport(
@@ -60,7 +96,7 @@ describe('Windows native proof report', () => {
 
     const missing = report();
     missing.testResults.pop();
-    expect(() => verifyWindowsNativeVitestReport(missing)).toThrow(/did not run/u);
+    expect(() => verifyWindowsNativeVitestReport(missing)).toThrow(/suite results/u);
 
     const skipped = report();
     skipped.testResults[0].assertionResults[0].status = 'skipped';
@@ -70,9 +106,39 @@ describe('Windows native proof report', () => {
     delete missingDuration.testResults[0].endTime;
     expect(() => verifyWindowsNativeVitestReport(missingDuration)).toThrow(/duration/u);
 
+    const coercedDuration = report();
+    coercedDuration.testResults[0].startTime = null;
+    coercedDuration.testResults[0].endTime = null;
+    expect(() => verifyWindowsNativeVitestReport(coercedDuration)).toThrow(/duration/u);
+
     const negativeDuration = report();
     negativeDuration.testResults[0].endTime = 99;
     expect(() => verifyWindowsNativeVitestReport(negativeDuration)).toThrow(/duration/u);
+  });
+
+  it('validates each separately executed suite before aggregation', () => {
+    const single = report();
+    single.numPassedTests = 1;
+    single.testResults = [single.testResults[0]];
+    expect(verifyWindowsNativeSuiteReport(single, REQUIRED_WINDOWS_NATIVE_SUITES[0])).toEqual({
+      passedTests: 1,
+      suites: [
+        {
+          name: REQUIRED_WINDOWS_NATIVE_SUITES[0],
+          passedTests: 1,
+          durationMs: 25,
+        },
+      ],
+    });
+
+    single.testResults[0].assertionResults[0].status = 'skipped';
+    expect(() => verifyWindowsNativeSuiteReport(single, REQUIRED_WINDOWS_NATIVE_SUITES[0])).toThrow(
+      /skipped or failed/u,
+    );
+
+    const mismatched = report();
+    mismatched.numPassedTests += 1;
+    expect(() => verifyWindowsNativeVitestReport(mismatched)).toThrow(/assertion count/u);
   });
 
   it('prints bounded failing test details when the hosted native proof fails', () => {
@@ -99,10 +165,17 @@ describe('Windows native proof report', () => {
 
   it('runs through a disposable standard account and fails outside Server 2022 CI', () => {
     const script = readFileSync('build/run-windows-native-proof.ps1', 'utf8');
+    const workflow = readFileSync('.github/workflows/quality-gate.yml', 'utf8');
+    const nativeJob = workflow.slice(
+      workflow.indexOf('  checks_windows-native-standard-user:'),
+      workflow.indexOf('\n  quality-gate:'),
+    );
     expect(script).toContain("$env:ImageOS -ne 'win22'");
     expect(script).toContain('-Credential $credential');
     expect(script).toContain('Remove-LocalUser -Name $userName');
     expect(script).not.toContain('runas.exe');
+    expect(nativeJob).toContain('timeout-minutes: 20');
+    expect(WINDOWS_NATIVE_TOTAL_TIMEOUT_MS).toBeLessThan(20 * 60_000);
   });
 
   it('forces an isolated native config that resolves only the production transport', () => {
@@ -110,6 +183,10 @@ describe('Windows native proof report', () => {
     const nativeConfig = readFileSync('build/vitest.windows-native.config.mjs', 'utf8');
     expect(runner).toContain("join(projectRoot, 'build', 'vitest.windows-native.config.mjs')");
     expect(runner).toContain("'--config'");
+    expect(runner).toContain("'--reporter=verbose'");
+    expect(runner).toContain('WINDOWS_NATIVE_SUITE_TIMEOUT_MS');
+    expect(runner).toContain('WINDOWS_NATIVE_TOTAL_TIMEOUT_MS');
+    expect(runner).toContain('last stdout');
     expect(nativeConfig).toContain('windows-path-attributes-transport.ts');
     expect(nativeConfig).not.toMatch(/setupFiles|test-transport|process\.env/u);
   });

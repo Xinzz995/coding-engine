@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { OwnerRecord, ProcessIdentityKind } from './types.js';
 import {
   createIdentityProbe,
   hashPlatformIdentity,
+  parseWindowsIdentitySnapshotOutput,
   POSIX_IDENTITY_COMMAND_TIMEOUT_MS,
   resolveWindowsIdentityPowerShellLaunch,
   resolveWindowsPowerShellPath,
@@ -83,6 +84,19 @@ describe('platform identity probe', () => {
     ).toThrow(/ambiguous/i);
   });
 
+  it('rejects a type-confused Windows identity snapshot instead of treating it as missing', () => {
+    expect(() =>
+      parseWindowsIdentitySnapshotOutput(
+        JSON.stringify({
+          hostIdentity: 'host-a',
+          bootIdentity: '2026-07-30T00:00:00.000Z',
+          processStatus: ['missing'],
+          processValue: null,
+        }),
+      ),
+    ).toThrow(/malformed/i);
+  });
+
   it('returns alive only for an exact Linux/Windows identity match', () => {
     for (const platform of ['linux', 'win32'] as const) {
       const source = adapter(platform);
@@ -160,6 +174,86 @@ describe('platform identity probe', () => {
     });
     expect(JSON.stringify(snapshot)).not.toContain('host-a');
     expect(JSON.stringify(snapshot)).not.toContain('boot-a');
+  });
+
+  it('uses one combined platform snapshot for current and owner revalidation when available', () => {
+    const readIdentitySnapshot = vi.fn(() => ({
+      processIdentity: { status: 'found' as const, value: 'start-a' },
+      bootIdentity: 'boot-a',
+      hostIdentity: 'host-a',
+    }));
+    const source: IdentityProbeAdapter = {
+      ...adapter('win32'),
+      readHostIdentity: () => {
+        throw new Error('legacy host read must not run');
+      },
+      readBootIdentity: () => {
+        throw new Error('legacy boot read must not run');
+      },
+      readProcessIdentity: () => {
+        throw new Error('legacy process read must not run');
+      },
+      readIdentitySnapshot,
+    };
+    const probe = createIdentityProbe(source);
+
+    expect(probe.current()).toMatchObject({ pid: 100, processIdentity: { value: 'start-a' } });
+    expect(probe.probe(ownerFrom(source))).toBe('alive');
+    expect(readIdentitySnapshot).toHaveBeenNthCalledWith(1, 100);
+    expect(readIdentitySnapshot).toHaveBeenNthCalledWith(2, 100);
+  });
+
+  it('re-reads the combined snapshot instead of caching identity across verification boundaries', () => {
+    const readIdentitySnapshot = vi
+      .fn()
+      .mockReturnValueOnce({
+        processIdentity: { status: 'found' as const, value: 'start-a' },
+        bootIdentity: 'boot-a',
+        hostIdentity: 'host-a',
+      })
+      .mockReturnValueOnce({
+        processIdentity: { status: 'found' as const, value: 'start-b' },
+        bootIdentity: 'boot-a',
+        hostIdentity: 'host-a',
+      });
+    const source: IdentityProbeAdapter = { ...adapter('win32'), readIdentitySnapshot };
+    const probe = createIdentityProbe(source);
+    const first = probe.current();
+
+    expect(
+      probe.probe({
+        schemaVersion: 2,
+        ownerId: '123e4567-e89b-42d3-a456-426614174000',
+        ...first,
+        workspaceIdentity: digest,
+        startedAt: '2026-07-30T00:00:00.000Z',
+        command: 'run',
+      }),
+    ).toBe('dead');
+    expect(readIdentitySnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed and never falls back when the combined snapshot transport fails', () => {
+    const readHostIdentity = vi.fn(() => 'host-a');
+    const readBootIdentity = vi.fn(() => 'boot-a');
+    const readProcessIdentity = vi.fn(() => ({ status: 'found' as const, value: 'start-a' }));
+    const source: IdentityProbeAdapter = {
+      platform: 'win32',
+      pid: 100,
+      readHostIdentity,
+      readBootIdentity,
+      readProcessIdentity,
+      readIdentitySnapshot: () => {
+        throw new Error('combined transport unavailable');
+      },
+    };
+    const probe = createIdentityProbe(source);
+
+    expect(() => probe.current()).toThrow(/platform identity sources are unavailable/i);
+    expect(probe.probe(ownerFrom(source))).toBe('unknown');
+    expect(readHostIdentity).not.toHaveBeenCalled();
+    expect(readBootIdentity).not.toHaveBeenCalled();
+    expect(readProcessIdentity).not.toHaveBeenCalled();
   });
 
   it('freezes the raw platform identity length boundary', () => {

@@ -24,6 +24,11 @@ export interface IdentityProbeAdapter {
   readHostIdentity(): string;
   readBootIdentity(): string;
   readProcessIdentity(pid: number): ProcessIdentityLookup;
+  readIdentitySnapshot?(pid: number): {
+    readonly hostIdentity: string;
+    readonly bootIdentity: string;
+    readonly processIdentity: ProcessIdentityLookup;
+  };
 }
 
 const KIND_BY_PLATFORM: Record<SupportedIdentityPlatform, ProcessIdentityKind> = {
@@ -53,8 +58,22 @@ export function hashPlatformIdentity(domain: 'host' | 'boot', value: string): st
     .digest('hex')}`;
 }
 
+function readIdentitySnapshot(
+  adapter: IdentityProbeAdapter,
+  pid: number,
+):
+  | {
+      readonly hostIdentity: string;
+      readonly bootIdentity: string;
+      readonly processIdentity: ProcessIdentityLookup;
+    }
+  | undefined {
+  return adapter.readIdentitySnapshot?.(pid);
+}
+
 function currentSnapshot(adapter: IdentityProbeAdapter): ProcessIdentitySnapshot {
-  const processIdentity = adapter.readProcessIdentity(adapter.pid);
+  const observed = readIdentitySnapshot(adapter, adapter.pid);
+  const processIdentity = observed?.processIdentity ?? adapter.readProcessIdentity(adapter.pid);
   if (processIdentity.status !== 'found') {
     throw new WorkspaceSafetyError('unsupported', 'Current process identity is unavailable');
   }
@@ -64,8 +83,11 @@ function currentSnapshot(adapter: IdentityProbeAdapter): ProcessIdentitySnapshot
       kind: KIND_BY_PLATFORM[adapter.platform],
       value: boundedRawIdentity(processIdentity.value, 'process identity'),
     },
-    bootIdentity: hashPlatformIdentity('boot', adapter.readBootIdentity()),
-    hostId: hashPlatformIdentity('host', adapter.readHostIdentity()),
+    bootIdentity: hashPlatformIdentity(
+      'boot',
+      observed?.bootIdentity ?? adapter.readBootIdentity(),
+    ),
+    hostId: hashPlatformIdentity('host', observed?.hostIdentity ?? adapter.readHostIdentity()),
   };
 }
 
@@ -74,16 +96,23 @@ function probeRecord(adapter: IdentityProbeAdapter, record: OwnerRecord): Identi
     const expectedKind = KIND_BY_PLATFORM[adapter.platform];
     if (record.processIdentity.kind !== expectedKind) return 'unknown';
 
-    const hostId = hashPlatformIdentity('host', adapter.readHostIdentity());
+    const observed = readIdentitySnapshot(adapter, record.pid);
+    const hostId = hashPlatformIdentity(
+      'host',
+      observed?.hostIdentity ?? adapter.readHostIdentity(),
+    );
     if (hostId !== record.hostId) return 'unknown';
 
-    const bootIdentity = hashPlatformIdentity('boot', adapter.readBootIdentity());
+    const bootIdentity = hashPlatformIdentity(
+      'boot',
+      observed?.bootIdentity ?? adapter.readBootIdentity(),
+    );
     if (bootIdentity !== record.bootIdentity) return 'dead';
 
-    const observed = adapter.readProcessIdentity(record.pid);
-    if (observed.status === 'missing') return 'dead';
-    if (observed.status === 'unknown') return 'unknown';
-    const observedValue = boundedRawIdentity(observed.value, 'process identity');
+    const processIdentity = observed?.processIdentity ?? adapter.readProcessIdentity(record.pid);
+    if (processIdentity.status === 'missing') return 'dead';
+    if (processIdentity.status === 'unknown') return 'unknown';
+    const observedValue = boundedRawIdentity(processIdentity.value, 'process identity');
     if (observedValue !== record.processIdentity.value) return 'dead';
 
     // The first macOS implementation can only persist second-resolution start time.
@@ -319,19 +348,105 @@ function readWindowsProcessIdentity(pid: number): ProcessIdentityLookup {
 }
 
 function readWindowsBootIdentity(): string {
-  const value = requireWindowsPowerShellText(
-    [
-      '-Command',
-      '[Console]::Out.Write((Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O"))',
-    ],
-    'Windows boot identity',
+  return validateWindowsBootIdentity(
+    requireWindowsPowerShellText(
+      [
+        '-Command',
+        '[Console]::Out.Write((Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O"))',
+      ],
+      'Windows boot identity',
+    ),
   );
+}
+
+function validateWindowsBootIdentity(value: string): string {
   const bootTime = Date.parse(value);
   const uptimeDerived = Date.now() - uptime() * 1000;
   if (!Number.isFinite(bootTime) || Math.abs(bootTime - uptimeDerived) > 120_000) {
     throw new WorkspaceSafetyError('unsupported', 'Windows boot identity sources disagree');
   }
   return value;
+}
+
+export const WINDOWS_IDENTITY_SNAPSHOT_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  '$targetProcessId = 0',
+  '$rawProcessId = [Environment]::GetEnvironmentVariable("CODING_X_WINDOWS_IDENTITY_PID", "Process")',
+  'if (-not [int]::TryParse($rawProcessId, [ref]$targetProcessId) -or $targetProcessId -le 0) { exit 6 }',
+  '$processStatus = "missing"',
+  '$processValue = $null',
+  '$target = Get-Process -Id $targetProcessId -ErrorAction SilentlyContinue',
+  'if ($null -ne $target) {',
+  '  try {',
+  '    $processValue = $target.StartTime.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture)',
+  '    $processStatus = "found"',
+  '  } catch { $processStatus = "unknown" }',
+  '}',
+  '$bootIdentity = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O")',
+  '$hostIdentity = [string](Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Cryptography").MachineGuid',
+  '[Console]::Out.Write((@{ processStatus = $processStatus; processValue = $processValue; bootIdentity = $bootIdentity; hostIdentity = $hostIdentity } | ConvertTo-Json -Compress))',
+].join('\n');
+
+export function parseWindowsIdentitySnapshotOutput(output: string): {
+  readonly hostIdentity: string;
+  readonly bootIdentity: string;
+  readonly processStatus: 'found' | 'missing' | 'unknown';
+  readonly processValue: string | null;
+} {
+  let value: unknown;
+  try {
+    value = JSON.parse(output);
+  } catch {
+    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is malformed');
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is malformed');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.hostIdentity !== 'string' ||
+    typeof record.bootIdentity !== 'string' ||
+    typeof record.processStatus !== 'string' ||
+    !['found', 'missing', 'unknown'].includes(record.processStatus) ||
+    (record.processStatus === 'found' &&
+      (typeof record.processValue !== 'string' || !/^\d+$/u.test(record.processValue))) ||
+    (record.processStatus !== 'found' && record.processValue !== null)
+  ) {
+    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is malformed');
+  }
+  return record as ReturnType<typeof parseWindowsIdentitySnapshotOutput>;
+}
+
+function readWindowsIdentitySnapshot(pid: number): {
+  readonly hostIdentity: string;
+  readonly bootIdentity: string;
+  readonly processIdentity: ProcessIdentityLookup;
+} {
+  const launch = resolveWindowsIdentityPowerShellLaunch();
+  const result = runCommand(
+    launch.command,
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_IDENTITY_SNAPSHOT_SCRIPT],
+    { ...launch.env, CODING_X_WINDOWS_IDENTITY_PID: String(pid) },
+    WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
+  );
+  if (result.error || result.status !== 0) {
+    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is unavailable');
+  }
+  const record = parseWindowsIdentitySnapshotOutput(result.stdout);
+  let processIdentity: ProcessIdentityLookup;
+  if (record.processStatus === 'found') {
+    processIdentity = { status: 'found', value: record.processValue! };
+  } else if (record.processStatus === 'unknown') {
+    processIdentity = { status: 'unknown' };
+  } else {
+    const existence = probePidExistence(pid);
+    processIdentity = existence === 'missing' ? { status: 'missing' } : { status: 'unknown' };
+  }
+  return {
+    processIdentity,
+    bootIdentity: validateWindowsBootIdentity(record.bootIdentity),
+    hostIdentity: record.hostIdentity,
+  };
 }
 
 export function createSystemIdentityAdapter(): IdentityProbeAdapter {
@@ -383,6 +498,7 @@ export function createSystemIdentityAdapter(): IdentityProbeAdapter {
         ),
       readBootIdentity: readWindowsBootIdentity,
       readProcessIdentity: readWindowsProcessIdentity,
+      readIdentitySnapshot: readWindowsIdentitySnapshot,
     };
   }
   throw new WorkspaceSafetyError(

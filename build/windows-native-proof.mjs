@@ -11,14 +11,35 @@ export const REQUIRED_WINDOWS_NATIVE_SUITES = [
   'delegated-recovery.windows-crash.test.ts',
   'windows-reparse-point.windows.test.ts',
 ];
+export const WINDOWS_NATIVE_SUITE_TIMEOUT_MS = 6 * 60_000;
+export const WINDOWS_NATIVE_TOTAL_TIMEOUT_MS = 16 * 60_000;
+const REPORT_COUNTER_FIELDS = [
+  'numFailedTestSuites',
+  'numFailedTests',
+  'numPendingTestSuites',
+  'numPendingTests',
+  'numTodoTests',
+  'numPassedTests',
+];
 
 function fail(message) {
   throw new Error(`Windows native proof failed: ${message}`);
 }
 
-export function verifyWindowsNativeVitestReport(value) {
+function requireReport(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('report is not an object');
-  if (value.success !== true) fail('Vitest did not report success');
+  for (const key of REPORT_COUNTER_FIELDS) {
+    if (!Number.isInteger(value[key]) || value[key] < 0) {
+      fail(`${key} must be a non-negative integer, received ${String(value[key])}`);
+    }
+  }
+  if (!Array.isArray(value.testResults)) fail('testResults is missing');
+  return value;
+}
+
+function verifyWindowsNativeReport(value, expectedSuites) {
+  const report = requireReport(value);
+  if (report.success !== true) fail('Vitest did not report success');
   for (const key of [
     'numFailedTestSuites',
     'numFailedTests',
@@ -26,18 +47,24 @@ export function verifyWindowsNativeVitestReport(value) {
     'numPendingTests',
     'numTodoTests',
   ]) {
-    if (value[key] !== 0) fail(`${key} must be zero, received ${String(value[key])}`);
+    if (report[key] !== 0) fail(`${key} must be zero, received ${String(report[key])}`);
   }
-  if (!Number.isInteger(value.numPassedTests) || value.numPassedTests <= 0) {
+  if (report.numPassedTests <= 0) {
     fail('no native test actually passed');
   }
-  if (!Array.isArray(value.testResults)) fail('testResults is missing');
+  if (report.testResults.length !== expectedSuites.length) {
+    fail(
+      `expected ${String(expectedSuites.length)} suite results, received ${String(report.testResults.length)}`,
+    );
+  }
 
   const byName = new Map(
-    value.testResults.map((result) => [basename(String(result.name)), result]),
+    report.testResults.map((result) => [basename(String(result.name)), result]),
   );
+  if (byName.size !== report.testResults.length) fail('duplicate native suite result');
   const suites = [];
-  for (const name of REQUIRED_WINDOWS_NATIVE_SUITES) {
+  let passedAssertions = 0;
+  for (const name of expectedSuites) {
     const result = byName.get(name);
     if (!result) fail(`required suite did not run: ${name}`);
     if (result.status !== 'passed') fail(`required suite was not green: ${name}`);
@@ -48,18 +75,43 @@ export function verifyWindowsNativeVitestReport(value) {
     if (nonPassed.length > 0) {
       fail(`required suite contains skipped or failed tests: ${name}`);
     }
-    const durationMs = Number(result.endTime) - Number(result.startTime);
-    if (!Number.isFinite(durationMs) || durationMs < 0) {
+    if (
+      typeof result.startTime !== 'number' ||
+      !Number.isFinite(result.startTime) ||
+      typeof result.endTime !== 'number' ||
+      !Number.isFinite(result.endTime) ||
+      result.endTime < result.startTime
+    ) {
       fail(`required suite has no finite non-negative duration: ${name}`);
     }
+    const durationMs = result.endTime - result.startTime;
+    passedAssertions += result.assertionResults.length;
     suites.push({ name, passedTests: result.assertionResults.length, durationMs });
   }
-  return { passedTests: value.numPassedTests, suites };
+  if (passedAssertions !== report.numPassedTests) {
+    fail(
+      `passed assertion count ${String(passedAssertions)} does not match numPassedTests ${String(report.numPassedTests)}`,
+    );
+  }
+  return { passedTests: report.numPassedTests, suites };
+}
+
+export function verifyWindowsNativeVitestReport(value) {
+  return verifyWindowsNativeReport(value, REQUIRED_WINDOWS_NATIVE_SUITES);
+}
+
+export function verifyWindowsNativeSuiteReport(value, name) {
+  return verifyWindowsNativeReport(value, [name]);
 }
 
 function boundedText(value, maximum = 4_000) {
   const text = String(value ?? '');
   return text.length <= maximum ? text : `${text.slice(0, maximum)}\n[truncated]`;
+}
+
+function boundedTailText(value, maximum = 4_000) {
+  const output = String(value ?? '');
+  return output.length <= maximum ? output : `[truncated]\n${output.slice(-maximum)}`;
 }
 
 export function summarizeFailedWindowsNativeVitestReport(value) {
@@ -114,6 +166,23 @@ function readFailedVitestReport(reportPath) {
   }
 }
 
+export function combineWindowsNativeVitestReports(reports) {
+  if (reports.length !== REQUIRED_WINDOWS_NATIVE_SUITES.length) {
+    fail(
+      `expected ${String(REQUIRED_WINDOWS_NATIVE_SUITES.length)} reports, received ${String(reports.length)}`,
+    );
+  }
+  const checked = reports.map(requireReport);
+  const combined = {
+    success: checked.every((report) => report.success === true),
+    testResults: checked.flatMap((report) => report.testResults),
+  };
+  for (const field of REPORT_COUNTER_FIELDS) {
+    combined[field] = checked.reduce((total, report) => total + report[field], 0);
+  }
+  return combined;
+}
+
 function parseArgs(argv) {
   const parsed = { expectedUser: undefined, result: undefined };
   for (let index = 0; index < argv.length; index += 1) {
@@ -159,41 +228,62 @@ function main() {
   const identity = assertStandardUser(options.expectedUser);
   const projectRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
   const vitest = join(projectRoot, 'node_modules', 'vitest', 'vitest.mjs');
-  const reportPath = `${options.result}.vitest.json`;
-  const testPaths = REQUIRED_WINDOWS_NATIVE_SUITES.map((name) =>
-    join(projectRoot, 'src', 'workspace-safety', name),
-  );
   const startedAt = Date.now();
-  const run = spawnSync(
-    process.execPath,
-    [
-      vitest,
-      'run',
-      ...testPaths,
-      '--reporter=json',
-      `--outputFile=${reportPath}`,
-      '--no-file-parallelism',
-      '--config',
-      join(projectRoot, 'build', 'vitest.windows-native.config.mjs'),
-    ],
-    {
-      cwd: projectRoot,
-      env: { ...process.env },
-      encoding: 'utf8',
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 15 * 60_000,
-      windowsHide: true,
-      shell: false,
-    },
-  );
-  if (run.error) throw run.error;
-  if (run.status !== 0) {
-    fail(
-      `Vitest exited ${String(run.status)}\nreport:\n${readFailedVitestReport(reportPath)}\nstdout:\n${boundedText(run.stdout)}\nstderr:\n${boundedText(run.stderr)}`,
+  const deadline = startedAt + WINDOWS_NATIVE_TOTAL_TIMEOUT_MS;
+  const reports = [];
+  for (const [index, name] of REQUIRED_WINDOWS_NATIVE_SUITES.entries()) {
+    const reportPath = `${options.result}.vitest.${index}.json`;
+    const testPath = join(projectRoot, 'src', 'workspace-safety', name);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) fail(`total native proof deadline expired before ${name}`);
+    process.stdout.write(`[windows-native] starting ${name}\n`);
+    const run = spawnSync(
+      process.execPath,
+      [
+        vitest,
+        'run',
+        testPath,
+        '--reporter=verbose',
+        '--reporter=json',
+        `--outputFile.json=${reportPath}`,
+        '--no-file-parallelism',
+        '--config',
+        join(projectRoot, 'build', 'vitest.windows-native.config.mjs'),
+      ],
+      {
+        cwd: projectRoot,
+        env: { ...process.env },
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: Math.min(WINDOWS_NATIVE_SUITE_TIMEOUT_MS, remainingMs),
+        windowsHide: true,
+        shell: false,
+      },
     );
+    if (run.error) {
+      fail(
+        `${name} did not complete: ${boundedText(run.error.message, 1_000)}\nreport:\n${readFailedVitestReport(reportPath)}\nlast stdout:\n${boundedTailText(run.stdout)}\nlast stderr:\n${boundedTailText(run.stderr)}`,
+      );
+    }
+    if (run.status !== 0) {
+      fail(
+        `${name} exited ${String(run.status)}\nreport:\n${readFailedVitestReport(reportPath)}\nlast stdout:\n${boundedTailText(run.stdout)}\nlast stderr:\n${boundedTailText(run.stderr)}`,
+      );
+    }
+    let report;
+    try {
+      report = JSON.parse(readFileSync(reportPath, 'utf8'));
+      verifyWindowsNativeSuiteReport(report, name);
+    } catch (error) {
+      fail(
+        `${name} returned an invalid report: ${boundedText(error instanceof Error ? error.message : error, 1_000)}\nreport:\n${readFailedVitestReport(reportPath)}\nlast stdout:\n${boundedTailText(run.stdout)}\nlast stderr:\n${boundedTailText(run.stderr)}`,
+      );
+    }
+    reports.push(report);
+    process.stdout.write(`[windows-native] completed ${name}\n`);
   }
   const totalDurationMs = Date.now() - startedAt;
-  const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+  const report = combineWindowsNativeVitestReports(reports);
   const verified = verifyWindowsNativeVitestReport(report);
   const proof = {
     schemaVersion: 1,

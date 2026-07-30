@@ -13,7 +13,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { digestBytes, jsonBytes } from './filesystem.js';
-import { createIdentityProbe } from './identity.js';
 import { createQuarantineRecordBytes, QUARANTINE_FILE } from './quarantine.js';
 import {
   captureRecoverySourceSnapshotDigest,
@@ -27,8 +26,8 @@ import {
   readRecoveryDomain,
 } from './recovery.js';
 import {
-  acquireRecoveryAttemptWithAuthority as acquireRecoveryAttempt,
-  installRecoveryDomainWithAuthority as installRecoveryDomain,
+  acquireRecoveryAttemptWithAuthority as acquireRecoveryAttemptControlled,
+  installRecoveryDomainWithAuthority as installRecoveryDomainControlled,
 } from './recovery-authority-test-seam.js';
 import {
   acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease,
@@ -71,6 +70,25 @@ function identity(pid: number): ProcessIdentitySnapshot {
   };
 }
 
+function installRecoveryDomain(
+  options: Parameters<typeof installRecoveryDomainControlled>[0],
+): ReturnType<typeof installRecoveryDomainControlled> {
+  return installRecoveryDomainControlled({
+    ...options,
+    probeSourceOwner: options.probeSourceOwner ?? (() => 'dead'),
+  });
+}
+
+function acquireRecoveryAttempt(
+  options: Parameters<typeof acquireRecoveryAttemptControlled>[0],
+): ReturnType<typeof acquireRecoveryAttemptControlled> {
+  return acquireRecoveryAttemptControlled({
+    ...options,
+    probeSourceOwner: options.probeSourceOwner ?? (() => 'dead'),
+    probeAttemptOwner: options.probeAttemptOwner ?? (() => 'dead'),
+  });
+}
+
 async function workspaceWithDeadOwner(): Promise<string> {
   const workspace = temporaryWorkspace();
   await bootstrapWorkspace({
@@ -80,7 +98,7 @@ async function workspaceWithDeadOwner(): Promise<string> {
   });
   await acquireWorkspaceLease({
     workspacePath: workspace,
-    identity: { ...createIdentityProbe().current(), pid: 2_000_000_000 },
+    identity: identity(2_000_000_000),
     ownerId: '00000000-0000-4000-8000-000000000002',
     command: 'run',
   });
@@ -89,7 +107,7 @@ async function workspaceWithDeadOwner(): Promise<string> {
 
 async function workspaceWithLiveOwner(): Promise<string> {
   const workspace = temporaryWorkspace();
-  const current = createIdentityProbe().current();
+  const current = identity(2);
   await bootstrapWorkspace({
     workspacePath: workspace,
     identity: current,
@@ -284,6 +302,7 @@ describe('recovery domain installation and takeover', () => {
         attemptId: ATTEMPT_A,
         identity: identity(101),
         mode: 'mechanical-empty',
+        probeSourceOwner: () => 'alive',
       }),
     ).rejects.toThrow(/source owner.*(alive|unknown)/i);
     expect(recoveryStagingEntries(workspace)).toEqual([]);
@@ -366,7 +385,7 @@ describe('recovery domain installation and takeover', () => {
     await expect(
       bootstrapWorkspace({
         workspacePath: workspace,
-        identity: createIdentityProbe().current(),
+        identity: identity(21),
         ownerId: '00000000-0000-4000-8000-000000000021',
         hooks: { beforeRelease: () => Promise.reject(new Error('keep-bootstrap-owner')) },
       }),
@@ -673,7 +692,7 @@ describe('recovery domain installation and takeover', () => {
       expectedSourceSnapshotDigest: sourceSnapshotDigest,
       recoveryId: RECOVERY_ID,
       attemptId: ATTEMPT_A,
-      identity: { ...createIdentityProbe().current(), pid: 2_000_000_001 },
+      identity: identity(2_000_000_001),
       mode: 'mechanical-empty',
     });
 
