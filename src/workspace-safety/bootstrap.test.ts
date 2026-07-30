@@ -37,6 +37,7 @@ const BOOTSTRAP_OWNER = '00000000-0000-4000-8000-000000000001';
 interface WorkerCapture {
   readonly child: ChildProcessWithoutNullStreams;
   readonly ready: Promise<void>;
+  readonly installReady: Promise<void>;
   readonly result: Promise<{
     status: string;
     code?: string;
@@ -59,7 +60,12 @@ function startBootstrapWorker(workspace: string, ownerId: string, pid: number): 
   const ready = new Promise<void>((resolve) => {
     markReady = resolve;
   });
+  let markInstallReady!: () => void;
+  const installReady = new Promise<void>((resolve) => {
+    markInstallReady = resolve;
+  });
   let readySeen = false;
+  let installReadySeen = false;
   const result = new Promise<{
     status: string;
     code?: string;
@@ -72,6 +78,10 @@ function startBootstrapWorker(workspace: string, ownerId: string, pid: number): 
       if (!readySeen && output.includes('READY\n')) {
         readySeen = true;
         markReady();
+      }
+      if (!installReadySeen && output.includes('INSTALL_READY\n')) {
+        installReadySeen = true;
+        markInstallReady();
       }
     });
     child.once('error', reject);
@@ -95,7 +105,7 @@ function startBootstrapWorker(workspace: string, ownerId: string, pid: number): 
       );
     });
   });
-  return { child, ready, result };
+  return { child, ready, installReady, result };
 }
 
 afterEach(() => {
@@ -215,8 +225,11 @@ describe('workspace bootstrap', () => {
     const first = startBootstrapWorker(workspace, '00000000-0000-4000-8000-000000000011', 5011);
     const second = startBootstrapWorker(workspace, '00000000-0000-4000-8000-000000000012', 5012);
     await Promise.all([first.ready, second.ready]);
-    first.child.stdin.end('GO\n');
-    second.child.stdin.end('GO\n');
+    first.child.stdin.write('GO\n');
+    second.child.stdin.write('GO\n');
+    await Promise.all([first.installReady, second.installReady]);
+    first.child.stdin.end('INSTALL\n');
+    second.child.stdin.end('INSTALL\n');
 
     const results = await Promise.all([first.result, second.result]);
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);

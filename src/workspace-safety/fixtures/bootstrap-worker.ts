@@ -28,7 +28,17 @@ process.stdin.once('data', () => {
 
 async function runBootstrap(): Promise<void> {
   try {
-    const result = await bootstrapWorkspace({ workspacePath, ownerId, identity });
+    const result = await bootstrapWorkspace({
+      workspacePath,
+      ownerId,
+      identity,
+      hooks: {
+        beforeProtocolRootInstall: async () => {
+          process.stdout.write('INSTALL_READY\n');
+          await new Promise<void>((resolve) => process.stdin.once('data', () => resolve()));
+        },
+      },
+    });
     process.stdout.write(`${JSON.stringify({ status: 'fulfilled', created: result.created })}\n`);
   } catch (error) {
     const code =
