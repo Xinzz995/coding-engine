@@ -106,7 +106,15 @@ export class EventReader {
       const step = await Promise.race([
         this.#iterator.next(),
         new Promise<never>((_resolve, reject) =>
-          setTimeout(() => reject(new Error(`timed out waiting for ${expected}`)), 15_000),
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `timed out waiting for ${expected}; helper stderr: ${this.errors.join('')}`,
+                ),
+              ),
+            15_000,
+          ),
         ),
       ]);
       if (step.done)

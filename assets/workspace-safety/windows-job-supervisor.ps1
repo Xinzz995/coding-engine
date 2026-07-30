@@ -18,7 +18,16 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
+function Write-DiagnosticStage {
+  param([Parameter(Mandatory = $true)][string]$Name)
+  [Console]::Error.WriteLine(
+    'coding-x-supervisor-stage:{0}:{1}' -f $Name, [DateTime]::UtcNow.ToString('o')
+  )
+  [Console]::Error.Flush()
+}
+
 try {
+  Write-DiagnosticStage 'powershell-entered'
   if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     throw 'PowerShell FullLanguage mode is required'
   }
@@ -71,6 +80,7 @@ try {
   if ($actualHelperDigest -cne $ExpectedHelperDigest) {
     throw 'Fixed helper digest mismatch'
   }
+  Write-DiagnosticStage 'digest-verified'
 
   # Compile the exact source bytes that participated in the digest. Add-Type never receives a
   # project path or project-provided source text.
@@ -79,11 +89,13 @@ try {
     [void]$sourceTexts.Add($utf8.GetString($part))
   }
   $sourceText = $sourceTexts -join "`r`n"
+  Write-DiagnosticStage 'add-type-started'
   Add-Type -TypeDefinition $sourceText -Language CSharp -ReferencedAssemblies @(
     'System.dll',
     'System.Core.dll',
     'System.Web.Extensions.dll'
   ) -ErrorAction Stop
+  Write-DiagnosticStage 'add-type-completed'
 
   exit [CodingX.WorkspaceSafety.WindowsJobSupervisor]::Run(
     $ExpectedHelperDigest,
