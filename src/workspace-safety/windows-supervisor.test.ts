@@ -146,7 +146,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
     sendData(child, workspace, realpathSync(process.execPath), [
       '-e',
-      `if(process.argv[1] !== '雪' || process.argv[2] !== '') process.exit(9);require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+      `if(process.argv[1] !== '雪' || process.argv[2] !== ''){process.stderr.write(JSON.stringify(process.argv));process.exit(9)}require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
       '雪',
       '',
     ]);
@@ -264,7 +264,10 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     });
     await events.next('STARTED');
     const result = await events.next('RESULT');
-    expect(result.code).toBe(0);
+    expect(
+      result.code,
+      `target stdout: ${events.outputTail.stdout}\ntarget stderr: ${events.outputTail.stderr}\nmarker exists: ${existsSync(marker)}`,
+    ).toBe(0);
     const drained = await events.next('DRAINED');
     const message = JSON.parse(
       Buffer.from(String(drained.messageBase64), 'base64').toString('utf8'),

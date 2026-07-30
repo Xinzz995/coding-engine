@@ -86,6 +86,7 @@ export class EventReader {
   readonly exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   readonly errors: string[] = [];
   readonly outputBytes = { stdout: 0, stderr: 0 };
+  readonly outputTail = { stdout: '', stderr: '' };
   #iterator: AsyncIterator<string>;
 
   constructor(readonly child: ChildProcessWithoutNullStreams) {
@@ -119,7 +120,10 @@ export class EventReader {
       const event = JSON.parse(step.value) as ProtocolEvent;
       if (event.type === 'FAILURE') throw new Error(`supervisor failure: ${String(event.message)}`);
       if (event.type === 'OUTPUT' && (event.stream === 'stdout' || event.stream === 'stderr')) {
-        this.outputBytes[event.stream] += Buffer.from(String(event.data), 'base64').length;
+        const output = Buffer.from(String(event.data), 'base64');
+        this.outputBytes[event.stream] += output.length;
+        this.outputTail[event.stream] =
+          `${this.outputTail[event.stream]}${output.toString('utf8')}`.slice(-8_192);
       }
       if (event.type === expected) return event;
     }
