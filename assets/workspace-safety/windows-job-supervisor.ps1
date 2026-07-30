@@ -21,9 +21,8 @@ Set-StrictMode -Version 3.0
 function Write-DiagnosticStage {
   param([Parameter(Mandatory = $true)][string]$Name)
   $script:DiagnosticStage = $Name
-  [Console]::Error.WriteLine(
-    'coding-x-supervisor-stage:{0}:{1}' -f $Name, [DateTime]::UtcNow.ToString('o')
-  )
+  $message = 'coding-x-supervisor-stage:' + $Name + ':' + [DateTime]::UtcNow.ToString('o')
+  [Console]::Error.WriteLine($message)
   [Console]::Error.Flush()
 }
 
@@ -104,11 +103,8 @@ try {
     $TimeoutsBase64
   )
 } catch {
-  [Console]::Error.WriteLine(
-    'coding-x Windows Job supervisor initialization failed at {0}: {1}: {2}' -f
-      $DiagnosticStage,
-      $_.Exception.GetType().FullName,
-      $_.Exception.Message
-  )
+  $message = 'coding-x Windows Job supervisor initialization failed at ' +
+    $DiagnosticStage + ': ' + $_.Exception.GetType().FullName + ': ' + $_.Exception.Message
+  [Console]::Error.WriteLine($message)
   exit 2
 }
