@@ -245,6 +245,7 @@ function main() {
         testPath,
         '--reporter=verbose',
         '--reporter=json',
+        '--bail=1',
         `--outputFile.json=${reportPath}`,
         '--no-file-parallelism',
         '--config',
