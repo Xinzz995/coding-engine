@@ -37,7 +37,7 @@ export interface WindowsSupervisorLaunch {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly detached: true;
-  readonly windowsHide: true;
+  readonly windowsHide: false;
   readonly stdio: readonly ['pipe', 'pipe', 'pipe'];
   readonly assets: WindowsSupervisorAssets;
 }
@@ -237,7 +237,7 @@ export function createWindowsSupervisorLaunch(
     cwd: assets.root,
     env: { SystemRoot: systemRoot, TEMP: temp, TMP: tmp },
     detached: true,
-    windowsHide: true,
+    windowsHide: false,
     stdio: ['pipe', 'pipe', 'pipe'],
     assets,
   };
@@ -253,7 +253,7 @@ export function spawnWindowsJobSupervisor(
     cwd: launch.cwd,
     env: { ...launch.env },
     detached: true,
-    windowsHide: true,
+    windowsHide: launch.windowsHide,
     shell: false,
     stdio: ['pipe', 'pipe', 'pipe'],
   });

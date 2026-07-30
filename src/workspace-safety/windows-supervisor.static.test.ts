@@ -47,7 +47,7 @@ describe('fixed Windows Job supervisor assets', () => {
       TMP: 'C:\\Windows\\Temp',
     });
     expect(launch.detached).toBe(true);
-    expect(launch.windowsHide).toBe(true);
+    expect(launch.windowsHide).toBe(false);
     expect(launch.stdio).toEqual(['pipe', 'pipe', 'pipe']);
   });
 

@@ -210,7 +210,7 @@ async function main() {
         TMP: process.env.TMP,
       },
       detached: true,
-      windowsHide: true,
+      windowsHide: false,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
     },

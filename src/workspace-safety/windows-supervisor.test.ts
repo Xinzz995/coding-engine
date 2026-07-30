@@ -42,7 +42,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       cwd: launch.cwd,
       env: { ...launch.env },
       detached: true,
-      windowsHide: true,
+      windowsHide: launch.windowsHide,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
