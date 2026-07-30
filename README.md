@@ -163,7 +163,8 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 ```
 
 - **实现收敛不等于可交付**：全部 story 同时满足 `passes && validated` 且无 blocked 后，引擎还会重跑完整机械检查、执行本地最终 Review 并查询 GitHub 交付状态；三者均就绪才返回 0。存在 blocked 返回 3；后续检查、Review 或远端未就绪时返回对应的非零代码；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断，返回 1（完整对照见「命令行参数」后的「退出码」表）。
-- **工作区锁**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 直接拒绝；异常退出（kill -9、断电）遗留的 stale 锁在下次启动时自动接管并告警，无需人工清理。
+- **工作区锁（0.33.3 当前行为）**：启动时在 workspace 写 `engine.lock`（O_EXCL 原子创建），同一 workspace 的第二个 `run`/`repair` 以退出码 2 拒绝；锁损坏或记录的父 PID 已死时，当前版本会把它当 stale 自动接管。
+- **已知安全边界**：上述 stale 判断不能证明 Builder、Validator 或检查命令的后代进程都已退出；信号中断或终止失败时也可能过早释放锁。异常中断后不要立即重跑，先确认旧的 coding-x 和项目检查进程已经停止。Issue #106 / ADR-021 计划在 0.34.0 以隔离状态和显式恢复替代自动接管；实现合并前不要把目标设计当作现有能力。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。每次真实调用记录完整收口耗时与退出码，异常时另保留最近 2000 字符诊断，终端输出仍实时可见。
 - **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018）。
 - **TDD 门禁（可选）**：启用 `prd.json.tdd` 后，Builder 按 `tdd` skill 对每个公共行为做真实 RED→同命令 GREEN→绿色重构；宿主 hook 在 agent commit 前提前检查，引擎仍在 Validator 前独立校验 Git 基线、政策摘要、新增覆盖忽略标记并运行项目原生 `coverageCheck`。hook 通过不能跳过引擎重跑；覆盖率证明代码被执行，不证明断言有效或历史上一定先写测试（ADR-017）。
@@ -385,7 +386,7 @@ coding-x 的信息分三层保存：
 | `final-review.md` | 与结构化最终 Review 同时生成 | 引擎写；人读 | 方便阅读 findings | 只是阅读副本，编辑它不能改变裁决状态 |
 | `review-decisions.json` | `/review-loop` 获得用户明确决定后追加 | `/review-loop` 写；引擎/doctor 读 | 当前提交上的反证、修复授权、P1 延期或低等级知悉 | 绑定 finding ID 与 head SHA；修复产生新提交后必须重跑 coding-x |
 | `review-*.md` | 旧版本 `/review-loop` 可能遗留 | report 只读展示 | 历史本地反馈 | 已弃用；被 Git 忽略，不能作为通过证明或共享记录 |
-| `engine.lock` | `run` 或 `repair` 开始时原子创建 | 引擎独占 | 防止两个写者同时改同一 workspace | 正常退出删除；异常遗留由下次运行判定并接管，不要习惯性手删 |
+| `engine.lock` | `run` 或 `repair` 开始时原子创建 | 引擎独占 | 0.33.3 正常路径防止两个 run/repair 同时写 | 正常退出删除；当前异常接管只看父 PID，重跑前先确认后代已停，不要习惯性手删 |
 | `prd.tampered-*.json` | 引擎发现运行期 PRD 被修改时产生 | 引擎写；review/report/人读 | 保存被检测到的篡改版本，当前 PRD 会按启动快照恢复 | 红旗取证；切换功能时随旧运行归档并清出当前根目录 |
 | `archive/<日期-功能>/` | 新功能覆盖旧 workspace，或同功能需求再派生之前 | `prd-to-json` 创建 | 保存旧运行/旧 AC 对应的本地状态和证据 | **本地运行档案**；与 Git 内 `docs/archive/` 完全不同，可按保留策略人工清理 |
 
@@ -593,7 +594,7 @@ npx coding-x codex      # 使用 Codex；也可以换成 claude 或 cursor
 
 启动后会依次发生：引擎获取 `.workspace/engine.lock` → 读取/初始化状态 → 预检 runner 与模型 → 启动仪表盘 → 每轮启动一个 Builder → 运行机械门禁 → 启动一个 Validator → 引擎写入裁决 → 继续下一个 story。全部 Story 验证完成后，引擎会重跑完整机械检查、执行本地最终 Review，再查询 GitHub PR、CI 与 Ruleset；只有三部分都就绪才返回 0。Builder 会按 PRD 的 `branchName` 检查、创建或切换功能分支，并按 story 提交代码。
 
-可以按 `Ctrl+C` 中止后稍后重跑。已验证 story 会保留；如果进程停在“Builder 声称完成、Validator 尚未签发”之间，下次启动会把该 story 恢复为待复核。异常退出留下的 stale lock 会由下次运行判定接管，不需要日常手删。
+可以按 `Ctrl+C` 中止后稍后重跑。已验证 story 会保留；如果进程停在“Builder 声称完成、Validator 尚未签发”之间，下次启动会把该 story 恢复为待复核。0.33.3 只有在确认旧的 coding-x、Builder、Validator 和项目检查进程都已停止后才适合重跑；若终端出现终止失败或无法确认的信息，不要依赖 stale 自动接管，也不要习惯性手删锁，先停止遗留进程并保留现场排查。
 
 下面是完整命令示例；新项目先完成 `init`，日常主要关心 `doctor`、一个 runner、`status` 和
 `report`：
