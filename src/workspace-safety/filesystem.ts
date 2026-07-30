@@ -38,7 +38,7 @@ export interface CanonicalizeWorkspaceOptions {
 }
 
 export interface StableReadHooks {
-  readonly beforeOpen?: () => void | Promise<void>;
+  readonly afterOpen?: () => void | Promise<void>;
   readonly afterRead?: () => void | Promise<void>;
 }
 
@@ -261,15 +261,31 @@ async function readExactFileSnapshot(
 ): Promise<ExactFileRead> {
   let handle;
   try {
-    const before = await lstat(path, { bigint: true });
-    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1n) {
+    // This is only a bounded type preflight. Identity is deliberately not bound here because
+    // Linux filesystems may immediately reuse an inode after unlink; the opened handle below is
+    // the authoritative identity anchor.
+    const preflight = await lstat(path, { bigint: true });
+    if (preflight.isSymbolicLink() || !preflight.isFile() || preflight.nlink !== 1n) {
       throw safetyError('invalid', `不是普通文件：${path}`);
     }
-    await hooks.beforeOpen?.();
     const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-    handle = await open(path, constants.O_RDONLY | noFollow);
+    const nonBlock = process.platform === 'win32' ? 0 : constants.O_NONBLOCK;
+    handle = await open(path, constants.O_RDONLY | noFollow | nonBlock);
     const opened = await handle.stat({ bigint: true });
-    if (!opened.isFile() || opened.nlink !== 1n || !sameFileIdentity(before, opened)) {
+    if (!opened.isFile() || opened.nlink !== 1n) {
+      throw safetyError('invalid', `不是普通文件：${path}`);
+    }
+    // Hold the opened inode before observing the path. A pre-open lstat can be defeated on
+    // filesystems that immediately reuse the unlinked inode number; keeping this handle open
+    // prevents that reuse and gives the read a real linearization point.
+    await hooks.afterOpen?.();
+    const openedPath = await lstat(path, { bigint: true });
+    if (
+      openedPath.isSymbolicLink() ||
+      !openedPath.isFile() ||
+      openedPath.nlink !== 1n ||
+      !sameFileSnapshot(opened, openedPath)
+    ) {
       throw safetyError('invalid', `文件身份在打开期间发生变化：${path}`);
     }
     const bytes = await handle.readFile();

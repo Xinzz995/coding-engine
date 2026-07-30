@@ -8,6 +8,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -277,7 +278,7 @@ describe('workspace safety filesystem primitives', () => {
     },
   );
 
-  it('rejects a symlink and a path swapped between inspection and open', async () => {
+  it('rejects a symlink and a path swapped after open but before identity binding', async () => {
     const root = temporaryRoot('workspace-stable-read-');
     const first = join(root, 'first.txt');
     const second = join(root, 'second.txt');
@@ -292,7 +293,7 @@ describe('workspace safety filesystem primitives', () => {
     writeFileSync(target, 'first');
     await expect(
       readExactFile(target, {
-        beforeOpen: () => {
+        afterOpen: () => {
           rmSync(target);
           writeFileSync(target, 'second');
         },
@@ -306,6 +307,21 @@ describe('workspace safety filesystem primitives', () => {
       }),
     ).rejects.toMatchObject({ code: 'invalid' });
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a FIFO without waiting for a writer',
+    async () => {
+      const root = temporaryRoot('workspace-fifo-read-');
+      const fifo = join(root, 'blocked.fifo');
+      const created = spawnSync('mkfifo', [fifo], { encoding: 'utf8', timeout: 5_000 });
+      expect(created.error).toBeUndefined();
+      expect(created.status, created.stderr).toBe(0);
+
+      const startedAt = Date.now();
+      await expect(readExactFile(fifo)).rejects.toMatchObject({ code: 'invalid' });
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    },
+  );
 
   it('rejects hard links so canonical safety bytes cannot alias another path', async () => {
     const root = temporaryRoot('workspace-hardlink-read-');
