@@ -35,9 +35,11 @@ try {
   if ($ExpectedHelperDigest -notmatch '^sha256:[0-9a-f]{64}$') {
     throw 'Invalid helper digest'
   }
+  Write-DiagnosticStage 'preconditions-verified'
 
   $scriptPath = $MyInvocation.MyCommand.Path
   $scriptBytes = [System.IO.File]::ReadAllBytes($scriptPath)
+  Write-DiagnosticStage 'script-read'
   $sourceNames = @(
     'WindowsJobSupervisor.cs',
     'WindowsJobProcess.cs',
@@ -48,6 +50,7 @@ try {
   foreach ($path in $sourcePaths) {
     [void]$sourceParts.Add([System.IO.File]::ReadAllBytes($path))
   }
+  Write-DiagnosticStage 'sources-read'
   if ($scriptBytes.Length -gt 4MB) {
     throw 'Helper asset exceeds its size limit'
   }
@@ -56,6 +59,7 @@ try {
       throw 'Helper asset exceeds its size limit'
     }
   }
+  Write-DiagnosticStage 'sizes-verified'
 
   $bundle = New-Object System.IO.MemoryStream
   $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
@@ -69,6 +73,7 @@ try {
     $bundle.Write($csharpDomain, 0, $csharpDomain.Length)
     $bundle.Write($sourceParts[$index], 0, $sourceParts[$index].Length)
   }
+  Write-DiagnosticStage 'bundle-built'
   $sha256 = [System.Security.Cryptography.SHA256]::Create()
   try {
     $actualHelperDigest = 'sha256:' + ([System.BitConverter]::ToString(
@@ -76,8 +81,9 @@ try {
     ).Replace('-', '').ToLowerInvariant())
   } finally {
     $sha256.Dispose()
-    $bundle.Dispose()
+      $bundle.Dispose()
   }
+  Write-DiagnosticStage 'digest-computed'
   if ($actualHelperDigest -cne $ExpectedHelperDigest) {
     throw 'Fixed helper digest mismatch'
   }
