@@ -538,8 +538,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         recordIteration({
           ...(builderOutcome ? { builderOutcome } : {}),
           validatorOutcome: 'skipped',
-          validationProtocol: 'invalid',
-          validationProtocolError: { code: 'artifact-changed', diagnostic },
           ...(validationRollback ? { validationRollback: true as const } : {}),
         });
         dashboard.setState({
@@ -729,18 +727,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           : '';
         const gateHeadAfter = readGitHead(agentCwd);
         const gateArtifactChanged = !verificationHead || gateHeadAfter !== verificationHead;
+        if (gateArtifactChanged && stopForValidationHeadChange(
+          verificationHead, '项目机械检查结束后', builderOutcome, gateHeadAfter,
+        )) break;
         recordEvidence({
           type: 'gate-run', source: 'engine', at: new Date().toISOString(), iteration: i,
           storyId: currentStory, ok: gate.ok, total: gate.total, ran: gate.ran, ms: gate.ms,
-          ...(gateArtifactChanged ? { artifactChanged: true as const } : {}),
           ...(gate.failure ? {
             failedCommand: gate.failure.command, exitCode: gate.failure.exitCode, timedOut: gate.failure.timedOut,
             ...(gateDiagnostic ? { diagnosticTail: gateDiagnostic } : {}),
           } : {}),
         });
-        if (gateArtifactChanged && stopForValidationHeadChange(
-          verificationHead, '项目机械检查结束后', builderOutcome, gateHeadAfter,
-        )) break;
         if (!gate.ok) {
           const classification = validationOnly
             ? classifyValidationOnlyGateFailure(gate.failure!)
@@ -824,12 +821,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           : '';
         const tddHeadAfter = readGitHead(agentCwd);
         const tddArtifactChanged = !verificationHead || tddHeadAfter !== verificationHead;
+        if (tddArtifactChanged && stopForValidationHeadChange(
+          verificationHead, 'TDD 门禁结束后', builderOutcome, tddHeadAfter,
+        )) break;
         recordEvidence({
           type: 'tdd-gate', source: 'engine', at: new Date().toISOString(),
           phase: 'post-builder', iteration: i, storyId: currentStory,
           ok: tddGate.ok, policyOk: tddGate.policyOk,
           commandRan: tddGate.commandRan, ms: tddGate.ms,
-          ...(tddArtifactChanged ? { artifactChanged: true as const } : {}),
           ...(tddGate.failure ? {
             failureCode: tddGate.failure.code,
             failedCommand: tddGate.failure.command,
@@ -838,9 +837,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             diagnosticTail: diagnostic || 'TDD 门禁失败',
           } : {}),
         });
-        if (tddArtifactChanged && stopForValidationHeadChange(
-          verificationHead, 'TDD 门禁结束后', builderOutcome, tddHeadAfter,
-        )) break;
         if (!tddGate.ok) {
           const classification = validationOnly
             ? classifyValidationOnlyTddFailure(tddGate.failure!)
@@ -917,6 +913,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       let validatorDiagnostic: string | undefined;
       let validationProtocol: 'passed' | 'failed' | 'invalid' | undefined;
       let validationTarget: ValidationTargetEvidence | undefined;
+      let validationHeadFailure: string | null = null;
       let validationProtocolError: {
         code: LoopValidationProtocolErrorCode;
         diagnostic: string;
@@ -955,10 +952,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           if (headDiagnostic) {
             canStartValidator = false;
             validatorOutcome = 'skipped';
-            rejectProtocol(
-              'artifact-changed',
-              headDiagnostic,
-            );
+            validationHeadFailure = headDiagnostic;
+            console.error(`⏸️  ${headDiagnostic}；不启动 Validator`);
           } else {
             validationRequest = createValidationRequest(
               currentStoryObj,
@@ -1129,7 +1124,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // Validator 运行或协议不可验证时保留候选、不增加 retry，并立即非绿结束。
       if (!validationReceipt && !validatorRollback) {
         const current = currentStory ? tryReadState(statePath)?.[currentStory] : undefined;
-        if (validationProtocolError?.code === 'artifact-changed') {
+        if (validationHeadFailure) {
+          if (!validationOnly) {
+            validationRollback = rollbackPendingValidation('检查期间 Git HEAD 发生变化');
+          }
+          validationUnverifiable = true;
+        } else if (validationProtocolError?.code === 'artifact-changed') {
           if (!validationOnly) {
             validationRollback = rollbackPendingValidation('检查期间 Git HEAD 发生变化');
           }
@@ -1170,10 +1170,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
 
       if (validationUnverifiable) {
-        console.error(
-          `\n⏸️  ${currentStory} 的 Validator 结果无法可靠验证；` +
-          '保留实现候选且不增加重试，本次运行停止',
-        );
+        const reason = validationHeadFailure
+          ? '验收前无法确认当前提交身份'
+          : 'Validator 结果无法可靠验证';
+        console.error(`\n⏸️  ${currentStory} 的${reason}；保留实现候选且不增加重试，本次运行停止`);
         exitCode = 1;
         tamperCheckBeforeExit(i);
         break;

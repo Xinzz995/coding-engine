@@ -99,16 +99,12 @@ export type EvidenceRecord =
       }> }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
       ok: boolean; total: number; ran: number; ms: number;
-      /** 命令已结束，但提交身份发生变化或不可读；保留观察事实，结果不得用于裁决。 */
-      artifactChanged?: true;
       failedCommand?: string; exitCode?: number | null; timedOut?: boolean;
       /** 失败命令 stdout/stderr 合并输出的尾部；有界保存。 */
       diagnosticTail?: string }
   | { type: 'tdd-gate'; source: 'engine'; at: string;
       phase: 'preflight' | 'post-builder'; iteration: number; storyId: string | null;
       ok: boolean; policyOk: boolean; commandRan: boolean; ms: number;
-      /** 阶段已结束，但提交身份发生变化或不可读；保留观察事实，结果不得用于裁决。 */
-      artifactChanged?: true;
       failureCode?: TddEvidenceFailureCode; failedCommand?: string;
       exitCode?: number | null; timedOut?: boolean; diagnosticTail?: string }
   | { type: 'tamper'; source: 'engine'; at: string; iteration: number; archive: string | null }
@@ -272,7 +268,6 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (typeof v.storyId === 'string' || v.storyId === null)
         && typeof v.ok === 'boolean' && typeof v.total === 'number'
         && typeof v.ran === 'number' && typeof v.ms === 'number'
-        && (v.artifactChanged === undefined || v.artifactChanged === true)
         && (v.failedCommand === undefined || typeof v.failedCommand === 'string')
         && (v.exitCode === undefined || v.exitCode === null || typeof v.exitCode === 'number')
         && (v.timedOut === undefined || typeof v.timedOut === 'boolean')
@@ -285,15 +280,9 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && typeof v.ok === 'boolean' && typeof v.policyOk === 'boolean'
         && typeof v.commandRan === 'boolean'
         && Number.isSafeInteger(v.ms) && (v.ms as number) >= 0
-        && (v.artifactChanged === undefined || v.artifactChanged === true)
         && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
       if (!base) return false;
-      if (v.phase === 'preflight' && (
-        v.iteration !== 0
-        || v.storyId !== null
-        || v.commandRan !== false
-        || v.artifactChanged !== undefined
-      )) {
+      if (v.phase === 'preflight' && (v.iteration !== 0 || v.storyId !== null || v.commandRan !== false)) {
         return false;
       }
       if (v.phase === 'post-builder' && (v.iteration === 0 || typeof v.storyId !== 'string')) {

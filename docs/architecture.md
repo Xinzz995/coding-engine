@@ -1,7 +1,7 @@
 ---
 title: 架构地图
 status: active
-updated: 2026-07-30
+updated: 2026-07-28
 scope: root
 ---
 
@@ -19,24 +19,24 @@ scope: root
 | 模块 | 路径 | 职责 |
 |---|---|---|
 | CLI 入口 | `src/cli.ts`、`src/cursor-hooks.ts` | 参数解析、启动循环/仪表盘，提供模型/全局配置与 Cursor 项目检查安装、状态、卸载入口；Cursor 安装器只在 Git 根安全管理 `.cursor/` 中归属明确的内容；`help`/`-h`/`--help` 在子命令校验与任何 workspace/runner 副作用前统一短路 |
-| 主循环 | `src/engine/loop.ts` | 直接拥有 workspace 锁、仪表盘、Developer ⇄ Validator 逐轮状态机、最终 Review、报告与资源释放；agent 结局机械三分与异常轮处理（no-op 检测、stall 熔断、终轮篡改收口）；按契约检查→TDD 门禁→Validator 排序；生成 Validator 精确目标、消费结构化 claim 后写 verdict/签发凭证；旧候选凭证失效后进入 validation-only，只重跑机械检查、TDD 与 Validator，不再启动 Developer；每个真实子进程调用附加调用凭证；完成判定与收敛出口（ADR-009、013、015、016、017、018、020）。逐轮状态机保留在这里，因为提前退出、证据写入、状态所有权与完成判定共享同一控制流，继续拆成回调会掩盖退出路径 |
-| 循环启动预检 | `src/engine/loop-preflight.ts` | 仪表盘和任何 agent 启动前先取得非空 Git HEAD，再按既有顺序核对质量契约与固定版本，完成 PRD/State 恢复、凭证对账、TDD 政策、模型目录、最终 Review 模型与冻结检查快照校验；全部预检成功后才创建或更新 state，失败保持原 state 字节不变并返回既有退出码，成功交回收窄的就绪上下文 |
+| 主循环 | `src/engine/loop.ts` | 直接拥有 workspace 锁、仪表盘、Developer ⇄ Validator 逐轮状态机、最终 Review、报告与资源释放；agent 结局机械三分与异常轮处理（no-op 检测、stall 熔断、终轮篡改收口）；按契约检查→TDD 门禁→Validator 排序；生成 Validator 精确目标、消费结构化 claim 后写 verdict/签发凭证；每个真实子进程调用附加调用凭证；完成判定与收敛出口（ADR-009、013、015、016、017、018）。逐轮状态机保留在这里，因为提前退出、证据写入、状态所有权与完成判定共享同一控制流，继续拆成回调会掩盖退出路径 |
+| 循环启动预检 | `src/engine/loop-preflight.ts` | 仪表盘和任何 agent 启动前，按既有顺序核对质量契约与固定版本，完成 PRD/State 恢复、TDD 政策、模型目录、最终 Review 模型与冻结检查快照校验；失败只返回既有退出码，成功交回收窄的就绪上下文 |
 | 循环指令装配 | `src/engine/loop-instructions.ts` | 读取 Builder/Validator 指令，维护 TDD 工作流片段并渲染 workspace、重试、仲裁与 TDD 占位符；`loop.ts` 继续兼容转出 `renderInstruction` |
 | Agent 进程 | `src/engine/agent.ts` | 拉起 claude/codex/cursor headless 子进程、模型参数与超时控制；stdout/stderr 实时 tee 并滚动保留有界尾部，正常路径等 pipe 关闭再返回 duration/exit/output，超时路径计入整棵进程树终止等待 |
 | 进程树终止 | `src/engine/process-tree.ts` | agent 与机械门禁共享的跨平台超时收口：POSIX 进程组 SIGTERM→SIGKILL 并确认退出；Windows 等待 `taskkill /T /F`，调用方只在整棵树停止后继续写 workspace |
 | PRD 读取 | `src/engine/prd.ts` | 读 prd.json（需求内容） |
-| 执行状态 | `src/engine/state.ts` | state.json 读写与迁移、选 story、完成判定、合并视图；结构化 Validator 凭证绑定 request、Git HEAD、story ID 与有序验收标准摘要，旧布尔状态只保留为待重验候选；每次选择先处理未实现 story，再处理凭证失效的 validation-only story，`validated`/凭证与 `escalated` 路由状态均由引擎独占 |
+| 执行状态 | `src/engine/state.ts` | state.json 读写与迁移、选 story、完成判定、合并视图；`validated` 验收凭证与 `escalated` 路由状态由引擎独占 |
 | 验收协议 | `src/engine/validation-protocol.ts` | v1 validation request/result 单源：一次性 request、story/AC hash/Git HEAD 绑定、runner-neutral prompt 合同、固定临时结果路径、64 KiB 严格解析与 fail-closed 错误码（ADR-015） |
 | 进度 | `src/engine/progress.ts` | 读取 progress.md |
 | 修复 | `src/engine/repair.ts` | jsonrepair 修复 prd.json / state.json |
 | 质量契约 | `src/quality/contract.ts` | 严格解析 `.coding-x/quality.json`，规范化摘要、精确版本约束和 PRD 检查快照派生/一致性核对；契约是项目检查唯一人工维护来源 |
 | GitHub 交付门禁 | `src/quality/github.ts`、`src/quality/ruleset.ts`、`src/quality/release-ruleset.ts`、`src/doctor/delivery.ts` | 配置并回读默认分支 PR/状态检查规则、发布标签禁止更新/删除规则及不可变 Release；契约明确声明时精确管理代码扫描工具和两类阻断阈值，未声明时保留已有扫描规则；doctor 与最终 Review 对远端漂移 fail-closed |
 | 候选发布证据 | `build/release-evidence.mjs`、`.github/workflows/build-candidate.yml`、`.github/workflows/stage-candidate.yml`、`.github/workflows/publish.yml` | 无发布身份的独立工作流完成检查、构建和固定候选包；三仓验证后，stage-only OIDC 工作流回读候选来源与当前 `main`，不安装依赖或执行项目脚本，只暂存同一摘要；标签流程分别核对候选与 staging 运行，只验证已公开 npm 制品并发布不可变 Release，不直接发布 npm |
-| 机械门禁与回写 | `src/engine/gate.ts` | 按 test→build→static→security 执行 PRD 中由契约冻结的结构化检查；默认不经 shell，只有契约显式声明时使用指定 shell；超时复用进程树终止单源并等待整棵树退出；普通新候选仍按既有回写规则处理，validation-only 则把明确非零结果判为失败并清除候选，把命令缺失、超时等环境问题判为不可验证并保留候选且不增加重试 |
-| TDD 门禁 | `src/engine/tdd-gate.ts` | 严格解析 `prd.json.tdd`；校验 Git 根/完整基线、项目内政策文件真实路径与 SHA-256、生产 pathspec 和基线后新增覆盖忽略标记；通过公共 command runner 执行项目原生 coverageCheck；validation-only 中，政策缺失/漂移和新增禁用标记是明确失败，其余 Git、读取或运行环境问题是不可验证（ADR-017、020） |
+| 机械门禁与回写 | `src/engine/gate.ts` | 按 test→build→static→security 执行 PRD 中由契约冻结的结构化检查；默认不经 shell，只有契约显式声明时使用指定 shell；超时复用进程树终止单源并等待整棵树退出；门禁/异常轮回写及结构化 Validator pass/fail 的引擎状态转移共享 notes/重试/blocked 规则 |
+| TDD 门禁 | `src/engine/tdd-gate.ts` | 严格解析 `prd.json.tdd`；校验 Git 根/完整基线、项目内政策文件真实路径与 SHA-256、生产 pathspec 和基线后新增覆盖忽略标记；通过公共 command runner 执行项目原生 coverageCheck（ADR-017） |
 | 模型路由 | `src/engine/models.ts` | 严格校验 runner 绑定的五模型 schema；builder 按 story 难度/升级态/CLI 覆盖解析，validator 恒定，输出实际路由来源 |
 | 全局模型目录 | `src/engine/model-catalog.ts` | 解析默认路径与 `CODING_X_CONFIG` 覆盖，严格校验 version 1 schema；只读查询三 runner 的允许模型，并为显式 `config init` 排他创建空模板 |
-| 模型预检 | `src/engine/model-preflight.ts` | 循环启动前组合 schema、runner、CLI 覆盖与待执行 story；显式模型策略只允许目录中声明的 ID，无效即停且不启动 agent/dashboard，纯 runner-default 跳过目录；validation-only 不解析不会调用的 Builder/升级模型，但仍严格预检 Validator 与最终 Review 模型 |
+| 模型预检 | `src/engine/model-preflight.ts` | 循环启动前组合 schema、runner、CLI 覆盖与待执行 story；显式模型策略只允许目录中声明的 ID，无效即停且不启动 agent/dashboard，纯 runner-default 跳过目录 |
 | prd 守卫 | `src/engine/prd-guard.ts` | 运行期 prd.json 冻结：首次成功读取建快照，四处检测点校验，篡改自动存档（去重）+快照写回恢复+告警；写回失败信号驱动 loop 跳过该轮 validator（ADR-007） |
 | 证据索引 | `src/engine/evidence.ts` | evidence.jsonl 的 schema 单源（iteration/gate-run/tdd-gate/tamper/validation-claim/screenshot-claim 判别联合）与追加/读取；结构化 result 保留 `source=validator` claim，目标/协议/receipt、TDD 门禁与 Builder/Validator 调用凭证保留 `source=engine` 机械观察；有界诊断、坏行与未知 type 均 fail-safe，status/report 按 source 区分信任级别 |
 | workspace 锁 | `src/engine/lock.ts`、`src/engine/fs-atomic.ts` | engine.lock 单写者互斥（O_EXCL 原子创建、pid 活性三分支、stale 自动接管、轮首自愈防 agent 误删）；run/repair 持锁，其余子命令不锁；fs-atomic 为 state/prd 关键 JSON 与 report.html 提供 tmp+rename 原子写（ADR-008/014） |
@@ -58,7 +58,7 @@ cli → quality + engine（loop → loop-preflight / agent / state / gate / tdd-
 
 项目知识也分冷热生命周期：`/compound-docs` 默认只对本轮相关 active 文档做沉淀与增量熵 GC，用户显式要求全量时才逐条审计 patterns/glossary/architecture/golden-principles/prompt-writing；任务型文档先以证据收尾 status，再在用户明确授权物理归档后镜像原相对树移入 `docs/archive/`。冷档案继续由 doctor 检查 frontmatter 与相对链接，但不参与 updated 新鲜度，也不进入日常实现/沉淀上下文。
 
-`.coding-x/quality.json` 是项目检查唯一人工维护来源；prd-to-json 先用 doctor 取得规范化摘要和结构化派生快照，再把它们连同源 PRD（意图真相）一起冻结到 workspace `prd.json`（执行需求）并初始化 `state.json`。正式运行要求精确版本、摘要和快照全部一致；候选版本只能 shadow。builder 只实现一个 story并留下 `passes=true` 候选。契约检查与 TDD 政策/覆盖命令都通过后，引擎才把 story ID、有序 AC 快照/hash、一次性 request ID 与 Git HEAD 注入 Validator；Validator 只写逐 AC 结构化 claim，引擎核对绑定与 state 不变式后才写 retry/blocked/notes 或签发结构化凭证。新候选出现明确失败或不可验证时仍按既有规则回滚；已有候选的凭证因 HEAD 或验收标准变化失效时只撤销验收，进入 validation-only。validation-only 的明确失败清除候选、增加重试并停止本次运行，下一次启动重新预检后才可进入 Developer；不可验证则保留候选、不增加重试并以非绿结果退出。所有 story 必须持有同一当前 HEAD 的有效凭证，才可进入最终 Review（ADR-009、013、015、017、018、020）。
+`.coding-x/quality.json` 是项目检查唯一人工维护来源；prd-to-json 先用 doctor 取得规范化摘要和结构化派生快照，再把它们连同源 PRD（意图真相）一起冻结到 workspace `prd.json`（执行需求）并初始化 `state.json`。正式运行要求精确版本、摘要和快照全部一致；候选版本只能 shadow。builder 只实现一个 story并留下 `passes=true` 候选。契约检查与 TDD 政策/覆盖命令都通过后，引擎才把 story ID、有序 AC 快照/hash、一次性 request ID 与 Git HEAD 注入 Validator；Validator 只写逐 AC 结构化 claim，引擎核对绑定与 state 不变式后才写 retry/blocked/notes 或签发 `validated=true`。缺结果、错目标、旧结果、产物变化或 state 改写全部回滚候选态（ADR-009、013、015、017、018）。
 
 coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。它们运行仓库机械健康检查，
 只验证文档、契约结构和契约生成文件；完整 doctor 继续拒绝候选版本与固定版本不一致。

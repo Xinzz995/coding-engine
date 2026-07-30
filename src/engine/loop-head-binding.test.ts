@@ -237,17 +237,15 @@ describe('runLoop Git HEAD validation chain', () => {
         });
         expect(existsSync(calls)).toBe(false);
         const evidence = readEvidence(fixture.workspace);
-        expect(evidence.records.find((record) => record.type === 'gate-run')).toMatchObject({
-          ok: gateExitCode === 0,
-          artifactChanged: true,
-        });
-        expect(evidence.records.find((record) => record.type === 'iteration')).toMatchObject({
+        expect(evidence.records.some((record) => record.type === 'gate-run')).toBe(false);
+        const iteration = evidence.records.find((record) => record.type === 'iteration');
+        expect(iteration).toMatchObject({
           builderRan: false,
           validatorRan: false,
           validatorOutcome: 'skipped',
-          validationProtocol: 'invalid',
-          validationProtocolError: { code: 'artifact-changed' },
         });
+        expect(iteration).not.toHaveProperty('validationProtocol');
+        expect(iteration).not.toHaveProperty('validationProtocolError');
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
@@ -291,15 +289,17 @@ describe('runLoop Git HEAD validation chain', () => {
         validationReceipt: null,
         retryCount: 0,
       });
-      expect(
-        readEvidence(fixture.workspace).records.find((record) => record.type === 'iteration'),
-      ).toMatchObject({
+      const iteration = readEvidence(fixture.workspace).records.find(
+        (record) => record.type === 'iteration',
+      );
+      expect(iteration).toMatchObject({
         builderRan: true,
         validatorRan: false,
         validatorOutcome: 'skipped',
         validationRollback: true,
-        validationProtocolError: { code: 'artifact-changed' },
       });
+      expect(iteration).not.toHaveProperty('validationProtocol');
+      expect(iteration).not.toHaveProperty('validationProtocolError');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -340,15 +340,61 @@ describe('runLoop Git HEAD validation chain', () => {
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
       ).toMatchObject(candidate());
-      expect(
-        readEvidence(fixture.workspace).records.find((record) => record.type === 'iteration'),
-      ).toMatchObject({
+      const iteration = readEvidence(fixture.workspace).records.find(
+        (record) => record.type === 'iteration',
+      );
+      expect(iteration).toMatchObject({
         builderRan: false,
         validatorRan: false,
         validatorOutcome: 'skipped',
-        validationProtocol: 'invalid',
-        validationProtocolError: { code: 'artifact-changed' },
       });
+      expect(iteration).not.toHaveProperty('validationProtocol');
+      expect(iteration).not.toHaveProperty('validationProtocolError');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rolls back an ordinary Builder candidate at the exact Validator request boundary', async () => {
+    const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+    const fake = fakeBoundValidator(fixture.workspace, 'passed');
+    const calls = join(fixture.workspace, 'bound-calls.txt');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(
+        await runProductionLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          beforeValidatorRequestForTests: () => {
+            fixture.commitFile(
+              'H2 after ordinary Builder\n',
+              'test: advance at ordinary Validator request boundary',
+            );
+          },
+        }),
+      ).toBe(1);
+      expect(readFileSync(calls, 'utf8')).toBe('1');
+      expect(
+        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({
+        passes: false,
+        validated: false,
+        validationReceipt: null,
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      });
+      const iteration = readEvidence(fixture.workspace).records.find(
+        (record) => record.type === 'iteration',
+      );
+      expect(iteration).toMatchObject({
+        builderRan: true,
+        validatorRan: false,
+        validatorOutcome: 'skipped',
+        validationRollback: true,
+      });
+      expect(iteration).not.toHaveProperty('validationProtocol');
+      expect(iteration).not.toHaveProperty('validationProtocolError');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -391,18 +437,16 @@ describe('runLoop Git HEAD validation chain', () => {
     expect(
       JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
     ).toMatchObject(candidate());
-    expect(
-      readEvidence(fixture.workspace).records.find((record) => record.type === 'iteration'),
-    ).toMatchObject({
+    const iteration = readEvidence(fixture.workspace).records.find(
+      (record) => record.type === 'iteration',
+    );
+    expect(iteration).toMatchObject({
       builderRan: false,
       validatorRan: false,
       validatorOutcome: 'skipped',
-      validationProtocol: 'invalid',
-      validationProtocolError: {
-        code: 'artifact-changed',
-        diagnostic: expect.stringContaining('当前 unavailable'),
-      },
     });
+    expect(iteration).not.toHaveProperty('validationProtocol');
+    expect(iteration).not.toHaveProperty('validationProtocolError');
   });
 
   it.each(['valid', 'missing', 'invalid', 'state-mutation'] as const)(
@@ -631,10 +675,8 @@ describe('runLoop Git HEAD validation chain', () => {
       const evidence = readEvidence(fixture.workspace).records;
       expect(evidence.filter((record) => record.type === 'iteration')).toHaveLength(2);
       const gateRuns = evidence.filter((record) => record.type === 'gate-run');
-      expect(gateRuns).toHaveLength(2);
-      expect(gateRuns[0]).toMatchObject({ ok: true, ran: 1, artifactChanged: true });
-      expect(gateRuns[1]).toMatchObject({ ok: true, ran: 1 });
-      expect(gateRuns[1]).not.toHaveProperty('artifactChanged');
+      expect(gateRuns).toHaveLength(1);
+      expect(gateRuns[0]).toMatchObject({ ok: true, ran: 1 });
       expect(evidence.find((record) => record.type === 'validation-claim')).toMatchObject({
         verdict: 'passed',
         gitHead: fixture.head(),
@@ -682,18 +724,16 @@ describe('runLoop Git HEAD validation chain', () => {
         expect(existsSync(calls)).toBe(false);
         const records = readEvidence(workspace).records;
         expect(
-          records.find((record) => record.type === 'tdd-gate' && record.phase === 'post-builder'),
-        ).toMatchObject({
-          ok: tddExitCode === 0,
-          artifactChanged: true,
-        });
-        expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+          records.some((record) => record.type === 'tdd-gate' && record.phase === 'post-builder'),
+        ).toBe(false);
+        const iteration = records.find((record) => record.type === 'iteration');
+        expect(iteration).toMatchObject({
           builderRan: false,
           validatorRan: false,
           validatorOutcome: 'skipped',
-          validationProtocol: 'invalid',
-          validationProtocolError: { code: 'artifact-changed' },
         });
+        expect(iteration).not.toHaveProperty('validationProtocol');
+        expect(iteration).not.toHaveProperty('validationProtocolError');
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
       }

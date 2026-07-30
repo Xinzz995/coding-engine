@@ -132,25 +132,6 @@ describe('readEvidence 容错', () => {
     expect(readEvidence(dir).records).toEqual([timedOutRun]);
   });
 
-  it('保留提交变化后未被裁决采用的门禁结果', () => {
-    const dir = ws();
-    const changedRun: EvidenceRecord = {
-      ...gateRun,
-      artifactChanged: true,
-    };
-    appendEvidence(dir, changedRun);
-    expect(readEvidence(dir)).toEqual({ records: [changedRun], skippedLines: 0 });
-  });
-
-  it('拒绝非 true 的门禁提交变化标志', () => {
-    const dir = ws();
-    writeFileSync(join(dir, EVIDENCE_FILE), [
-      { ...gateRun, artifactChanged: false },
-      { ...gateRun, artifactChanged: 'yes' },
-    ].map((value) => JSON.stringify(value)).join('\n') + '\n');
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 2 });
-  });
-
   it('门禁与 validator 的有界失败诊断往返保真', () => {
     const dir = ws();
     const gateDiagnostic: EvidenceRecord = {
@@ -398,23 +379,9 @@ describe('TDD 门禁证据', () => {
       timedOut: false,
       diagnosticTail: 'lines 88% < 90%',
     };
-    const changed: EvidenceRecord = {
-      type: 'tdd-gate',
-      source: 'engine',
-      at: '2026-07-23T01:02:00.000Z',
-      phase: 'post-builder',
-      iteration: 2,
-      storyId: 'US-001',
-      ok: true,
-      policyOk: true,
-      commandRan: true,
-      ms: 300,
-      artifactChanged: true,
-    };
     appendEvidence(dir, preflight);
     appendEvidence(dir, failed);
-    appendEvidence(dir, changed);
-    expect(readEvidence(dir)).toEqual({ records: [preflight, failed, changed], skippedLines: 0 });
+    expect(readEvidence(dir)).toEqual({ records: [preflight, failed], skippedLines: 0 });
   });
 
   it('拒绝自相矛盾或超限的 TDD 门禁记录', () => {
@@ -434,31 +401,14 @@ describe('TDD 门禁证据', () => {
       failedCommand: 'npm test',
       exitCode: 1,
       timedOut: false,
-      diagnosticTail: 'coverage failed',
     };
     writeFileSync(join(dir, EVIDENCE_FILE), [
       { ...base, ok: true },
       { ...base, phase: 'unknown' },
       { ...base, policyOk: false, commandRan: true },
       { ...base, diagnosticTail: 'x'.repeat(2001) },
-      { ...base, artifactChanged: false },
-      { ...base, artifactChanged: 'yes' },
-      {
-        ...base,
-        phase: 'preflight',
-        iteration: 0,
-        storyId: null,
-        ok: true,
-        commandRan: false,
-        artifactChanged: true,
-        failureCode: undefined,
-        failedCommand: undefined,
-        exitCode: undefined,
-        timedOut: undefined,
-        diagnosticTail: undefined,
-      },
     ].map((value) => JSON.stringify(value)).join('\n') + '\n');
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 7 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 4 });
   });
 });
 
