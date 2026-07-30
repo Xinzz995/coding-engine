@@ -1,11 +1,15 @@
 ---
 title: 016-agent-invocation-receipt
 status: active
-updated: 2026-07-22
+updated: 2026-07-30
 scope: root
 ---
 
 # 016. 每次真实 Agent 子进程调用留下有界调用凭证
+
+> 2026-07-30 目标边界修正：0.34.0 只有在受管 containment 已确认清空后，才允许写普通
+> completed/error/timeout 调用凭证；终止无法确认时进入 workspace 隔离，不再追加普通 iteration
+> 或 invocation receipt。0.33.3 尚未实现这条统一规则，不能把“已发出终止请求”伪装成已收口。
 
 ## 背景
 
