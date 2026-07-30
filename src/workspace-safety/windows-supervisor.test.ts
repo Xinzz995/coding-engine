@@ -41,7 +41,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const child = spawn(launch.command, args, {
       cwd: launch.cwd,
       env: { ...launch.env },
-      detached: true,
+      detached: launch.detached,
       windowsHide: launch.windowsHide,
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
