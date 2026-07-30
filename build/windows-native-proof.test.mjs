@@ -174,6 +174,11 @@ describe('Windows native proof report', () => {
     expect(script).toContain('-Credential $credential');
     expect(script).toContain('Remove-LocalUser -Name $userName');
     expect(script).not.toContain('runas.exe');
+    expect(nativeJob).toContain('build / windows-supervisor-reproducibility');
+    expect(nativeJob).toContain('native/windows-supervisor/build.ps1');
+    expect(nativeJob.indexOf('windows-supervisor-reproducibility')).toBeLessThan(
+      nativeJob.indexOf('windows-native-proof'),
+    );
     expect(nativeJob).toContain('timeout-minutes: 20');
     expect(WINDOWS_NATIVE_TOTAL_TIMEOUT_MS).toBeLessThan(20 * 60_000);
   });

@@ -249,6 +249,11 @@ jobs:
         timeout-minutes: 10
         shell: pwsh
         run: '& ''npm'' ''ci'''
+      - name: 'build / windows-supervisor-reproducibility'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: pwsh
+        run: '& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-supervisor.exe'''
       - name: 'test / windows-native-proof'
         working-directory: '.'
         timeout-minutes: 20

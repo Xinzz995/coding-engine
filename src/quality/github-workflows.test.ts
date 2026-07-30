@@ -106,8 +106,15 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).toContain('checks_windows-native-standard-user:');
     expect(yaml.match(/runs-on: windows-2022/gu)).toHaveLength(3);
     expect(yaml).not.toContain('windows-latest');
+    expect(yaml).toContain('build / windows-supervisor-reproducibility');
+    expect(yaml).toContain(
+      "& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-supervisor.exe''",
+    );
     expect(yaml).toContain('test / windows-native-proof');
     expect(yaml).toContain("& ''npm'' ''run'' ''test:windows-native-proof''");
+    expect(yaml.indexOf('build / windows-supervisor-reproducibility')).toBeLessThan(
+      yaml.indexOf('test / windows-native-proof'),
+    );
     expect(yaml).toContain('name: quality-gate');
     expect(yaml).toContain('if: ${{ always() }}');
     expect(yaml).toContain(
@@ -184,6 +191,7 @@ describe('renderPolicyGuardWorkflow', () => {
       'assets/workspace-safety/**',
       'build/vitest.windows-native.config.mjs',
       'docs/golden-principles.md',
+      'native/windows-supervisor/**',
       'package.json',
       'tsup.config.ts',
       'vitest.config.ts',

@@ -102,6 +102,38 @@
           }
         },
         {
+          "id": "windows-supervisor-reproducibility",
+          "module": "root",
+          "paths": [
+            ".gitattributes",
+            "native/windows-supervisor/**",
+            "assets/workspace-safety/coding-x-windows-supervisor.exe",
+            "assets/workspace-safety/WindowsSupervisorProgram.cs",
+            "assets/workspace-safety/WindowsJobSupervisor.cs",
+            "assets/workspace-safety/WindowsJobProcess.cs",
+            "assets/workspace-safety/WindowsJobAuthority.cs"
+          ],
+          "command": {
+            "executable": "pwsh",
+            "args": [
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "native/windows-supervisor/build.ps1",
+              "-Mode",
+              "Verify",
+              "-CommittedExecutable",
+              "assets/workspace-safety/coding-x-windows-supervisor.exe"
+            ],
+            "cwd": ".",
+            "platforms": ["windows"],
+            "timeoutMs": 600000
+          }
+        },
+        {
           "id": "cli-smoke",
           "module": "root",
           "command": {
@@ -217,6 +249,7 @@
       ".github/workflows/**",
       ".github/dependabot.yml",
       "assets/workspace-safety/**",
+      "native/windows-supervisor/**",
       "src/contracts/**",
       "src/engine/**",
       "src/workspace-safety/**",
@@ -242,6 +275,7 @@
           ".github/workflows/**",
           ".github/dependabot.yml",
           "assets/workspace-safety/**",
+          "native/windows-supervisor/**",
           "build/run-windows-native-proof.ps1",
           "build/vitest.windows-native.config.mjs",
           "build/windows-native-proof.mjs",
@@ -437,7 +471,7 @@
             "timeoutMs": 600000
           }
         ],
-        "checkIds": ["windows-native-proof"]
+        "checkIds": ["windows-supervisor-reproducibility", "windows-native-proof"]
       }
     ],
     "requiredChecks": ["quality-gate", "policy-guard-source"],
