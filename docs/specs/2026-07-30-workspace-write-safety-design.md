@@ -45,31 +45,31 @@ Issue #91 的干净检出不在本 Issue 内。
 
 ## 可证伪完成合同
 
-| 验收标准                                             | 明确失败信号                              | 验证证据                                            |
-| ---------------------------------------------------- | ----------------------------------------- | --------------------------------------------------- |
-| 每次租约有唯一 owner，迟到 handle 不能改新 owner     | 旧 handle 能 rename/delete/重建后来者锁   | owner 置换与迟到 verify/release 单测                |
-| 新启动 0.33.3 面对新版目录失败关闭                   | 旧 acquire 删除目录或继续进入             | 冻结的真实 0.33.3 acquire/verify/release 三路径测试 |
-| 不宣称 fencing 已运行旧版                            | 无初始化标记也能正式运行                  | 版本切换与初始化前置测试                            |
-| 首次空 workspace 只有一个 bootstrap 赢家             | 两个初始化者都写安全标记或业务文件        | 两真实进程 init barrier 与标记回读                  |
-| prepared 早于 supervisor spawn，bound 早于 DATA      | 无身份 supervisor 已拿到 workspace/target | spawn/bind/DATA 间故障注入                          |
-| 项目代码只在 armed 落盘后运行                        | marker 在 armed 回读前出现                | DATA/ARMED/START 顺序测试                           |
-| START 只能消费一次且绑定 operation                   | 重复/迟到/错 ID 仍执行目标                | IPC 状态机单测与真实 helper 测试                    |
-| parent hard crash 会触发 supervisor 收口             | 旧后代仍持续写 sentinel                   | parent kill + EOF cleanup 场景                      |
-| root exit 0 但有孙进程不能通过                       | 结果被记录为 passed/completed             | 正常退出残留孙进程回归                              |
-| 只有确认 containment 空才清 activity                 | 第二 writer 进入后旧孙进程仍能写          | 新 owner 获取后再释放旧 child 写动作                |
-| Windows 使用 Job Object，而非 taskkill 证明          | 中间根退出后孤儿孙进程未被统计            | Windows Job ActiveProcesses 真实测试                |
-| containment 不可用时项目代码零执行                   | Add-Type/Job/PGID 失败却直接 spawn        | capability 故障注入 + marker 反测                   |
-| parent 与 delegated child 不并发写业务文件           | START 后 parent 写 state/evidence         | writer phase 断言与字节不变测试                     |
-| child 只能写声明范围                                 | 越界后回 idle 或继续写普通 evidence       | delta violation → quarantine/lease-lost 测试        |
-| parent 崩溃不能绕过 child delta                      | drained 后不复核 baseline 就回 ready      | hard kill + recovery delta/quarantine 三平台测试    |
-| Agent 不留下跨轮后台服务                             | nohup 服务存活且调用仍成功                | dev server 残留回归与指令断言                       |
-| run/repair/report/apply/review decision 共享排他边界 | 任意两正式入口同时写                      | 代表性两两并发测试                                  |
-| recovery 与 normal acquire 不双赢                    | 两者同时获得业务写权                      | claim/mkdir/rename barrier 矩阵                     |
-| recovery crash 可精确续做                            | stale claim 只能手删或永久锁死            | 每个 recovery phase 的 resume 测试                  |
-| 未知状态不能靠普通确认变 ready                       | reason 字符串绕过 containment 证明        | corrupt/foreign/reboot-proof 测试                   |
-| 半完成 mutation 不能被普通 recover 清掉              | 部分新 PRD 被当完整基线                   | phase 故障注入 + exact-input resume                 |
-| 安全记录不泄漏秘密                                   | secret canary 出现在 lock/claim/archive   | 全目录反向搜索                                      |
-| 三个平台都验证真实树                                 | 只跑 mock 即宣称完成                      | Linux/macOS/Windows Actions 证据                    |
+| 验收标准                                                       | 明确失败信号                              | 验证证据                                            |
+| -------------------------------------------------------------- | ----------------------------------------- | --------------------------------------------------- |
+| 每次租约有唯一 owner，迟到 handle 不能改新 owner               | 旧 handle 能 rename/delete/重建后来者锁   | owner 置换与迟到 verify/release 单测                |
+| 新启动 0.33.3 面对新版目录失败关闭                             | 旧 acquire 删除目录或继续进入             | 冻结的真实 0.33.3 acquire/verify/release 三路径测试 |
+| 不宣称 fencing 已运行旧版                                      | 无初始化标记也能正式运行                  | 版本切换与初始化前置测试                            |
+| 首次空 workspace 只有一个 bootstrap 赢家                       | 两个初始化者都写安全标记或业务文件        | 两真实进程 init barrier 与标记回读                  |
+| prepared 早于 supervisor spawn，bound 早于 DATA                | 无身份 supervisor 已拿到 workspace/target | spawn/bind/DATA 间故障注入                          |
+| 项目代码只在 armed 落盘后运行                                  | marker 在 armed 回读前出现                | DATA/ARMED/START 顺序测试                           |
+| START 只能消费一次且绑定 operation                             | 重复/迟到/错 ID 仍执行目标                | IPC 状态机单测与真实 helper 测试                    |
+| parent hard crash 会触发 supervisor 收口                       | 旧后代仍持续写 sentinel                   | parent kill + EOF cleanup 场景                      |
+| root exit 0 但有孙进程不能通过                                 | 结果被记录为 passed/completed             | 正常退出残留孙进程回归                              |
+| 只有确认 containment 空才清 activity                           | 第二 writer 进入后旧孙进程仍能写          | 新 owner 获取后再释放旧 child 写动作                |
+| Windows 使用 Job Object，而非 taskkill 证明                    | 中间根退出后孤儿孙进程未被统计            | Windows Job ActiveProcesses 真实测试                |
+| containment 不可用时项目代码零执行                             | Add-Type/Job/PGID 失败却直接 spawn        | capability 故障注入 + marker 反测                   |
+| parent 与 delegated child 不并发写业务文件                     | START 后 parent 写 state/evidence         | writer phase 断言与字节不变测试                     |
+| child 只能写声明范围                                           | 越界后回 idle 或继续写普通 evidence       | delta violation → quarantine/lease-lost 测试        |
+| parent 崩溃不能绕过 child delta                                | drained 后不复核 baseline 就回 ready      | hard kill + recovery delta/quarantine 三平台测试    |
+| Agent 不留下跨轮后台服务                                       | nohup 服务存活且调用仍成功                | dev server 残留回归与指令断言                       |
+| run/repair/report/apply/review decision 共享排他边界           | 任意两正式入口同时写                      | 代表性两两并发测试                                  |
+| recovery 与 normal acquire 不双赢                              | 两者同时获得业务写权                      | claim/mkdir/rename barrier 矩阵                     |
+| recovery crash 可精确续做                                      | stale claim 只能手删或永久锁死            | 每个 recovery phase 的 resume 测试                  |
+| 未知状态不能靠普通确认变 ready                                 | reason 字符串绕过 containment 证明        | corrupt/foreign/reboot-proof 测试                   |
+| 半完成 mutation 不能被普通 recover 清掉                        | 部分新 PRD 被当完整基线                   | phase 故障注入 + exact-input resume                 |
+| 未被选入 mutation/archive 的普通业务秘密不被安全元数据顺手复制 | secret canary 出现在 lock/claim/archive   | 全目录反向搜索                                      |
+| 三个平台都验证真实树                                           | 只跑 mock 即宣称完成                      | Linux/macOS/Windows Actions 证据                    |
 
 ## 状态模型
 
@@ -95,9 +95,11 @@ Issue #91 的干净检出不在本 Issue 内。
 5. 合法 bootstrap protocol + lease 存在，即使 marker 尚未安装，也按 owner/containment 映射
    active/recoverable/isolated，不能误判 legacy；
 6. 无合法 bootstrap 协议根且无标记，却存在运行时文件或 pid-only 锁 → legacy；
-7. 普通 containment live/unknown、foreign host 或恢复输入不足 → isolated；
+7. owner 不是本机 exact-live 时，普通 containment live/unknown、foreign host 或恢复输入不足 →
+   isolated；本机 exact-live owner 仍属于 active，armed 期间存在 live containment 是正常执行态；
 8. exact containment empty、owner dead 且 baseline/mutation 等所需输入严格有效 → recoverable；
-9. exact owner live → active；
+9. exact owner live → active；该规则在 active lease 内优先于普通 containment 状态，但不能覆盖
+   schema/绑定无效、quarantine 或 recovery；
 10. 永久协议根与初始化标记有效、lease 不存在 → ready；
 11. 无标记、无协议根且除严格 inert bootstrap staging 外目录为空 → uninitialized-empty。
 
@@ -198,6 +200,7 @@ lease-lost/invalid，不能再写 quarantine。首版不自动回滚，后续只
     lease.prepare-*/         # 非权威 staging；可选
     lease/                   # active owner 时存在
       owner.json
+      quarantine.json        # 无 operation 时的 containment 隔离；可选
       bootstrap-input/       # 初始化标记 staging 时可选
       operation.prepare-*/   # 非权威 staging；可选
       operation/             # active operation 时存在；整体安装/settle
@@ -339,8 +342,9 @@ prepared/prepared-bound 的 setup/capability failure 或首个受支持用户中
 
 父进程在写 prepared 前暂停普通业务写，生成并回读一份严格、排序、可重算的调用前 manifest。它
 绑定 ownerId、operationId、固定 delegation contract 版本，并覆盖 workspace 中每个 canonical 业务
-路径的类型、相对路径、字节数与 SHA-256；只排除由 coordinator 单独严格验证的整个
-`engine.lock/` 协议子树和本次 baseline 自身，不排除 safety marker 或其他普通 workspace 文件。symlink、
+路径的类型、相对路径、字节数与 SHA-256。`workspace-safety.json`、整个 `engine.lock/` 协议子树和
+本次 baseline 属于安全域，由 coordinator 以独立清单和预算严格验证，不计入业务 baseline，也不得被
+delegation contract 授权为业务写入目标。其他普通 workspace 文件不能排除。symlink、reparse point、
 特殊文件、路径逃逸、重复规范化路径或扫描期间发生字节变化均使项目代码零执行并返回 invalid。
 
 manifest 同时保存允许新增、修改、删除的有界路径规则，以及 state/result/evidence 的语义校验版本。
@@ -350,12 +354,40 @@ projection digest”；对 append-only 文件保存旧字节长度与 prefix dig
 需要旧文件正文。若一种委托无法用固定 projection/prefix/成员规则完整表达，项目代码零执行并返回
 配置错误，不能只留整文件 hash 后依赖 parent 内存裁决。
 
-baseline 不保存文件正文、prompt、argv 或凭据。`active-child.json` 从 prepared 起绑定 baseline 与
+baseline 不保存文件正文、prompt、argv 或凭据。这里的 secret canary 只证明未被 mutation input 或
+archivePaths 选中的普通业务秘密不会被安全元数据顺手复制；调用方显式选择的 archive/input 本来就会
+保存对应字节，不能把此证明扩大成“任意归档输入都不含秘密”。`active-child.json` 从 prepared 起绑定 baseline 与
 contract 摘要，armed 后两者都不可修改。正常 parent 和 recovery 使用同一 evaluator 重扫 workspace：
 prepared/prepared-bound 要求业务字节与 baseline 完全相同；armed 允许的 delta 还必须满足路径范围、
 上述承诺与当前文件语义。无法读取、摘要冲突或 contract 版本不可用都不是“无变化”，而是 invalid。
 恢复接受合法 delta 时仅把已有 child 输出保留为未签发候选，不补写普通成功/失败 evidence，也不把
 对应 Story 视为已验证。
+
+v1 evaluator 进一步冻结以下机械边界，避免正常路径与恢复路径各自解释：
+
+- canonical contract 不超过 64 KiB、完整 baseline 文件不超过 64 MiB、最多 256 条 rule；每条最多
+  3 个不重复 action、256 个 JSON pointer；version、path、pointer 分别不超过 128、4096、512 UTF-8
+  bytes；业务树和安全树各自最多 100000 项，不能互相挤占预算；任一先达到的上限都失败关闭；
+- ownerId/operationId 使用小写、带 RFC version/variant 的 canonical UUID；contract、rules、allow、
+  pointers 与 entries 都使用唯一规范顺序，未知字段、重复值、重叠规则或摘要不匹配一律 invalid；
+- JSON pointer 严格按 RFC 6901 解码，只允许 `~0`、`~1`，拒绝重复及祖先/后代重叠。对象 pointer
+  允许既存父对象内的叶子新增、删除或改值，但父路径必须前后存在且类型不变；数组只允许既存索引
+  的值替换，不允许新增、删除、`-` 或索引位移；
+- `whole-file` 可以显式 create 缺失文件，但结果必须是普通文件；modify/delete 的原对象必须是普通
+  文件。`append-only + allow[modify]` 必须从既存普通文件开始；
+  `append-only + allow[create,modify]` 可以在缺失时首次创建，若起点已存在则仍只能追加，不能替换、
+  截短或删除。`json-mutable-pointers` 必须从既存普通文件开始且只允许 modify；
+  `add-only-directory` 必须从既存普通目录开始且只允许 create，所有旧成员递归保持不变；
+- 文件访问保留 raw name，记录与匹配使用 NFC path；同一树内 NFC 冲突一律 invalid，macOS/Windows
+  还按固定“先大写、再小写、再 NFC”的 casefold 保守拒绝冲突。symlink、reparse point、特殊文件和
+  路径逃逸都不进入 baseline；
+- Windows 不能只依赖 Node 的 `lstat` 判断 reparse point。每个高层操作在开始前和结束后，以固定、
+  摘要绑定、严格 UTF-8 的批量系统属性检查器核验完整父链和对应扫描树；任何
+  `FILE_ATTRIBUTE_REPARSE_POINT`、属性读取失败、结果缺失或检查器变化都失败关闭。单文件读取继续
+  使用原有 no-follow 文件身份与内容稳定性复核，不为每个叶子单独启动检查器；
+- 每次 capture/evaluate 都执行两次完整扫描；路径集合、类型、文件身份、长度、时间或摘要任一变化
+  立即 invalid，不重试或合并。append prefix 必须通过同一 no-follow 普通文件句柄读完并在前后复核
+  路径与文件身份；JSON 必须是严格 UTF-8、无 BOM、无重复 key 的合法 JSON。
 
 ### drained-receipt.json
 
@@ -368,9 +400,12 @@ prepared/prepared-bound 要求业务字节与 baseline 完全相同；armed 允�
   "protocolDigest": "sha256:...",
   "activeChildDigest": "sha256:...",
   "delegatedBaselineDigest": "sha256:...",
+  "delegationContractDigest": "sha256:...",
+  "containmentDigest": "sha256:...",
   "helperDigest": "sha256:...",
   "supervisorIdentity": "bounded-platform-value",
   "proof": "windows-job-zero-and-pipes-eof-v1",
+  "drainReason": "natural",
   "drainedAt": "2026-07-30T00:00:03.000Z"
 }
 ```
@@ -380,8 +415,9 @@ prepared/prepared-bound 要求业务字节与 baseline 完全相同；armed 允�
 canonical active-child/baseline、验证 START digest 并把两份摘要缓存在内存；drain 后使用缓存值写
 receipt；同时缓存 owner.json 与 protocol.json 精确摘要，绝不在 child 可能改写后从磁盘重建“原始
 摘要”。POSIX 只有在 pipes EOF、launcher 退出且
-目标 pgid 精确为空时写 `posix-group-empty-and-pipes-eof-v1`；Windows 必须已缓存根结果、关闭 thread /
-process handle、在仍持有 Job handle 时确认 `ActiveProcesses == 0` 与 pipes EOF，才写
+目标 pgid 精确为空时写 `posix-group-empty-and-pipes-eof-v1`；Windows 自然结束路径必须已缓存根
+结果，随后关闭 thread/process handle；外部终止路径允许没有 STARTED/RESULT，但同样必须关闭目标
+handle，并在仍持有 Job handle 时确认 `ActiveProcesses == 0` 与 pipes EOF，才写
 `windows-job-zero-and-pipes-eof-v1`。若 supervisor 从未接受 START，项目代码机械上未运行；canonical
 active-child 已是严格 armed 时，它可以安全重读摘要、清空 barrier/suspended containment，并写
 `never-started-containment-empty-v1`；磁盘仍是 prepared-bound 时不写 receipt。`proof` 只允许这三个
@@ -389,6 +425,12 @@ active-child 已是严格 armed 时，它可以安全重读摘要、清空 barri
 parent 回读绑定后 ACK；supervisor 随后退出，parent 确认其死亡、delta accepted 后才整体 settle
 operation，不逐项清 active 与 receipt。
 父进程崩溃路径由 supervisor 完成同一写入后退出，留给 recovery 使用。
+
+`drainReason` 固定为
+`natural | process-tree-not-empty | timeout | user-interrupt | parent-shutdown`，是 receipt 精确字节及
+摘要的一部分。`process-tree-not-empty` 只能由 supervisor 在自然收口窗口结束后根据平台集合测量得出；
+parent 不能通过 TERMINATE 自报。IPC 的 DRAINED 只携带 `operationId + receiptDigest + proof`，不复制
+reason 或 `leftover`，避免出现两个可分叉的裁决来源。
 
 receipt 必须和当前 owner record、protocol、operation、active-child、delegated baseline 的精确字节
 摘要、固定 helper 及 supervisor identity 完全匹配。缺失、部分写入、旧 operation、helper 不匹配、当前 safety bytes 与
@@ -400,6 +442,30 @@ receipt 必须和当前 owner record、protocol、operation、active-child、del
 
 quarantine 严格绑定 ownerId、可选 operationId、冻结 active-child/baseline digest、创建者身份、时间与
 固定 reason 枚举，只允许：
+
+```json
+{
+  "schemaVersion": 1,
+  "ownerId": "uuid",
+  "operationId": "uuid-or-null",
+  "activeChildDigest": "sha256-or-null",
+  "delegatedBaselineDigest": "sha256-or-null",
+  "creator": {
+    "kind": "owner-or-recovery-attempt",
+    "id": "uuid",
+    "recordDigest": "sha256:..."
+  },
+  "reason": "containment-unconfirmed",
+  "priorQuarantineDigest": null,
+  "createdAt": "2026-07-30T00:05:00.000Z"
+}
+```
+
+有 operation 时，`operationId` 与两份冻结摘要必须同时存在，文件位于 `operation/quarantine.json`；
+没有 operation 的 containment 失败使用 active lease 根的 `quarantine.json`，三项同时为 `null`。
+`creator.recordDigest` 绑定精确 owner 或 recovery attempt owner 记录，不复制机器原始身份。初次安装
+不得替换已有文件；唯一允许的覆盖是 recovery 将 `containment-unconfirmed` 单向升级为
+`workspace-integrity-violation`，新记录必须保持同一冻结绑定并以 `priorQuarantineDigest` 绑定旧字节。
 
 - `containment-unconfirmed`：终止、探测或平台证明无法确认；业务字节尚未裁决。它在严格同机 reboot
   proof 后才允许安装 recovery claim；若有 armed operation，必须已经存在完整 cached-digest receipt，
@@ -417,6 +483,18 @@ containment quarantine → 其余状态，因此 strict reboot proof 建立 reco
 秘密。
 
 ### recovery claim、state 与 attempt lease
+
+磁盘上的进程身份、owner/attempt 存活、supervisor 存活与 containment 状态都是操作系统裁判事实。
+这条边界从 `bootstrapWorkspace` 与 `acquireWorkspaceLease` 开始：正式入口不得接收 identity 或系统
+authority，必须在模块内捕获精确当前身份；返回的 lease handle 由模块私有能力创建，并永久携带同一
+身份复核器。不存在可供普通生产调用方读取 owner 后重新 attach 的入口。正式 recovery 的
+install/acquire/finalize/resume 同样不得接收调用方提供的 identity、liveness probe、containment probe
+或自定义 authority；它们必须在每个权限相关写入及最终 rename 前重新核对同一
+pid/host/boot/process identity。确定性测试所需的伪身份只开放在名称明确的
+`workspace-authority-test-seam` 与 `recovery-authority-test-seam`，production 与未来 CLI activation
+禁止导入这些 seam 或直接调用 Controlled core。同机重启 coordinator 是唯一受控内部例外：它仍从
+真实系统 boot change 与精确 quarantine 建立 authority，并在最终写入前重复核对，不能退化为
+fixture probe。
 
 `claim.json` 一旦安装便不可变：
 
@@ -494,7 +572,7 @@ source conflict/invalid。机械恢复和 bootstrap-complete 不允许改 canoni
   "schemaVersion": 1,
   "ownerId": "uuid",
   "mutationId": "uuid",
-  "kind": "apply-prd",
+  "kind": "apply-prd-v1",
   "inputDigest": "sha256:...",
   "baseSnapshotDigest": "sha256:...",
   "phase": "staged",
@@ -512,6 +590,18 @@ input 或 state。archive 目标由 mutationId 决定；旧快照先复制到唯
 manifest/逐字节相同；半份 staging 不是最终 archive，可由 RecoveryWriter 按 mutationId 保留取证并
 新建 attempt staging。目标原子覆盖、删除均幂等，每步重读摘要。committed 前不能 release；崩溃后
 只允许 exact-input resume，普通 recover 不得清除。
+
+`kind` 首版固定为 `apply-prd-v1 | repair-v1 | generic-v1`：前两项保留未来正式调用入口的真实目的，
+`generic-v1` 仅供 dark implementation 与破坏性测试使用。通用 mutation 核心只执行调用方显式提供的
+有限 writes、deletes 与 archivePaths，不替 apply-prd/repair 决定要归档哪些业务文件；该策略仍留给
+后续公开接线裁决。generic-v1 的 canary 只能证明“未选入的普通业务秘密不被安全元数据额外复制”，
+不能证明任意 archivePaths 都不含秘密。后续 apply-prd/repair 必须各自冻结允许路径，并对真实固定
+路径执行独立 canary；本 PR 不选择路径或保留时长。
+
+v1 的 plannedPaths/archivePaths 一律拒绝永久协议根、安全标记、路径逃逸、软链接、硬链接与内部
+staging 名称。业务写的父目录必须已经存在；目录创建尚未进入 manifest 状态机，因此不能隐式创建。
+目标文件的完整候选先写入 canonical `mutation/apply/` 内的有界 prepared 文件，校验后再形成固定
+apply staging 并原子替换业务目标；hard crash 不会在业务目录留下 manifest 外的临时文件。
 
 所有安全 JSON 用 owner-aware 原子覆盖；临时名含 ownerId/单调序号并用 `wx`。这保证本合同覆盖的
 进程崩溃窗口得到完整旧版、完整新版或保守 invalid；不额外声称掉电、内核崩溃或存储故障下的 fsync
@@ -594,22 +684,29 @@ finally 只能请求这条 close 路径，不能旁路 rename。这样暂停在�
 
 ### 通用消息
 
-| 方向              | 消息                      | 前置                               | 后置                     |
-| ----------------- | ------------------------- | ---------------------------------- | ------------------------ |
-| supervisor→parent | BOUND(identity,isolation) | supervisor 已隔离终端信号          | parent 可持久化 bound    |
-| parent→supervisor | DATA(operationId, target) | prepared-bound 已落盘并回读        | 仅内存校验，不运行       |
-| supervisor→parent | READY/ARMED               | containment 已建，项目代码不可运行 | 返回有界身份             |
-| parent→supervisor | START(operationId,digest) | armed 已原子落盘并回读             | 重读同 digest 后一次接受 |
-| parent→supervisor | ABORT_BEFORE_START        | canonical 仍为 prepared-bound      | 项目代码保持零执行       |
-| supervisor→parent | PRESTART_DRAINED          | prestart containment 空且 pipe EOF | parent 等其退出并核基线  |
-| supervisor→parent | STARTED                   | 项目代码已启动/恢复                | 仅内存诊断               |
-| supervisor→parent | RESULT                    | 根结果已得，集合可能未空           | 不等于完成               |
-| supervisor→parent | DRAINED(platformProof)    | 集合空、pipe EOF、平台证明已回读   | parent ack 后退出        |
+| 方向              | 消息                           | 前置                               | 后置                     |
+| ----------------- | ------------------------------ | ---------------------------------- | ------------------------ |
+| supervisor→parent | BOUND(identity,isolation)      | supervisor 已隔离终端信号          | parent 可持久化 bound    |
+| parent→supervisor | DATA(operationId, target)      | prepared-bound 已落盘并回读        | 仅内存校验，不运行       |
+| supervisor→parent | READY/ARMED                    | containment 已建，项目代码不可运行 | 返回有界身份             |
+| parent→supervisor | START(operationId,digest)      | armed 已原子落盘并回读             | 重读同 digest 后一次接受 |
+| parent→supervisor | ABORT_BEFORE_START             | canonical 仍为 prepared-bound      | 项目代码保持零执行       |
+| supervisor→parent | PRESTART_DRAINED               | prestart containment 空且 pipe EOF | parent 等其退出并核基线  |
+| supervisor→parent | STARTED                        | 项目代码已启动/恢复                | 仅内存诊断               |
+| supervisor→parent | RESULT                         | 根结果已得，集合可能未空           | 不等于完成               |
+| parent→supervisor | TERMINATE(operationId,reason)  | canonical armed；timeout/中断/断链 | 与 START 首到者获胜      |
+| supervisor→parent | DRAINED(receiptDigest,proof)   | 集合空、pipe EOF、receipt 已回读   | parent ack 后退出        |
+| parent→supervisor | ACK(operationId,receiptDigest) | DRAINED 与持久 receipt 已回读      | supervisor 可退出/关 Job |
 
 START 必须携带 frozen active-child digest；supervisor 在运行/恢复 target 前从 canonical operation 重读并
 验证 owner、operation、containment 与该 digest。任一断链、重复、错 ID 或错 digest 都停止新启动。
-parent 在 RESULT 后发现剩余成员时发 TERMINATE；清理成功仍
-返回 `process-tree-not-empty`，不能把原 exit 0 采用为通过。
+`TERMINATE.reason` 固定为 `timeout | user-interrupt | parent-shutdown`，不携带自由命令、PID、
+信号名或平台参数；POSIX 与 Windows 使用同一通用消息。canonical armed 后 START 与 TERMINATE 以
+supervisor 首次接受的消息为准：TERMINATE 先到时项目代码永不启动，迟到的同 operation、同冻结绑定
+START 只返回未接受，不改变终态；START 先到时项目代码已经可能运行，TERMINATE 直接清空集合。
+首个合法 TERMINATE reason 冻结，之后同 operation 的合法 TERMINATE 幂等且不能改写原因。自然窗口
+结束后仍有成员由 supervisor 自己测得并写入 receipt 的 `process-tree-not-empty`，不再由 parent 发送
+TERMINATE 代替；清理成功也不能采用原 exit 0 为通过。
 
 parent 先暂停普通写，原子写并回读 delegated baseline，再写绑定其摘要的 prepared；随后启动一个
 尚不知道 workspace path/target 的 supervisor。取得 pid 与平台 identity 后写 prepared-bound 并回读，
@@ -643,9 +740,14 @@ parent→supervisor 控制 fd/handle 只属于两端，不出现在 launcher/tar
 - root 结束且 pipes EOF 后，supervisor 用 Linux `/proc` 或 macOS 平台 adapter 枚举精确 pgid；只剩
   launcher 时命令 launcher 退出，再用负 pgid probe 证明整个组不存在，使用 START 前缓存摘要原子写
   POSIX drained receipt，回读后才发送 DRAINED；
-- parent IPC EOF 后 supervisor 对目标 pgid 执行 TERM→宽限→KILL 并等待组不存在；若曾接受 START，
+- parent IPC EOF 后 supervisor 只经仍与原 ChildProcess IPC 绑定的固定 launcher 发送内部
+  `SIGNAL_GROUP(TERM|KILL)`；launcher 在自身进程内向自己的 process group 发信号，从而在系统调用前
+  排除 PID/PGID 复用，再按 TERM→宽限→KILL 等待组不存在。该内部消息拒绝 caller 提供 PID 或任意
+  signal；若曾接受 START，
   使用缓存摘要写同一 receipt；若未接受 START 但 canonical armed 有效，写 never-started receipt；仍是
   prepared-bound 则零 receipt。因为 supervisor 不在目标组，KILL 不会同时消灭见证者；
+- timeout、用户中断或 parent EOF 的终止路径不要求先收到 STARTED/RESULT；launcher IPC、身份、
+  session 或 pgid 任一不匹配时停止并隔离；
 - parent ACK 后 supervisor 正常退出，parent 再 probe 持久 pgid。pgid 存在表示有残留，结果不得通过；
 - pgid 复用或成员身份无法判定时 unknown/quarantine，不误杀。
 
@@ -668,7 +770,8 @@ supervisor 存活至 receipt 落盘、目标 pgid 为空，而不是只调用 co
 8. parent 持久化 armed 并发送 frozen digest；supervisor 重读 active/baseline、缓存摘要后才
    ResumeThread；
 9. ResumeThread 成功且不再需要 thread handle 后立即 CloseHandle(hThread)；
-10. 根进程退出后先缓存 exit code，再 CloseHandle(hProcess)，然后查询 ActiveProcesses；
+10. 自然结束时先缓存根 exit code，再 CloseHandle(hProcess)；外部终止允许尚无根结果，也必须关闭
+    hProcess，随后查询 ActiveProcesses；
 11. 正常完成或 TerminateJobObject 后都等待 ActiveProcesses == 0 与 stdout/stderr EOF；
 12. supervisor 在仍持有 Job handle 时原子写、回读 drained receipt，再发送 DRAINED；
 13. parent 验证 receipt 并 ACK 后，supervisor 才关闭 Job handle 并退出。
@@ -678,8 +781,8 @@ parent IPC EOF 时 supervisor 主动 TerminateJobObject。canonical active-child
 接受 START 但 canonical armed 严格有效，则安全重读并写 never-started receipt。随后退出，不等 ACK。
 若 supervisor 自身被硬杀，KILL_ON_JOB_CLOSE 只能触发异步终止，无法给后来的进程留下可查询
 Job；没有 receipt 就保持 isolated，不以 supervisor/target pid dead 代替。终止路径也必须先缓存
-需要的根结果并关闭 hProcess，再等待 ActiveProcesses 归零，避免 supervisor 自己的 handle 让计数
-无法收敛。
+已经取得的根结果；即使 STARTED/RESULT 尚未出现也要关闭 hProcess，再等待 ActiveProcesses 归零，
+避免 supervisor 自己的 handle 让计数无法收敛。
 
 Add-Type 被 ConstrainedLanguage/AppLocker/策略阻止、外层 Job 不兼容、原子 Job 关联失败、查询失败或
 handle 继承不明时，target 保持未运行/被终止，返回 2。绝不以 `taskkill` 成功代替 Job 归零。
@@ -705,14 +808,15 @@ handle 继承不明时，target 保持未运行/被终止，返回 2。绝不以
 
 ## 完成、收口与长时服务
 
-armed 调用完成条件是
-`root result + pipes EOF + containment empty + cached-digest receipt + supervisor closed`，不是 Promise
-收到 exit。POSIX 的 empty 由组外 supervisor 让 trusted launcher 退出、探测精确 pgid 消失、写 receipt，
+armed 调用的共同完成条件是
+`pipes EOF + containment empty + cached-digest receipt + supervisor closed`，不是 Promise 收到 exit；
+只有自然完成路径额外要求 root result，timeout、用户中断和 parent 断链允许没有 STARTED/RESULT。
+POSIX 的 empty 由组外 supervisor 让 trusted launcher 退出、探测精确 pgid 消失、写 receipt，
 并在 supervisor 退出后由 parent 再探测和回读证明；Windows 的 empty 由仍持 Job handle 的 supervisor
 在关闭目标 handle 后查询为零并持久化精确 receipt，不能在 helper 退出后补查匿名 Job。
 
 固定时序为：根结果后自然 drain 最多 5 秒；提前达到 pipes EOF + empty 即正常完成。到期仍有成员，
-记录 leftover 并清理：POSIX TERM grace 5 秒，再 KILL + empty confirm 5 秒；Windows
+receipt 记录 `drainReason=process-tree-not-empty` 并清理：POSIX TERM grace 5 秒，再 KILL + empty confirm 5 秒；Windows
 TerminateJobObject + zero/EOF confirm 5 秒。清理成功也保留 process-tree-not-empty 裁决。命令 timeout
 不吞掉这三段收口预算；完整 duration 包含它们。timeout、signal、parent EOF 跳过自然 drain，直接
 终止。有限测试使用 barrier：
@@ -912,6 +1016,9 @@ recovery 仍在。
 | prepared/bound setup 失败或首中断原子 abort    |    barrier + 真机 |    barrier + 真机 |        barrier + 真机 |
 | DATA 后、armed 前零 receipt 恢复               |              真机 |              真机 |              Job 真机 |
 | DATA 与 START 分离、重复/错 ID 拒绝            |       真机 + 单测 |       真机 + 单测 |           真机 + 单测 |
+| armed 后 START/TERMINATE 两种先后顺序          |       真机 + 单测 |       真机 + 单测 |           真机 + 单测 |
+| TERM-first 迟到 START、重复 TERM 首因冻结      |       真机 + 单测 |       真机 + 单测 |           真机 + 单测 |
+| 终止路径无 STARTED/RESULT 仍完成平台证明       |              真机 |              真机 |                  真机 |
 | STARTED/快速退出/receipt 任意交错              |      barrier 单测 |      barrier 单测 |      Job barrier 真机 |
 | child 越界后 parent hard kill 再恢复           |              真机 |              真机 |                  真机 |
 | 合法 delta 后 parent kill→recover ready        |              真机 |              真机 |                  真机 |
@@ -944,12 +1051,32 @@ recovery 仍在。
 | owner boot identity 同机重启恢复               |   adapter fixture |   adapter fixture |       adapter fixture |
 | reboot 仅解除合格 containment quarantine       |   adapter fixture |   adapter fixture |       adapter fixture |
 | reboot 不补 armed receipt/不越过 integrity     |   adapter fixture |   adapter fixture |       adapter fixture |
-| secret canary 不落安全记录                     |              真机 |              真机 |                  真机 |
+| 未选择的普通 secret canary 不落安全元数据      |              真机 |              真机 |                  真机 |
 
 Windows 另测 Node 22 与当前 Node、普通用户、嵌套外层 Job、不兼容 Job、ConstrainedLanguage/Add-Type
 拒绝、breakaway 尝试、`.cmd` shim、Unicode/空参数、stdin/大 stdout/stderr、thread/process handle
 关闭顺序、ActiveProcesses 归零、receipt 损坏/错绑、supervisor 在 receipt 前后 hard kill 和 handle leak。
+同一普通用户证明还必须真实创建 Unicode/空格路径上的 WOF 压缩普通文件和“父目录 junction、子文件
+表面普通”的场景，先证明 Node `lstat` 未识别，再证明 readReady、bootstrap/recovery 和 evaluator
+均由系统属性检查拒绝；fixture 创建失败不得跳过。
 GitHub Windows Server 2022 是最低真实证明；mock taskkill 不能替代。
+非 Windows 上的源码、摘要和条件测试只能证明分发合同，不能把 skip 或静态检查报告为 Job 行为已完成；
+上述 Windows 行为必须由 required Windows CI 真正执行后才算绿色。
+
+Windows 原生证明使用独立的 required job：工作流固定 `windows-2022`，先由 hosted runner 管理员创建
+一次性本地普通账户，再通过无交互 credential 启动该账户执行固定 Windows Job、parent crash、生产
+operation、delegated recovery 与 reparse safety suite。证明入口同时核对 token 不含 Administrators SID，
+并解析 Vitest JSON，要求固定 suite 全部存在、至少一个断言实际通过、逐项记录耗时且零 skip/pending；
+账户切换、结果文件、WOF/junction fixture 或任一
+suite 不可用都让 job 失败。普通 `npm test` 中的条件 skip 不计入此证明。0.33.3 冻结包兼容测试使用
+PATH 上的 `node` 和仓库相对 fixture，避免把 `Program Files` 绝对路径送入旧版按空格切分的 runner
+覆盖参数；不得因此替换冻结 tarball 或放宽摘要核验。
+
+普通 Windows 全量单测为避免每个 fixture 重复冷启动 PowerShell，可由仓库 Vitest 配置把 transport
+解析到严格、有计数上限的 test-only 实现；这份结果不计入原生证明。required native runner 必须显式
+使用另一份无 alias、setup 或环境旁路的固定配置，直接调用真实 PowerShell/GetFileAttributesW，并以
+WOF、junction 和普通用户断言证明没有走 test transport。production API 不接收 transport/probe，也不
+读取测试旁路环境变量；配置、runner、固定 suite 与 LF 属性规则都属于旧 policy 保护范围。
 
 POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代码、launcher 提前退出、pgid
 仍有成员、group probe unknown 和 START 后 parent 立即 kill。真实测试只证明普通进程继承合同；
@@ -962,6 +1089,11 @@ POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代
 3. atomic activation PR 同时迁移全部 spawn、全部 workspace 写入口、doctor/recovery、skills 和
    Builder 服务合同；没有“新 run + 旧旁路”的中间产品状态。
 4. closeout PR 只做真实 dogfood、文档对账和 Issue 证据。
+
+dark foundation 的 `workspace-safety` 生产模块只公开进程放置与集合状态的只读检查；POSIX 组信号只存在于
+摘要绑定的固定 launcher 内。0.33.3 仍在使用的 `src/engine/process-tree.ts` 是 activation PR 必须整体
+替换的已知旧边界，不属于本 PR 的新安全证明，也不能被新模块导入。测试失败后的破坏性清理仅允许位于
+test-only fixture，并在发送信号前重核已记录 launcher 的进程身份与 session/pgid。
 
 0.34.0 初始化真实测试实际运行冻结 0.33.3 binary 面对新版目录：
 
@@ -987,5 +1119,6 @@ POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代
 - 跨主机共享 workspace 的分布式一致性。
 - 自动迁移任意 0.33.x 旧 workspace。
 - 允许 operation 合法遗留后台 daemon。
-- 修改 GitHub 门禁、三层 Review 内容或 npm 发布。
+- 改变稳定 required check 名称或门禁语义、三层 Review 内容或 npm 发布；本 PR 只扩展
+  `quality-gate` 内部跨平台证明矩阵。
 - 提前完成 Issue #91 的干净检出。

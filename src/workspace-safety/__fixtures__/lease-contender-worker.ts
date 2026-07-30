@@ -1,0 +1,38 @@
+import { existsSync } from 'node:fs';
+import { createIdentityProbe } from '../identity.js';
+import { acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease } from '../workspace-authority-test-seam.js';
+
+const [workspacePath, barrierPath] = process.argv.slice(2);
+
+async function send(message: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    process.send?.(message, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+if (!workspacePath || !barrierPath || typeof process.send !== 'function') {
+  process.exitCode = 2;
+} else {
+  try {
+    const lease = await acquireWorkspaceLease({
+      workspacePath,
+      identity: createIdentityProbe().current(),
+      command: 'run',
+      hooks: {
+        beforeLeaseInstall: async () => {
+          await send('staged');
+          while (!existsSync(barrierPath)) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+        },
+      },
+    });
+    await lease.release();
+    await send('acquired');
+  } catch {
+    await send('rejected');
+  }
+}

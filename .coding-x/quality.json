@@ -7,9 +7,7 @@
     "defaultBranch": "main"
   },
   "release": {
-    "protectedRefs": [
-      "v*"
-    ]
+    "protectedRefs": ["v*"]
   },
   "sources": {
     "specs": [
@@ -39,35 +37,53 @@
       "path": "."
     }
   ],
-  "generatedPaths": [
-    "dist/**",
-    "coverage/**"
-  ],
+  "generatedPaths": ["dist/**", "coverage/**"],
   "checks": {
     "test": {
       "checks": [
         {
           "id": "tests",
           "module": "root",
+          "paths": ["src/**", "build/**", "hooks/**"],
+          "command": {
+            "executable": "npm",
+            "args": ["test", "--", "--run"],
+            "cwd": ".",
+            "platforms": ["linux", "macos", "windows"],
+            "timeoutMs": 600000
+          }
+        },
+        {
+          "id": "legacy-compatibility",
+          "module": "root",
+          "paths": ["src/workspace-safety/**", "package.json", "package-lock.json"],
+          "command": {
+            "executable": "npm",
+            "args": ["run", "test:legacy-compat"],
+            "cwd": ".",
+            "platforms": ["linux", "macos", "windows"],
+            "timeoutMs": 600000
+          }
+        },
+        {
+          "id": "windows-native-proof",
+          "module": "root",
           "paths": [
-            "src/**",
-            "build/**",
-            "hooks/**"
+            ".gitattributes",
+            "assets/workspace-safety/**",
+            "build/run-windows-native-proof.ps1",
+            "build/vitest.windows-native.config.mjs",
+            "build/windows-native-proof.mjs",
+            "vitest.config.ts",
+            "src/workspace-safety/windows-*.ts",
+            "src/workspace-safety/delegated-recovery.windows-crash.test.ts"
           ],
           "command": {
             "executable": "npm",
-            "args": [
-              "test",
-              "--",
-              "--run"
-            ],
+            "args": ["run", "test:windows-native-proof"],
             "cwd": ".",
-            "platforms": [
-              "linux",
-              "macos",
-              "windows"
-            ],
-            "timeoutMs": 600000
+            "platforms": ["windows"],
+            "timeoutMs": 1200000
           }
         }
       ]
@@ -79,16 +95,9 @@
           "module": "root",
           "command": {
             "executable": "npm",
-            "args": [
-              "run",
-              "build"
-            ],
+            "args": ["run", "build"],
             "cwd": ".",
-            "platforms": [
-              "linux",
-              "macos",
-              "windows"
-            ],
+            "platforms": ["linux", "macos", "windows"],
             "timeoutMs": 600000
           }
         },
@@ -97,16 +106,9 @@
           "module": "root",
           "command": {
             "executable": "node",
-            "args": [
-              "dist/cli.js",
-              "--help"
-            ],
+            "args": ["dist/cli.js", "--help"],
             "cwd": ".",
-            "platforms": [
-              "linux",
-              "macos",
-              "windows"
-            ],
+            "platforms": ["linux", "macos", "windows"],
             "timeoutMs": 60000
           }
         }
@@ -117,66 +119,36 @@
         {
           "id": "format",
           "module": "root",
-          "paths": [
-            "src/**",
-            "build/**",
-            "hooks/**",
-            "*.ts",
-            "*.js"
-          ],
+          "paths": ["src/**", "build/**", "hooks/**", "*.ts", "*.js"],
           "command": {
             "executable": "npm",
-            "args": [
-              "run",
-              "format:check"
-            ],
+            "args": ["run", "format:check"],
             "cwd": ".",
-            "platforms": [
-              "linux"
-            ],
+            "platforms": ["linux"],
             "timeoutMs": 120000
           }
         },
         {
           "id": "lint",
           "module": "root",
-          "paths": [
-            "src/**",
-            "eslint.config.js",
-            "tsconfig.json"
-          ],
+          "paths": ["src/**", "eslint.config.js", "tsconfig.json"],
           "command": {
             "executable": "npm",
-            "args": [
-              "run",
-              "lint"
-            ],
+            "args": ["run", "lint"],
             "cwd": ".",
-            "platforms": [
-              "linux"
-            ],
+            "platforms": ["linux"],
             "timeoutMs": 600000
           }
         },
         {
           "id": "typecheck",
           "module": "root",
-          "paths": [
-            "src/**",
-            "tsconfig.json"
-          ],
+          "paths": ["src/**", "tsconfig.json"],
           "command": {
             "executable": "npm",
-            "args": [
-              "run",
-              "typecheck"
-            ],
+            "args": ["run", "typecheck"],
             "cwd": ".",
-            "platforms": [
-              "linux",
-              "macos",
-              "windows"
-            ],
+            "platforms": ["linux", "macos", "windows"],
             "timeoutMs": 600000
           }
         },
@@ -195,16 +167,9 @@
           ],
           "command": {
             "executable": "npm",
-            "args": [
-              "run",
-              "repository-health"
-            ],
+            "args": ["run", "repository-health"],
             "cwd": ".",
-            "platforms": [
-              "linux",
-              "macos",
-              "windows"
-            ],
+            "platforms": ["linux", "macos", "windows"],
             "timeoutMs": 120000
           }
         }
@@ -217,14 +182,9 @@
           "module": "root",
           "command": {
             "executable": "npm",
-            "args": [
-              "audit",
-              "--audit-level=high"
-            ],
+            "args": ["audit", "--audit-level=high"],
             "cwd": ".",
-            "platforms": [
-              "linux"
-            ],
+            "platforms": ["linux"],
             "timeoutMs": 300000
           }
         }
@@ -253,9 +213,13 @@
     ],
     "highRiskPaths": [
       ".coding-x/**",
+      ".gitattributes",
       ".github/workflows/**",
       ".github/dependabot.yml",
+      "assets/workspace-safety/**",
+      "src/contracts/**",
       "src/engine/**",
+      "src/workspace-safety/**",
       "src/quality/**",
       "src/doctor/**",
       "src/status/**",
@@ -264,6 +228,9 @@
       "hooks/**",
       "eslint.config.js",
       ".prettierrc.json",
+      "tsconfig.json",
+      "tsup.config.ts",
+      "vitest.config.ts",
       "package.json",
       "package-lock.json"
     ],
@@ -271,29 +238,49 @@
       {
         "paths": [
           ".coding-x/**",
+          ".gitattributes",
           ".github/workflows/**",
           ".github/dependabot.yml",
+          "assets/workspace-safety/**",
+          "build/run-windows-native-proof.ps1",
+          "build/vitest.windows-native.config.mjs",
+          "build/windows-native-proof.mjs",
+          "build/windows-native-proof.test.mjs",
+          "build/workflow-security.test.mjs",
           "eslint.config.js",
           ".prettierrc.json",
           "docs/golden-principles.md",
-          "src/doctor/repository-health.test.ts"
+          "src/doctor/repository-health.test.ts",
+          "src/quality/**",
+          "src/workspace-safety/delegated-recovery.windows-crash.test.ts",
+          "src/workspace-safety/windows-reparse-point.windows.test.ts",
+          "src/workspace-safety/windows-supervisor.crash.test.ts",
+          "src/workspace-safety/windows-supervisor-integration.test.ts",
+          "src/workspace-safety/windows-supervisor.test.ts",
+          "tsconfig.json",
+          "vitest.config.ts"
         ],
-        "categories": [
-          "policy",
-          "security"
-        ]
+        "categories": ["policy", "security"]
       },
       {
-        "paths": [
-          "src/engine/**"
-        ],
+        "paths": ["src/engine/**"],
+        "categories": ["state", "recovery", "concurrency", "timeout", "retry", "subprocess"]
+      },
+      {
+        "paths": ["src/contracts/**"],
+        "categories": ["public-contract", "state"]
+      },
+      {
+        "paths": ["src/workspace-safety/**"],
         "categories": [
           "state",
           "recovery",
+          "idempotency",
           "concurrency",
           "timeout",
-          "retry",
-          "subprocess"
+          "subprocess",
+          "security",
+          "untrusted-input"
         ]
       },
       {
@@ -301,12 +288,10 @@
           "package.json",
           "package-lock.json",
           ".github/workflows/stage-candidate.yml",
-          ".github/workflows/publish.yml"
+          ".github/workflows/publish.yml",
+          "tsup.config.ts"
         ],
-        "categories": [
-          "release",
-          "security"
-        ]
+        "categories": ["release", "security"]
       }
     ]
   },
@@ -326,18 +311,15 @@
         "setup": [
           {
             "executable": "npm",
-            "args": [
-              "ci"
-            ],
+            "args": ["ci"],
             "cwd": ".",
-            "platforms": [
-              "linux"
-            ],
+            "platforms": ["linux"],
             "timeoutMs": 600000
           }
         ],
         "checkIds": [
           "tests",
+          "legacy-compatibility",
           "build",
           "cli-smoke",
           "format",
@@ -361,21 +343,13 @@
         "setup": [
           {
             "executable": "npm",
-            "args": [
-              "ci"
-            ],
+            "args": ["ci"],
             "cwd": ".",
-            "platforms": [
-              "linux"
-            ],
+            "platforms": ["linux"],
             "timeoutMs": 600000
           }
         ],
-        "checkIds": [
-          "tests",
-          "build",
-          "cli-smoke"
-        ]
+        "checkIds": ["tests", "build", "cli-smoke"]
       },
       {
         "id": "macos-node-24",
@@ -391,21 +365,35 @@
         "setup": [
           {
             "executable": "npm",
-            "args": [
-              "ci"
-            ],
+            "args": ["ci"],
             "cwd": ".",
-            "platforms": [
-              "macos"
-            ],
+            "platforms": ["macos"],
             "timeoutMs": 600000
           }
         ],
-        "checkIds": [
-          "tests",
-          "build",
-          "cli-smoke"
-        ]
+        "checkIds": ["tests", "legacy-compatibility", "build", "cli-smoke"]
+      },
+      {
+        "id": "windows-node-22",
+        "platform": "windows",
+        "toolchains": [
+          {
+            "kind": "node",
+            "version": "22",
+            "cache": "npm",
+            "cacheDependencyPath": "package-lock.json"
+          }
+        ],
+        "setup": [
+          {
+            "executable": "npm",
+            "args": ["ci"],
+            "cwd": ".",
+            "platforms": ["windows"],
+            "timeoutMs": 600000
+          }
+        ],
+        "checkIds": ["tests", "legacy-compatibility", "build", "cli-smoke"]
       },
       {
         "id": "windows-node-24",
@@ -421,27 +409,38 @@
         "setup": [
           {
             "executable": "npm",
-            "args": [
-              "ci"
-            ],
+            "args": ["ci"],
             "cwd": ".",
-            "platforms": [
-              "windows"
-            ],
+            "platforms": ["windows"],
             "timeoutMs": 600000
           }
         ],
-        "checkIds": [
-          "tests",
-          "build",
-          "cli-smoke"
-        ]
+        "checkIds": ["tests", "build", "cli-smoke"]
+      },
+      {
+        "id": "windows-native-standard-user",
+        "platform": "windows",
+        "toolchains": [
+          {
+            "kind": "node",
+            "version": "22",
+            "cache": "npm",
+            "cacheDependencyPath": "package-lock.json"
+          }
+        ],
+        "setup": [
+          {
+            "executable": "npm",
+            "args": ["ci"],
+            "cwd": ".",
+            "platforms": ["windows"],
+            "timeoutMs": 600000
+          }
+        ],
+        "checkIds": ["windows-native-proof"]
       }
     ],
-    "requiredChecks": [
-      "quality-gate",
-      "policy-guard-source"
-    ],
+    "requiredChecks": ["quality-gate", "policy-guard-source"],
     "requiredCodeScanning": [
       {
         "tool": "CodeQL",

@@ -1,0 +1,377 @@
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  canonicalizeWorkspaceDirectory,
+  createStagingDirectory,
+  digestBytes,
+  installDirectoryNoReplace,
+  installFileNoReplace,
+  inspectLinkedFileInstall,
+  readLinkedFileInstall,
+  recoverLinkedFileInstall,
+  jsonBytes,
+  moveDirectoryNoReplace,
+  readExactFile,
+  writeNewFile,
+} from './filesystem.js';
+import { WorkspaceSafetyError } from './types.js';
+
+const roots: string[] = [];
+
+function temporaryRoot(prefix: string): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  roots.push(root);
+  return root;
+}
+
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+describe('workspace safety filesystem primitives', () => {
+  it('serializes JSON deterministically and hashes the exact bytes', () => {
+    const bytes = jsonBytes({ value: '中文', count: 2 });
+
+    expect(bytes.toString('utf8')).toBe('{\n  "value": "中文",\n  "count": 2\n}\n');
+    expect(digestBytes(bytes)).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(digestBytes(bytes)).toBe(digestBytes(Buffer.from(bytes)));
+  });
+
+  it('installs a complete non-empty staging directory without replacing a target', async () => {
+    const root = temporaryRoot('workspace-filesystem-');
+    const staging = await createStagingDirectory(root, 'lease.prepare-', 'first');
+    await writeNewFile(join(staging, 'owner.json'), Buffer.from('first'));
+    const target = join(root, 'lease');
+
+    await installDirectoryNoReplace(staging, target);
+    expect(readFileSync(join(target, 'owner.json'), 'utf8')).toBe('first');
+
+    const losing = await createStagingDirectory(root, 'lease.prepare-', 'second');
+    await writeNewFile(join(losing, 'owner.json'), Buffer.from('second'));
+
+    await expect(installDirectoryNoReplace(losing, target)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(readFileSync(join(target, 'owner.json'), 'utf8')).toBe('first');
+    expect(readFileSync(join(losing, 'owner.json'), 'utf8')).toBe('second');
+  });
+
+  it('never replaces an existing file during first installation', async () => {
+    const root = temporaryRoot('workspace-file-install-');
+    const staged = join(root, 'marker.staged');
+    const target = join(root, 'workspace-safety.json');
+    writeFileSync(staged, 'candidate');
+    writeFileSync(target, 'winner');
+
+    await expect(installFileNoReplace(staged, target)).rejects.toMatchObject({
+      code: 'conflict',
+    });
+    expect(readFileSync(target, 'utf8')).toBe('winner');
+    expect(readFileSync(staged, 'utf8')).toBe('candidate');
+  });
+
+  it('installs one complete file and removes the staging hard link before success', async () => {
+    const root = temporaryRoot('workspace-file-install-success-');
+    const staged = join(root, 'marker.staged');
+    const target = join(root, 'workspace-safety.json');
+    writeFileSync(staged, 'candidate');
+
+    await installFileNoReplace(staged, target);
+
+    expect(readFileSync(target, 'utf8')).toBe('candidate');
+    expect(() => readFileSync(staged)).toThrow();
+    await expect(readExactFile(target)).resolves.toEqual(Buffer.from('candidate'));
+  });
+
+  it('does not replace a target that wins immediately before the hard-link commit', async () => {
+    const root = temporaryRoot('workspace-file-install-race-');
+    const staged = join(root, 'marker.staged');
+    const target = join(root, 'workspace-safety.json');
+    writeFileSync(staged, 'candidate');
+
+    await expect(
+      installFileNoReplace(staged, target, {
+        beforeLink: () => writeFileSync(target, 'winner'),
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+
+    expect(readFileSync(target, 'utf8')).toBe('winner');
+    expect(readFileSync(staged, 'utf8')).toBe('candidate');
+  });
+
+  it('never reports success when an exception occurs after the hard link exists', async () => {
+    const root = temporaryRoot('workspace-file-install-post-link-');
+    const staged = join(root, 'marker.staged');
+    const target = join(root, 'workspace-safety.json');
+    writeFileSync(staged, 'candidate');
+
+    await expect(
+      installFileNoReplace(staged, target, {
+        afterLink: () => {
+          throw new Error('stop-after-link');
+        },
+      }),
+    ).rejects.toThrow('stop-after-link');
+
+    expect(readFileSync(target, 'utf8')).toBe('candidate');
+    await expect(readExactFile(target)).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('recovers only an exact controlled two-link install window', async () => {
+    const root = temporaryRoot('workspace-file-linked-recovery-');
+    const staged = join(root, 'marker.staged');
+    const target = join(root, 'workspace-safety.json');
+    writeFileSync(staged, 'candidate');
+    linkSync(staged, target);
+    let authorityChecks = 0;
+
+    await expect(
+      inspectLinkedFileInstall({
+        source: staged,
+        target,
+        expectedBytes: Buffer.from('candidate'),
+      }),
+    ).resolves.toBeUndefined();
+    await expect(readLinkedFileInstall({ source: staged, target, maxBytes: 32 })).resolves.toEqual(
+      Buffer.from('candidate'),
+    );
+    expect(existsSync(staged)).toBe(true);
+    expect(existsSync(target)).toBe(true);
+
+    await recoverLinkedFileInstall({
+      source: staged,
+      target,
+      expectedBytes: Buffer.from('candidate'),
+      authorize: () => {
+        authorityChecks += 1;
+      },
+    });
+
+    expect(authorityChecks).toBe(2);
+    expect(existsSync(staged)).toBe(false);
+    expect(readFileSync(target, 'utf8')).toBe('candidate');
+    await expect(readExactFile(target)).resolves.toEqual(Buffer.from('candidate'));
+  });
+
+  it('bounds discovery reads and rejects linked files with any third alias', async () => {
+    const root = temporaryRoot('workspace-file-linked-read-');
+    const staged = join(root, 'marker.staged');
+    const target = join(root, 'workspace-safety.json');
+    writeFileSync(staged, 'candidate');
+    linkSync(staged, target);
+
+    await expect(
+      readLinkedFileInstall({ source: staged, target, maxBytes: 4 }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+
+    linkSync(staged, join(root, 'third-link'));
+    await expect(
+      readLinkedFileInstall({ source: staged, target, maxBytes: 32 }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('keeps all bytes when controlled linked-install recovery loses authority', async () => {
+    const root = temporaryRoot('workspace-file-linked-authority-');
+    const staged = join(root, 'marker.staged');
+    const target = join(root, 'workspace-safety.json');
+    writeFileSync(staged, 'candidate');
+    linkSync(staged, target);
+
+    await expect(
+      recoverLinkedFileInstall({
+        source: staged,
+        target,
+        expectedBytes: Buffer.from('candidate'),
+        authorize: () => {
+          throw new WorkspaceSafetyError('lease-lost', 'authority changed');
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'lease-lost' });
+    expect(readFileSync(staged, 'utf8')).toBe('candidate');
+    expect(readFileSync(target, 'utf8')).toBe('candidate');
+  });
+
+  it.each(['extra-link', 'wrong-bytes', 'identity-change'] as const)(
+    'rejects an unsafe linked-install recovery: %s',
+    async (failure) => {
+      const root = temporaryRoot(`workspace-file-linked-${failure}-`);
+      const staged = join(root, 'marker.staged');
+      const target = join(root, 'workspace-safety.json');
+      writeFileSync(staged, 'candidate');
+      linkSync(staged, target);
+      if (failure === 'extra-link') linkSync(staged, join(root, 'third-link'));
+
+      await expect(
+        recoverLinkedFileInstall({
+          source: staged,
+          target,
+          expectedBytes: Buffer.from(failure === 'wrong-bytes' ? 'different' : 'candidate'),
+          authorize: () => undefined,
+          beforeSourceUnlink:
+            failure === 'identity-change'
+              ? () => {
+                  rmSync(staged);
+                  writeFileSync(staged, 'candidate');
+                }
+              : undefined,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid' });
+      expect(existsSync(target)).toBe(true);
+    },
+  );
+
+  it.each(['source', 'target'] as const)(
+    'rejects when the linked %s path is replaced before validation',
+    async (changedPath) => {
+      const root = temporaryRoot(`workspace-file-install-${changedPath}-swap-`);
+      const staged = join(root, 'marker.staged');
+      const target = join(root, 'workspace-safety.json');
+      writeFileSync(staged, 'candidate');
+
+      await expect(
+        installFileNoReplace(staged, target, {
+          afterLink: () => {
+            const path = changedPath === 'source' ? staged : target;
+            rmSync(path);
+            writeFileSync(path, 'candidate');
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid' });
+
+      expect(readFileSync(changedPath === 'source' ? staged : target, 'utf8')).toBe('candidate');
+    },
+  );
+
+  it.each(['source', 'target'] as const)(
+    'rejects when the linked %s path is replaced after validation but before staging cleanup',
+    async (changedPath) => {
+      const root = temporaryRoot(`workspace-file-install-${changedPath}-late-swap-`);
+      const staged = join(root, 'marker.staged');
+      const target = join(root, 'workspace-safety.json');
+      writeFileSync(staged, 'candidate');
+
+      await expect(
+        installFileNoReplace(staged, target, {
+          beforeSourceUnlink: () => {
+            const path = changedPath === 'source' ? staged : target;
+            rmSync(path);
+            writeFileSync(path, 'candidate');
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid' });
+
+      expect(readFileSync(changedPath === 'source' ? staged : target, 'utf8')).toBe('candidate');
+    },
+  );
+
+  it('rejects a symlink and a path swapped between inspection and open', async () => {
+    const root = temporaryRoot('workspace-stable-read-');
+    const first = join(root, 'first.txt');
+    const second = join(root, 'second.txt');
+    const target = join(root, 'target.txt');
+    writeFileSync(first, 'first');
+    writeFileSync(second, 'second');
+    symlinkSync(first, target);
+
+    await expect(readExactFile(target)).rejects.toMatchObject({ code: 'invalid' });
+
+    rmSync(target);
+    writeFileSync(target, 'first');
+    await expect(
+      readExactFile(target, {
+        beforeOpen: () => {
+          rmSync(target);
+          writeFileSync(target, 'second');
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+
+    writeFileSync(target, 'stable');
+    await expect(
+      readExactFile(target, {
+        afterRead: () => writeFileSync(target, 'changed-after-read'),
+      }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('rejects hard links so canonical safety bytes cannot alias another path', async () => {
+    const root = temporaryRoot('workspace-hardlink-read-');
+    const source = join(root, 'source.json');
+    const alias = join(root, 'canonical.json');
+    writeFileSync(source, '{}');
+    linkSync(source, alias);
+
+    await expect(readExactFile(alias)).rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('cannot replace a complete non-empty competitor that wins at the rename boundary', async () => {
+    const root = temporaryRoot('workspace-directory-race-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+    const target = join(root, 'lease');
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        beforeRename: () => {
+          mkdirSync(target);
+          writeFileSync(join(target, 'owner.json'), 'winner');
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+
+    expect(readFileSync(join(target, 'owner.json'), 'utf8')).toBe('winner');
+    expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
+  });
+
+  it('runs the synchronous commit check after async preparation and before rename', async () => {
+    const root = temporaryRoot('workspace-directory-commit-check-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+    const target = join(root, 'lease');
+    const order: string[] = [];
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        beforeRename: async () => {
+          await Promise.resolve();
+          order.push('prepared');
+        },
+        commitCheck: () => {
+          order.push('commit-check');
+          throw new Error('preserve-before-rename');
+        },
+      }),
+    ).rejects.toThrow('preserve-before-rename');
+
+    expect(order).toEqual(['prepared', 'commit-check']);
+    expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
+    expect(() => readFileSync(join(target, 'owner.json'))).toThrow();
+  });
+
+  it('canonicalizes a stable symbolic-link alias to the same workspace identity', async () => {
+    const root = temporaryRoot('workspace-real-');
+    const parent = temporaryRoot('workspace-link-parent-');
+    const link = join(parent, 'workspace');
+    symlinkSync(root, link, process.platform === 'win32' ? 'junction' : 'dir');
+
+    const direct = await canonicalizeWorkspaceDirectory(root);
+    const aliased = await canonicalizeWorkspaceDirectory(link);
+
+    expect(aliased.path).toBe(direct.path);
+    expect(aliased.identity).toBe(direct.identity);
+    expect(aliased.requestedKind).toBe('symlink');
+  });
+});

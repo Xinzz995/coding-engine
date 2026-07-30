@@ -89,8 +89,10 @@ operation 一次原子移入 settled 目录，不能逐文件清 active/baseline
 这里的委托是诚实执行合同，不是操作系统权限沙箱；更强的干净检出与文件系统隔离仍由 Issue #91
 处理。
 
-baseline 不保存文件正文；字段级委托必须保存可重算的受保护字段 canonical projection digest，追加
-文件保存旧长度与 prefix digest，只新增目录保存旧成员摘要。任何委托若不能靠这些持久承诺完整
+baseline 不保存文件正文；字段级委托必须保存可重算的受保护字段 canonical projection digest。
+追加文件分为两种固定合同：`allow[modify]` 要求起点文件既存，`allow[create,modify]` 允许缺失文件
+首次创建；后一种若起点已经存在也仍只能追加。两者都保存旧长度与 prefix digest，禁止替换、截短
+或删除。JSON 局部修改仍要求既存普通文件且只允许 modify；只新增目录保存旧成员摘要。任何委托若不能靠这些持久承诺完整
 复核，就不得启动项目代码，不能把只存在于父进程内存的旧值留给崩溃恢复猜测。
 
 delegated child 发生范围外新增、修改、删除，或把允许文件写成非法结构时，不回到 owned-idle，
@@ -124,15 +126,20 @@ Developer、Validator、普通/TDD 检查和三个 Final Review Runner 共用 co
 3. 只有 prepared-bound 成立后，项目 executable/args/cwd/env 才经专用 IPC 传递且不落盘；
 4. supervisor 建立尚不能运行项目代码的 containment，并返回 containment 身份；
 5. 父进程把继续绑定同一 baseline/scope 摘要的 `armed` 原子落盘并回读 owner/operation/身份完全一致；
-6. 父进程发送且只发送一次带同一 `operationId` 与 frozen armed digest 的 `START`；supervisor 重读
-   canonical armed 并核对 digest 后才接受；
-7. supervisor 才启动或恢复项目代码，并返回 `STARTED`；它与 `running` 都只存在于内存诊断，磁盘
-   armed 字节保持冻结，不用于推断 START 是否已经发生。
+6. canonical armed 回读后，父进程可以发送带同一 `operationId` 与 frozen armed digest 的 `START`，
+   或因 timeout/用户中断/断链发送平台中立的 `TERMINATE`；supervisor 以首个接受者冻结裁决；
+7. START 先到时 supervisor 重读 canonical armed、核对 digest 后才启动或恢复项目代码并返回
+   `STARTED`；TERMINATE 先到时项目代码永不启动，迟到的同 operation、同冻结绑定 START 只返回未
+   接受。`STARTED` 与 `running` 都只存在于内存诊断，磁盘 armed 字节保持冻结，不用于推断 START
+   是否已经发生。
 
-`DATA` 不等于授权；重复、迟到、错 operation 的 DATA/START/ACK 一律失败关闭。`armed` 在
+`DATA` 不等于授权；重复、迟到、错 operation 的 DATA/START/ACK 一律失败关闭，但 TERM-first 后
+排队到达的同 operation、同冻结绑定 START 是明确的幂等未接受。首个合法 TERMINATE reason 冻结，
+后续同 operation 的合法 TERMINATE 不再改变原因。`armed` 在
 START 发出后可能已经运行项目代码，所以恢复必须把 armed 当成“可能已运行”，不能因没有 STARTED
 或 running 落盘而宣称安全。drained receipt 绑定冻结的 armed 摘要，避免快速启动/退出与状态回写
-争抢同一个权威字节。
+争抢同一个权威字节。receipt 还精确绑定 owner/protocol、delegation contract、containment、helper、
+supervisor identity、proof 与 `drainReason`；IPC DRAINED 只引用该 receipt 摘要，不复制裁决字段。
 
 prepared/prepared-bound 还必须有 owner-live 的 abort-before-start 出口。supervisor 从未建立，或已
 确认项目代码零执行、prestart containment 清空、supervisor exact dead 且 baseline 完全未变时，父进程
@@ -151,8 +158,9 @@ stdout/stderr 是有意传递的独立数据管道。否则项目后代持有控
 父进程在初始 prepared 后、prepared-bound 前死亡时，supervisor 从未得到 workspace path/DATA，因
 IPC EOF/握手超时退出，也没有 workspace 写能力；握手期限后可按未授权状态恢复。prepared-bound
 之后死亡时，恢复还必须核对持久化 supervisor 身份 exact dead；armed 继续按 START 可能已发出处理。
-父进程在 START 后死亡时，supervisor 必须主动终止 containment；磁盘记录仍保留，下一实例只有在
-重新确认 containment 清空后才能恢复。
+父进程在 START 后死亡时，supervisor 必须主动终止 containment；若 canonical armed 后父进程在
+START 前死亡，supervisor 清空未启动 containment 并签发绑定摘要的 never-started receipt。磁盘记录
+仍保留，下一实例只有在重新确认 containment 清空后才能恢复。
 
 父进程死在 DATA 后、canonical armed 前时，supervisor 只终止仍停在 barrier/suspended 的 containment
 并退出，不得写无法绑定 armed digest 的 receipt；磁盘 prepared-bound 由 baseline unchanged +
@@ -167,8 +175,9 @@ POSIX supervisor 不仅位于 target containment 之外，还必须在独立 ses
 父进程持久化。START 后 launcher 才在同一 pgid 内启动目标，普通后代继续继承该组。正常路径只有
 当组内除 launcher 外无成员且 pipes EOF 时才让 launcher 退出，再以负 pgid 探测整个组为空并发送
 DRAINED。发送前 supervisor 使用 START 前缓存的 owner/protocol/active/baseline 摘要原子写并回读
-POSIX drained receipt。父进程硬崩溃时 supervisor 对目标 pgid 执行 TERM→宽限→KILL，等待组消失并
-写同一 receipt；supervisor
+POSIX drained receipt。父进程硬崩溃时 supervisor 只经仍绑定原 ChildProcess 的固定 launcher IPC
+发送内部 `SIGNAL_GROUP(TERM|KILL)`；launcher 在自身进程内向自己的 process group 发信号，在系统
+调用前排除 PID/PGID 复用，再按 TERM→宽限→KILL 等待组消失并写同一 receipt；supervisor
 自己不在该组，因此能观察终点。若 supervisor 也被硬杀，已持久 pgid 继续阻断；pgid 被复用或成员
 身份无法判断时保持隔离。
 
@@ -179,8 +188,9 @@ supervisor。它在回报可持久化 identity 前进入独立 process group，�
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 且不允许 breakaway；
 用 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 在 `CreateProcessW` 时原子纳入 Job，并保持
 `CREATE_SUSPENDED`，确认 `ActiveProcesses == 1` 后才回报 armed；父进程落盘后才
-`ResumeThread`。恢复线程后立即关闭 thread handle；取得并缓存根结果后关闭 process handle，
-然后才能等待 `ActiveProcesses == 0` 与 stdout/stderr EOF。固定 supervisor 在仍持有 Job handle
+`ResumeThread`。恢复线程后立即关闭 thread handle；自然路径取得并缓存根结果后关闭 process
+handle，timeout/用户中断/parent 断链允许没有 STARTED/RESULT，也必须关闭 process handle；然后
+才能等待 `ActiveProcesses == 0` 与 stdout/stderr EOF。固定 supervisor 在仍持有 Job handle
 时使用 START 前缓存值原子写入 owner/protocol/operation/active/baseline/helper 摘要全绑定的
 `drained-receipt.json`，父进程回读后 ACK，supervisor 才关闭 Job handle 并退出。跨平台 safety-only
 receipt 是正常/父进程崩溃路径的集合清空与原始 safety bytes 证明；helper 除该安全文件外没有
@@ -203,7 +213,7 @@ FullLanguage `Add-Type`。Job、原子关联、查询或 Add-Type 任一步不�
 
 ### 3. 根命令结果不等于调用完成
 
-接受 START 并实际启动项目代码后的普通完成必须同时满足：
+接受 START 并实际启动项目代码后的自然完成必须同时满足：
 
 - 根命令结果已经取得；
 - stdout/stderr 全部 EOF；
@@ -213,6 +223,12 @@ FullLanguage `Add-Type`。Job、原子关联、查询或 Add-Type 任一步不�
 - POSIX 在 supervisor 退出后再次探测精确 pgid 为空，并与 receipt 对账；
 - Windows 在 supervisor 仍持 Job handle 时确认 ActiveProcesses 为零后写 receipt，随后 supervisor
   才退出；不声称能在匿名 Job 消失后重新查询它。
+
+timeout、用户中断与 parent 断链不要求先观察 STARTED/RESULT；它们直接终止 containment，但仍必须
+满足共同的 pipes EOF、集合精确为空、cached-digest receipt 与 supervisor 退出。receipt 额外绑定
+`drainReason=timeout|user-interrupt|parent-shutdown`。自然窗口结束后仍有成员时，
+`process-tree-not-empty` 由 supervisor 的平台集合测量产生并写入 receipt；parent 不用 TERMINATE 自报。
+IPC DRAINED 只携 receipt digest 与 proof，不再复制 reason/leftover。
 
 prepared/prepared-bound 的 setup failure、能力失败或首个用户中断走上一节 abort-before-start，不要求
 不存在的 drained receipt；armed 但 supervisor 明确从未接受 START 时使用 never-started receipt。两类
@@ -224,7 +240,7 @@ owned-idle 并写有界失败证据；
 若清理无法确认则 quarantine，且不补写普通 evidence/report。
 
 根结果出现后先给自然收口固定 5 秒：期间持续等待 pipes EOF 与 containment 为空，提前满足就采用
-根结果。期限后仍有成员才判 leftover；POSIX 再给 TERM 5 秒、KILL 后确认 5 秒，Windows 终止 Job
+根结果。期限后仍有成员才判 `process-tree-not-empty`；POSIX 再给 TERM 5 秒、KILL 后确认 5 秒，Windows 终止 Job
 后确认最多 5 秒。三段预算独立于项目命令 timeout，并计入调用 duration；timeout、signal 和父进程
 断链不等待自然收口，直接进入终止。测试用事件 barrier 命中每个边界，不靠固定 sleep 猜结果。
 
@@ -286,16 +302,33 @@ canonical realpath 与目录身份传到底层，skills 不得硬编码 `.worksp
 绝对路径和指向同目录的 symlink alias 必须落到同一租约身份。`coding-x init` 使用同一底层
 `workspace init` 完成默认新 workspace 初始化；额外 workspace 由用户显式调用该嵌套命令。
 
-多文件 apply-prd/repair 在首次业务写前，把严格 mutation state、完整 input 与 manifest 放入唯一
+未来多文件 apply-prd/repair 在首次业务写前，把严格 mutation state、完整 input 与 manifest 放入唯一
 staging 目录，回读后一次原子安装为固定 mutation；只有完整 staged 状态才授权业务写。每一步按
 固定 phase 幂等执行；未到 committed 不允许 release，committed 后也不逐项清元数据，而是随整个
 active lease 原子移出。崩溃后普通 recover 不得清除它，只能由同一命令使用精确 input digest 续做，
-直到得到完整目标状态。首版只实现这两类固定状态机，不建立通用事务框架。
+直到得到完整目标状态。本次 dark foundation 的 `generic-v1` 只供破坏性测试；它不决定
+apply-prd/repair 的允许路径、归档清单或保留时长。正式接线必须分别冻结固定状态机和真实路径 canary，
+不把 generic-v1 当成公开事务框架。
 
 只读 status/doctor/dashboard 不获取租约。手动 report 一旦要落盘就不再属于只读。质量 init 写
 `.coding-x/`、GitHub workflow 和项目模板，不属于 workspace 租约。
 
 ### 6. 恢复是可证明的状态转换
+
+owner authority 不是普通调用参数。正式 bootstrap 与 lease acquire 不接收 identity 或系统 authority，
+而是直接捕获一次精确 current identity；lease handle 只能由模块私有能力创建，并永久携带该身份的
+复核器，因此其他进程不能读取 owner 后 attach 成第二 writer。恢复中的 owner/attempt/supervisor
+存活和 containment 也必须由正式入口直接读取操作系统；调用方不能注入 identity、probe 或自定义
+authority。上述正式入口在每个权限相关写入及最终 lease rename 前重新核对同一
+pid/host/boot/process identity。伪身份只允许存在于显式 test-only seam，production 与后续 activation
+代码不得导入。same-host reboot coordinator 可使用受控内部 authority，但只能由真实 boot change、
+原 owner 精确字节和 canonical containment quarantine 共同导出，并在最终写前再次核对。
+
+路径安全在 Windows 上还必须读取系统原生属性，不能把 Node `lstat` 未报告为 symlink 当作普通文件
+证明。固定检查器按高层操作批量核验完整父链和扫描树，在操作开始前、结束后各检查一次；不为每个
+叶子启动独立进程。`workspace-safety.json` 与 `engine.lock/` 属于独立安全域，和业务树分别使用
+100000 项预算，且不能被业务 delegation 授权。任何 reparse point、缺失结果、超限或检查器摘要变化
+都失败关闭。
 
 doctor 将观察状态归一为：
 
@@ -389,6 +422,26 @@ pid-only 自动接管。
 - Builder 后台服务合同同步改变；
 - Linux、macOS、Windows 真实回归已绿色。
 
+dark PR 在非 Windows 上只能把 Windows helper 标为 `pending-native`：源码静态检查、条件 skip 或 mock
+都不能计入 Job 行为绿色，必须由 required Windows CI 真正执行对应测试。
+
+required Windows 证明固定到 GitHub hosted `windows-2022`，另起一次性非管理员本地账户无交互执行
+原生 Job/helper suite。汇总脚本必须解析机器结果并拒绝缺 suite、全 skip、pending 或账户 token 含
+Administrators SID；仅有普通跨平台测试 job 绿色不能代替这条证明。quality contract schema v1 不增加
+可注入的 runner label，生成器内部固定 hosted image，保持已发布 0.33.3 strict parser 可继续读取。
+原生 suite 还必须用系统命令真实创建 WOF 压缩文件和父目录 junction，覆盖 Unicode 与空格路径，
+并证明 Node 未识别但系统属性检查会拒绝；fixture 创建失败、属性不成立或测试被跳过都使 required
+job 失败。非 Windows 只能验证检查器分发与摘要，不能宣称完成这项行为证明。
+普通 Windows 全量单测允许通过仅测试可见的模块解析替身避免重复 PowerShell 冷启动，但 required
+native runner 显式使用独立、无替身的固定配置；生产入口没有 transport/probe 或环境旁路。原生
+runner、独立配置、固定 suite、辅助资产和 LF 属性规则都由旧 policy guard 识别，不能在同一个 PR
+静默削弱后自行变绿。
+
+dark foundation 的新 POSIX 模块不公开 spawn 或 pid-only 的组终止接口；生产组信号只由摘要绑定的
+固定 launcher 对自己的 live group 发出。0.33.3 的 `src/engine/process-tree.ts` 仍是旧生产路径，必须
+留到 atomic activation PR 随全部 spawn 一次迁移，不能把它计入本 PR 的新安全证明。新模块不得导入
+该旧路径；破坏性测试清理只允许对已记录且重新核验身份与 placement 的 test fixture 执行。
+
 启用前 architecture/README 继续诚实描述 0.33.3，不能用已合并但未接线的模块宣称 P1 已关闭。
 
 ## 退出语义
@@ -432,7 +485,8 @@ Windows Job Object 和 POSIX process group 都不覆盖项目代码主动使用�
 - 不建立 GitHub、跨主机分布式锁或中央质量平台。
 - 不引入数据库、常驻 daemon、TUI 或 Node ABI native addon。
 - 不自动杀身份无法核对的 pid，不把手删锁包装成安全恢复。
-- 不保存完整命令、prompt、模型输出、环境变量或秘密到安全记录。
+- 不把未被 mutation input/archivePaths 选中的普通业务秘密顺手复制进安全元数据。调用方显式选择的
+  input/archive 会保存对应字节；generic-v1 的测试不能证明任意归档输入都不含秘密。
 - 不允许 Agent 留下未登记的跨轮后台服务。
 - 不借此改造三层 Review 内容、npm 发布或 Issue #91 的干净检出。
 - 不承诺掉电、内核崩溃或存储设备故障下的落盘持久性；本合同的 atomic 指进程崩溃可见性，不代表

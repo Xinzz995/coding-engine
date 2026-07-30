@@ -1,5 +1,5 @@
 import { defineConfig } from 'tsup';
-import { cpSync, mkdirSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 export default defineConfig({
@@ -12,9 +12,18 @@ export default defineConfig({
     mkdirSync('dist/instructions', { recursive: true });
     mkdirSync('dist/public', { recursive: true });
     mkdirSync('dist/hooks', { recursive: true });
+    mkdirSync('dist/workspace-safety', { recursive: true });
     cpSync('assets/instructions', 'dist/instructions', { recursive: true });
     cpSync('assets/dashboard', 'dist/public', { recursive: true });
     cpSync('hooks/tdd-commit-check.mjs', 'dist/hooks/tdd-commit-check.mjs');
+    cpSync('assets/workspace-safety', 'dist/workspace-safety', { recursive: true });
+    for (const name of readdirSync('assets/workspace-safety').sort()) {
+      const source = readFileSync(`assets/workspace-safety/${name}`);
+      const distributed = readFileSync(`dist/workspace-safety/${name}`);
+      if (!source.equals(distributed)) {
+        throw new Error(`workspace safety helper 发布字节不一致：${name}`);
+      }
+    }
     // 发布物烟测：真实执行 bundle，防止源码测试全绿但 npm bin 入口不认 --help。
     const smoke = spawnSync(process.execPath, ['dist/cli.js', '--help'], { encoding: 'utf8' });
     if (smoke.error) throw smoke.error;

@@ -30,10 +30,7 @@ function validContract(): unknown {
       protectedRefs: ['v*'],
     },
     sources: {
-      specs: [
-        { kind: 'path', path: 'docs/specs/feature.md' },
-        { kind: 'pull-request' },
-      ],
+      specs: [{ kind: 'path', path: 'docs/specs/feature.md' }, { kind: 'pull-request' }],
       acceptanceCriteria: [{ kind: 'pull-request' }],
       engineeringStandards: ['AGENTS.md', 'docs/golden-principles.md'],
     },
@@ -44,44 +41,50 @@ function validContract(): unknown {
     generatedPaths: ['dist/**', 'coverage/**'],
     checks: {
       test: {
-        checks: [{
-          id: 'unit',
-          module: 'root',
-          paths: ['src/**'],
-          command: {
-            executable: 'npm',
-            args: ['test', '--', '--run'],
-            cwd: '.',
-            platforms: ['linux', 'macos', 'windows'],
-            timeoutMs: 600_000,
+        checks: [
+          {
+            id: 'unit',
+            module: 'root',
+            paths: ['src/**'],
+            command: {
+              executable: 'npm',
+              args: ['test', '--', '--run'],
+              cwd: '.',
+              platforms: ['linux', 'macos', 'windows'],
+              timeoutMs: 600_000,
+            },
           },
-        }],
+        ],
       },
       build: {
-        checks: [{
-          id: 'build',
-          module: 'root',
-          command: {
-            executable: 'npm',
-            args: ['run', 'build'],
-            cwd: '.',
-            platforms: ['linux', 'macos', 'windows'],
-            timeoutMs: 600_000,
+        checks: [
+          {
+            id: 'build',
+            module: 'root',
+            command: {
+              executable: 'npm',
+              args: ['run', 'build'],
+              cwd: '.',
+              platforms: ['linux', 'macos', 'windows'],
+              timeoutMs: 600_000,
+            },
           },
-        }],
+        ],
       },
       static: {
-        checks: [{
-          id: 'shell-static',
-          module: 'api',
-          command: {
-            shell: 'bash',
-            script: 'npm run typecheck | tee typecheck.log',
-            cwd: 'packages/api',
-            platforms: ['linux', 'macos'],
-            timeoutMs: 600_000,
+        checks: [
+          {
+            id: 'shell-static',
+            module: 'api',
+            command: {
+              shell: 'bash',
+              script: 'npm run typecheck | tee typecheck.log',
+              cwd: 'packages/api',
+              platforms: ['linux', 'macos'],
+              timeoutMs: 600_000,
+            },
           },
-        }],
+        ],
       },
       security: {
         notApplicable: '示例仓库没有第三方生产依赖。',
@@ -95,36 +98,61 @@ function validContract(): unknown {
     github: {
       jobs: [
         {
-          id: 'ubuntu-node-22', platform: 'linux',
-          toolchains: [{ kind: 'node', version: '22', cache: 'npm', cacheDependencyPath: 'package-lock.json' }],
-          setup: [{
-            executable: 'npm', args: ['ci'], cwd: '.', platforms: ['linux'], timeoutMs: 600_000,
-          }],
+          id: 'ubuntu-node-22',
+          platform: 'linux',
+          toolchains: [
+            { kind: 'node', version: '22', cache: 'npm', cacheDependencyPath: 'package-lock.json' },
+          ],
+          setup: [
+            {
+              executable: 'npm',
+              args: ['ci'],
+              cwd: '.',
+              platforms: ['linux'],
+              timeoutMs: 600_000,
+            },
+          ],
           checkIds: ['unit', 'build', 'shell-static'],
         },
         {
-          id: 'macos-node-24', platform: 'macos',
+          id: 'macos-node-24',
+          platform: 'macos',
           toolchains: [{ kind: 'node', version: '24' }],
-          setup: [{
-            executable: 'npm', args: ['ci'], cwd: '.', platforms: ['macos'], timeoutMs: 600_000,
-          }],
+          setup: [
+            {
+              executable: 'npm',
+              args: ['ci'],
+              cwd: '.',
+              platforms: ['macos'],
+              timeoutMs: 600_000,
+            },
+          ],
           checkIds: ['unit', 'build', 'shell-static'],
         },
         {
-          id: 'windows-node-24', platform: 'windows',
+          id: 'windows-node-24',
+          platform: 'windows',
           toolchains: [{ kind: 'node', version: '24' }],
-          setup: [{
-            executable: 'npm', args: ['ci'], cwd: '.', platforms: ['windows'], timeoutMs: 600_000,
-          }],
+          setup: [
+            {
+              executable: 'npm',
+              args: ['ci'],
+              cwd: '.',
+              platforms: ['windows'],
+              timeoutMs: 600_000,
+            },
+          ],
           checkIds: ['unit', 'build'],
         },
       ],
       requiredChecks: ['quality-gate', 'policy-guard-source'],
-      requiredCodeScanning: [{
-        tool: 'CodeQL',
-        alertsThreshold: 'errors',
-        securityAlertsThreshold: 'high_or_higher',
-      }],
+      requiredCodeScanning: [
+        {
+          tool: 'CodeQL',
+          alertsThreshold: 'errors',
+          securityAlertsThreshold: 'high_or_higher',
+        },
+      ],
       immutableReleases: true,
       securityFeatures: {
         dependabotSecurityUpdates: true,
@@ -213,9 +241,7 @@ describe('parseQualityContract', () => {
     const typeResult = parseQualityContract(invalidType);
     expect(typeResult.status).toBe('invalid');
     if (typeResult.status === 'invalid') {
-      expect(typeResult.errors).toContain(
-        'github.securityFeatures.secretScanning 必须是布尔值',
-      );
+      expect(typeResult.errors).toContain('github.securityFeatures.secretScanning 必须是布尔值');
     }
 
     const contradictory = clone();
@@ -251,11 +277,13 @@ describe('parseQualityContract', () => {
     const invalidResult = parseQualityContract(invalid);
     expect(invalidResult.status).toBe('invalid');
     if (invalidResult.status === 'invalid') {
-      expect(invalidResult.errors).toEqual(expect.arrayContaining([
-        'github.requiredCodeScanning 含重复工具 codeql',
-        'github.requiredCodeScanning[1].alertsThreshold 是未知阈值',
-        'github.requiredCodeScanning[1].securityAlertsThreshold 是未知阈值',
-      ]));
+      expect(invalidResult.errors).toEqual(
+        expect.arrayContaining([
+          'github.requiredCodeScanning 含重复工具 codeql',
+          'github.requiredCodeScanning[1].alertsThreshold 是未知阈值',
+          'github.requiredCodeScanning[1].securityAlertsThreshold 是未知阈值',
+        ]),
+      );
     }
   });
 
@@ -274,14 +302,55 @@ describe('parseQualityContract', () => {
   });
 
   it.each([
-    ['non-array args', (input: Record<string, any>) => { input.checks.test.checks[0].command.args = 'test'; }],
-    ['empty platforms', (input: Record<string, any>) => { input.checks.test.checks[0].command.platforms = []; }],
-    ['duplicate platforms', (input: Record<string, any>) => { input.checks.test.checks[0].command.platforms = ['linux', 'linux']; }],
-    ['invalid platform', (input: Record<string, any>) => { input.checks.test.checks[0].command.platforms = ['aix']; }],
-    ['timeout too large', (input: Record<string, any>) => { input.checks.test.checks[0].command.timeoutMs = 3_600_001; }],
-    ['both executable and shell', (input: Record<string, any>) => { input.checks.test.checks[0].command.shell = 'bash'; input.checks.test.checks[0].command.script = 'npm test'; }],
-    ['cwd escapes', (input: Record<string, any>) => { input.checks.test.checks[0].command.cwd = '../outside'; }],
-    ['unknown command field', (input: Record<string, any>) => { input.checks.test.checks[0].command.env = { TOKEN: 'x' }; }],
+    [
+      'non-array args',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.args = 'test';
+      },
+    ],
+    [
+      'empty platforms',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.platforms = [];
+      },
+    ],
+    [
+      'duplicate platforms',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.platforms = ['linux', 'linux'];
+      },
+    ],
+    [
+      'invalid platform',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.platforms = ['aix'];
+      },
+    ],
+    [
+      'timeout too large',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.timeoutMs = 3_600_001;
+      },
+    ],
+    [
+      'both executable and shell',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.shell = 'bash';
+        input.checks.test.checks[0].command.script = 'npm test';
+      },
+    ],
+    [
+      'cwd escapes',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.cwd = '../outside';
+      },
+    ],
+    [
+      'unknown command field',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].command.env = { TOKEN: 'x' };
+      },
+    ],
   ])('rejects unsafe or ambiguous command form: %s', (_name, mutate) => {
     const input = clone();
     mutate(input);
@@ -306,9 +375,15 @@ describe('parseQualityContract', () => {
       static: { notApplicable: 'none' },
       security: { notApplicable: 'none' },
     };
-    input.github.jobs[0].setup = [{
-      executable: 'npm', args: ['ci'], cwd: '..', platforms: [], timeoutMs: 0,
-    }];
+    input.github.jobs[0].setup = [
+      {
+        executable: 'npm',
+        args: ['ci'],
+        cwd: '..',
+        platforms: [],
+        timeoutMs: 0,
+      },
+    ];
     const result = parseQualityContract(input);
     expect(result.status).toBe('invalid');
     if (result.status === 'invalid') {
@@ -336,6 +411,16 @@ describe('parseQualityContract', () => {
       expect(errors).toContain('toolchains 含重复 node');
       expect(errors).toContain('引用未知检查 missing');
       expect(errors).toContain('在 windows 运行不适用的检查 shell-static');
+    }
+  });
+
+  it('keeps hosted runner selection out of schema v1 and rejects expression injection', () => {
+    const input = clone();
+    Object.assign(input.github.jobs[0], { runner: '${{ fromJSON(inputs.runner) }}' });
+    const result = parseQualityContract(input);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      expect(result.errors).toContain('github.jobs[0] 未知字段 runner');
     }
   });
 
@@ -398,18 +483,28 @@ describe('quality contract identity and runtime mode', () => {
     expect(ready.status).toBe('ready');
     if (ready.status !== 'ready') return;
     expect(assessQualityRuntime(ready.contract, '0.29.0', false)).toEqual({
-      mode: 'formal', expectedVersion: '0.29.0', actualVersion: '0.29.0',
-      versionMatches: true, deliveryReadyAllowed: true,
+      mode: 'formal',
+      expectedVersion: '0.29.0',
+      actualVersion: '0.29.0',
+      versionMatches: true,
+      deliveryReadyAllowed: true,
     });
     expect(assessQualityRuntime(ready.contract, '0.30.0', false)).toMatchObject({
-      mode: 'version-mismatch', versionMatches: false, deliveryReadyAllowed: false,
+      mode: 'version-mismatch',
+      versionMatches: false,
+      deliveryReadyAllowed: false,
     });
     expect(assessQualityRuntime(ready.contract, '0.30.0', true)).toEqual({
-      mode: 'shadow', expectedVersion: '0.29.0', actualVersion: '0.30.0',
-      versionMatches: false, deliveryReadyAllowed: false,
+      mode: 'shadow',
+      expectedVersion: '0.29.0',
+      actualVersion: '0.30.0',
+      versionMatches: false,
+      deliveryReadyAllowed: false,
     });
     expect(assessQualityRuntime(ready.contract, '0.29.0', true)).toMatchObject({
-      mode: 'shadow', versionMatches: true, deliveryReadyAllowed: false,
+      mode: 'shadow',
+      versionMatches: true,
+      deliveryReadyAllowed: false,
     });
   });
 
@@ -422,9 +517,9 @@ describe('quality contract identity and runtime mode', () => {
     expect(snapshot).not.toBe(ready.contract.checks);
     if ('checks' in snapshot.test) snapshot.test.checks[0].id = 'changed';
     expect(qualityChecksMatchContract(snapshot, ready.contract)).toBe(false);
-    expect('checks' in ready.contract.checks.test
-      ? ready.contract.checks.test.checks[0].id
-      : null).toBe('unit');
+    expect(
+      'checks' in ready.contract.checks.test ? ready.contract.checks.test.checks[0].id : null,
+    ).toBe('unit');
   });
 });
 
@@ -461,7 +556,8 @@ describe('readQualityContract', () => {
       expect(readQualityContract(root)).toMatchObject({ status: 'invalid' });
       writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify(validContract()));
       expect(readQualityContract(root)).toMatchObject({
-        status: 'ready', path: join(root, '.coding-x', 'quality.json'),
+        status: 'ready',
+        path: join(root, '.coding-x', 'quality.json'),
         digest: expect.stringMatching(/^sha256:/),
       });
     } finally {
