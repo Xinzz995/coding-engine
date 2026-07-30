@@ -400,6 +400,59 @@ describe('runLoop Git HEAD validation chain', () => {
     }
   });
 
+  it('rolls back a Builder candidate when HEAD becomes unreadable after Developer returns', async () => {
+    const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+    const headPath = join(fixture.projectRoot, '.git', 'HEAD');
+    const headContents = readFileSync(headPath, 'utf8');
+    const calls = join(fixture.workspace, 'builder-removes-head.txt');
+    const fake = join(fixture.workspace, 'builder-removes-head.mjs');
+    writeFileSync(
+      fake,
+      `
+      import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      appendFileSync(${JSON.stringify(calls)}, 'builder\\n');
+      const statePath = join(process.env.CODING_X_WORKSPACE, 'state.json');
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      state['US-001'].notes = 'candidate before HEAD failure';
+      writeFileSync(statePath, JSON.stringify(state));
+      appendFileSync(join(process.env.CODING_X_WORKSPACE, 'progress.md'), 'builder done\\n');
+      unlinkSync(join(process.cwd(), '.git', 'HEAD'));
+    `,
+    );
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    let exitCode: number | undefined;
+
+    try {
+      exitCode = await runProductionLoop(strictConfig(fixture.workspace, fixture.instructionsDir));
+    } finally {
+      writeFileSync(headPath, headContents);
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+
+    expect(exitCode).toBe(2);
+    expect(readFileSync(calls, 'utf8')).toBe('builder\n');
+    expect(
+      JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+    ).toMatchObject({
+      passes: false,
+      validated: false,
+      validationReceipt: null,
+      retryCount: 0,
+      blocked: false,
+      escalated: false,
+    });
+    expect(
+      readEvidence(fixture.workspace).records.find((record) => record.type === 'iteration'),
+    ).toMatchObject({
+      builderRan: true,
+      validatorRan: false,
+      builderOutcome: 'completed',
+      validationRollback: true,
+    });
+  });
+
   it('fails closed when HEAD becomes unreadable at the Validator request boundary', async () => {
     const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
     const marker = join(fixture.workspace, 'validator-called-without-head.txt');

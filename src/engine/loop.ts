@@ -621,7 +621,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (stateAfterBuilder) {
           const reconciled = reconcileAtCurrentHead(before, stateAfterBuilder, 'Developer 返回后');
           if (!reconciled) {
-            recordIteration({ builderOutcome: 'completed' });
+            const validationRollback = rollbackPendingValidation(
+              'Developer 返回后无法读取 Git HEAD',
+            );
+            recordIteration({
+              builderOutcome: 'completed',
+              ...(validationRollback ? { validationRollback: true as const } : {}),
+            });
             exitCode = 2;
             tamperCheckBeforeExit(i);
             break;
