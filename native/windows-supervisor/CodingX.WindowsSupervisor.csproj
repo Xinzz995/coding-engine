@@ -24,8 +24,9 @@
     <RestoreLockedMode>true</RestoreLockedMode>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
-    <RepositoryRoot>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..'))</RepositoryRoot>
-    <PathMap>$(RepositoryRoot)=/_/repo</PathMap>
+    <CodingXSourceRoot Condition="'$(CodingXSourceRoot)' == ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..'))</CodingXSourceRoot>
+    <CodingXBuildRoot Condition="'$(CodingXBuildRoot)' == ''">$(MSBuildProjectDirectory)</CodingXBuildRoot>
+    <PathMap>$(CodingXSourceRoot)=/_/repo,$(CodingXBuildRoot)=/_/build</PathMap>
   </PropertyGroup>
 
   <ItemGroup>

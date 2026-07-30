@@ -180,11 +180,11 @@ function Invoke-DeterministicBuild {
   [System.IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
   $objectDirectoryProperty = $objectDirectory + [System.IO.Path]::DirectorySeparatorChar
   $outputDirectoryProperty = $outputDirectory + [System.IO.Path]::DirectorySeparatorChar
-  $pathMap = "$sourceDirectory=/_/repo,$SlotRoot=/_/build"
   $sharedProperties = @(
     "-p:BaseIntermediateOutputPath=$objectDirectoryProperty",
     "-p:MSBuildProjectExtensionsPath=$objectDirectoryProperty",
-    "-p:PathMap=$pathMap",
+    "-p:CodingXSourceRoot=$sourceDirectory",
+    "-p:CodingXBuildRoot=$SlotRoot",
     '-p:RestoreLockedMode=true',
     '-p:Deterministic=true',
     '-p:ContinuousIntegrationBuild=true',
