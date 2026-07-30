@@ -27,6 +27,11 @@ const candidate = () => ({
   escalated: false,
 });
 
+// These cases exercise real child processes and temporary Git repositories. The
+// outer test budget must outlive the loop's own 5-second agent timeout so Vitest
+// never starts cleanup while an in-flight child is still settling on Windows.
+const HEAD_BINDING_TEST_TIMEOUT_MS = 30_000;
+
 function writeHeadAdvanceScript(
   fixture: ReturnType<typeof setup>,
   filename: string,
@@ -250,6 +255,7 @@ describe('runLoop Git HEAD validation chain', () => {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
     },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
   );
 
   it('rolls back a new unvalidated candidate when a gate changes HEAD', async () => {
@@ -303,7 +309,7 @@ describe('runLoop Git HEAD validation chain', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, HEAD_BINDING_TEST_TIMEOUT_MS);
 
   it('rechecks HEAD at the exact Validator request boundary', async () => {
     const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
@@ -353,7 +359,7 @@ describe('runLoop Git HEAD validation chain', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, HEAD_BINDING_TEST_TIMEOUT_MS);
 
   it('rolls back an ordinary Builder candidate at the exact Validator request boundary', async () => {
     const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
@@ -398,7 +404,7 @@ describe('runLoop Git HEAD validation chain', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, HEAD_BINDING_TEST_TIMEOUT_MS);
 
   it('rolls back a Builder candidate when HEAD becomes unreadable after Developer returns', async () => {
     const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
@@ -451,7 +457,7 @@ describe('runLoop Git HEAD validation chain', () => {
       builderOutcome: 'completed',
       validationRollback: true,
     });
-  });
+  }, HEAD_BINDING_TEST_TIMEOUT_MS);
 
   it('fails closed when HEAD becomes unreadable at the Validator request boundary', async () => {
     const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
@@ -500,7 +506,7 @@ describe('runLoop Git HEAD validation chain', () => {
     });
     expect(iteration).not.toHaveProperty('validationProtocol');
     expect(iteration).not.toHaveProperty('validationProtocolError');
-  });
+  }, HEAD_BINDING_TEST_TIMEOUT_MS);
 
   it.each(['valid', 'missing', 'invalid', 'state-mutation'] as const)(
     'prioritizes Validator-time HEAD drift over a %s result',
@@ -564,6 +570,7 @@ describe('runLoop Git HEAD validation chain', () => {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
     },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
   );
 
   it('rolls back an ordinary Builder candidate when Validator changes HEAD', async () => {
@@ -610,7 +617,7 @@ describe('runLoop Git HEAD validation chain', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, HEAD_BINDING_TEST_TIMEOUT_MS);
 
   it('reruns the full validation chain on the new HEAD and converges after drift', async () => {
     const target = story({ acceptanceCriteria: ['works'] });
@@ -737,7 +744,7 @@ describe('runLoop Git HEAD validation chain', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, HEAD_BINDING_TEST_TIMEOUT_MS);
 
   it.each([
     ['successful', 0],
@@ -791,5 +798,6 @@ describe('runLoop Git HEAD validation chain', () => {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
     },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
   );
 });
