@@ -46,11 +46,11 @@ try {
     'WindowsJobAuthority.cs'
   )
   $sourcePaths = @($SourcePath, $ProcessSourcePath, $AuthoritySourcePath)
-  $sourceParts = New-Object System.Collections.ArrayList
+  $sourceParts = @($null, $null, $null)
   for ($index = 0; $index -lt $sourcePaths.Count; $index++) {
     Write-DiagnosticStage ('source-' + $index + '-read-started')
     $path = $sourcePaths[$index]
-    [void]$sourceParts.Add([System.IO.File]::ReadAllBytes($path))
+    $sourceParts[$index] = [System.IO.File]::ReadAllBytes($path)
     Write-DiagnosticStage ('source-' + $index + '-read-completed')
   }
   Write-DiagnosticStage 'sources-read'
@@ -64,8 +64,8 @@ try {
   }
   Write-DiagnosticStage 'sizes-verified'
 
-  $bundle = New-Object System.IO.MemoryStream
-  $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+  $bundle = [System.IO.MemoryStream]::new()
+  $utf8 = [System.Text.UTF8Encoding]::new($false, $true)
   $powershellDomain = $utf8.GetBytes("coding-x-windows-supervisor-powershell-v1`0")
   $bundle.Write($powershellDomain, 0, $powershellDomain.Length)
   $bundle.Write($scriptBytes, 0, $scriptBytes.Length)
@@ -94,9 +94,9 @@ try {
 
   # Compile the exact source bytes that participated in the digest. Add-Type never receives a
   # project path or project-provided source text.
-  $sourceTexts = New-Object System.Collections.ArrayList
-  foreach ($part in $sourceParts) {
-    [void]$sourceTexts.Add($utf8.GetString($part))
+  $sourceTexts = @($null, $null, $null)
+  for ($index = 0; $index -lt $sourceParts.Count; $index++) {
+    $sourceTexts[$index] = $utf8.GetString($sourceParts[$index])
   }
   $sourceText = $sourceTexts -join "`r`n"
   Write-DiagnosticStage 'add-type-started'
