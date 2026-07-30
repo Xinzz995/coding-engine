@@ -47,8 +47,11 @@ try {
   )
   $sourcePaths = @($SourcePath, $ProcessSourcePath, $AuthoritySourcePath)
   $sourceParts = New-Object System.Collections.ArrayList
-  foreach ($path in $sourcePaths) {
+  for ($index = 0; $index -lt $sourcePaths.Count; $index++) {
+    Write-DiagnosticStage ('source-' + $index + '-read-started')
+    $path = $sourcePaths[$index]
     [void]$sourceParts.Add([System.IO.File]::ReadAllBytes($path))
+    Write-DiagnosticStage ('source-' + $index + '-read-completed')
   }
   Write-DiagnosticStage 'sources-read'
   if ($scriptBytes.Length -gt 4MB) {

@@ -246,6 +246,7 @@ function main() {
         '--reporter=verbose',
         '--reporter=json',
         '--bail=1',
+        '--testNamePattern=rejects case-insensitive duplicate target environment before target creation',
         `--outputFile.json=${reportPath}`,
         '--no-file-parallelism',
         '--config',
