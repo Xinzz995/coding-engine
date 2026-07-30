@@ -128,6 +128,9 @@ describe('quality contract preflight and shadow mode', () => {
       },
     });
     writeFileSync(statePath, original);
+    writeFinalReviewState(workspace, previousFinalReview('b'.repeat(40)));
+    const finalReviewPath = join(workspace, 'final-review.json');
+    const originalFinalReview = readFileSync(finalReviewPath, 'utf8');
     const fake = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
     const config = strictConfig(workspace, instructionsDir);
@@ -135,6 +138,7 @@ describe('quality contract preflight and shadow mode', () => {
 
     expect(await runProductionLoop(config)).toBe(2);
     expect(readFileSync(statePath, 'utf8')).toBe(original);
+    expect(readFileSync(finalReviewPath, 'utf8')).toBe(originalFinalReview);
     expect(existsSync(fake.calls)).toBe(false);
   });
 
@@ -162,6 +166,7 @@ describe('quality contract preflight and shadow mode', () => {
     expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001']).toMatchObject(
       { passes: true, validated: true },
     );
+    expect(existsSync(join(workspace, 'final-review.json'))).toBe(false);
   });
 
   it('does not repeat Story validation after the new head only waits for the remote PR', async () => {

@@ -112,6 +112,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
     ? parsedBootState ?? (stateExisted ? blankStateFor(bootPrd) : initialStateFor(bootPrd))
     : null;
   let bootInvalidatedStoryIds: string[] = [];
+  let bootFinalReviewNeedsInvalidation = false;
   // 旧 Final Review 自身仍按提交失效，但它不再决定 Story 是否过期；Story 当前性只由
   // 自己的结构化凭证、当前 PRD 与当前 HEAD 裁决。
   if (bootState && bootPrd) {
@@ -120,7 +121,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
       previousReview.status === 'ready' &&
       previousReview.state.binding.headSha !== bootGitHead
     ) {
-      invalidateFinalReviewState(cfg.workspace);
+      bootFinalReviewNeedsInvalidation = true;
     }
     const reconciled = reconcileValidationReceipts(bootPrd, bootState, bootGitHead);
     bootState = reconciled.state;
@@ -269,6 +270,9 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   // 必须保持原样；parsedBootState=null 代表既有文件损坏，也不覆盖诊断现场。
   if (bootState && (!stateExisted || parsedBootState)) {
     writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
+  }
+  if (bootFinalReviewNeedsInvalidation) {
+    invalidateFinalReviewState(cfg.workspace);
   }
   if (bootInvalidatedStoryIds.length > 0) {
     console.warn(
