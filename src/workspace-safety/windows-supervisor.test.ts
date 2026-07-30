@@ -576,7 +576,8 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const outcomePath = join(workspace, 'breakaway-outcome.json');
     const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
     const child = spawnWindowsJobSupervisor(launch);
-    const events = new EventReader(child);
+    // This fixture compiles its small P/Invoke probe inside the disposable standard-user process.
+    const events = new EventReader(child, 60_000);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
     const powershell = win32.join(

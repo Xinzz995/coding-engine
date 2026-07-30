@@ -112,7 +112,10 @@ export class EventReader {
   readonly outputTail = { stdout: '', stderr: '' };
   #iterator: AsyncIterator<string>;
 
-  constructor(readonly child: ChildProcessWithoutNullStreams) {
+  constructor(
+    readonly child: ChildProcessWithoutNullStreams,
+    readonly eventTimeoutMs = 15_000,
+  ) {
     activeChildren.add(child);
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.#iterator = lines[Symbol.asyncIterator]();
@@ -135,10 +138,10 @@ export class EventReader {
             () =>
               reject(
                 new Error(
-                  `timed out waiting for ${expected}; helper stderr: ${this.errors.join('')}`,
+                  `timed out waiting for ${expected}; helper stderr: ${this.errors.join('')}; target stdout: ${this.outputTail.stdout}; target stderr: ${this.outputTail.stderr}`,
                 ),
               ),
-            15_000,
+            this.eventTimeoutMs,
           ),
         ),
       ]);

@@ -8,6 +8,7 @@ import {
   readDarkWindowsHelperBundle,
   runDarkWindowsSupervisedOperation,
 } from '../windows-supervisor.js';
+import { windowsTestTargetEnvironment } from '../windows-test-environment.js';
 
 const OWNER_ID = '00000000-0000-4000-8000-000000000010';
 const OPERATION_ID = '00000000-0000-4000-8000-000000000020';
@@ -63,7 +64,7 @@ if (
             `require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'started')`,
           ],
           cwd: workspace,
-          environment: [],
+          environment: windows ? windowsTestTargetEnvironment() : [],
         },
         hooks: {
           onBound: async (facts: { readonly supervisorPid: number }) => {
