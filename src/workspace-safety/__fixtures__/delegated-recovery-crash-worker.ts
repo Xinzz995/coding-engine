@@ -21,6 +21,7 @@ import {
   readDarkWindowsHelperBundle,
   runDarkWindowsSupervisedOperation,
 } from '../windows-supervisor.js';
+import { windowsTestTargetEnvironment } from '../windows-test-environment.js';
 
 const [mode, workspace, delta] = process.argv.slice(2);
 if (!mode || !workspace) throw new Error('delegated recovery worker arguments are missing');
@@ -112,7 +113,7 @@ if (mode === 'parent') {
           executable: process.execPath,
           args: ['-e', targetSource],
           cwd: workspace,
-          environment: [],
+          environment: process.platform === 'win32' ? windowsTestTargetEnvironment() : [],
         },
         hooks: { onStarted },
       };

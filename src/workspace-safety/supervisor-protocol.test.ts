@@ -329,7 +329,7 @@ describe('supervisor protocol', () => {
               cwd: '/tmp',
               environment: [
                 { name: 'A', value: '1' },
-                { name: 'A', value: '2' },
+                { name: 'a', value: '2' },
               ],
             },
           }),

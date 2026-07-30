@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createWindowsSupervisorLaunch, spawnWindowsJobSupervisor } from './windows-supervisor.js';
+import { windowsTestTargetEnvironment } from './windows-test-environment.js';
 import {
   ASSET_ROOT,
   BREAKAWAY_SOURCE,
@@ -144,12 +145,18 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, realpathSync(process.execPath), [
-      '-e',
-      `if(process.argv[1] !== '雪' || process.argv[2] !== ''){process.stderr.write(JSON.stringify(process.argv));process.exit(9)}require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
-      '雪',
-      '',
-    ]);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      [
+        '-e',
+        `if(process.argv[1] !== '雪' || process.argv[2] !== '') process.exit(9);require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+        '雪',
+        '',
+      ],
+      windowsTestTargetEnvironment(),
+    );
     await events.next('ARMED');
     expect(existsSync(marker)).toBe(false);
     sendEmbedded(child, 'ABORT_BEFORE_START', {
@@ -219,7 +226,13 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     installPreparedAuthority(workspace, launch.assets.helperDigest, bound, fixture);
-    sendData(child, workspace, realpathSync(process.execPath), ['-e', 'process.exit(0)']);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      ['-e', 'process.exit(0)'],
+      windowsTestTargetEnvironment(),
+    );
     await events.next('ARMED');
     sendEmbedded(child, 'ABORT_BEFORE_START', {
       schemaVersion: 1,
@@ -239,12 +252,18 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, realpathSync(process.execPath), [
-      '-e',
-      `if(process.argv[1] !== '雪' || process.argv[2] !== '') process.exit(9);require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
-      '雪',
-      '',
-    ]);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      [
+        '-e',
+        `if(process.argv[1] !== '雪' || process.argv[2] !== ''){process.stderr.write(JSON.stringify(process.argv));process.exit(9)}require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+        '雪',
+        '',
+      ],
+      windowsTestTargetEnvironment(),
+    );
     const armedEvent = await events.next('ARMED');
     expect(existsSync(marker)).toBe(false);
     const containment = armedEvent.containment as Record<string, unknown>;
@@ -299,10 +318,13 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, realpathSync(process.execPath), [
-      '-e',
-      `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran')`,
-    ]);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran')`],
+      windowsTestTargetEnvironment(),
+    );
     const armedEvent = await events.next('ARMED');
     const observed = armedEvent.containment as Record<string, unknown>;
     const forged = { ...observed, targetIdentity: `${String(observed.targetIdentity)}-forged` };
@@ -331,7 +353,13 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, realpathSync(process.execPath), ['-e', 'process.exit(0)']);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      ['-e', 'process.exit(0)'],
+      windowsTestTargetEnvironment(),
+    );
     const armedEvent = await events.next('ARMED');
     const containment = armedEvent.containment as Record<string, unknown>;
     const armedBytes = installArmedAuthority(authority, containment);
@@ -379,10 +407,13 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, realpathSync(process.execPath), [
-      '-e',
-      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
-    ]);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+      windowsTestTargetEnvironment(),
+    );
     const armedEvent = await events.next('ARMED');
     const containment = armedEvent.containment as Record<string, unknown>;
     const armedBytes = Buffer.from(
@@ -451,7 +482,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, command, [marker]);
+    sendData(child, workspace, command, [marker], windowsTestTargetEnvironment());
     const armedEvent = await events.next('ARMED');
     const containment = armedEvent.containment as Record<string, unknown>;
     const armedBytes = Buffer.from(
@@ -494,10 +525,16 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, realpathSync(process.execPath), [
-      '-e',
-      'process.stdout.write(Buffer.alloc(2*1024*1024,65));process.stderr.write(Buffer.alloc(2*1024*1024,66))',
-    ]);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      [
+        '-e',
+        'process.stdout.write(Buffer.alloc(2*1024*1024,65));process.stderr.write(Buffer.alloc(2*1024*1024,66))',
+      ],
+      windowsTestTargetEnvironment(),
+    );
     const armedEvent = await events.next('ARMED');
     const containment = armedEvent.containment as Record<string, unknown>;
     const armedBytes = Buffer.from(
@@ -611,10 +648,16 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const events = new EventReader(child);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-    sendData(child, workspace, realpathSync(process.execPath), [
-      '-e',
-      `require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(${JSON.stringify(ready)},'ready');setInterval(()=>{},1000)`,
-    ]);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      [
+        '-e',
+        `require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(${JSON.stringify(ready)},'ready');setInterval(()=>{},1000)`,
+      ],
+      windowsTestTargetEnvironment(),
+    );
     const armedEvent = await events.next('ARMED');
     const containment = armedEvent.containment as Record<string, unknown>;
     const armedBytes = Buffer.from(

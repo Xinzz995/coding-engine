@@ -197,7 +197,11 @@ async function main() {
         executable: realpathSync(process.execPath),
         args: [targetProgram, targetSawCtrl, targetReady],
         cwd: workspace,
-        environment: [],
+        environment: [
+          { name: 'SystemRoot', value: process.env.SystemRoot },
+          { name: 'TEMP', value: process.env.TEMP },
+          { name: 'TMP', value: process.env.TMP },
+        ],
       },
     },
     { workspacePath: workspace },

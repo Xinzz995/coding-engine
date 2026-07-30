@@ -19,6 +19,7 @@ import {
   readDarkWindowsHelperBundle,
   runDarkWindowsSupervisedOperation,
 } from './windows-supervisor.js';
+import { windowsTestTargetEnvironment } from './windows-test-environment.js';
 import {
   acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease,
   bootstrapWorkspaceWithAuthority as bootstrapWorkspace,
@@ -66,7 +67,7 @@ function target(source: string, cwd: string) {
     executable: process.execPath,
     args: ['-e', source],
     cwd,
-    environment: [] as const,
+    environment: windowsTestTargetEnvironment(),
   };
 }
 

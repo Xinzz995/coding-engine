@@ -315,8 +315,9 @@ function parseTarget(value: unknown): SupervisorTarget {
     const item = asRecord(entry, `target.environment[${index}]`);
     exactKeys(item, ['name', 'value'], `target.environment[${index}]`);
     const name = pattern(item.name, `target.environment[${index}].name`, ENVIRONMENT_NAME_PATTERN);
-    if (names.has(name)) invalid('target.environment contains a duplicate name');
-    names.add(name);
+    const canonicalName = name.toLowerCase();
+    if (names.has(canonicalName)) invalid('target.environment contains a duplicate name');
+    names.add(canonicalName);
     return {
       name,
       value: boundedString(item.value, `target.environment[${index}].value`, true),

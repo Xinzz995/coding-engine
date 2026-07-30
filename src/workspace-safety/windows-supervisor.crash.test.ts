@@ -19,6 +19,7 @@ import {
   waitForFile,
   waitForProcessGone,
 } from './windows-supervisor.test-support.js';
+import { windowsTestTargetEnvironment } from './windows-test-environment.js';
 
 const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
 
@@ -31,7 +32,13 @@ windowsOnly(
       const { launch, child, events } = createSupervisor();
       const bound = await events.next('BOUND');
       const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-      sendData(child, workspace, realpathSync(process.execPath), ['-e', 'process.exit(0)']);
+      sendData(
+        child,
+        workspace,
+        realpathSync(process.execPath),
+        ['-e', 'process.exit(0)'],
+        windowsTestTargetEnvironment(),
+      );
       const armedEvent = await events.next('ARMED');
       const containment = armedEvent.containment as Record<string, unknown>;
       const armedBytes = installArmedAuthority(authority, containment);
@@ -70,10 +77,13 @@ windowsOnly(
       const { launch, child, events } = createSupervisor();
       const bound = await events.next('BOUND');
       const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
-      sendData(child, workspace, realpathSync(process.execPath), [
-        '-e',
-        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
-      ]);
+      sendData(
+        child,
+        workspace,
+        realpathSync(process.execPath),
+        ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+        windowsTestTargetEnvironment(),
+      );
       const armedEvent = await events.next('ARMED');
       const containment = armedEvent.containment as Record<string, unknown>;
       const armedBytes = Buffer.from(

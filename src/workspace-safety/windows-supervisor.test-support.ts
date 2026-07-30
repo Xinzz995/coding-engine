@@ -56,9 +56,32 @@ export const DIGEST = (value: string | Buffer): string =>
 export const OPERATION_ID = '12345678-1234-4234-8234-123456789abc';
 const OWNER_ID = 'abcdefab-cdef-4abc-8def-abcdefabcdef';
 export const created: string[] = [];
+const activeChildren = new Set<ChildProcessWithoutNullStreams>();
 
-afterEach(() => {
-  for (const path of created.splice(0)) rmSync(path, { force: true, recursive: true });
+afterEach(async () => {
+  await Promise.all(
+    [...activeChildren].map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = (): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            child.off('exit', finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, 5_000);
+          child.once('exit', finish);
+          if (child.exitCode !== null || child.signalCode !== null) return finish();
+          child.kill('SIGKILL');
+        }),
+    ),
+  );
+  activeChildren.clear();
+  for (const path of created.splice(0)) {
+    rmSync(path, { force: true, maxRetries: 10, recursive: true, retryDelay: 50 });
+  }
 });
 
 export function createWindowsWorkspace(label: string): string {
@@ -90,13 +113,17 @@ export class EventReader {
   #iterator: AsyncIterator<string>;
 
   constructor(readonly child: ChildProcessWithoutNullStreams) {
+    activeChildren.add(child);
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.#iterator = lines[Symbol.asyncIterator]();
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => this.errors.push(chunk));
-    this.exit = new Promise((resolve) =>
-      child.once('exit', (code, signal) => resolve({ code, signal })),
-    );
+    this.exit = new Promise((resolve) => {
+      child.once('exit', (code, signal) => {
+        activeChildren.delete(child);
+        resolve({ code, signal });
+      });
+    });
   }
 
   async next(expected: string): Promise<ProtocolEvent> {
@@ -260,7 +287,10 @@ export function sendData(
   workspace: string,
   executable: string,
   args: readonly string[],
-  environment: readonly { readonly name: string; readonly value: string }[] = [],
+  environment: readonly {
+    readonly name: string;
+    readonly value: string;
+  }[],
 ): void {
   const message = {
     schemaVersion: 1,

@@ -203,7 +203,11 @@ async function main() {
       executable: realpathSync(process.execPath),
       args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(targetMarker)},'ran')`],
       cwd: workspace,
-      environment: [],
+      environment: [
+        { name: 'SystemRoot', value: process.env.SystemRoot },
+        { name: 'TEMP', value: process.env.TEMP },
+        { name: 'TMP', value: process.env.TMP },
+      ],
     },
   };
   send(helper, 'DATA', data, { workspacePath: workspace });
