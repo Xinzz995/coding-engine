@@ -109,7 +109,7 @@ describe('buildApiResponse', () => {
     expect(r.sourcePrd).toBe('docs/prds/prd-x.md');
     expect(r.stories.length).toBe(1);
     expect(r.stories[0].passes).toBe(true); // 状态来自 state.json
-    expect(r.stories[0].validated).toBe(true); // 旧 passed state 兼容为已验收
+    expect(r.stories[0].validated).toBe(false); // 旧 passed state 只保留实现候选
     expect(r.logs).toContain('US-001');
   });
 
@@ -126,7 +126,7 @@ describe('buildApiResponse', () => {
     const r = buildApiResponse();
     expect(r.stateCorrupted).toBe(false);
     expect(r.stories[0].passes).toBe(true);
-    expect(r.stories[0].validated).toBe(true);
+    expect(r.stories[0].validated).toBe(false);
   });
 
   it('fails closed and exposes a warning flag when state.json exists but is corrupt', () => {

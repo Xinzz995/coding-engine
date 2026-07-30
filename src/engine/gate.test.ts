@@ -8,6 +8,7 @@ import {
   readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES,
   applyAbortRollback, ABORT_LINE_PREFIX, applyValidatorFailure,
   applyValidatorSuccess,
+  classifyValidationOnlyGateFailure,
   runContractQualityChecks,
 } from './gate.js';
 import type { GateFailure } from './gate.js';
@@ -41,6 +42,13 @@ const failure = (over: Partial<GateFailure> = {}): GateFailure => ({
   command: 'npm test', exitCode: 1, timedOut: false, outputTail: '2 failed', ...over,
 });
 
+const validationReceipt = {
+  schemaVersion: 1 as const,
+  requestId: 'validator-request-1',
+  gitHead: 'a'.repeat(40),
+  acceptanceHash: `sha256:${'b'.repeat(64)}`,
+};
+
 describe('readQualityChecks', () => {
   it('returns null when prd is null or field missing', () => {
     expect(readQualityChecks(null)).toBeNull();
@@ -63,9 +71,33 @@ describe('readQualityChecks', () => {
   });
 });
 
+describe('classifyValidationOnlyGateFailure', () => {
+  it('只把正常结束的门禁非零退出分类为明确失败', () => {
+    expect(classifyValidationOnlyGateFailure(failure({ exitCode: 7, timedOut: false })))
+      .toBe('failed');
+  });
+
+  it.each([
+    ['超时', { exitCode: null, timedOut: true }],
+    ['spawn 错误或信号终止', { exitCode: null, timedOut: false }],
+    ['超时优先于异常的数值退出码', { exitCode: 143, timedOut: true }],
+  ])('把%s分类为不可验证，不把候选实现误判为失败', (_label, overrides) => {
+    expect(classifyValidationOnlyGateFailure(failure(overrides)))
+      .toBe('unverifiable');
+  });
+});
+
 describe('applyGateFailure', () => {
   const base: RunState = {
-    'US-001': { passes: true, validated: true, notes: '', retryCount: 0, blocked: false, escalated: false },
+    'US-001': {
+      passes: true,
+      validated: true,
+      validationReceipt,
+      notes: '',
+      retryCount: 0,
+      blocked: false,
+      escalated: false,
+    },
   };
   const now = new Date(2026, 6, 5, 14, 30); // 本地时间 2026-07-05 14:30
 
@@ -73,6 +105,7 @@ describe('applyGateFailure', () => {
     const next = applyGateFailure(base, 'US-001', failure(), now);
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
+    expect(next['US-001']).toHaveProperty('validationReceipt', null);
     expect(next['US-001'].retryCount).toBe(1);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain('[门禁失败 - 第1次] 2026-07-05 14:30');
@@ -86,6 +119,7 @@ describe('applyGateFailure', () => {
     expect(next).not.toBe(base);
     expect(base['US-001'].passes).toBe(true);
     expect(base['US-001'].validated).toBe(true);
+    expect(base['US-001'].validationReceipt).toBe(validationReceipt);
     expect(base['US-001'].notes).toBe('');
   });
 
@@ -181,6 +215,7 @@ describe('engine-owned Validator verdict state', () => {
     'US-001': {
       passes: true,
       validated: false,
+      validationReceipt,
       notes: '[需求冲突] 保留这条仲裁\n旧失败详情',
       retryCount: 2,
       blocked: false,
@@ -194,6 +229,7 @@ describe('engine-owned Validator verdict state', () => {
     expect(next['US-001']).toEqual({
       passes: true,
       validated: false,
+      validationReceipt: null,
       notes: '[需求冲突] 保留这条仲裁',
       retryCount: 0,
       blocked: false,
@@ -214,6 +250,7 @@ describe('engine-owned Validator verdict state', () => {
 
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
+    expect(next['US-001']).toHaveProperty('validationReceipt', null);
     expect(next['US-001'].retryCount).toBe(3);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain('[需求冲突] 保留这条仲裁\n[验证失败 - 第3次] 2026-07-22 18:30');
@@ -463,10 +500,21 @@ describe('applyAbortRollback', () => {
   const at = new Date('2026-07-17T10:00:00');
 
   it('回写 passes=false 并写入中断标记行；retryCount 与 blocked 不动', () => {
-    const state = { 'US-001': { passes: true, validated: true, notes: '', retryCount: 2, blocked: false, escalated: false } };
+    const state = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt,
+        notes: '',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    };
     const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
+    expect(next['US-001']).toHaveProperty('validationReceipt', null);
     expect(next['US-001'].retryCount).toBe(2);
     expect(next['US-001'].blocked).toBe(false);
     expect(next['US-001'].notes).toContain(ABORT_LINE_PREFIX);
@@ -475,6 +523,7 @@ describe('applyAbortRollback', () => {
     // 不可变：原 state 不被就地修改
     expect(state['US-001'].passes).toBe(true);
     expect(state['US-001'].validated).toBe(true);
+    expect(state['US-001'].validationReceipt).toBe(validationReceipt);
   });
 
   it('error 结局的标记行含退出码', () => {

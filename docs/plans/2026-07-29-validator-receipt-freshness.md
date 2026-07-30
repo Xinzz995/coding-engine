@@ -71,6 +71,12 @@ Builder 返回后重新对账，防止新提交留下其他 Story 的旧绿灯�
 Builder no-op 判断，直接执行现有机械检查、可选 TDD 门禁与结构化 Validator 协议。外部命令若改写
 引擎独占验收字段，本轮恢复调用前值并失败关闭；不为此建立新的通用控制文件框架。
 
+Builder 返回并完成对账后固定本轮唯一验收 HEAD；项目机械检查和 TDD 门禁各自在启动前、结束后
+核对，Validator 建立请求前和返回后再次核对。任一边界观察到 HEAD 不一致或不可读时，不接受该阶段
+结果、不增加 retry、撤销新 HEAD 下已经过期的其他 Story 凭证并立即停止；validation-only 保留既有
+候选，普通实现轮沿用未验收候选回滚。下一次运行重新走完整链路，不能把不同 HEAD 的结果拼接成
+一次通过。H1→H2→H1 的瞬时恢复仍属于 Issue #91 的隔离检出边界。
+
 正式 HEAD 预检发生在选择 Story 与建立本轮纯重验之前；失败时不启动 Agent，也不修改 Story、候选
 或 retry。validation-only 中，机械检查/TDD 正常结束并明确不通过、确定的 TDD 政策违规或合法
 Validator failed 才清除跨轮保留的旧候选，并沿用既有 retry、升级与 blocked 规则；未 blocked 时
@@ -78,7 +84,8 @@ Validator failed 才清除跨轮保留的旧候选，并沿用既有 retry、升
 Validator 运行/协议不可验证时，保留旧候选、撤销凭证、不增加 retry，并立即非绿结束。机械/TDD
 不可验证时不进入 Validator，Validator 不可验证时不进入 Final Review；合法 Validator passed 才
 签发新凭证。质量契约明确声明某项机械检查不适用于当前平台时正常跳过；TDD `coverageCheck` 没有
-独立的平台跳过声明。
+独立的平台跳过声明。明确失败同样结束本次运行；候选清除后，由下一次启动先完成 Builder/升级模型
+预检，再进入 Developer，不能在只预检了 Validator/Review 的同一运行中直接调用 Builder。
 
 以上分类只服务 validation-only。普通 Builder 新候选继续遵循 ADR-009 与 ADR-017 的现有异常回写、
 stall、retry、升级和 blocked 语义；本计划不建立全局三态门禁。
@@ -114,6 +121,7 @@ Review binding 保存该摘要。旧 Review 缺少摘要时仍可作为历史记
 - `src/engine/gate.test.ts`：validation-only 对门禁非零与不可验证结果的分类不改变普通轮行为。
 - `src/engine/tdd-gate.test.ts`：validation-only 中确定政策违规/coverage 非零与环境不可验证分支。
 - `src/engine/loop-gates.test.ts`：纯重验分别通过、打回或保留旧候选停止；只有明确失败增加 retry，达到上限后 blocked 且不再调用 Builder。
+- `src/engine/loop-head-binding.test.ts`：项目检查、TDD 与 Validator 各边界的 HEAD 漂移优先按不可验证处理，不接受跨提交结果。
 - `src/engine/model-preflight.test.ts`：validation-only 只要求 Validator/Review 路由。
 - `src/engine/loop-preflight.test.ts`：无 HEAD 提前停止、不依赖旧 Final Review，且 state/retry 不变。
 - `src/engine/loop-lifecycle.test.ts`：两遍选择、保留候选、跳过 Builder、多 Story 收敛。

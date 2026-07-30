@@ -6,6 +6,114 @@ import { readEvidence } from './evidence.js';
 import { setup, story, fakeBoundValidator, strictConfig } from './loop-test-support.js';
 
 describe('runLoop structured validation protocol', () => {
+  it('preserves a validation-only candidate and retry count when Validator is unverifiable', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'existing candidate',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const fake = fakeBoundValidator(workspace, 'missing');
+    writeFileSync(join(workspace, 'bound-calls.txt'), '1');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
+        maxIterations: 3,
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          notes: 'existing candidate',
+          retryCount: 2,
+        });
+      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
+      expect(iteration).toMatchObject({
+        builderRan: false,
+        validatorRan: true,
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'missing-result' },
+      });
+      expect(iteration).not.toHaveProperty('validationRollback');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('clears a validation-only candidate and increments retry only for a valid failed claim', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'existing candidate',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const fake = fakeBoundValidator(workspace, 'failed');
+    writeFileSync(join(workspace, 'bound-calls.txt'), '1');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
+        maxIterations: 3,
+      })).toBe(1);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({ passes: false, validated: false, validationReceipt: null, retryCount: 3 });
+      expect(readEvidence(workspace).records.find((r) => r.type === 'iteration')).toMatchObject({
+        builderRan: false,
+        validatorRan: true,
+        validationProtocol: 'failed',
+      });
+      expect(readFileSync(join(workspace, 'bound-calls.txt'), 'utf8')).toBe('2');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('stops at blocked after a fifth validation-only Validator failure without Developer', async () => {
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['返回 401'] })]);
+    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'existing candidate',
+        retryCount: 4,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const fake = fakeBoundValidator(workspace, 'failed');
+    writeFileSync(join(workspace, 'bound-calls.txt'), '1');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
+        maxIterations: 3,
+      })).toBe(3);
+      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
+        .toMatchObject({ passes: false, retryCount: 5, blocked: true });
+      expect(readFileSync(join(workspace, 'bound-calls.txt'), 'utf8')).toBe('2');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('issues a receipt only for a fresh, fully bound passed claim', async () => {
     const { workspace, instructionsDir } = setup([
       story({

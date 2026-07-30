@@ -61,6 +61,11 @@ function storyPending(state: RunState | null, storyId: string): boolean {
   return !current || (!isStoryPassed(current) && !current.blocked);
 }
 
+function storyNeedsImplementation(state: RunState | null, storyId: string): boolean {
+  const current = state?.[storyId];
+  return !current || (!current.blocked && !current.passes);
+}
+
 function addModel(target: Map<string, string[]>, model: string | undefined, path: string): void {
   if (!model) return;
   const paths = target.get(model) ?? [];
@@ -88,7 +93,7 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
   const shadowed = new Map<string, string[]>();
 
   for (const story of opts.prd?.userStories ?? []) {
-    if (!storyPending(opts.state, story.id)) continue;
+    if (!storyNeedsImplementation(opts.state, story.id)) continue;
     // enabled 已严格校验；disabled stories 无 difficulty，不进入 config 索引。
     const difficulty = story.difficulty ?? null;
     const escalated = opts.state?.[story.id]?.escalated ?? false;
@@ -116,7 +121,7 @@ export async function preflightModelRouting(opts: ModelPreflightOptions): Promis
     }
   }
 
-  const hasPending = storyRoutes.length > 0;
+  const hasPending = (opts.prd?.userStories ?? []).some((story) => storyPending(opts.state, story.id));
   const validator = resolveValidatorModel({ cliOverride: opts.validatorOverride, config });
   const review: ModelChoice = opts.reviewOverride
     ? { model: opts.reviewOverride, source: 'cli-review' }

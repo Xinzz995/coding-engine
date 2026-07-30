@@ -2,11 +2,27 @@ import { readFileSync, existsSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
 import { join } from 'node:path';
 import type { Prd, Story } from './prd.js';
+import {
+  acceptanceHash,
+  VALIDATION_PROTOCOL_VERSION,
+  type ValidationRequest,
+} from './validation-protocol.js';
+
+export const VALIDATION_RECEIPT_SCHEMA_VERSION = 1 as const;
+
+export interface ValidationReceipt {
+  schemaVersion: typeof VALIDATION_RECEIPT_SCHEMA_VERSION;
+  requestId: string;
+  gitHead: string;
+  acceptanceHash: string;
+}
 
 export interface StoryState {
   passes: boolean;
   /** validator 已被引擎机械观察为正常完成；仅引擎可修改。 */
   validated: boolean;
+  /** Validator 结论所绑定的精确提交与 Story/AC 身份；旧状态可缺省。 */
+  validationReceipt?: ValidationReceipt | null;
   notes: string;
   retryCount: number;
   blocked: boolean;
@@ -21,23 +37,81 @@ export type RunState = Record<string, StoryState>;
 export type StoryView = Story & StoryState;
 
 export const INITIAL_STORY_STATE: Readonly<StoryState> = Object.freeze({
-  passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false,
+  passes: false,
+  validated: false,
+  validationReceipt: null,
+  notes: '',
+  retryCount: 0,
+  blocked: false,
+  escalated: false,
 });
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function isGitHead(value: unknown): value is string {
+  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value);
+}
+
+function isAcceptanceHash(value: unknown): value is string {
+  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
+}
+
+/** 严格读取 v1 凭证；字段缺失、未知字段或任一非法值都拒绝。 */
+export function parseValidationReceipt(value: unknown): ValidationReceipt | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash'])
+  )
+    return null;
+  if (
+    value.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
+    typeof value.requestId !== 'string' ||
+    value.requestId.trim().length === 0 ||
+    !isGitHead(value.gitHead) ||
+    !isAcceptanceHash(value.acceptanceHash)
+  )
+    return null;
+  return {
+    schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
+    requestId: value.requestId,
+    gitHead: value.gitHead,
+    acceptanceHash: value.acceptanceHash,
+  };
+}
+
 function normalizeStoryState(v: unknown): StoryState | null {
-  if (typeof v !== 'object' || v === null) return null;
-  const s = v as Record<string, unknown>;
-  if (typeof s.passes !== 'boolean' || typeof s.notes !== 'string'
-    || typeof s.retryCount !== 'number' || typeof s.blocked !== 'boolean'
-    || (s.validated !== undefined && typeof s.validated !== 'boolean')
-    || (s.escalated !== undefined && typeof s.escalated !== 'boolean')) return null;
+  if (!isRecord(v)) return null;
+  const s = v;
+  if (
+    typeof s.passes !== 'boolean' ||
+    typeof s.notes !== 'string' ||
+    typeof s.retryCount !== 'number' ||
+    typeof s.blocked !== 'boolean' ||
+    (s.validated !== undefined && typeof s.validated !== 'boolean') ||
+    (s.escalated !== undefined && typeof s.escalated !== 'boolean')
+  )
+    return null;
+  let validationReceipt: ValidationReceipt | null = null;
+  if (s.validationReceipt !== undefined && s.validationReceipt !== null) {
+    validationReceipt = parseValidationReceipt(s.validationReceipt);
+    if (!validationReceipt) return null;
+  }
+  const hasCurrentReceipt =
+    !s.blocked && s.passes && s.validated === true && validationReceipt !== null;
   return {
     passes: s.passes,
-    // v0.24.0 及更早 state 没有该字段：历史 passes=true 已被旧引擎当作最终通过，
-    // 为避免升级后全量重验，内存按 passes 兼容；只读不触发迁移写。
-    // 凭证不能脱离候选通过态单独存活；显式 false/true 组合按 false 归一，
-    // 下一次 agent 写回时所有权恢复会把磁盘中的陈旧 true 一并清掉。
-    validated: !s.blocked && s.passes && (s.validated === undefined ? true : s.validated),
+    // 旧 state 缺少结构化凭证时只保留实现候选，绝不由 passes 反推已验收。
+    // validated 与 validationReceipt 是一个整体，任一缺失或脱离候选态都同时撤销。
+    validated: hasCurrentReceipt,
+    validationReceipt: hasCurrentReceipt ? validationReceipt : null,
     notes: s.notes,
     retryCount: s.retryCount,
     blocked: s.blocked,
@@ -64,6 +138,7 @@ export function tryReadState(path: string): RunState | null {
 
 export interface EngineOwnedFields {
   validated: boolean | 'missing';
+  validationReceipt: ValidationReceipt | null | 'missing';
   escalated: boolean | 'missing';
 }
 
@@ -76,14 +151,27 @@ export function tryReadEngineOwnedFields(path: string, storyId: string): EngineO
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const raw = (parsed as Record<string, unknown>)[storyId];
-    if (raw === undefined) return { validated: 'missing', escalated: 'missing' };
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
-    const story = raw as Record<string, unknown>;
+    if (raw === undefined) {
+      return { validated: 'missing', validationReceipt: 'missing', escalated: 'missing' };
+    }
+    if (!isRecord(raw)) return null;
+    const story = raw;
     const validated = story.validated === undefined ? 'missing' : story.validated;
+    const rawReceipt = story.validationReceipt === undefined ? 'missing' : story.validationReceipt;
     const escalated = story.escalated === undefined ? 'missing' : story.escalated;
-    if ((validated !== 'missing' && typeof validated !== 'boolean')
-        || (escalated !== 'missing' && typeof escalated !== 'boolean')) return null;
-    return { validated, escalated };
+    if (
+      (validated !== 'missing' && typeof validated !== 'boolean') ||
+      (escalated !== 'missing' && typeof escalated !== 'boolean')
+    )
+      return null;
+    let validationReceipt: ValidationReceipt | null | 'missing';
+    if (rawReceipt === 'missing' || rawReceipt === null) {
+      validationReceipt = rawReceipt;
+    } else {
+      validationReceipt = parseValidationReceipt(rawReceipt);
+      if (!validationReceipt) return null;
+    }
+    return { validated, validationReceipt, escalated };
   } catch {
     return null;
   }
@@ -96,7 +184,9 @@ function legacyStateOf(story: Story): StoryState {
   const blocked = s.blocked ?? false;
   return {
     passes,
-    validated: passes && !blocked,
+    // legacy 内嵌 passes 只能迁移为实现候选，不能补造结构化 Validator 凭证。
+    validated: false,
+    validationReceipt: null,
     notes: s.notes ?? '',
     retryCount: s.retryCount ?? 0,
     blocked,
@@ -132,7 +222,7 @@ export function readDisplayState(path: string, prd: Prd): DisplayStateRead {
   const rawState = stateExists ? tryReadState(path) : null;
   const stateCorrupted = stateExists && rawState === null;
   return {
-    state: stateCorrupted ? blankStateFor(prd) : rawState ?? initialStateFor(prd),
+    state: stateCorrupted ? blankStateFor(prd) : (rawState ?? initialStateFor(prd)),
     stateCorrupted,
   };
 }
@@ -153,9 +243,97 @@ function storyStateOf(state: RunState, id: string): StoryState {
   return state[id] ?? INITIAL_STORY_STATE;
 }
 
-/** 对外统一的有效通过判定：非 blocked + builder 声明 + engine 验收凭证缺一不可。 */
-export function isStoryPassed(state: Pick<StoryState, 'passes' | 'validated' | 'blocked'>): boolean {
+/** @deprecated 仅供旧展示兼容；正式控制流必须用 isStoryPassedAt 核对结构化凭证。 */
+export function isStoryPassed(
+  state: Pick<StoryState, 'passes' | 'validated' | 'blocked'>,
+): boolean {
   return !state.blocked && state.passes && state.validated;
+}
+
+export type StoryValidationInvalidReason =
+  | 'blocked'
+  | 'missing-candidate'
+  | 'not-validated'
+  | 'missing-receipt'
+  | 'invalid-receipt'
+  | 'invalid-current-head'
+  | 'head-mismatch'
+  | 'acceptance-mismatch';
+
+export type StoryValidationEvaluation =
+  | { valid: true; receipt: ValidationReceipt; acceptanceHash: string }
+  | {
+      valid: false;
+      reason: StoryValidationInvalidReason;
+      receipt: ValidationReceipt | null;
+      acceptanceHash: string;
+    };
+
+/** 唯一的 Story 完成当前性判断：同时绑定候选、提交、Story ID 与有序 AC。 */
+export function evaluateStoryValidation(
+  story: Pick<Story, 'id' | 'acceptanceCriteria'>,
+  state: StoryState,
+  currentGitHead: string,
+): StoryValidationEvaluation {
+  const expectedHash = acceptanceHash(story.id, story.acceptanceCriteria);
+  const rawReceipt = state.validationReceipt ?? null;
+  const receipt = rawReceipt === null ? null : parseValidationReceipt(rawReceipt);
+  if (state.blocked) {
+    return { valid: false, reason: 'blocked', receipt, acceptanceHash: expectedHash };
+  }
+  if (!state.passes) {
+    return { valid: false, reason: 'missing-candidate', receipt, acceptanceHash: expectedHash };
+  }
+  if (!state.validated) {
+    return { valid: false, reason: 'not-validated', receipt, acceptanceHash: expectedHash };
+  }
+  if (rawReceipt === null) {
+    return { valid: false, reason: 'missing-receipt', receipt: null, acceptanceHash: expectedHash };
+  }
+  if (!receipt) {
+    return { valid: false, reason: 'invalid-receipt', receipt: null, acceptanceHash: expectedHash };
+  }
+  if (!isGitHead(currentGitHead)) {
+    return { valid: false, reason: 'invalid-current-head', receipt, acceptanceHash: expectedHash };
+  }
+  if (receipt.gitHead !== currentGitHead) {
+    return { valid: false, reason: 'head-mismatch', receipt, acceptanceHash: expectedHash };
+  }
+  if (receipt.acceptanceHash !== expectedHash) {
+    return { valid: false, reason: 'acceptance-mismatch', receipt, acceptanceHash: expectedHash };
+  }
+  return { valid: true, receipt, acceptanceHash: expectedHash };
+}
+
+export function isStoryPassedAt(
+  story: Pick<Story, 'id' | 'acceptanceCriteria'>,
+  state: StoryState,
+  currentGitHead: string,
+): boolean {
+  return evaluateStoryValidation(story, state, currentGitHead).valid;
+}
+
+/**
+ * 以当前 PRD 与 HEAD 对账全部 Story。失效只撤销引擎验收整体，保留实现候选及其他状态。
+ */
+export function reconcileValidationReceipts(
+  prd: Prd,
+  state: RunState,
+  currentGitHead: string,
+): { state: RunState; invalidatedStoryIds: string[] } {
+  let next = state;
+  const invalidatedStoryIds: string[] = [];
+  for (const story of prd.userStories) {
+    const current = state[story.id];
+    if (!current || evaluateStoryValidation(story, current, currentGitHead).valid) continue;
+    if (!current.validated && (current.validationReceipt ?? null) === null) continue;
+    next = {
+      ...next,
+      [story.id]: { ...current, validated: false, validationReceipt: null },
+    };
+    invalidatedStoryIds.push(story.id);
+  }
+  return { state: next, invalidatedStoryIds };
 }
 
 export interface EscalatedTamper {
@@ -166,6 +344,93 @@ export interface EscalatedTamper {
 export interface ValidatedTamper {
   expected: boolean;
   received: boolean | 'missing';
+}
+
+export interface ValidationOwnership {
+  validated: boolean;
+  validationReceipt: ValidationReceipt | null;
+}
+
+export interface ObservedValidationOwnership {
+  validated: boolean | 'missing';
+  validationReceipt: ValidationReceipt | null | 'missing';
+}
+
+export interface ValidationOwnershipTamper {
+  expected: ValidationOwnership;
+  received: ObservedValidationOwnership;
+}
+
+function sameValidationReceipt(
+  left: ValidationReceipt | null | 'missing',
+  right: ValidationReceipt | null | 'missing',
+): boolean {
+  if (left === null || left === 'missing' || right === null || right === 'missing') {
+    return left === right;
+  }
+  return (
+    left.schemaVersion === right.schemaVersion &&
+    left.requestId === right.requestId &&
+    left.gitHead === right.gitHead &&
+    left.acceptanceHash === right.acceptanceHash
+  );
+}
+
+export function validationOwnershipOf(state: StoryState): ValidationOwnership {
+  return {
+    validated: state.validated,
+    validationReceipt: state.validationReceipt ?? null,
+  };
+}
+
+/** 恢复 agent 写回前的 validated + receipt 整体；任一字段变化都会整体回滚。 */
+export function restoreValidationOwnership(
+  state: RunState,
+  storyId: string,
+  expected: ValidationOwnership,
+  fallback?: StoryState,
+  observed?: ObservedValidationOwnership,
+): { state: RunState; tamper: ValidationOwnershipTamper | null } {
+  const current = state[storyId];
+  if (!current) {
+    if (!fallback) return { state, tamper: null };
+    return {
+      state: {
+        ...state,
+        [storyId]: {
+          ...fallback,
+          validated: expected.validated,
+          validationReceipt: expected.validationReceipt,
+        },
+      },
+      tamper: {
+        expected,
+        received: observed ?? { validated: 'missing', validationReceipt: 'missing' },
+      },
+    };
+  }
+  const received: ObservedValidationOwnership = observed ?? {
+    validated: current.validated,
+    validationReceipt:
+      current.validationReceipt === undefined ? 'missing' : current.validationReceipt,
+  };
+  if (
+    received.validated === expected.validated &&
+    sameValidationReceipt(received.validationReceipt, expected.validationReceipt)
+  ) {
+    return { state, tamper: null };
+  }
+  return {
+    state: {
+      ...state,
+      [storyId]: {
+        ...current,
+        validated: expected.validated,
+        validationReceipt: expected.validationReceipt,
+      },
+    },
+    tamper: { expected, received },
+  };
 }
 
 /** 恢复 agent 写回前的引擎独占值；无篡改时保持同一 state 引用。 */
@@ -192,7 +457,7 @@ export function restoreEscalated(
   };
 }
 
-/** 恢复 agent 写回前的验收凭证；无篡改时保持同一 state 引用。 */
+/** @deprecated 仅供旧调用兼容；新控制流必须用 restoreValidationOwnership 整体恢复。 */
 export function restoreValidated(
   state: RunState,
   storyId: string,
@@ -216,17 +481,69 @@ export function restoreValidated(
   };
 }
 
-/** 结构化 Validator passed claim 通过目标/协议/state 检查且候选仍通过时，由引擎签发。 */
+/** @deprecated 旧两参数调用保留类型兼容，但不会签发无目标身份的裸布尔凭证。 */
 export function issueValidationReceipt(
   state: RunState,
   storyId: string,
+): { state: RunState; changed: boolean };
+/** 结构化 Validator passed claim 已核对后，以本轮 request 签发持久凭证。 */
+export function issueValidationReceipt(
+  state: RunState,
+  story: Pick<Story, 'id' | 'acceptanceCriteria'>,
+  request: ValidationRequest,
+): { state: RunState; changed: boolean };
+export function issueValidationReceipt(
+  state: RunState,
+  storyOrId: string | Pick<Story, 'id' | 'acceptanceCriteria'>,
+  request?: ValidationRequest,
 ): { state: RunState; changed: boolean } {
-  const current = state[storyId];
-  if (!current || !current.passes || current.blocked || current.validated) {
+  // 没有 Story/AC/request 绑定就无法安全签发；兼容入口必须失败关闭。
+  if (typeof storyOrId === 'string' || !request) return { state, changed: false };
+  const story = storyOrId;
+  const expectedHash = acceptanceHash(story.id, story.acceptanceCriteria);
+  if (
+    request.version !== VALIDATION_PROTOCOL_VERSION ||
+    typeof request.requestId !== 'string' ||
+    request.requestId.trim().length === 0 ||
+    typeof request.storyId !== 'string' ||
+    !Array.isArray(request.acceptanceCriteria) ||
+    !request.acceptanceCriteria.every((criterion) => typeof criterion === 'string') ||
+    typeof request.acceptanceHash !== 'string' ||
+    !isGitHead(request.gitHead)
+  ) {
+    return { state, changed: false };
+  }
+  const requestCriteriaMatch =
+    request.acceptanceCriteria.length === story.acceptanceCriteria.length &&
+    request.acceptanceCriteria.every(
+      (criterion, index) => criterion === story.acceptanceCriteria[index],
+    );
+  if (
+    request.storyId !== story.id ||
+    !requestCriteriaMatch ||
+    request.acceptanceHash !== expectedHash ||
+    acceptanceHash(request.storyId, request.acceptanceCriteria) !== request.acceptanceHash
+  ) {
+    return { state, changed: false };
+  }
+  const current = state[story.id];
+  if (!current || !current.passes || current.blocked) {
+    return { state, changed: false };
+  }
+  const receipt: ValidationReceipt = {
+    schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
+    requestId: request.requestId,
+    gitHead: request.gitHead,
+    acceptanceHash: request.acceptanceHash,
+  };
+  if (current.validated && sameValidationReceipt(current.validationReceipt ?? null, receipt)) {
     return { state, changed: false };
   }
   return {
-    state: { ...state, [storyId]: { ...current, validated: true } },
+    state: {
+      ...state,
+      [story.id]: { ...current, validated: true, validationReceipt: receipt },
+    },
     changed: true,
   };
 }
@@ -241,15 +558,24 @@ export function rollbackUnvalidatedPass(
     return { state, changed: false };
   }
   return {
-    state: { ...state, [storyId]: { ...current, passes: false, validated: false } },
+    state: {
+      ...state,
+      [storyId]: {
+        ...current,
+        passes: false,
+        validated: false,
+        validationReceipt: null,
+      },
+    },
     changed: true,
   };
 }
 
 /** 启动恢复：进程若在 builder 与 validator 之间中断，显式待验收 true 回写为可重试态。 */
-export function rollbackUnvalidatedPasses(
-  state: RunState,
-): { state: RunState; storyIds: string[] } {
+export function rollbackUnvalidatedPasses(state: RunState): {
+  state: RunState;
+  storyIds: string[];
+} {
   let next = state;
   const storyIds: string[] = [];
   for (const id of Object.keys(state)) {
@@ -287,6 +613,43 @@ export function allStoriesResolved(prd: Prd, state: RunState): boolean {
   return prd.userStories.every((s) => {
     const st = storyStateOf(state, s.id);
     return isStoryPassed(st) || st.blocked;
+  });
+}
+
+export type StorySelectionMode = 'implementation' | 'validation-only';
+
+export interface NextStorySelection {
+  storyId: string;
+  mode: StorySelectionMode;
+}
+
+/**
+ * 两遍选择：先完成所有缺候选项，再按 PRD 顺序重验已有候选但凭证不再当前的 Story。
+ */
+export function selectNextStory(
+  prd: Prd,
+  state: RunState,
+  currentGitHead: string,
+): NextStorySelection | null {
+  for (const story of prd.userStories) {
+    const current = storyStateOf(state, story.id);
+    if (!current.blocked && !current.passes) {
+      return { storyId: story.id, mode: 'implementation' };
+    }
+  }
+  for (const story of prd.userStories) {
+    const current = storyStateOf(state, story.id);
+    if (!current.blocked && current.passes && !isStoryPassedAt(story, current, currentGitHead)) {
+      return { storyId: story.id, mode: 'validation-only' };
+    }
+  }
+  return null;
+}
+
+export function allStoriesResolvedAt(prd: Prd, state: RunState, currentGitHead: string): boolean {
+  return prd.userStories.every((story) => {
+    const current = storyStateOf(state, story.id);
+    return current.blocked || isStoryPassedAt(story, current, currentGitHead);
   });
 }
 

@@ -15,17 +15,130 @@ import {
   fakeCounting,
   fakeBoundValidator,
   strictConfig,
+  validationReceiptFor,
+  setupGitProject,
 } from './loop-test-support.js';
 
 describe('quality contract preflight and shadow mode', () => {
+  it('stops before state mutation, model lookup or any agent when Git HEAD is unavailable', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const statePath = join(workspace, 'state.json');
+    const original = JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'keep exactly',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    });
+    writeFileSync(statePath, original);
+    const fake = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+    let catalogCalls = 0;
+    let reviewCalls = 0;
+
+    const code = await runProductionLoop({
+      ...strictConfig(workspace, instructionsDir),
+      projectRoot: instructionsDir,
+      modelCatalog: async () => {
+        catalogCalls += 1;
+        return { status: 'available', runner: 'claude', source: 'global-config', configPath: 'x', models: [] };
+      },
+      finalReviewRunner: async () => {
+        reviewCalls += 1;
+        return { exitCode: 0, message: 'must not run' };
+      },
+    });
+
+    expect(code).toBe(2);
+    expect(readFileSync(statePath, 'utf8')).toBe(original);
+    expect(catalogCalls).toBe(0);
+    expect(reviewCalls).toBe(0);
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
+  it('invalidates a stale Story receipt without any Final Review file and revalidates without Developer', async () => {
+    const target = story({ acceptanceCriteria: ['still works'] });
+    const project = setupGitProject([target]);
+    const oldHead = project.head();
+    writeFileSync(
+      join(project.workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: validationReceiptFor(target, oldHead),
+          notes: 'candidate stays',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const newHead = project.commitFile('H2\n');
+    const fake = fakeBoundValidator(project.workspace, 'passed');
+    const calls = join(project.workspace, 'bound-calls.txt');
+    writeFileSync(calls, '1');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    expect(await runProductionLoop({
+      ...strictConfig(project.workspace, project.instructionsDir),
+      projectRoot: project.projectRoot,
+    })).toBe(0);
+    expect(readFileSync(calls, 'utf8')).toBe('2');
+    expect(JSON.parse(readFileSync(join(project.workspace, 'state.json'), 'utf8'))['US-001'])
+      .toMatchObject({
+        passes: true,
+        validated: true,
+        retryCount: 0,
+        validationReceipt: { gitHead: newHead },
+      });
+  });
+
   it('fails before any Story agent when a production final Review model is not explicit', async () => {
     const { workspace, instructionsDir } = setup([story()]);
+    const statePath = join(workspace, 'state.json');
+    expect(existsSync(statePath)).toBe(false);
     const fake = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
     const config = strictConfig(workspace, instructionsDir);
     delete config.finalReviewRunner;
 
     expect(await runProductionLoop(config)).toBe(2);
+    expect(existsSync(fake.calls)).toBe(false);
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it('keeps stale receipt bytes unchanged when a later model preflight fails', async () => {
+    const target = story({ acceptanceCriteria: ['still current'] });
+    const { workspace, instructionsDir } = setup([target]);
+    const statePath = join(workspace, 'state.json');
+    const original = JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: validationReceiptFor(target, 'a'.repeat(40)),
+        notes: 'do not rewrite',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
+      },
+    });
+    writeFileSync(statePath, original);
+    writeFinalReviewState(workspace, previousFinalReview('b'.repeat(40)));
+    const finalReviewPath = join(workspace, 'final-review.json');
+    const originalFinalReview = readFileSync(finalReviewPath, 'utf8');
+    const fake = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+    const config = strictConfig(workspace, instructionsDir);
+    delete config.finalReviewRunner;
+
+    expect(await runProductionLoop(config)).toBe(2);
+    expect(readFileSync(statePath, 'utf8')).toBe(original);
+    expect(readFileSync(finalReviewPath, 'utf8')).toBe(originalFinalReview);
     expect(existsSync(fake.calls)).toBe(false);
   });
 
@@ -49,10 +162,11 @@ describe('quality contract preflight and shadow mode', () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
 
     expect(await runLoop(strictConfig(workspace, instructionsDir))).toBe(0);
-    expect(readFileSync(fake.calls, 'utf8').trim().split('\n')).toHaveLength(2);
+    expect(readFileSync(fake.calls, 'utf8').trim().split('\n')).toHaveLength(1);
     expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001']).toMatchObject(
       { passes: true, validated: true },
     );
+    expect(existsSync(join(workspace, 'final-review.json'))).toBe(false);
   });
 
   it('does not repeat Story validation after the new head only waits for the remote PR', async () => {
@@ -73,6 +187,8 @@ describe('quality contract preflight and shadow mode', () => {
     writeFinalReviewState(workspace, previousFinalReview('a'.repeat(40)));
     const fake = fakeBoundValidator(workspace, 'passed');
     const calls = join(workspace, 'bound-calls.txt');
+    // 该 fixture 的第 1 次调用模拟 Builder；本场景从跨轮候选开始，首个真实调用应是 Validator。
+    writeFileSync(calls, '1');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     let finalReviewCalls = 0;
     const config: LoopConfig = {
@@ -144,7 +260,8 @@ describe('quality contract preflight and shadow mode', () => {
   });
 
   it('allows a mismatched candidate only in shadow mode and returns 7 instead of delivery-ready', async () => {
-    const { workspace, instructionsDir } = setup([story({ passes: true })]);
+    const target = story({ passes: true });
+    const { workspace, instructionsDir, head } = setup([target]);
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
@@ -155,6 +272,7 @@ describe('quality contract preflight and shadow mode', () => {
           retryCount: 0,
           blocked: false,
           escalated: false,
+          validationReceipt: validationReceiptFor(target, head()),
         },
       }),
     );

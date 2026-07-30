@@ -54,6 +54,20 @@ export interface GateFailure {
   outputTail: string;
 }
 
+/** validation-only 对失败结果的裁决；普通 Builder 轮不消费此分类。 */
+export type ValidationOnlyFailureClassification = 'failed' | 'unverifiable';
+
+/**
+ * validation-only 只把正常结束并返回非零退出码视为候选实现已明确失败。
+ * GateFailure 只表示失败结果，因此非 null 的正常退出码按契约必为非零；
+ * 超时、spawn 错误与信号终止都无法证明候选有错，必须保持为不可验证。
+ */
+export function classifyValidationOnlyGateFailure(
+  failure: GateFailure,
+): ValidationOnlyFailureClassification {
+  return failure.exitCode !== null && !failure.timedOut ? 'failed' : 'unverifiable';
+}
+
 export interface GateResult {
   ok: boolean;
   failure: GateFailure | null;
@@ -336,7 +350,15 @@ export function applyGateFailure(
   if (blocked && !prev.blocked) lines.push(`${BLOCKED_LINE_PREFIX}: 已达到最大重试次数，跳过此 story]`);
   return {
     ...state,
-    [storyId]: { ...prev, passes: false, validated: false, notes: lines.join('\n'), retryCount, blocked },
+    [storyId]: {
+      ...prev,
+      passes: false,
+      validated: false,
+      validationReceipt: null,
+      notes: lines.join('\n'),
+      retryCount,
+      blocked,
+    },
   };
 }
 
@@ -352,6 +374,7 @@ export function applyValidatorSuccess(state: RunState, storyId: string): RunStat
     [storyId]: {
       ...prev,
       validated: false,
+      validationReceipt: null,
       notes: arbitrationLines.join('\n'),
       retryCount: 0,
     },
@@ -393,6 +416,7 @@ export function applyValidatorFailure(
       ...prev,
       passes: false,
       validated: false,
+      validationReceipt: null,
       notes: lines.join('\n'),
       retryCount,
       blocked,
@@ -437,6 +461,14 @@ export function applyAbortRollback(
   ];
   return {
     ...state,
-    [storyId]: { ...prev, passes: false, validated: false, notes: lines.join('\n'), retryCount: prev.retryCount, blocked: prev.blocked },
+    [storyId]: {
+      ...prev,
+      passes: false,
+      validated: false,
+      validationReceipt: null,
+      notes: lines.join('\n'),
+      retryCount: prev.retryCount,
+      blocked: prev.blocked,
+    },
   };
 }

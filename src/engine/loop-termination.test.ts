@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readEvidence } from './evidence.js';
-import { setup, story, runLoop } from './loop-test-support.js';
+import { setup, story, runLoop, validationReceiptFor } from './loop-test-support.js';
 
 describe('no-op 检测与 stall 熔断', () => {
   it('builder 空转（双无变化）：跳过验收只跑 builder，连续 3 轮熔断 exit 1', async () => {
@@ -133,12 +133,20 @@ describe('no-op 检测与 stall 熔断', () => {
   });
 
   it('已完工 workspace 启动即收敛：不调 agent，也不伪造 iteration', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const target = story();
+    const { workspace, instructionsDir, head } = setup([target]);
     // 预置已完工 state；fake 不写任何文件（空转）
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: validationReceiptFor(target, head()),
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+        },
       }),
     );
     const fake = join(workspace, 'fake.mjs');
@@ -166,11 +174,22 @@ describe('no-op 检测与 stall 熔断', () => {
   });
 
   it('已收敛但含 blocked 的工作区重跑：no-op 快路径同样 exit 3 并列出 blocked story', async () => {
-    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
+    const passed = story();
+    const { workspace, instructionsDir, head } = setup([
+      passed,
+      story({ id: 'US-002', priority: 2 }),
+    ]);
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: validationReceiptFor(passed, head()),
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+        },
         'US-002': { passes: false, notes: '[需要人工核实] 待裁决', retryCount: 0, blocked: true },
       }),
     );

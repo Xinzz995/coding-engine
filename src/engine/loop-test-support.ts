@@ -1,13 +1,15 @@
 import { afterEach } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runLoop as runProductionLoop, type LoopConfig } from './loop.js';
 import type { QualityContract, QualityContractReadResult } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
 import { digest } from '../review/common.js';
 import type { FinalReviewState } from '../review/types.js';
+import { acceptanceHash } from './validation-protocol.js';
+import type { ValidationReceipt } from './state.js';
 
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 
@@ -42,11 +44,38 @@ afterEach(() => {
 export function setup(
   prdStories: unknown[],
   prdExtra: Record<string, unknown> = {},
-): { workspace: string; instructionsDir: string } {
-  const workspace = mkdtempSync(join(tmpdir(), 'loop-ws-'));
+): ReturnType<typeof setupGitProject> {
+  return setupGitProject(prdStories, prdExtra);
+}
+
+/**
+ * 需要验证提交身份的集成测试必须拥有自己的仓库，不能借用测试进程所在仓库的 HEAD。
+ * workspace 被首个提交忽略，后续 H1→H2 只由测试显式提交的文件推进。
+ */
+export function setupGitProject(
+  prdStories: unknown[],
+  prdExtra: Record<string, unknown> = {},
+): {
+  projectRoot: string;
+  workspace: string;
+  instructionsDir: string;
+  head: () => string;
+  commitFile: (contents: string, message?: string) => string;
+} {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'loop-project-'));
+  const workspace = join(projectRoot, '.workspace');
   const instructionsDir = mkdtempSync(join(tmpdir(), 'loop-ins-'));
-  cleanup.push(() => rmSync(workspace, { recursive: true, force: true }));
+  mkdirSync(workspace, { recursive: true });
+  cleanup.push(() => rmSync(projectRoot, { recursive: true, force: true }));
   cleanup.push(() => rmSync(instructionsDir, { recursive: true, force: true }));
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: projectRoot });
+  execFileSync('git', ['config', 'user.name', 'coding-x test'], { cwd: projectRoot });
+  execFileSync('git', ['config', 'user.email', 'coding-x-test@example.invalid'], { cwd: projectRoot });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: projectRoot });
+  writeFileSync(join(projectRoot, '.gitignore'), '.workspace/\n');
+  writeFileSync(join(projectRoot, 'source.txt'), 'H1\n');
+  execFileSync('git', ['add', '.gitignore', 'source.txt'], { cwd: projectRoot });
+  execFileSync('git', ['commit', '-q', '-m', 'test: H1'], { cwd: projectRoot });
   writeFileSync(
     join(workspace, 'prd.json'),
     JSON.stringify({
@@ -61,7 +90,17 @@ export function setup(
   );
   writeFileSync(join(instructionsDir, 'builder.md'), 'build it');
   writeFileSync(join(instructionsDir, 'validator.md'), 'validate it');
-  return { workspace, instructionsDir };
+  const head = () => execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+  }).trim().toLowerCase();
+  const commitFile = (contents: string, message = 'test: H2') => {
+    writeFileSync(join(projectRoot, 'source.txt'), contents);
+    execFileSync('git', ['add', 'source.txt'], { cwd: projectRoot });
+    execFileSync('git', ['commit', '-q', '-m', message], { cwd: projectRoot });
+    return head();
+  };
+  return { projectRoot, workspace, instructionsDir, head, commitFile };
 }
 
 export const story = (over: Record<string, unknown> = {}) => ({
@@ -72,6 +111,19 @@ export const story = (over: Record<string, unknown> = {}) => ({
   priority: 1,
   ...over,
 });
+
+export function validationReceiptFor(
+  target: { id: string; acceptanceCriteria: string[] },
+  gitHead: string,
+  requestId = 'fixture-validator-request',
+): ValidationReceipt {
+  return {
+    schemaVersion: 1,
+    requestId,
+    gitHead,
+    acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+  };
+}
 
 export const routedStory = (over: Record<string, unknown> = {}) =>
   story({
@@ -174,6 +226,7 @@ export const read = (f: string) =>
 export const runLoop = (cfg: LoopConfig): Promise<number> =>
   runProductionLoop({
     ...cfg,
+    projectRoot: cfg.projectRoot ?? resolve(cfg.workspace, '..'),
     qualityContractReader: () => readyQualityContract(),
     legacyValidatorProtocolForTests: true,
     finalReviewRunner: cfg.finalReviewRunner ?? finalReviewPass,
@@ -263,6 +316,7 @@ export function strictConfig(workspace: string, instructionsDir: string): LoopCo
     devTimeoutMs: 5000,
     valTimeoutMs: 5000,
     workspace,
+    projectRoot: resolve(workspace, '..'),
     instructionsDir,
     port: 0,
     openBrowser: false,
@@ -272,15 +326,15 @@ export function strictConfig(workspace: string, instructionsDir: string): LoopCo
   };
 }
 
-export function currentRepoTdd(coverageCheck: string): Record<string, unknown> {
+export function currentRepoTdd(
+  coverageCheck: string,
+  baselineRef: string,
+): Record<string, unknown> {
   return {
     coverageCheck,
     sourcePathspecs: [':(glob)src/__coding_x_tdd_fixture_only__/**'],
     policyFiles: [],
-    baselineRef: execFileSync('git', ['rev-parse', 'HEAD'], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-    }).trim(),
+    baselineRef,
     forbiddenAddedPatterns: ['istanbul ignore', 'c8 ignore'],
   };
 }

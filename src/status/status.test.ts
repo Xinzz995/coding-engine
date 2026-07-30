@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status.js';
 import { digest } from '../review/common.js';
+import { acceptanceHash } from '../engine/validation-protocol.js';
 
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), 'status-ws-'));
@@ -58,6 +59,21 @@ function writeReadyFinalReview(workspace: string, shadow = false): void {
 
 const story = (id: string, title: string, priority: number) => ({
   id, title, description: 'd', acceptanceCriteria: ['ac'], priority,
+});
+
+const passedState = (target: ReturnType<typeof story>) => ({
+  passes: true,
+  validated: true,
+  validationReceipt: {
+    schemaVersion: 1,
+    requestId: `request-${target.id}`,
+    gitHead: 'a'.repeat(40),
+    acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+  },
+  notes: '',
+  retryCount: 0,
+  blocked: false,
+  escalated: false,
 });
 
 const PRD = {
@@ -204,7 +220,7 @@ describe('renderStatusReport', () => {
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
       writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
-        PRD.userStories.map((s) => [s.id, { passes: true, notes: '', retryCount: 0, blocked: false }]),
+        PRD.userStories.map((s) => [s.id, passedState(s)]),
       )));
       const { text, exitCode } = renderStatusReport(collectStatus(ws));
       expect(text).toContain('demo-proj');
@@ -354,7 +370,7 @@ describe('renderStatusReport', () => {
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
       writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': passedState(PRD.userStories[0]),
         'US-002': { passes: false, notes: '', retryCount: 0, blocked: false },
         'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
       }));
@@ -373,7 +389,7 @@ describe('renderStatusReport', () => {
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
       writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': passedState(PRD.userStories[0]),
         'US-002': { passes: false, notes: '', retryCount: 0, blocked: true },
         'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
       }));
@@ -390,8 +406,8 @@ describe('renderStatusReport', () => {
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
       writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': passedState(PRD.userStories[0]),
+        'US-002': passedState(PRD.userStories[1]),
         'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
       }));
       const { text } = renderStatusReport(collectStatus(ws));
@@ -610,7 +626,7 @@ describe('renderStatusJson', () => {
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, sourcePrd: 'docs/prds/demo.md' }));
       writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': passedState(PRD.userStories[0]),
         'US-002': { passes: false, notes: '一条失败记录', retryCount: 2, blocked: false },
         'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
       }));
@@ -647,7 +663,7 @@ describe('renderStatusJson', () => {
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
       writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
-        PRD.userStories.map((s) => [s.id, { passes: true, notes: '', retryCount: 0, blocked: false }]),
+        PRD.userStories.map((s) => [s.id, passedState(s)]),
       )));
       const { text, exitCode } = renderStatusJson(collectStatus(ws));
       expect(JSON.parse(text).summary).toEqual({ total: 3, passed: 3, blocked: 0 });
@@ -674,10 +690,10 @@ describe('renderStatusJson', () => {
       const obj = JSON.parse(text);
       expect(obj.stories[0]).toEqual({
         id: 'US-001', title: '旧一', priority: 1,
-        passes: true, validated: true, notes: '旧备注', retryCount: 2, blocked: false, escalated: false,
+        passes: true, validated: false, notes: '旧备注', retryCount: 2, blocked: false, escalated: false,
       });
       expect(obj.stories[1].blocked).toBe(true);
-      expect(obj.summary).toEqual({ total: 2, passed: 1, blocked: 1 });
+      expect(obj.summary).toEqual({ total: 2, passed: 0, blocked: 1 });
       expect(exitCode).toBe(3);
     } finally {
       rmSync(ws, { recursive: true, force: true });
@@ -742,9 +758,7 @@ describe('renderStatusJson', () => {
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
       writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
-        PRD.userStories.map((s) => [s.id, {
-          passes: true, validated: true, notes: '', retryCount: 0, blocked: false,
-        }]),
+        PRD.userStories.map((s) => [s.id, passedState(s)]),
       )));
       writeReadyFinalReview(ws);
       const report = collectStatus(ws);

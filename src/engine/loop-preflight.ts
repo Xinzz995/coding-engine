@@ -1,4 +1,5 @@
 import { join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { permissionWarning, type AgentKind } from './agent.js';
 import { appendEvidence, clipEvidenceDiagnostic } from './evidence.js';
 import { writeFileAtomicSync } from './fs-atomic.js';
@@ -13,10 +14,10 @@ import {
 import { createPrdGuard } from './prd-guard.js';
 import type { Prd } from './prd.js';
 import {
-  allStoriesResolved,
+  allStoriesResolvedAt,
   blankStateFor,
-  ensureStateFile,
-  rollbackUnvalidatedPasses,
+  initialStateFor,
+  reconcileValidationReceipts,
   tryReadState,
   type RunState,
 } from './state.js';
@@ -53,6 +54,7 @@ export type LoopPreflightResult =
       modelPreflight: ModelPreflightResult;
       frozenQualityChecks: FrozenQualityChecks;
       runKind: AgentKind;
+      gitHead: string;
       bootResolved: boolean;
     };
 
@@ -93,58 +95,37 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
     );
   }
 
-  // 启动时保证 state.json 存在：v0.4 及更早的 prd.json 把状态写在 story 上，
-  // ensureStateFile 会把它们抽取成 state.json（一次性迁移）。
   const bootPrd = guard.read().prd;
-  if (bootPrd) ensureStateFile(cfg.workspace, bootPrd);
-  // ensureStateFile 为了 legacy 迁移会在损坏 state 时返回内嵌旧状态，但运行期
-  // 绝不能因此“复活”旧 passes。重读磁盘：新迁移文件可读则正常使用，
-  // 仍损坏则与轮内 readRunState 一样按全未开始处理，且不覆盖原文件。
-  let bootState = bootPrd ? (tryReadState(statePath) ?? blankStateFor(bootPrd)) : null;
-  // 最终 Review 后的任何新提交都会使旧 Review 失效。Story 与变更文件没有可靠的
-  // 多对多映射，因此首版保守重验全部已通过 Story，绝不猜测“只影响哪几个”。
-  // 这里同时撤销候选通过与引擎凭证，让既有 Developer → 门禁 → Validator 顺序完整重跑。
+  // 正式运行必须先绑定一个非空提交身份。这个检查发生在 state 创建/迁移、模型目录读取
+  // 和任何 Agent 启动之前；失败时不得改变既有 Story 状态。
+  const bootGitHead = readGitHead(projectRoot);
+  if (!bootGitHead) {
+    console.error('❌ 无法读取当前 Git HEAD；正式运行必须在至少有一个提交的 Git 仓库中执行');
+    return { status: 'failed', exitCode: 2 };
+  }
+
+  // 先只在内存准备状态。文件缺失时从 legacy PRD 抽取候选；文件存在但损坏时按
+  // 全未开始失败关闭。只有全部启动预检通过后才创建或迁移 state.json。
+  const stateExisted = existsSync(statePath);
+  const parsedBootState = bootPrd && stateExisted ? tryReadState(statePath) : null;
+  let bootState = bootPrd
+    ? parsedBootState ?? (stateExisted ? blankStateFor(bootPrd) : initialStateFor(bootPrd))
+    : null;
+  let bootInvalidatedStoryIds: string[] = [];
+  let bootFinalReviewNeedsInvalidation = false;
+  // 旧 Final Review 自身仍按提交失效，但它不再决定 Story 是否过期；Story 当前性只由
+  // 自己的结构化凭证、当前 PRD 与当前 HEAD 裁决。
   if (bootState && bootPrd) {
     const previousReview = readFinalReviewState(cfg.workspace);
-    const currentHead = readGitHead(projectRoot);
     if (
       previousReview.status === 'ready' &&
-      currentHead &&
-      previousReview.state.binding.headSha !== currentHead
+      previousReview.state.binding.headSha !== bootGitHead
     ) {
-      // 失效必须同时落到 Story 凭证与 Review 文件。否则本轮重验 Story 后若只因
-      // PR 尚未同步而退出，下一次启动仍会读到旧 head 的 Review，并重复重验同一提交。
-      invalidateFinalReviewState(cfg.workspace);
-      const invalidated: string[] = [];
-      const next = structuredClone(bootState);
-      for (const story of bootPrd.userStories) {
-        const current = next[story.id];
-        if (!current || current.blocked || !current.passes || !current.validated) continue;
-        next[story.id] = { ...current, passes: false, validated: false };
-        invalidated.push(story.id);
-      }
-      if (invalidated.length > 0) {
-        bootState = next;
-        writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
-        console.warn(
-          `⚠️  最终 Review 后提交已变化，旧 Validator 凭证失效；` +
-            `将保守重验：${invalidated.join(', ')}`,
-        );
-      }
+      bootFinalReviewNeedsInvalidation = true;
     }
-  }
-  // 进程可能在 builder 写 passes=true 后、validator 签发凭证前被杀。显式
-  // validated=false 是 v0.25 的待验收残态；启动时回写成可被 builder 重新选中的状态。
-  // 旧 state 缺字段时 tryReadState 已按历史 passes 兼容，不会在这里被误重验。
-  if (bootState) {
-    const recovered = rollbackUnvalidatedPasses(bootState);
-    if (recovered.storyIds.length > 0) {
-      bootState = recovered.state;
-      writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
-      console.warn(
-        `⚠️  检测到未完成 validator 的待验收状态，已回写待复核：${recovered.storyIds.join(', ')}`,
-      );
-    }
+    const reconciled = reconcileValidationReceipts(bootPrd, bootState, bootGitHead);
+    bootState = reconciled.state;
+    bootInvalidatedStoryIds = reconciled.invalidatedStoryIds;
   }
 
   const agentEnv: NodeJS.ProcessEnv = {
@@ -285,9 +266,23 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   )
     ? structuredClone(bootPrd.qualityChecks)
     : structuredClone(qualityRead.contract.checks);
+  // 所有启动预检均成功后才落盘对账结果。预检失败时 Story 候选、凭证与 retry
+  // 必须保持原样；parsedBootState=null 代表既有文件损坏，也不覆盖诊断现场。
+  if (bootState && (!stateExisted || parsedBootState)) {
+    writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
+  }
+  if (bootFinalReviewNeedsInvalidation) {
+    invalidateFinalReviewState(cfg.workspace);
+  }
+  if (bootInvalidatedStoryIds.length > 0) {
+    console.warn(
+      `⚠️  旧 Validator 凭证不再对应当前提交或验收目标，已保留实现候选并等待重验：` +
+        bootInvalidatedStoryIds.join(', '),
+    );
+  }
   const runKind = modelPreflight.runner;
   const readyState = bootState ?? blankStateFor(bootPrd);
-  const bootResolved = allStoriesResolved(bootPrd, readyState);
+  const bootResolved = allStoriesResolvedAt(bootPrd, readyState, bootGitHead);
   for (const warning of modelPreflight.warnings) console.warn(`⚠️  ${warning}`);
   console.log(renderPreflightSummary(modelPreflight));
   if (!bootResolved) console.warn(permissionWarning(runKind));
@@ -308,6 +303,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
     modelPreflight,
     frozenQualityChecks,
     runKind,
+    gitHead: bootGitHead,
     bootResolved,
   };
 }
