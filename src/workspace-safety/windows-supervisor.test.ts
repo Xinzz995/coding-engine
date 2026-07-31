@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parseDelegatedBaselineBytes } from './baseline.js';
 import { createWindowsSupervisorLaunch, spawnWindowsJobSupervisor } from './windows-supervisor.js';
 import { windowsTestTargetEnvironment } from './windows-test-environment.js';
 import {
@@ -335,6 +336,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       entries,
     );
     expect(authority.baselineBytes.byteLength).toBeGreaterThan(128 * 1024);
+    expect(() => parseDelegatedBaselineBytes(authority.baselineBytes)).not.toThrow();
     sendData(
       child,
       workspace,

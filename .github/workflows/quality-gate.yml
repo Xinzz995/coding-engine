@@ -249,18 +249,6 @@ jobs:
         timeout-minutes: 10
         shell: pwsh
         run: '& ''npm'' ''ci'''
-      - name: 'TEMP / generate Windows supervisor artifact'
-        working-directory: '.'
-        timeout-minutes: 10
-        shell: pwsh
-        run: '& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Generate'' ''-Target'' ''Supervisor'' ''-OutputDirectory'' "$env:RUNNER_TEMP\coding-x-windows-supervisor"'
-      - name: 'TEMP / upload Windows supervisor artifact'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: windows-supervisor-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/coding-x-windows-supervisor/*
-          if-no-files-found: error
-          retention-days: 1
       - name: 'build / windows-supervisor-reproducibility'
         working-directory: '.'
         timeout-minutes: 10

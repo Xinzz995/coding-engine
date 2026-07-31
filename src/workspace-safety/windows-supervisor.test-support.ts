@@ -275,7 +275,7 @@ export function installPreparedAuthority(
     semantic: fixture.semantic,
     rules: [],
   };
-  const baseline = {
+  const baselineWithoutDigest = {
     schemaVersion: 1,
     ownerId: OWNER_ID,
     operationId: OPERATION_ID,
@@ -284,7 +284,10 @@ export function installPreparedAuthority(
     contractDigest: DIGEST(canonicalJson(contract)),
     entries: baselineEntries,
     capturedAt: timestamp,
-    manifestDigest: DIGEST('manifest'),
+  };
+  const baseline = {
+    ...baselineWithoutDigest,
+    manifestDigest: DIGEST(canonicalJson(baselineWithoutDigest)),
   };
   const baselineBytes = Buffer.from(JSON.stringify(baseline), 'utf8');
   const prepared = {
