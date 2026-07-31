@@ -1,8 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -82,4 +82,20 @@ describe('fixed Review Runner proxy', () => {
       expect(result.stderr).toContain('exceeds the fixed');
     });
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'refuses a config path that resolves through a symbolic link',
+    () => {
+      withInvocation('codex', 'prompt', (configPath) => {
+        const linkedConfigPath = join(dirname(configPath), 'linked-config.json');
+        symlinkSync(configPath, linkedConfigPath);
+        const result = spawnSync(process.execPath, [proxyPath, linkedConfigPath], {
+          encoding: 'utf8',
+          timeout: 5000,
+        });
+        expect(result.status).toBe(126);
+        expect(result.stderr).toContain('coding-x review runner proxy');
+      });
+    },
+  );
 });

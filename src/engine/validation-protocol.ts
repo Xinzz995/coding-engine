@@ -3,8 +3,10 @@ import {
   closeSync,
   constants,
   fstatSync,
+  lstatSync,
   openSync,
   readFileSync,
+  readSync,
   statSync,
   unlinkSync,
 } from 'node:fs';
@@ -45,27 +47,62 @@ export function readGitHead(cwd: string): string | null {
     return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(normalized) ? normalized : null;
   };
   const readBounded = (path: string, maximumBytes: number): string | null => {
+    let descriptor: number | null = null;
     try {
-      const info = statSync(path);
-      if (!info.isFile() || info.size > maximumBytes) return null;
-      return readFileSync(path, 'utf8');
+      const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
+      descriptor = openSync(path, constants.O_RDONLY | noFollow);
+      const opened = fstatSync(descriptor);
+      const linkedPath = lstatSync(path);
+      if (
+        !opened.isFile() ||
+        !linkedPath.isFile() ||
+        linkedPath.isSymbolicLink() ||
+        linkedPath.dev !== opened.dev ||
+        linkedPath.ino !== opened.ino ||
+        opened.size > maximumBytes
+      ) {
+        return null;
+      }
+      const bytes = Buffer.allocUnsafe(opened.size);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const count = readSync(descriptor, bytes, offset, bytes.length - offset, null);
+        if (count === 0) break;
+        offset += count;
+      }
+      const hasTrailingByte = readSync(descriptor, Buffer.allocUnsafe(1), 0, 1, null) !== 0;
+      const after = fstatSync(descriptor);
+      if (
+        offset !== opened.size ||
+        hasTrailingByte ||
+        after.dev !== opened.dev ||
+        after.ino !== opened.ino ||
+        after.size !== opened.size ||
+        after.mtimeMs !== opened.mtimeMs ||
+        after.ctimeMs !== opened.ctimeMs
+      ) {
+        return null;
+      }
+      return bytes.toString('utf8');
     } catch {
       return null;
+    } finally {
+      if (descriptor !== null) closeSync(descriptor);
     }
   };
   const locateGitDirectory = (): string | null => {
     let current = resolve(cwd);
     for (;;) {
       const marker = join(current, '.git');
+      const text = readBounded(marker, 4096);
+      if (text !== null) {
+        const match = text.match(/^gitdir:\s*(.+?)\s*$/u);
+        if (!match) return null;
+        return isAbsolute(match[1]) ? resolve(match[1]) : resolve(current, match[1]);
+      }
       try {
         const info = statSync(marker);
         if (info.isDirectory()) return marker;
-        if (info.isFile()) {
-          const text = readBounded(marker, 4096);
-          const match = text?.match(/^gitdir:\s*(.+?)\s*$/u);
-          if (!match) return null;
-          return isAbsolute(match[1]) ? resolve(match[1]) : resolve(current, match[1]);
-        }
       } catch {
         // Continue towards the filesystem root.
       }

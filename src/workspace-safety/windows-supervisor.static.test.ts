@@ -3,11 +3,14 @@ import { linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createSystemIdentityAdapter } from './identity.js';
 import {
   createWindowsSupervisorLaunch,
   readWindowsSupervisorAssets,
+  spawnWindowsJobSupervisor,
   WINDOWS_SUPERVISOR_EXECUTABLE,
 } from './windows-supervisor.js';
+import { WindowsSupervisorProcess } from './windows-supervisor-protocol.js';
 import {
   ASSET_ROOT,
   BREAKAWAY_SOURCE,
@@ -115,6 +118,24 @@ describe('fixed Windows Job supervisor assets', () => {
       }),
     ).toThrow(/ambiguous/u);
   });
+
+  it.runIf(process.platform === 'win32')(
+    'observes the same native creation identity emitted by the fixed supervisor',
+    async () => {
+      const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+      const supervisor = new WindowsSupervisorProcess(spawnWindowsJobSupervisor(launch), 5000);
+      try {
+        const bound = await supervisor.next('BOUND');
+        expect(bound.supervisorPid).toBe(supervisor.pid);
+        expect(createSystemIdentityAdapter().readProcessIdentity(supervisor.pid)).toEqual({
+          status: 'found',
+          value: bound.supervisorIdentity,
+        });
+      } finally {
+        await supervisor.abort();
+      }
+    },
+  );
 
   it('keeps each native source reviewable and preserves the fail-closed Windows sequence', () => {
     const sources = REVIEWED_WINDOWS_SOURCES.map((name) =>

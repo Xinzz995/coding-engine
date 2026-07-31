@@ -1,4 +1,4 @@
-import { constants, fstatSync, lstatSync, openSync, readFileSync, closeSync } from 'node:fs';
+import { constants, closeSync, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 import { dirname, isAbsolute, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 
@@ -14,10 +14,6 @@ function fail(message) {
 }
 
 function readStableOrdinaryFile(path, maximumBytes) {
-  const before = lstatSync(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) {
-    throw new Error(`refusing non-ordinary single-link file: ${path}`);
-  }
   let descriptor;
   try {
     descriptor = openSync(
@@ -25,17 +21,36 @@ function readStableOrdinaryFile(path, maximumBytes) {
       constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
     );
     const opened = fstatSync(descriptor);
-    if (!opened.isFile() || opened.nlink !== 1 || opened.size > maximumBytes) {
+    const linkedPath = lstatSync(path);
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      !linkedPath.isFile() ||
+      linkedPath.isSymbolicLink() ||
+      linkedPath.nlink !== 1 ||
+      linkedPath.dev !== opened.dev ||
+      linkedPath.ino !== opened.ino ||
+      opened.size > maximumBytes
+    ) {
       throw new Error(`refusing invalid or oversized file: ${path}`);
     }
-    const bytes = readFileSync(descriptor);
-    const after = lstatSync(path);
+    const bytes = Buffer.allocUnsafe(opened.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    const hasTrailingByte = readSync(descriptor, Buffer.allocUnsafe(1), 0, 1, null) !== 0;
+    const after = fstatSync(descriptor);
     if (
-      bytes.length !== opened.size ||
+      offset !== opened.size ||
+      hasTrailingByte ||
       after.dev !== opened.dev ||
       after.ino !== opened.ino ||
       after.size !== opened.size ||
-      after.mtimeMs !== opened.mtimeMs
+      after.mtimeMs !== opened.mtimeMs ||
+      after.ctimeMs !== opened.ctimeMs
     ) {
       throw new Error(`file identity changed while reading: ${path}`);
     }

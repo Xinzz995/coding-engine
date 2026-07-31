@@ -252,6 +252,52 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 20_000);
 
+  it('accepts a bounded DATA contract whose canonical base64 exceeds the generic event limit', async () => {
+    const setupState = await setup();
+    const environment = Array.from({ length: 48 }, (_, index) => ({
+      name: `CODING_X_LARGE_ENV_${String(index).padStart(2, '0')}`,
+      value: `${index}:`.padEnd(320, 'x'),
+    }));
+    const controlBytes = Buffer.from(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        type: 'DATA',
+        operationId: OPERATION_ID,
+        target: { ...target('', setupState.workspace), environment },
+      }, null, 2)}\n`,
+      'utf8',
+    );
+    expect(controlBytes.length).toBeLessThanOrEqual(64 * 1024);
+    expect(controlBytes.toString('base64').length).toBeGreaterThan(16_384);
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: {
+            ...target(
+              "process.stdout.write(process.env.CODING_X_LARGE_ENV_47 ?? 'missing')",
+              setupState.workspace,
+            ),
+            environment,
+          },
+          timeouts: { naturalDrainMs: 500, termMs: 100, killMs: 3000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome.verdict).toBe('completed');
+    expect(outcome.stdout.toString('utf8')).toBe(environment[47].value);
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 15_000);
+
   it('fails closed and drains containment when aggregate output exceeds 16 MiB', async () => {
     const setupState = await setup();
     let containment: ContainmentDescriptor | undefined;

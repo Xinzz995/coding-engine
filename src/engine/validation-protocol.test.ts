@@ -96,6 +96,28 @@ describe('validation request', () => {
     expect(readGitHead(checkout)).toBe('b'.repeat(64));
   });
 
+  it.runIf(process.platform !== 'win32')(
+    'refuses Git identity files reached through symbolic links',
+    () => {
+      const root = tempDir();
+      const checkout = join(root, 'checkout');
+      const outsideHead = join(root, 'outside-head');
+      mkdirSync(join(checkout, '.git'), { recursive: true });
+      writeFileSync(outsideHead, `${'a'.repeat(40)}\n`);
+      symlinkSync(outsideHead, join(checkout, '.git', 'HEAD'));
+
+      expect(readGitHead(checkout)).toBeNull();
+    },
+  );
+
+  it('refuses a Git identity file larger than the fixed read bound', () => {
+    const checkout = join(tempDir(), 'checkout');
+    mkdirSync(join(checkout, '.git'), { recursive: true });
+    writeFileSync(join(checkout, '.git', 'HEAD'), 'a'.repeat(4097));
+
+    expect(readGitHead(checkout)).toBeNull();
+  });
+
   it('binds one request to the exact story, AC snapshot, artifact and workspace path', () => {
     const dir = tempDir();
     const req = request(dir);

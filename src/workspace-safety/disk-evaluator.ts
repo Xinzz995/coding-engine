@@ -69,6 +69,7 @@ import {
   WorkspaceSafetyError,
 } from './types.js';
 import {
+  assertNoWindowsReparsePoints,
   assertWindowsSafetyTreeHasNoReparsePoints,
   assertWindowsWorkspaceTreeHasNoReparsePoints,
 } from './windows-path-attributes.js';
@@ -729,10 +730,20 @@ async function evaluateOnce(
   now: Date,
 ): Promise<LogicalEvaluation> {
   const workspace = await canonicalizeWorkspaceDirectory(workspacePath);
-  assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
+  assertNoWindowsReparsePoints(
+    [
+      join(workspace.path, WORKSPACE_MARKER_FILE),
+      join(workspace.path, PROTOCOL_ROOT_DIR),
+    ],
+    { allowMissing: true },
+  );
   const before = await safetyFingerprint(workspace);
   const markerExists = await pathExists(join(workspace.path, WORKSPACE_MARKER_FILE));
   const protocolRootExists = await pathExists(join(workspace.path, PROTOCOL_ROOT_DIR));
+
+  if (markerExists && protocolRootExists) {
+    assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
+  }
 
   let logical: Omit<LogicalEvaluation, 'safetyFingerprint'>;
   if (!markerExists && !protocolRootExists) {
@@ -771,6 +782,7 @@ async function evaluateOnce(
         unsupportedCanonical: [],
       };
     } else {
+      assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
       const bootstrapping = await evaluateBootstrapState({ workspace, probe, fingerprint: before });
       logical = bootstrapping;
     }
@@ -872,7 +884,12 @@ async function evaluateOnce(
 
   const after = await safetyFingerprint(workspace);
   if (before !== after) throw invalid('safety records changed during evaluation');
-  assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
+  if (protocolRootExists) {
+    const rootInfo = await lstat(join(workspace.path, PROTOCOL_ROOT_DIR));
+    if (!rootInfo.isSymbolicLink() && rootInfo.isDirectory()) {
+      assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
+    }
+  }
   await assertWorkspaceDirectoryUnchanged(workspace);
   return { ...logical, safetyFingerprint: after };
 }

@@ -5,8 +5,9 @@
  * view of the disposable fixtures. The required native proof uses a separate config and therefore
  * cannot resolve this module; that suite proves the Windows-only gap Node cannot observe.
  */
+import { spawnSync } from 'node:child_process';
 import { lstatSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import { WorkspaceSafetyError } from './types.js';
 import type { WindowsPathAttributeTransportOptions } from './windows-path-attributes-transport.js';
 
@@ -20,6 +21,41 @@ function invalid(message: string): never {
     'invalid',
     `Invalid deterministic Windows path attribute test proof: ${message}`,
   );
+}
+
+function environmentValue(name: string): string {
+  const keys = Object.keys(process.env).filter((key) => key.toLowerCase() === name);
+  if (keys.length !== 1) invalid(`required ${name} environment value is ambiguous`);
+  const value = process.env[keys[0]];
+  if (typeof value !== 'string' || value.length === 0 || !win32.isAbsolute(value)) {
+    invalid(`required ${name} environment value is unavailable`);
+  }
+  return value;
+}
+
+function invokeNativeProcessIdentity(options: WindowsPathAttributeTransportOptions): Buffer {
+  const result = spawnSync(
+    options.executablePath,
+    ['--expected-helper-digest', options.helperDigest],
+    {
+      cwd: win32.dirname(options.executablePath),
+      env: {
+        SystemRoot: environmentValue('systemroot'),
+        TEMP: environmentValue('temp'),
+        TMP: environmentValue('tmp'),
+      },
+      input: options.requestBytes,
+      encoding: 'buffer',
+      maxBuffer: options.maxResponseBytes,
+      timeout: options.timeoutMs,
+      windowsHide: true,
+      shell: false,
+    },
+  );
+  if (result.error || result.status !== 0 || result.signal !== null) {
+    invalid('native process identity proof is unavailable');
+  }
+  return Buffer.from(result.stdout);
 }
 
 function attributes(path: string): number | undefined {
@@ -132,6 +168,9 @@ export function invokeWindowsPathAttributeHelper(
     readonly payload: Record<string, unknown>;
   };
   if (request.schemaVersion !== 1) invalid('unsupported schema');
+  if (request.mode === 'process-identity-v1') {
+    return invokeNativeProcessIdentity(options);
+  }
   if (request.mode === 'paths-v1') {
     const paths = request.payload.paths;
     if (!Array.isArray(paths)) invalid('paths payload is invalid');
