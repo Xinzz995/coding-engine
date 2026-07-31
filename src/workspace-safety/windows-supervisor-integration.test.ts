@@ -226,12 +226,24 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
 
   it('classifies a live descendant after root exit as leftover, then proves the Job empty', async () => {
     const state = await setup();
-    const descendant = "process.stdout.write('descendant-alive\\n');setInterval(() => {},1000);";
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-windows-descendant-'));
+    roots.push(controlRoot);
+    const descendantReady = join(controlRoot, 'descendant-ready');
+    const descendant = [
+      "const fs=require('node:fs');",
+      `fs.writeFileSync(${JSON.stringify(descendantReady)},'ready');`,
+      "process.stdout.write('descendant-alive\\n');",
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20000);',
+    ].join('');
     const source = [
       "const {spawn}=require('node:child_process');",
+      "const fs=require('node:fs');",
       `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});`,
+      'const wait=new Int32Array(new SharedArrayBuffer(4));',
+      'const deadline=Date.now()+10000;',
+      `while(!fs.existsSync(${JSON.stringify(descendantReady)})){if(Date.now()>deadline)process.exit(88);Atomics.wait(wait,0,0,10);}`,
       "process.stdout.write('root-exiting\\n');",
-      'setTimeout(() => process.exit(0),50);',
+      'process.exit(0);',
     ].join('');
 
     const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
@@ -244,6 +256,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     expect(outcome.verdict).toBe('process-tree-not-empty');
     expect(outcome.leftover).toBe(true);
     expect(outcome.receipt.drainReason).toBe('process-tree-not-empty');
+    expect(readFileSync(descendantReady, 'utf8')).toBe('ready');
     expect(outcome.stdout.toString('utf8')).toContain('root-exiting');
     expect(outcome.stdout.toString('utf8')).toContain('descendant-alive');
     await state.session.close();
