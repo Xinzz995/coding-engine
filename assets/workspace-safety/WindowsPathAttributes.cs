@@ -12,6 +12,12 @@ namespace CodingX.WorkspaceSafety
         internal const uint FileAttributeDirectory = 0x10;
         internal const uint FileAttributeReparsePoint = 0x400;
 
+        private const uint WofProviderWim = 1;
+        private const uint WofProviderFile = 2;
+        private const uint FileProviderCompressionXpress4k = 0;
+        private const uint FileProviderCompressionLzx = 1;
+        private const uint FileProviderCompressionXpress8k = 2;
+        private const uint FileProviderCompressionXpress16k = 3;
         private const int ErrorFileNotFound = 2;
         private const int ErrorInvalidParameter = 87;
         private const int ErrorNoMoreFiles = 18;
@@ -42,6 +48,30 @@ namespace CodingX.WorkspaceSafety
                 Status = status;
                 Value = value;
             }
+        }
+
+        internal sealed class ExternalBackingRecord
+        {
+            internal readonly string Status;
+            internal readonly string Provider;
+            internal readonly string Algorithm;
+
+            internal ExternalBackingRecord(
+                string status,
+                string provider,
+                string algorithm)
+            {
+                Status = status;
+                Provider = provider;
+                Algorithm = algorithm;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WofFileCompressionInfo
+        {
+            internal uint Algorithm;
+            internal uint Flags;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -116,6 +146,21 @@ namespace CodingX.WorkspaceSafety
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr handle);
 
+        [DllImport(
+            "Wofutil.dll",
+            EntryPoint = "WofIsExternalFile",
+            ExactSpelling = true,
+            CharSet = CharSet.Unicode,
+            CallingConvention = CallingConvention.Winapi,
+            SetLastError = false)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+        private static extern int WofIsExternalFile(
+            string path,
+            out int isExternal,
+            out uint provider,
+            IntPtr externalFileInfo,
+            IntPtr bufferLength);
+
         internal static string ExtendedPath(string path)
         {
             string normalized = ValidateAndNormalizeAbsolutePath(path);
@@ -136,6 +181,93 @@ namespace CodingX.WorkspaceSafety
             uint attributes = GetFileAttributesW(ExtendedPath(path));
             error = attributes == InvalidFileAttributes ? Marshal.GetLastWin32Error() : 0;
             return attributes;
+        }
+
+        internal static ExternalBackingRecord ReadExternalBacking(
+            string path,
+            uint attributes)
+        {
+            if ((attributes & FileAttributeDirectory) != 0)
+                return new ExternalBackingRecord(
+                    "not-applicable",
+                    null,
+                    null);
+
+            string extendedPath = ExtendedPath(path);
+            int isExternal;
+            uint provider;
+            int result = WofIsExternalFile(
+                extendedPath,
+                out isExternal,
+                out provider,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            if (result != 0)
+                throw new InvalidOperationException(
+                    "native external backing query failed");
+            if (isExternal == 0)
+                return new ExternalBackingRecord("physical", null, null);
+            if (provider == WofProviderWim)
+                return new ExternalBackingRecord("external", "wim", null);
+            if (provider != WofProviderFile)
+                throw new InvalidOperationException(
+                    "native external backing provider is unsupported");
+
+            int expectedLength = Marshal.SizeOf(typeof(WofFileCompressionInfo));
+            if (expectedLength != 8)
+                throw new InvalidOperationException(
+                    "native compression information layout is invalid");
+            IntPtr information = Marshal.AllocHGlobal(expectedLength);
+            IntPtr length = Marshal.AllocHGlobal(sizeof(int));
+            try
+            {
+                Marshal.WriteInt32(length, expectedLength);
+                int confirmedExternal;
+                uint confirmedProvider;
+                result = WofIsExternalFile(
+                    extendedPath,
+                    out confirmedExternal,
+                    out confirmedProvider,
+                    information,
+                    length);
+                if (result != 0 ||
+                    confirmedExternal == 0 ||
+                    confirmedProvider != provider ||
+                    Marshal.ReadInt32(length) != expectedLength)
+                    throw new InvalidOperationException(
+                        "native external backing confirmation failed");
+
+                WofFileCompressionInfo compression =
+                    (WofFileCompressionInfo)Marshal.PtrToStructure(
+                        information,
+                        typeof(WofFileCompressionInfo));
+                if (compression.Flags != 0)
+                    throw new InvalidOperationException(
+                        "native compression flags are unsupported");
+                return new ExternalBackingRecord(
+                    "external",
+                    "file",
+                    CompressionAlgorithmName(compression.Algorithm));
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(length);
+                Marshal.FreeHGlobal(information);
+            }
+        }
+
+        private static string CompressionAlgorithmName(uint algorithm)
+        {
+            if (algorithm == FileProviderCompressionXpress4k)
+                return "xpress4k";
+            if (algorithm == FileProviderCompressionLzx)
+                return "lzx";
+            if (algorithm == FileProviderCompressionXpress8k)
+                return "xpress8k";
+            if (algorithm == FileProviderCompressionXpress16k)
+                return "xpress16k";
+            throw new InvalidOperationException(
+                "native compression algorithm is unsupported");
         }
 
         internal static ProcessIdentityRecord ReadProcessIdentity(uint pid)

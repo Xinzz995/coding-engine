@@ -41,6 +41,12 @@ describe('fixed Windows path attribute protocol', () => {
     expect(attributesSource).toContain('GetProcessTimes');
     expect(attributesSource).toContain('WaitForSingleObject');
     expect(attributesSource).toContain('CloseHandle');
+    expect(attributesSource).toContain('WofIsExternalFile');
+    expect(attributesSource).toContain('DefaultDllImportSearchPaths');
+    expect(attributesSource).toContain('DllImportSearchPath.System32');
+    expect(attributesSource).not.toContain('WofSetFileDataLocation');
+    expect(attributesSource).not.toContain('DeviceIoControl');
+    expect(attributesSource).not.toContain('FSCTL_SET_EXTERNAL_BACKING');
     expect(attributesSource).toContain('StringComparison.OrdinalIgnoreCase');
     expect(attributesSource).not.toContain('Directory.EnumerateFileSystemEntries');
     expect(programSource).toContain('CXWPI_FAILURE_V1 stage=');
@@ -158,8 +164,22 @@ describe('fixed Windows path attribute protocol', () => {
           schemaVersion: 1,
           mode: 'paths-v1',
           records: [
-            { path: 'C:\\proof one', status: 'found', attributes: 16 },
-            { path: 'C:\\proof two', status: 'missing', attributes: null },
+            {
+              path: 'C:\\proof one',
+              status: 'found',
+              attributes: 16,
+              externalBacking: {
+                status: 'not-applicable',
+                provider: null,
+                algorithm: null,
+              },
+            },
+            {
+              path: 'C:\\proof two',
+              status: 'missing',
+              attributes: null,
+              externalBacking: null,
+            },
           ],
         }),
         request,
@@ -171,13 +191,128 @@ describe('fixed Windows path attribute protocol', () => {
           schemaVersion: 1,
           mode: 'paths-v1',
           records: [
-            { path: 'C:\\proof two', status: 'missing', attributes: null },
-            { path: 'C:\\proof one', status: 'found', attributes: 16 },
+            {
+              path: 'C:\\proof two',
+              status: 'missing',
+              attributes: null,
+              externalBacking: null,
+            },
+            {
+              path: 'C:\\proof one',
+              status: 'found',
+              attributes: 16,
+              externalBacking: {
+                status: 'not-applicable',
+                provider: null,
+                algorithm: null,
+              },
+            },
           ],
         }),
         request,
       ),
     ).toThrow(/order or identity/u);
+  });
+
+  it.each([
+    {
+      name: 'ordinary file',
+      attributes: 0,
+      backing: { status: 'physical', provider: null, algorithm: null },
+    },
+    {
+      name: 'directory',
+      attributes: 16,
+      backing: { status: 'not-applicable', provider: null, algorithm: null },
+    },
+    {
+      name: 'WIM file',
+      attributes: 0,
+      backing: { status: 'external', provider: 'wim', algorithm: null },
+    },
+    {
+      name: 'LZX file',
+      attributes: 0,
+      backing: { status: 'external', provider: 'file', algorithm: 'lzx' },
+    },
+  ])('accepts a strictly typed $name backing proof', ({ attributes, backing }) => {
+    const path = 'C:\\proof.bin';
+    expect(
+      parseWindowsPathAttributeResponse(
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: 'paths-v1',
+          records: [
+            {
+              path,
+              status: 'found',
+              attributes,
+              externalBacking: backing,
+            },
+          ],
+        }),
+        {
+          schemaVersion: 1,
+          mode: 'paths-v1',
+          payload: { paths: [path] },
+        },
+      ),
+    ).toMatchObject({ records: [{ externalBacking: backing }] });
+  });
+
+  it.each([
+    {
+      name: 'missing external proof',
+      attributes: 0,
+      backing: undefined,
+    },
+    {
+      name: 'directory marked physical',
+      attributes: 16,
+      backing: { status: 'physical', provider: null, algorithm: null },
+    },
+    {
+      name: 'file marked not-applicable',
+      attributes: 0,
+      backing: { status: 'not-applicable', provider: null, algorithm: null },
+    },
+    {
+      name: 'unknown provider',
+      attributes: 0,
+      backing: { status: 'external', provider: 'future', algorithm: null },
+    },
+    {
+      name: 'unknown algorithm',
+      attributes: 0,
+      backing: { status: 'external', provider: 'file', algorithm: 'future' },
+    },
+    {
+      name: 'WIM with compression algorithm',
+      attributes: 0,
+      backing: { status: 'external', provider: 'wim', algorithm: 'lzx' },
+    },
+  ])('rejects a $name', ({ attributes, backing }) => {
+    const path = 'C:\\proof.bin';
+    const record: Record<string, unknown> = {
+      path,
+      status: 'found',
+      attributes,
+    };
+    if (backing !== undefined) record.externalBacking = backing;
+    expect(() =>
+      parseWindowsPathAttributeResponse(
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: 'paths-v1',
+          records: [record],
+        }),
+        {
+          schemaVersion: 1,
+          mode: 'paths-v1',
+          payload: { paths: [path] },
+        },
+      ),
+    ).toThrow(/external backing|unknown or missing fields/u);
   });
 
   it('uses bounded summary responses instead of returning workspace paths', () => {

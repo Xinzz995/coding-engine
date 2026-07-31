@@ -143,8 +143,16 @@ export function invokeWindowsPathAttributeHelper(
           if (typeof path !== 'string') return invalid('path is not a string');
           const value = attributes(path);
           return value === undefined
-            ? { path, status: 'missing', attributes: null }
-            : { path, status: 'found', attributes: value };
+            ? { path, status: 'missing', attributes: null, externalBacking: null }
+            : {
+                path,
+                status: 'found',
+                attributes: value,
+                externalBacking:
+                  (value & FILE_ATTRIBUTE_DIRECTORY) !== 0
+                    ? { status: 'not-applicable', provider: null, algorithm: null }
+                    : { status: 'physical', provider: null, algorithm: null },
+              };
         }),
       }),
       'utf8',

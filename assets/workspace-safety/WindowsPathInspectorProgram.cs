@@ -38,12 +38,18 @@ namespace CodingX.WorkspaceSafety
             internal readonly string Path;
             internal readonly bool Found;
             internal readonly uint Attributes;
+            internal readonly WindowsPathAttributes.ExternalBackingRecord ExternalBacking;
 
-            internal AttributeRecord(string path, bool found, uint attributes)
+            internal AttributeRecord(
+                string path,
+                bool found,
+                uint attributes,
+                WindowsPathAttributes.ExternalBackingRecord externalBacking)
             {
                 Path = path;
                 Found = found;
                 Attributes = attributes;
+                ExternalBacking = externalBacking;
             }
         }
 
@@ -139,6 +145,11 @@ namespace CodingX.WorkspaceSafety
                 value.Add(
                     "attributes",
                     record.Found ? (object)record.Attributes : null);
+                value.Add(
+                    "externalBacking",
+                    record.Found
+                        ? (object)ExternalBackingResponse(record.ExternalBacking)
+                        : null);
                 records.Add(value);
             }
 
@@ -417,10 +428,28 @@ namespace CodingX.WorkspaceSafety
             int error;
             uint attributes = WindowsPathAttributes.Read(path, out error);
             if (attributes != WindowsPathAttributes.InvalidFileAttributes)
-                return new AttributeRecord(path, true, attributes);
+                return new AttributeRecord(
+                    path,
+                    true,
+                    attributes,
+                    WindowsPathAttributes.ReadExternalBacking(path, attributes));
             if (error == 2 || error == 3)
-                return new AttributeRecord(path, false, 0);
+                return new AttributeRecord(path, false, 0, null);
             throw new InvalidOperationException("native attribute read failed");
+        }
+
+        private static object ExternalBackingResponse(
+            WindowsPathAttributes.ExternalBackingRecord backing)
+        {
+            if (backing == null)
+                throw new InvalidOperationException(
+                    "external backing proof is missing");
+            Dictionary<string, object> response =
+                new Dictionary<string, object>();
+            response.Add("status", backing.Status);
+            response.Add("provider", backing.Provider);
+            response.Add("algorithm", backing.Algorithm);
+            return response;
         }
 
         private static void RequireOrdinaryFound(AttributeRecord record)
@@ -429,6 +458,13 @@ namespace CodingX.WorkspaceSafety
                 throw new InvalidOperationException("tree path disappeared");
             if ((record.Attributes & WindowsPathAttributes.FileAttributeReparsePoint) != 0)
                 throw new InvalidOperationException("tree contains reparse point");
+            if (record.ExternalBacking == null ||
+                String.Equals(
+                    record.ExternalBacking.Status,
+                    "external",
+                    StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    "tree contains externally backed content");
         }
 
         private static string EntryName(string child)

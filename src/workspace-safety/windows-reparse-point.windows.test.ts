@@ -23,7 +23,7 @@ import { readReadyWorkspaceRecords } from './lease.js';
 import { PROTOCOL_FILE, PROTOCOL_ROOT_DIR, WORKSPACE_MARKER_FILE } from './types.js';
 import { bootstrapWorkspaceWithAuthority } from './workspace-authority-test-seam.js';
 import {
-  WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT,
+  assertNoWindowsReparsePoints,
   assertWindowsSafetyTreeHasNoReparsePoints,
   assertWindowsWorkspaceTreeHasNoReparsePoints,
   inspectWindowsPathAttributes,
@@ -58,11 +58,13 @@ function compactWithWof(path: string): void {
   const [record] = inspectWindowsPathAttributes([path]);
   if (
     record?.status !== 'found' ||
-    (record.attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT) === 0
+    record.externalBacking.status !== 'external' ||
+    record.externalBacking.provider !== 'file' ||
+    record.externalBacking.algorithm !== 'lzx'
   ) {
     const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
     throw new Error(
-      `compact.exe returned success without creating WOF in ${cwd}\\${filename}\n${output.slice(-4000)}`,
+      `compact.exe returned success without creating a verified LZX WOF file in ${cwd}\\${filename}\n${output.slice(-4000)}`,
     );
   }
 }
@@ -71,8 +73,13 @@ function expectNodeBlindWof(path: string): void {
   const [record] = inspectWindowsPathAttributes([path]);
   expect(record).toMatchObject({ status: 'found' });
   if (record.status !== 'found') throw new Error('WOF proof path disappeared');
-  expect(record.attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT).toBe(
-    WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT,
+  expect(record.externalBacking).toEqual({
+    status: 'external',
+    provider: 'file',
+    algorithm: 'lzx',
+  });
+  expect(() => assertNoWindowsReparsePoints([path])).toThrow(
+    /Windows path attribute|external backing/u,
   );
   const node = lstatSync(path);
   expect(node.isSymbolicLink()).toBe(false);

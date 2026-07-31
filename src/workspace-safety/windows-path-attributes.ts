@@ -60,9 +60,29 @@ type WindowsPathRequest =
       };
     };
 
+export type WindowsExternalBacking =
+  | { readonly status: 'not-applicable'; readonly provider: null; readonly algorithm: null }
+  | { readonly status: 'physical'; readonly provider: null; readonly algorithm: null }
+  | {
+      readonly status: 'external';
+      readonly provider: 'file';
+      readonly algorithm: 'xpress4k' | 'lzx' | 'xpress8k' | 'xpress16k';
+    }
+  | { readonly status: 'external'; readonly provider: 'wim'; readonly algorithm: null };
+
 export type WindowsPathAttributeRecord =
-  | { readonly path: string; readonly status: 'found'; readonly attributes: number }
-  | { readonly path: string; readonly status: 'missing'; readonly attributes: null };
+  | {
+      readonly path: string;
+      readonly status: 'found';
+      readonly attributes: number;
+      readonly externalBacking: WindowsExternalBacking;
+    }
+  | {
+      readonly path: string;
+      readonly status: 'missing';
+      readonly attributes: null;
+      readonly externalBacking: null;
+    };
 
 export interface WindowsPathAttributeResponse {
   readonly schemaVersion: 1;
@@ -215,6 +235,44 @@ function integer(value: unknown, minimum: number, maximum: number, label: string
   return value as number;
 }
 
+function parseExternalBacking(
+  value: unknown,
+  attributes: number,
+  label: string,
+): WindowsExternalBacking {
+  const backing = record(value, label);
+  exactKeys(backing, ['status', 'provider', 'algorithm'], label);
+  const directory = (attributes & 0x10) !== 0;
+  if (
+    backing.status === 'not-applicable' &&
+    backing.provider === null &&
+    backing.algorithm === null
+  ) {
+    if (!directory) throw invalid(`${label} is not applicable only to directories`);
+    return { status: 'not-applicable', provider: null, algorithm: null };
+  }
+  if (directory) throw invalid(`${label} must be not-applicable for a directory`);
+  if (backing.status === 'physical' && backing.provider === null && backing.algorithm === null) {
+    return { status: 'physical', provider: null, algorithm: null };
+  }
+  if (backing.status !== 'external') {
+    throw invalid(`${label} status is invalid`);
+  }
+  if (backing.provider === 'wim' && backing.algorithm === null) {
+    return { status: 'external', provider: 'wim', algorithm: null };
+  }
+  if (
+    backing.provider === 'file' &&
+    (backing.algorithm === 'xpress4k' ||
+      backing.algorithm === 'lzx' ||
+      backing.algorithm === 'xpress8k' ||
+      backing.algorithm === 'xpress16k')
+  ) {
+    return { status: 'external', provider: 'file', algorithm: backing.algorithm };
+  }
+  throw invalid(`${label} provider and algorithm are inconsistent`);
+}
+
 export function parseWindowsPathAttributeResponse(
   input: string | Buffer,
   expected: WindowsPathRequest,
@@ -324,7 +382,11 @@ export function parseWindowsPathAttributeResponse(
   if (!Array.isArray(response.records)) throw invalid('response records must be an array');
   const records = response.records.map((item, index): WindowsPathAttributeRecord => {
     const parsedRecord = record(item, `response record ${index}`);
-    exactKeys(parsedRecord, ['path', 'status', 'attributes'], `response record ${index}`);
+    exactKeys(
+      parsedRecord,
+      ['path', 'status', 'attributes', 'externalBacking'],
+      `response record ${index}`,
+    );
     if (
       typeof parsedRecord.path !== 'string' ||
       parsedRecord.path.length > MAX_PATH_LENGTH ||
@@ -333,16 +395,30 @@ export function parseWindowsPathAttributeResponse(
       throw invalid(`response record ${index} path is invalid`);
     }
     if (parsedRecord.status === 'missing') {
-      if (parsedRecord.attributes !== null) {
-        throw invalid(`response record ${index} missing attributes must be null`);
+      if (parsedRecord.attributes !== null || parsedRecord.externalBacking !== null) {
+        throw invalid(`response record ${index} missing proof must be null`);
       }
-      return { path: parsedRecord.path, status: 'missing', attributes: null };
+      return {
+        path: parsedRecord.path,
+        status: 'missing',
+        attributes: null,
+        externalBacking: null,
+      };
     }
     if (parsedRecord.status !== 'found') {
       throw invalid(`response record ${index} status is invalid`);
     }
     const attributes = integer(parsedRecord.attributes, 0, 0xffffffff, 'file attributes');
-    return { path: parsedRecord.path, status: 'found', attributes };
+    return {
+      path: parsedRecord.path,
+      status: 'found',
+      attributes,
+      externalBacking: parseExternalBacking(
+        parsedRecord.externalBacking,
+        attributes,
+        `response record ${index} external backing`,
+      ),
+    };
   });
   if (
     records.length !== expected.payload.paths.length ||
@@ -427,6 +503,9 @@ export function assertNoWindowsReparsePoints(
     if ((item.attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
       throw invalid('path is a Windows reparse point');
     }
+    if (item.externalBacking.status === 'external') {
+      throw invalid('path has Windows external backing');
+    }
   }
 }
 
@@ -456,6 +535,9 @@ export function assertWindowsWorkspacePathAncestry(
     const item = byPath.get(path);
     if (!item) throw invalid('requested path ancestry proof is incomplete');
     if (item.status !== 'found') throw invalid('requested path ancestry is incomplete');
+    if (item.externalBacking.status === 'external') {
+      throw invalid('requested path ancestry contains Windows external backing');
+    }
     if ((item.attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT) === 0) continue;
     const info = lstatSync(item.path);
     if (!info.isSymbolicLink()) {
@@ -465,6 +547,9 @@ export function assertWindowsWorkspacePathAncestry(
   for (const path of canonical) {
     const item = byPath.get(path);
     if (!item || item.status !== 'found') throw invalid('canonical path ancestry is incomplete');
+    if (item.externalBacking.status === 'external') {
+      throw invalid('canonical path ancestry contains Windows external backing');
+    }
     if ((item.attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT) !== 0) {
       throw invalid('canonical path ancestry contains a Windows reparse point');
     }
@@ -481,6 +566,9 @@ export function assertWindowsRequestedPathAncestryBeforeCreate(requestedPath: st
       continue;
     }
     if (missing) throw invalid('requested path ancestry is discontinuous');
+    if (item.externalBacking.status === 'external') {
+      throw invalid('requested path ancestry contains Windows external backing');
+    }
     if ((item.attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT) === 0) continue;
     const info = lstatSync(item.path);
     if (!info.isSymbolicLink()) {

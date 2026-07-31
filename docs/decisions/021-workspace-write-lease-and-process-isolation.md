@@ -327,11 +327,14 @@ pid/host/boot/process identity。伪身份只允许存在于显式 test-only sea
 代码不得导入。same-host reboot coordinator 可使用受控内部 authority，但只能由真实 boot change、
 原 owner 精确字节和 canonical containment quarantine 共同导出，并在最终写前再次核对。
 
-路径安全在 Windows 上还必须读取系统原生属性，不能把 Node `lstat` 未报告为 symlink 当作普通文件
-证明。固定检查器按高层操作批量核验完整父链和扫描树，在操作开始前、结束后各检查一次；不为每个
-叶子启动独立进程。`workspace-safety.json` 与 `engine.lock/` 属于独立安全域，和业务树分别使用
-100000 项预算，且不能被业务 delegation 授权。任何 reparse point、缺失结果、超限或检查器摘要变化
-都失败关闭。
+路径安全在 Windows 上还必须读取系统原生属性，不能把 Node `lstat` 未报告为 symlink，或
+`FILE_ATTRIBUTE_REPARSE_POINT` 未设置，当作普通物理文件证明。固定检查器按高层操作批量核验完整
+父链和扫描树，在操作开始前、结束后各检查一次：所有既存路径读取原始属性，扫描发现的非目录文件
+另用 `WofIsExternalFile` 查询外部承载状态，目录和卷根不查询 WOF；不为每个叶子启动独立进程。
+`workspace-safety.json` 与 `engine.lock/` 属于独立安全域，和业务树分别使用 100000 项预算，且不能
+被业务 delegation 授权。任何 reparse point、WOF external backing、WOF API/DLL/HRESULT 失败、结果
+缺失、provider 或 FILE provider 的 algorithm 未知、超限或检查器摘要变化都失败关闭，不得退回只看
+reparse bit。
 
 doctor 将观察状态归一为：
 
@@ -440,9 +443,12 @@ required Windows 证明固定到 GitHub hosted `windows-2022`，另起一次性�
 原生 Job/helper suite。汇总脚本必须解析机器结果并拒绝缺 suite、全 skip、pending 或账户 token 含
 Administrators SID；仅有普通跨平台测试 job 绿色不能代替这条证明。quality contract schema v1 不增加
 可注入的 runner label，生成器内部固定 hosted image，保持已发布 0.33.3 strict parser 可继续读取。
-原生 suite 还必须用系统命令真实创建 WOF 压缩文件和父目录 junction，覆盖 Unicode 与空格路径，
-并证明 Node 未识别但系统属性检查会拒绝；fixture 创建失败、属性不成立或测试被跳过都使 required
-job 失败。非 Windows 只能验证检查器分发与摘要，不能宣称完成这项行为证明。
+原生 suite 还必须用 `compact.exe /C /EXE:LZX` 真实创建 WOF 压缩文件，并用
+WofIsExternalFile 证明 `provider=file`、`algorithm=lzx`；原始 reparse bit 可以不出现，不能作为 WOF
+成立条件。父目录 junction fixture 同样覆盖 Unicode 与空格路径；两类场景都必须证明 Node 未识别，
+但 `paths-v1`、`workspace-tree-v1`、`safety-tree-v1` 和对应高层读取均由生产系统检查拒绝。fixture
+创建、WOF 查询、provider/algorithm 断言、拒绝断言失败或测试被跳过都使 required job 失败。非
+Windows 只能验证检查器分发与摘要，不能宣称完成这项行为证明。
 普通 Windows 全量单测允许通过仅测试可见的模块解析替身避免重复启动原生检查器，但启动真实
 supervisor 的专用子进程和 required native runner 都不安装替身，直接调用摘要固定且可复现构建的
 C# EXE 与 Windows 原生进程/路径 API；生产入口没有 transport/probe 或环境旁路。原生 runner、

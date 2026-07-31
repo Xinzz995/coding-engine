@@ -46,8 +46,12 @@ Issue #91 干净检出。
   ActiveProcesses；两个平台的 supervisor 都在 START 前缓存 owner/protocol/active/baseline 摘要，并在
   集合清空后写 owner-bound drained receipt；
 - Windows 路径与 process-only 身份检查使用另一份固定源码、确定性重建且逐字节核验的 C# EXE，
-  直接调用原生属性、目录枚举与进程 creation FILETIME API；热路径不依赖 PowerShell 或旧版 managed
-  路径枚举，host/boot/current owner 的组合快照仍使用系统 PowerShell/CIM；
+  直接调用原生属性、目录枚举、`WofIsExternalFile` 外部承载查询与进程 creation FILETIME API；
+  WOF 只查询扫描发现的非目录文件；`paths-v1` 严格返回
+  physical/not-applicable 或 FILE/WIM provider 及 FILE algorithm，tree mode 在 helper 内直接拒绝；
+  查询失败或 provider/FILE algorithm 不明时失败关闭，不退回只看 reparse bit；热路径不依赖
+  PowerShell 或旧版 managed 路径枚举，host/boot/current owner 的组合快照仍使用系统
+  PowerShell/CIM；
 - 实现新版 lock recovery、同机 reboot-proof、attempt lease 单赢家、recovery-of-recovery 和 exact
   mutation resume 的内部能力；legacy workspace 只阻断并引导新 workspace，不实现迁移；
 - 先跑 Linux、macOS、Windows 真实破坏性回归，再允许后续产品接线。
@@ -70,6 +74,9 @@ Issue #91 干净检出。
   grandchild 仍活时绝不能 recoverable；
 - POSIX receipt/pgid/EOF 错绑，以及 Windows handle 关闭顺序、receipt 错绑、固定 EXE 摘要/
   确定性重建/Job/Query/Terminate 失败；
+- Windows 在 Unicode/空格路径用 `compact.exe /C /EXE:LZX` 建立真实 WOF 文件；
+  WofIsExternalFile 必须返回 `provider=file`、`algorithm=lzx`，即使原始 reparse bit 未出现，
+  `paths-v1`、两种 tree mode 和高层读取也都拒绝；WOF 查询失败、fixture 不成立或任一断言不得跳过；
 - recovery 与 normal acquire 双赢、recovery 自己崩溃；
 - 两个 resume 同时接管 dead lease；
 - operation baseline + prepared 整体安装，以及 settle 前后每个 hard-kill 窗口；
@@ -248,6 +255,9 @@ PR 2 与 PR 3 还必须保存 Linux、macOS、Windows 的真实任务链接。Wi
   真实中断只承诺 Ctrl+C/SIGINT，SIGTERM/TerminateProcess 属于 hard crash；
 - Windows 先关闭目标 thread/process handle，再以 Job ActiveProcesses 归零和绑定 receipt 证明，
   不使用 taskkill 或“pid 已死”代替；
+- Windows 原生证明用真实 FILE/LZX WOF fixture 和 junction 覆盖 Unicode/空格路径；WOF 判定不依赖
+  reparse bit，三种 helper mode 与高层读取全部拒绝，fixture、WOF 查询或 provider/FILE algorithm
+  无法确认时 required job 失败；
 - run、repair、report、apply-prd、review decision 代表性并发均被拒绝且零越界写；
 - bootstrap 双初始化只有一个标记写者；所有嵌套命令的自定义 workspace/symlink alias 指向同一租约；
 - bootstrap 与普通 lease 的部分 staging、canonical install、marker install、handle return 各 crash

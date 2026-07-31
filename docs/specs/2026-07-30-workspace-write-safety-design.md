@@ -381,10 +381,14 @@ v1 evaluator 进一步冻结以下机械边界，避免正常路径与恢复路�
 - 文件访问保留 raw name，记录与匹配使用 NFC path；同一树内 NFC 冲突一律 invalid，macOS/Windows
   还按固定“先大写、再小写、再 NFC”的 casefold 保守拒绝冲突。symlink、reparse point、特殊文件和
   路径逃逸都不进入 baseline；
-- Windows 不能只依赖 Node 的 `lstat` 判断 reparse point。每个高层操作在开始前和结束后，以固定、
-  摘要绑定、严格 UTF-8 的批量系统属性检查器核验完整父链和对应扫描树；任何
-  `FILE_ATTRIBUTE_REPARSE_POINT`、属性读取失败、结果缺失或检查器变化都失败关闭。单文件读取继续
-  使用原有 no-follow 文件身份与内容稳定性复核，不为每个叶子单独启动检查器；
+- Windows 不能只依赖 Node 的 `lstat`，也不能把
+  `FILE_ATTRIBUTE_REPARSE_POINT` 未出现当作文件由本卷物理承载的证明。每个高层操作在开始前和
+  结束后，以固定、摘要绑定、严格 UTF-8 的批量系统属性检查器核验完整父链和对应扫描树：所有既存
+  路径读取原始系统属性；扫描发现的非目录文件另用 `WofIsExternalFile` 查询外部承载状态，目录和卷根
+  不发起 WOF 查询。任何 reparse point 或 WOF external backing 都拒绝；WOF API/DLL/HRESULT 失败、
+  结果缺失、provider 或 FILE provider 的 algorithm 未知/矛盾、属性读取失败及检查器变化都失败关闭，
+  不得退回“reparse bit 未设置即安全”。单文件读取继续使用原有 no-follow 文件身份与内容稳定性复核，
+  不为每个叶子单独启动检查器；
 - 每次 capture/evaluate 都执行两次完整扫描；路径集合、类型、文件身份、长度、时间或摘要任一变化
   立即 invalid，不重试或合并。append prefix 必须通过同一 no-follow 普通文件句柄读完并在前后复核
   路径与文件身份；JSON 必须是严格 UTF-8、无 BOM、无重复 key 的合法 JSON。
@@ -787,10 +791,21 @@ supervisor 存活至 receipt 落盘、目标 pgid 为空，而不是只调用 co
 
 Windows 原生检查另带一份由固定源码确定性构建的 `.NET Framework 4.6` C# EXE。Node 直接启动
 并核对固定摘要；helper 通过 GetFileAttributesW 与 FindFirstFileW/FindNextFileW 流式读取系统属性、
-规范名称和有界目录树，也通过 OpenProcess、GetProcessTimes 与前后两次零等待存活检查读取进程
-creation FILETIME。路径和进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；
-进程 helper 子进程执行另有小于 supervisor 5 秒 handshake 的 3 秒硬上限。输入输出和失败阶段都采用有界协议，
-任何摘要、请求绑定、路径、进程存活、重解析点、枚举完整性或关闭句柄无法确认都按不可验证阻断。
+规范名称和有界目录树，并对扫描发现的非目录文件调用 WofIsExternalFile，返回明确的 physical/external
+状态；external 结果必须带 FILE/WIM provider，FILE provider 还必须带已知 compression algorithm。helper
+也通过 OpenProcess、GetProcessTimes 与前后两次零等待存活检查读取进程 creation FILETIME。路径和
+进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；进程 helper 子进程执行另有小于
+supervisor 5 秒 handshake 的 3 秒硬上限。输入输出和失败阶段都采用有界协议，任何摘要、请求绑定、
+路径、进程存活、重解析点、外部承载状态、枚举完整性或关闭句柄无法确认都按不可验证阻断。
+
+`paths-v1` 对每个 `found` 记录增加严格的 `externalBacking`：目录为
+`{status:"not-applicable",provider:null,algorithm:null}`，普通本地文件为
+`{status:"physical",provider:null,algorithm:null}`；外部文件只接受
+`{status:"external",provider:"file",algorithm:"xpress4k"|"lzx"|"xpress8k"|"xpress16k"}` 或
+`{status:"external",provider:"wim",algorithm:null}`。`missing` 记录的 `externalBacking` 必须为
+`null`。未知 provider、未知 FILE algorithm、字段缺失或多余字段都使整份响应无效。
+`workspace-tree-v1` 与 `safety-tree-v1` 不返回可被上层漏检的逐项 WOF 列表，而是在固定 helper 内部遇到
+任一 reparse point 或 external backing 时直接失败；只有完整遍历且 `complete:true` 的响应才成立。
 
 parent IPC EOF 时 supervisor 主动 TerminateJobObject。canonical active-child 仍是 prepared-bound 时，
 它按 9-10 归零后直接退出且不写 receipt；若曾接受 START，按 9-11 使用缓存摘要写 receipt；若从未
@@ -1082,16 +1097,20 @@ recovery 仍在。
 Windows 另测 Node 22 与当前 Node、普通用户、嵌套外层 Job、不兼容 Job、固定 EXE 缺失/损坏/摘要错误、
 确定性重建与逐字节比较、breakaway 尝试、`.cmd` shim、Unicode/空参数、stdin/大 stdout/stderr、thread/process handle
 关闭顺序、ActiveProcesses 归零、receipt 损坏/错绑、supervisor 在 receipt 前后 hard kill 和 handle leak。
-同一普通用户证明还必须真实创建 Unicode/空格路径上的 WOF 压缩普通文件和“父目录 junction、子文件
-表面普通”的场景，先证明 Node `lstat` 未识别，再证明 readReady、bootstrap/recovery 和 evaluator
-均由系统属性检查拒绝；fixture 创建失败不得跳过。
+同一普通用户证明还必须用 `compact.exe /C /EXE:LZX` 在 Unicode/空格路径上真实创建 WOF 压缩普通
+文件，并由 WofIsExternalFile 证明 `provider=file`、`algorithm=lzx`；该证明明确允许原始
+`FILE_ATTRIBUTE_REPARSE_POINT` 不出现，不能以 reparse bit 作为 WOF 判据。另建“父目录 junction、
+子文件表面普通”的场景，先证明 Node `lstat` 未识别，再证明 `paths-v1`、`workspace-tree-v1`、
+`safety-tree-v1` 及 readReady、bootstrap/recovery、evaluator 均由生产系统检查拒绝。fixture 创建、
+WOF 查询、provider/algorithm 断言或任一拒绝断言失败都不得跳过。
 GitHub Windows Server 2022 是最低真实证明；mock taskkill 不能替代。
 非 Windows 上的源码、摘要和条件测试只能证明分发合同，不能把 skip 或静态检查报告为 Job 行为已完成；
 上述 Windows 行为必须由 required Windows CI 真正执行后才算绿色。
 
 Windows 原生证明使用独立的 required job：工作流固定 `windows-2022`，先由 hosted runner 管理员创建
 一次性本地普通账户，再通过无交互 credential 启动该账户执行固定 Windows Job、parent crash、生产
-operation、delegated recovery 与 reparse safety suite。证明入口同时核对 token 不含 Administrators SID，
+operation、delegated recovery 与 reparse/external-backing safety suite。证明入口同时核对 token 不含
+Administrators SID，
 并解析 Vitest JSON，要求固定 suite 全部存在、至少一个断言实际通过、逐项记录耗时且零 skip/pending；
 账户切换、结果文件、WOF/junction fixture 或任一
 suite 不可用都让 job 失败。普通 `npm test` 中的条件 skip 不计入此证明。0.33.3 冻结包兼容测试使用
@@ -1103,9 +1122,9 @@ path transport 解析到严格、有计数上限的 test-only 实现；这份结
 supervisor 的专用子进程不安装任何 transport alias，进程身份与路径检查都使用同一份生产 EXE，
 避免“生产身份间接落到测试路径”的假证明。required native runner 也必须显式使用另一份无 test-only
 alias、setup 或环境旁路的固定配置，将 import 固定回生产 transport，直接调用真实固定 EXE 与 Windows
-原生 API，并以 WOF、junction、真实进程身份和普通用户断言证明没有走 test transport。production API
-不接收 transport/probe，也不读取测试旁路环境变量；配置、runner、固定 suite、辅助 EXE 的可复现
-构建、进程身份和属性规则都属于旧 policy 保护范围。
+原生 API，并以 WOF 的 FILE/LZX 结果、junction、真实进程身份和普通用户断言证明没有走 test
+transport。production API 不接收 transport/probe，也不读取测试旁路环境变量；配置、runner、固定
+suite、辅助 EXE 的可复现构建、进程身份和属性规则都属于旧 policy 保护范围。
 
 POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代码、launcher 提前退出、pgid
 仍有成员、group probe unknown 和 START 后 parent 立即 kill。真实测试只证明普通进程继承合同；
