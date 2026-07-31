@@ -299,6 +299,40 @@ describe('codexReviewPermissionOverrides', () => {
 });
 
 describe('managed Final Review runner execution', () => {
+  it.runIf(process.platform === 'win32')(
+    'rejects a Windows Runner script wrapper before version or Review execution',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'review-runner-shim-'));
+      temporaryRoots.push(root);
+      const executable = join(root, 'codex.cmd');
+      writeFileSync(executable, '@echo off\r\nexit /b 0\r\n');
+      vi.stubEnv('CODING_X_CODEX_BIN', executable);
+      const managed = vi.fn<typeof runManagedWorkspaceProcess>();
+
+      await expect(
+        readRunnerVersion({
+          session: fakeSession,
+          runner: 'codex',
+          managedProcess: managed,
+        }),
+      ).rejects.toThrow(/原生可执行文件/u);
+
+      await expect(
+        runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage: packageFixture('{}'),
+          timeoutMs: 1000,
+          managedProcess: managed,
+        }),
+      ).rejects.toThrow(/原生可执行文件/u);
+      expect(managed).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the fixed read-only managed operation for runner version checks', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     const managed: typeof runManagedWorkspaceProcess = async (session, options) => {

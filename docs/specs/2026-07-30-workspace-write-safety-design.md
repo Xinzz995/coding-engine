@@ -787,7 +787,7 @@ supervisor 存活至 receipt 落盘、目标 pgid 为空，而不是只调用 co
    detached 新进程组不连接 parent 控制台，parent 是用户 Ctrl+C 的唯一接收者；
 2. CreateJobObject；
 3. SetInformationJobObject(KILL_ON_JOB_CLOSE)，不设置 breakaway；
-4. 解析完整 executable；`.cmd/.bat` 通过受测的 `cmd.exe` 规则；
+4. 解析完整 executable；普通项目命令的 `.cmd/.bat` 通过受测的 `cmd.exe` 安全子集规则；
 5. STARTUPINFOEX 同时传 JOB_LIST 与最小 HANDLE_LIST；
 6. CreateProcessW 使用 EXTENDED_STARTUPINFO_PRESENT、UNICODE_ENVIRONMENT、CREATE_SUSPENDED 与
    CREATE_NO_WINDOW；
@@ -1107,7 +1107,8 @@ recovery 仍在。
 | 未选择的普通 secret canary 不落安全元数据      |              真机 |              真机 |                  真机 |
 
 Windows 另测 Node 22 与当前 Node、普通用户、嵌套外层 Job、不兼容 Job、固定 EXE 缺失/损坏/摘要错误、
-确定性重建与逐字节比较、breakaway 尝试、`.cmd` shim、Unicode/空参数、stdin/大 stdout/stderr、thread/process handle
+确定性重建与逐字节比较、breakaway 尝试、普通项目命令的 `.cmd` shim、Unicode/空参数、
+stdin/大 stdout/stderr、thread/process handle
 关闭顺序、ActiveProcesses 归零、receipt 损坏/错绑、supervisor 在 receipt 前后 hard kill 和 handle leak。
 同一普通用户证明还必须用 `compact.exe /C /EXE:LZX` 在 Unicode/空格路径上真实创建 WOF 压缩普通
 文件，并由 WofIsExternalFile 证明 `provider=file`、`algorithm=lzx`；该证明明确允许原始
@@ -1118,6 +1119,10 @@ WOF 查询、provider/algorithm 断言或任一拒绝断言失败都不得跳过
 GitHub Windows Server 2022 是最低真实证明；mock taskkill 不能替代。
 非 Windows 上的源码、摘要和条件测试只能证明分发合同，不能把 skip 或静态检查报告为 Job 行为已完成；
 上述 Windows 行为必须由 required Windows CI 真正执行后才算绿色。
+
+Developer、Validator 与 Final Review 的 AI Runner 不进入该 shell 子集：提示词及 Review 输入不能由
+`.cmd/.bat` 再次解释。Windows v1 在任何受管 AI 进程建立前明确拒绝脚本包装器，并要求三个
+`CODING_X_*_BIN` 覆盖指向对应工具的原生可执行文件；普通/TDD 项目检查继续保留上述 `.cmd` 能力。
 
 Windows 原生证明使用独立的 required job：工作流固定 `windows-2022`，先由 hosted runner 管理员创建
 一次性本地普通账户，再通过无交互 credential 启动该账户执行固定 Windows Job、parent crash、生产

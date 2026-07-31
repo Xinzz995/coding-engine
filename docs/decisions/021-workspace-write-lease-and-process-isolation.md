@@ -118,6 +118,11 @@ lease 的当前 owner 在 creator exact dead 时尽力清理。任何前置步�
 Developer、Validator、普通/TDD 检查和三个 Final Review Runner 共用 coordinator 与打包在 coding-x
 中的短生命周期 supervisor。协议严格按以下顺序执行：
 
+Windows 上的普通/TDD 项目命令可以使用固定 supervisor 的 `.cmd/.bat` 安全子集；AI Runner 不使用
+shell 脚本包装器，因为提示词和 Review 输入不能交给命令解释器再次解析。v1 对这类 Runner 在建立
+受管 operation 前返回 unsupported，并要求 `CODING_X_CLAUDE_BIN`、`CODING_X_CODEX_BIN` 或
+`CODING_X_CURSOR_BIN` 指向原生可执行文件。
+
 1. 父进程暂停普通写，冻结并回读调用前业务文件 manifest、委托范围和语义校验版本，再原子写
    `prepared` 绑定其摘要；
 2. 启动固定 supervisor，但暂不传 workspace path、target 或 DATA；父进程取得 supervisor 精确身份，

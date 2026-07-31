@@ -706,7 +706,9 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     );
     created.push(workspace);
     const marker = join(workspace, 'cmd-shell-ran.txt');
-    const commandProcessor = realpathSync.native(process.env.ComSpec!);
+    const commandProcessor = realpathSync.native(
+      join(process.env.SystemRoot!, 'System32', 'cmd.exe'),
+    );
     const node = realpathSync.native(process.execPath);
     const script =
       `${JSON.stringify(node)} -e ` +
@@ -746,6 +748,38 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       receiptDigest: message.receiptDigest,
     });
     await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it.each([
+    ['missing /s', ['/d', '/c']],
+    ['reordered /s and /c', ['/d', '/c', '/s']],
+    ['extra argument', ['/d', '/s', '/c', 'extra']],
+  ] as const)('rejects a system cmd.exe target with %s before ARMED', async (_label, prefix) => {
+    const workspace = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'coding-x-windows-cmd-shape-')),
+    );
+    created.push(workspace);
+    const marker = join(workspace, 'cmd-shape-ran.txt');
+    const commandProcessor = realpathSync.native(
+      join(process.env.SystemRoot!, 'System32', 'cmd.exe'),
+    );
+    const script = `echo rejected>${JSON.stringify(marker)}`;
+    const args = [...prefix, script];
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    sendData(
+      child,
+      workspace,
+      commandProcessor,
+      args,
+      windowsTestTargetEnvironment(),
+    );
+    await expect(events.next('ARMED')).rejects.toThrow(/fixed \/d \/s \/c shape/u);
+    await expect(events.exit).resolves.toEqual({ code: 2, signal: null });
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('drains large stdout and stderr without hiding EOF behind a green root result', async () => {

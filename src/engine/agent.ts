@@ -5,6 +5,7 @@ import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-saf
 import type { OperationDelegationScope } from '../workspace-safety/operation.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
+import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 
 export type AgentKind = 'claude' | 'codex' | 'cursor';
 
@@ -96,6 +97,35 @@ export function resolveExecutablePath(
   throw new Error(`找不到可执行文件：${name}`);
 }
 
+/**
+ * AI Runner 的提示词和配置不能交给 Windows shell 脚本重新解析。
+ * 项目质量检查仍使用通用解析器，并继续支持经过受管执行器约束的 .cmd/.bat。
+ */
+export function resolveRunnerExecutablePath(
+  kind: AgentKind,
+  name: string,
+  cwd: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const executable = resolveExecutablePath(name, cwd, environment, platform);
+  const extension = extname(executable).toLowerCase();
+  if (platform === 'win32' && (extension === '.cmd' || extension === '.bat')) {
+    const variable =
+      kind === 'codex'
+        ? 'CODING_X_CODEX_BIN'
+        : kind === 'cursor'
+          ? 'CODING_X_CURSOR_BIN'
+          : 'CODING_X_CLAUDE_BIN';
+    throw new WorkspaceSafetyError(
+      'unsupported',
+      `Windows 上的 ${kind} AI Runner 不支持 .cmd/.bat 脚本包装器；` +
+        `请将 ${variable} 指向该工具的原生可执行文件`,
+    );
+  }
+  return executable;
+}
+
 export function resolveBinary(kind: AgentKind): string {
   if (kind === 'codex') return process.env.CODING_X_CODEX_BIN ?? 'codex';
   if (kind === 'cursor') {
@@ -160,7 +190,7 @@ export function runAgent(opts: {
   let executable: string;
   let cwd: string;
   try {
-    executable = resolveExecutablePath(cmd, opts.cwd, environment);
+    executable = resolveRunnerExecutablePath(opts.kind, cmd, opts.cwd, environment);
     cwd = realpathSync(opts.cwd);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

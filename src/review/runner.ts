@@ -12,7 +12,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveBinary, resolveExecutablePath, type AgentKind } from '../engine/agent.js';
+import {
+  resolveBinary,
+  resolveExecutablePath,
+  resolveRunnerExecutablePath,
+  type AgentKind,
+} from '../engine/agent.js';
 import {
   canonicalManagedProcessPath,
   environmentEntries,
@@ -320,7 +325,12 @@ async function runProcess(options: {
 }): Promise<ProcessResult> {
   const environment = allowedEnvironment(options.runner);
   const cwd = canonicalManagedProcessPath(options.cwd);
-  const executable = resolveExecutablePath(resolveBinary(options.runner), cwd, environment);
+  const executable = resolveRunnerExecutablePath(
+    options.runner,
+    resolveBinary(options.runner),
+    cwd,
+    environment,
+  );
   const args = runnerArgs({ ...options, cwd });
   const invocation = createRunnerInvocation({
     runner: options.runner,
@@ -374,7 +384,12 @@ export async function readRunnerVersion(options: {
     const environment = allowedEnvironment(options.runner);
     const result = await (options.managedProcess ?? runManagedWorkspaceProcess)(options.session, {
       ...FINAL_REVIEW_OPERATION,
-      executable: resolveExecutablePath(resolveBinary(options.runner), root, environment),
+      executable: resolveRunnerExecutablePath(
+        options.runner,
+        resolveBinary(options.runner),
+        root,
+        environment,
+      ),
       args: ['--version'],
       cwd: root,
       environment: environmentEntries(environment),

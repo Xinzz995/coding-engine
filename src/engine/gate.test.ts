@@ -7,6 +7,7 @@ import {
   mkdirSync,
   symlinkSync,
   realpathSync,
+  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -534,6 +535,41 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform === 'win32')(
+    'keeps project .cmd quality checks available outside the AI Runner boundary',
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'contract-windows-cmd-')));
+      const command = join(root, 'project-check.cmd');
+      const marker = join(root, 'project-check.txt');
+      writeFileSync(command, '@echo off\r\n> "%~1" echo project-cmd-ok\r\nexit /b 0\r\n');
+      try {
+        const result = await runManagedContractQualityChecks(
+          contractWith({
+            checks: [
+              {
+                id: 'project-cmd',
+                module: 'root',
+                command: {
+                  executable: command,
+                  args: [marker],
+                  cwd: '.',
+                  platforms: ['windows'],
+                  timeoutMs: 5_000,
+                },
+              },
+            ],
+          }),
+          root,
+          'windows',
+        );
+        expect(result).toMatchObject({ ok: true, total: 1, ran: 1, skipped: [] });
+        expect(readFileSync(marker, 'utf8').trim()).toBe('project-cmd-ok');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'runs an explicitly declared POSIX shell script and never infers shell from executable args',

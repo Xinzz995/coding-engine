@@ -183,6 +183,10 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 
 插件和 runner 是两件事：**插件**让交互式 AI 知道怎样做需求对齐、PRD、review 等工作流；**runner**才是 `npx coding-x` 在自动循环中启动的 AI 命令行程序。只装其中一个不能代替另一个。
 
+Windows v1 的 AI runner 必须是原生可执行文件，不能是 `.cmd/.bat` 包装器；如果 PATH 找到的是脚本，
+请把下表对应的 `CODING_X_*_BIN` 指向该工具的原生程序。这个限制只针对 AI runner，不影响项目自己的
+`npm.cmd` 测试、构建或其他质量检查。
+
 ### Claude Code
 
 在 Claude Code 对话中添加 marketplace、安装插件，并让当前会话重新加载：
@@ -757,9 +761,9 @@ GitHub 状态给出。
 | 变量                  | 说明                                                                       |
 | --------------------- | -------------------------------------------------------------------------- |
 | `CODING_X_CONFIG`     | 覆盖全局模型配置的完整文件路径；相对路径按当前目录解析，空白值按未设置处理 |
-| `CODING_X_CLAUDE_BIN` | 覆盖 `claude` 可执行文件路径                                               |
-| `CODING_X_CODEX_BIN`  | 覆盖 `codex` 可执行文件路径                                                |
-| `CODING_X_CURSOR_BIN` | 覆盖 Cursor `agent` / `cursor-agent` 可执行文件路径                        |
+| `CODING_X_CLAUDE_BIN` | 覆盖 `claude` 可执行文件路径；Windows 必须指向原生程序                     |
+| `CODING_X_CODEX_BIN`  | 覆盖 `codex` 可执行文件路径；Windows 必须指向原生程序                      |
+| `CODING_X_CURSOR_BIN` | 覆盖 Cursor `agent` / `cursor-agent` 路径；Windows 必须指向原生程序        |
 
 ---
 
@@ -875,6 +879,7 @@ my-project/
 | agent 执行 `git commit` 被 TDD hook 阻断                   | hook 的有限错误摘要、手工运行 `coverageCheck`                                             | 修测试、实现或政策漂移后重跑；不要关闭 hook 规避。即使绕过，coding-x 引擎仍会独立打回                                                 |
 | Cursor 没有提前检查，或 `hooks cursor status` 报缺失/过期  | 项目根的 `.cursor/hooks.json`、`.cursor/coding-x/`、status 输出                           | 在 Git 项目根运行 `npx coding-x hooks cursor install`，升级 coding-x 后也重跑；若报冲突，先人工处理被修改或不合法的文件，不要强行覆盖 |
 | Cursor 插件已装但 `npx coding-x cursor` 找不到命令         | `agent --version`（旧安装可试 `cursor-agent --version`）、登录状态、`CODING_X_CURSOR_BIN` | 单独安装 Cursor Agent CLI；桌面应用不能替代。coding-x 自动识别两种命令名，自定义路径再设置环境变量                                    |
+| Windows 提示 AI runner 的 `.cmd/.bat` 包装器不受支持       | 对应 `CODING_X_*_BIN` 的实际路径、安装包是否提供原生程序                                  | 把对应变量指向该工具的原生可执行文件；不要改成 `shell:true`，项目自己的 `npm.cmd` 检查不受影响                                       |
 | 报“找不到 prd.json”                                        | 选定 workspace 的 `prd.json` 是否存在、`--workspace` 是否一致                             | 用 `prd-to-json` 从正式 PRD 生成临时候选并调用 apply；不要手工拼一个不完整 JSON                                                       |
 | 退出码 `2`，提示活动 lease 或恢复状态阻断                  | `doctor` / `status` 的安全分类、是否仍有 coding-x 或项目检查进程                          | 活跃运行就等待或正常停止；中断状态按提示运行 `workspace recover` 或 `workspace resume-mutation`，不要删除 `engine.lock/`              |
 | `state.json` 或 `prd.json` JSON 损坏                       | `status`/`report` 的保守警告                                                              | 运行 `npx coding-x repair`；它会自行获取短租约并按固定清单修复，不会替你解决业务失败                                                  |

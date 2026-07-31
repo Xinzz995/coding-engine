@@ -5,11 +5,13 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createSystemIdentityAdapter } from './identity.js';
 import {
+  DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS,
   createWindowsSupervisorLaunch,
   readWindowsSupervisorAssets,
   spawnWindowsJobSupervisor,
   WINDOWS_SUPERVISOR_EXECUTABLE,
 } from './windows-supervisor.js';
+import { WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS } from './windows-path-attributes.js';
 import { WindowsSupervisorProcess } from './windows-supervisor-protocol.js';
 import {
   ASSET_ROOT,
@@ -62,7 +64,7 @@ describe('fixed Windows Job supervisor assets', () => {
       expect.any(String),
     ]);
     expect(JSON.parse(Buffer.from(launch.args[3], 'base64').toString('utf8'))).toEqual({
-      handshakeMs: 5000,
+      handshakeMs: 15_000,
       naturalDrainMs: 5000,
       terminateMs: 5000,
       ackMs: 5000,
@@ -75,6 +77,9 @@ describe('fixed Windows Job supervisor assets', () => {
       TEMP: 'C:\\Windows\\Temp',
       TMP: 'C:\\Windows\\Temp',
     });
+    expect(DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS.handshakeMs).toBeGreaterThanOrEqual(
+      2 * WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS + 5000,
+    );
     expect(launch.detached).toBe(true);
     expect(launch.windowsHide).toBe(true);
     expect(launch.stdio).toEqual(['pipe', 'pipe', 'pipe']);
@@ -186,6 +191,9 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(processSource).toContain(
       'cmd.exe target must use the fixed /d /s /c shape',
     );
+    expect(processSource).toContain('only the fixed system cmd.exe target is supported');
+    expect(processSource).toContain('Path.Combine(windows, "System32", "cmd.exe")');
+    expect(processSource).not.toContain('Environment.GetEnvironmentVariable("ComSpec")');
     expect(processSource).toContain(
       '.Append(" /d /s /c \\"").Append(target.Arguments[3]).Append(\'"\')',
     );

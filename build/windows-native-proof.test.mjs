@@ -254,7 +254,7 @@ describe('Windows native proof report', () => {
     );
     expect(processLookup).toContain('inspectWindowsProcessIdentity');
     expect(processLookup).not.toMatch(/Get-Process|spawnSync/u);
-    expect(pathInspector).toContain('WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS = 3_000');
+    expect(pathInspector).toContain('WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS = 4_000');
     expect(pathInspectorProgram).toContain('process-identity-v1');
     expect(testIdentityTransport).toContain('MAX_TEST_INVOCATIONS');
     expect(testIdentityTransport).not.toMatch(

@@ -11,7 +11,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { buildAgentArgs, resolveBinary, resolveExecutablePath, runAgent } from './agent.js';
+import {
+  buildAgentArgs,
+  resolveBinary,
+  resolveExecutablePath,
+  resolveRunnerExecutablePath,
+  runAgent,
+} from './agent.js';
 import { createManagedProcessTestSession } from './managed-process-test-support.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -233,7 +239,78 @@ describe('resolveExecutablePath', () => {
   });
 });
 
+describe('resolveRunnerExecutablePath', () => {
+  it.each(['runner.CMD', 'runner.bat'])(
+    'rejects the Windows AI Runner script wrapper %s',
+    (name) => {
+      const dir = mkdtempSync(join(tmpdir(), 'coding-x-windows-runner-shim-'));
+      const executable = join(dir, name);
+      writeFileSync(executable, '@echo off\r\n');
+      chmodSync(executable, 0o755);
+      try {
+        expect(() =>
+          resolveRunnerExecutablePath('codex', executable, dir, process.env, 'win32'),
+        ).toThrow(/原生可执行文件/u);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('allows a Windows native runner and does not apply the restriction to POSIX', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x-runner-native-'));
+    const native = join(dir, 'runner.EXE');
+    const script = join(dir, 'runner.cmd');
+    writeFileSync(native, '');
+    writeFileSync(script, '');
+    chmodSync(native, 0o755);
+    chmodSync(script, 0o755);
+    try {
+      expect(resolveRunnerExecutablePath('claude', native, dir, process.env, 'win32')).toBe(
+        realpathSync.native(native),
+      );
+      expect(resolveRunnerExecutablePath('claude', script, dir, process.env, 'linux')).toBe(
+        realpathSync.native(script),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('runAgent', () => {
+  it.runIf(process.platform === 'win32')(
+    'rejects an AI Runner script wrapper before managed execution',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'coding-x-agent-shim-'));
+      const executable = join(dir, 'claude.cmd');
+      const marker = join(dir, 'runner-started.txt');
+      const originalBin = process.env.CODING_X_CLAUDE_BIN;
+      const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      writeFileSync(
+        executable,
+        `@echo off\r\n> ${JSON.stringify(marker)} echo started\r\nexit /b 0\r\n`,
+      );
+      process.env.CODING_X_CLAUDE_BIN = executable;
+      try {
+        const result = await runManagedAgent({
+          kind: 'claude',
+          prompt: '不可进入 shell 的提示词 & "quoted"',
+          cwd: dir,
+          timeoutMs: 5_000,
+        });
+        expect(result).toMatchObject({ timedOut: false, exitCode: 1, durationMs: 0 });
+        expect(result.outputTail).toContain('原生可执行文件');
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        stderr.mockRestore();
+        if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+        else process.env.CODING_X_CLAUDE_BIN = originalBin;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('returns a deterministic failed result when the runner executable is missing', async () => {
     const originalBin = process.env.CODING_X_CLAUDE_BIN;
     process.env.CODING_X_CLAUDE_BIN = 'coding-x-definitely-missing-runner';
