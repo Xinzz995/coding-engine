@@ -530,7 +530,7 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
         root,
       );
       expect(result).toMatchObject({ ok: true, total: 1, ran: 1, skipped: [] });
-      expect(readFileSync(marker, 'utf8')).toBe(realpathSync(moduleDir));
+      expect(readFileSync(marker, 'utf8')).toBe(realpathSync.native(moduleDir));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

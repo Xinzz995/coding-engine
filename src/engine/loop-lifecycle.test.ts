@@ -409,8 +409,8 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       expect(code).toBe(0);
       const recorded = readFileSync(marker, 'utf8');
       // The agent must run at the explicit project root, NOT inside .workspace.
-      expect(realpathSync(recorded)).toBe(realpathSync(projectRoot));
-      expect(realpathSync(recorded)).not.toBe(realpathSync(workspace));
+      expect(realpathSync.native(recorded)).toBe(realpathSync.native(projectRoot));
+      expect(realpathSync.native(recorded)).not.toBe(realpathSync.native(workspace));
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }

@@ -446,7 +446,7 @@ export async function runDarkWindowsSupervisedOperation(
           : result?.code === 0
             ? 'completed'
             : 'root-failed',
-      code: result?.code ?? null,
+      code: terminationReason ? null : (result?.code ?? null),
       signal: null,
       stdout: Buffer.concat(processHandle.stdout),
       stderr: Buffer.concat(processHandle.stderr),

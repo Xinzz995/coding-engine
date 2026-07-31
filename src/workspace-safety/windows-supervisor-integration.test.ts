@@ -215,6 +215,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     expect(outcome).toMatchObject({
       verdict: 'terminated',
       terminationReason: 'timeout',
+      code: null,
       leftover: false,
     });
     expect(outcome.stdout.toString('utf8')).toContain('stubborn-started');

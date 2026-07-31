@@ -3,9 +3,9 @@
  *
  * It preserves deterministic host and boot comparisons without starting PowerShell for every
  * fixture. Live process identity still comes from the reviewed native inspector, so a real fixed
- * supervisor and the parent observe the same Windows creation FILETIME. Every verification reads
- * the native FILETIME again: PID liveness alone cannot prove that a PID still names the same
- * process after reuse.
+ * supervisor and the parent observe the same Windows creation FILETIME. Only the still-executing
+ * Vitest process reuses its first exact FILETIME; every supervisor, target, missing, or unknown PID
+ * is re-read. The native proof bypasses this module and exercises every production recheck.
  */
 import type { ProcessIdentityLookup } from './identity.js';
 import type { WindowsIdentitySnapshot } from './windows-identity-transport.js';
@@ -15,6 +15,7 @@ const TEST_HOST_IDENTITY = 'coding-x-windows-test-host-v1';
 const TEST_BOOT_IDENTITY = 'coding-x-windows-test-boot-v1';
 const MAX_TEST_INVOCATIONS = 10_000;
 let invocationCount = 0;
+let currentProcessIdentity: string | undefined;
 
 function recordInvocation(): void {
   invocationCount += 1;
@@ -37,6 +38,11 @@ function fixtureProcessIdentity(pid: number): string {
   return (100_000_000_000_000_000n + BigInt(pid)).toString();
 }
 
+export function resetWindowsIdentityTestTransport(): void {
+  invocationCount = 0;
+  currentProcessIdentity = undefined;
+}
+
 function processIdentity(pid: number): ProcessIdentityLookup {
   // Cross-platform unit tests import this Windows-only transport directly. They still need a
   // deterministic fixture identity when no Windows inspector can run. Ordinary Windows Vitest,
@@ -47,8 +53,14 @@ function processIdentity(pid: number): ProcessIdentityLookup {
       ? { status: 'found', value: fixtureProcessIdentity(pid) }
       : { status: presence };
   }
+  if (pid === process.pid && currentProcessIdentity !== undefined) {
+    return { status: 'found', value: currentProcessIdentity };
+  }
   try {
     const observed = inspectWindowsProcessIdentity(pid);
+    if (pid === process.pid && observed.status === 'found') {
+      currentProcessIdentity = observed.value;
+    }
     return observed.status === 'found'
       ? { status: 'found', value: observed.value }
       : { status: observed.status };

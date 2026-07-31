@@ -138,7 +138,7 @@ export function setupGitProject(
  * 运行时校验。
  */
 export function initializeReadyWorkspaceFixture(workspacePath: string): void {
-  const canonicalPath = realpathSync(workspacePath);
+  const canonicalPath = realpathSync.native(workspacePath);
   const info = statSync(canonicalPath, { bigint: true });
   const digestBytes = (bytes: string | Buffer) =>
     `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
