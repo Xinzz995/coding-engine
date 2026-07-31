@@ -702,7 +702,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
 
   it('preserves nested quotes for the fixed cmd.exe /d /s /c target shape', async () => {
     const workspace = realpathSync.native(
-      mkdtempSync(join(tmpdir(), 'coding-x-windows-cmd-shell-')),
+      mkdtempSync(join(tmpdir(), 'coding-x windows cmd shell-')),
     );
     created.push(workspace);
     const marker = join(workspace, 'cmd-shell-ran.txt');
@@ -711,8 +711,9 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     );
     const node = realpathSync.native(process.execPath);
     const script =
-      `${JSON.stringify(node)} -e ` +
-      `"require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'quoted-ok')"`;
+      `"${node}" -e ` +
+      `"require('node:fs').writeFileSync(process.argv[1], 'quoted-ok')" ` +
+      `"${marker}"`;
     const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
     const child = spawnWindowsJobSupervisor(launch);
     const events = new EventReader(child);
@@ -735,7 +736,11 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       activeChildDigest: DIGEST(armedBytes),
     });
     await events.next('STARTED');
-    expect((await events.next('RESULT')).code).toBe(0);
+    const result = await events.next('RESULT');
+    expect(
+      result.code,
+      `target stdout: ${events.outputTail.stdout}\ntarget stderr: ${events.outputTail.stderr}\nmarker exists: ${existsSync(marker)}`,
+    ).toBe(0);
     const drained = await events.next('DRAINED');
     const message = JSON.parse(
       Buffer.from(String(drained.messageBase64), 'base64').toString('utf8'),
