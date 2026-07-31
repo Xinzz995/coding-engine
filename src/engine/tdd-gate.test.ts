@@ -503,7 +503,8 @@ describe('runTddGate', { timeout: 30_000, concurrent: false }, () => {
     process.env.MALICIOUS_GIT_RAN = wrapperRan;
     process.env.MALICIOUS_GIT_WORKSPACE_MARKER = workspaceMarker;
     if (process.platform === 'win32') {
-      process.env[nodeOptionsKey] = [nodeOptionsBefore, '--require', `"${script}"`]
+      const preloadScript = script.replaceAll('\\', '/');
+      process.env[nodeOptionsKey] = [nodeOptionsBefore, '--require', `"${preloadScript}"`]
         .filter((value) => value !== undefined && value !== '')
         .join(' ');
       const resolvedGit = execFileSync('where.exe', ['git'], { encoding: 'utf8' }).split(
