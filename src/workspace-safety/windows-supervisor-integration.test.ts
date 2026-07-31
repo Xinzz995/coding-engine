@@ -231,17 +231,20 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     const descendantReady = join(controlRoot, 'descendant-ready');
     const descendant = [
       "const fs=require('node:fs');",
-      `fs.writeFileSync(${JSON.stringify(descendantReady)},'ready');`,
+      'const wait=new Int32Array(new SharedArrayBuffer(4));',
       "process.stdout.write('descendant-alive\\n');",
-      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20000);',
+      `fs.writeFileSync(${JSON.stringify(descendantReady)},'ready');`,
+      'Atomics.wait(wait,0,0,20000);',
     ].join('');
     const source = [
       "const {spawn}=require('node:child_process');",
       "const fs=require('node:fs');",
-      `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});`,
+      `const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});`,
+      "if(!child.pid){process.stderr.write('descendant-no-pid\\n');process.exit(87)}",
       'const wait=new Int32Array(new SharedArrayBuffer(4));',
       'const deadline=Date.now()+10000;',
-      `while(!fs.existsSync(${JSON.stringify(descendantReady)})){if(Date.now()>deadline)process.exit(88);Atomics.wait(wait,0,0,10);}`,
+      `while(!fs.existsSync(${JSON.stringify(descendantReady)})){if(Date.now()>deadline){process.stderr.write('descendant-not-ready\\n');process.exit(88)}Atomics.wait(wait,0,0,10);}`,
+      "try{process.kill(child.pid,0)}catch{process.stderr.write('descendant-not-live\\n');process.exit(89)}",
       "process.stdout.write('root-exiting\\n');",
       'process.exit(0);',
     ].join('');
