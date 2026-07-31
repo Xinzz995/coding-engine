@@ -37,6 +37,7 @@ describe('fixed Windows path attribute protocol', () => {
     expect(attributesSource).toContain('FindNextFileW');
     expect(attributesSource).toContain('FindClose');
     expect(attributesSource).toContain('OpenProcess');
+    expect(attributesSource).toContain('ProcessQueryLimitedInformation | Synchronize');
     expect(attributesSource).toContain('GetProcessTimes');
     expect(attributesSource).toContain('WaitForSingleObject');
     expect(attributesSource).toContain('CloseHandle');

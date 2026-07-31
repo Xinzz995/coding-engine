@@ -19,6 +19,7 @@ namespace CodingX.WorkspaceSafety
         private const int MaximumPathCharacters = 32767;
         private const int MaximumNativeEntries = 200001;
         private const uint ProcessQueryLimitedInformation = 0x00001000;
+        private const uint Synchronize = 0x00100000;
         private const uint WaitObject0 = 0x00000000;
         private const uint WaitTimeout = 0x00000102;
         private const uint WaitFailed = 0xffffffff;
@@ -140,7 +141,7 @@ namespace CodingX.WorkspaceSafety
         internal static ProcessIdentityRecord ReadProcessIdentity(uint pid)
         {
             IntPtr process = OpenProcess(
-                ProcessQueryLimitedInformation,
+                ProcessQueryLimitedInformation | Synchronize,
                 false,
                 pid);
             if (process == IntPtr.Zero)
