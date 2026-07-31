@@ -19,6 +19,7 @@ import {
   readDarkWindowsHelperBundle,
   runDarkWindowsSupervisedOperation,
 } from './windows-supervisor.js';
+import { waitForProcessGone } from './windows-supervisor.test-support.js';
 import { windowsTestTargetEnvironment } from './windows-test-environment.js';
 import {
   acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease,
@@ -233,13 +234,15 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       "const fs=require('node:fs');",
       'const wait=new Int32Array(new SharedArrayBuffer(4));',
       "process.stdout.write('descendant-alive\\n');",
-      `fs.writeFileSync(${JSON.stringify(descendantReady)},'ready');`,
+      `fs.writeFileSync(${JSON.stringify(descendantReady)},String(process.pid));`,
       'Atomics.wait(wait,0,0,20000);',
     ].join('');
     const source = [
       "const {spawn}=require('node:child_process');",
       "const fs=require('node:fs');",
-      `const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});`,
+      // libuv places ordinary Windows children in its own kill-on-parent-exit Job.
+      // Detached skips that auxiliary Job without breaking away from coding-x's Job.
+      `const child=spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:['ignore',1,2]});`,
       "if(!child.pid){process.stderr.write('descendant-no-pid\\n');process.exit(87)}",
       'const wait=new Int32Array(new SharedArrayBuffer(4));',
       'const deadline=Date.now()+10000;',
@@ -259,7 +262,9 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     expect(outcome.verdict).toBe('process-tree-not-empty');
     expect(outcome.leftover).toBe(true);
     expect(outcome.receipt.drainReason).toBe('process-tree-not-empty');
-    expect(readFileSync(descendantReady, 'utf8')).toBe('ready');
+    const descendantPid = Number(readFileSync(descendantReady, 'utf8'));
+    expect(descendantPid).toBeGreaterThan(0);
+    await waitForProcessGone(descendantPid);
     expect(outcome.stdout.toString('utf8')).toContain('root-exiting');
     expect(outcome.stdout.toString('utf8')).toContain('descendant-alive');
     await state.session.close();
