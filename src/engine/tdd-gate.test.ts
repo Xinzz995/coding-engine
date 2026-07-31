@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -443,7 +444,10 @@ describe('runTddGate', { timeout: 30_000, concurrent: false }, () => {
     const fixture = repo();
     const managed = await createRepoWorkspaceSession(fixture.root);
     const bin = join(fixture.root, 'malicious-bin');
-    const script = join(bin, process.platform === 'win32' ? 'malicious-git.cjs' : 'malicious-git.mjs');
+    const script = join(
+      bin,
+      process.platform === 'win32' ? 'malicious-git.cjs' : 'malicious-git.mjs',
+    );
     const wrapper = join(bin, process.platform === 'win32' ? 'git.exe' : 'git');
     const wrapperRan = join(fixture.root, 'malicious-git-ran');
     const workspaceMarker = join(managed.workspacePath, 'malicious-git-write');
@@ -484,20 +488,28 @@ describe('runTddGate', { timeout: 30_000, concurrent: false }, () => {
       chmodSync(wrapper, 0o755);
     }
 
-    const pathBefore = process.env.PATH;
-    const nodeOptionsBefore = process.env.NODE_OPTIONS;
+    const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
+    const nodeOptionsKey =
+      Object.keys(process.env).find((key) => key.toLowerCase() === 'node_options') ??
+      'NODE_OPTIONS';
+    const pathBefore = process.env[pathKey];
+    const nodeOptionsBefore = process.env[nodeOptionsKey];
     const realGit =
       process.platform === 'win32'
         ? execFileSync('where.exe', ['git'], { encoding: 'utf8' }).split(/\r?\n/u)[0]
         : execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-    process.env.PATH = `${bin}${delimiter}${pathBefore ?? ''}`;
+    process.env[pathKey] = `${bin}${delimiter}${pathBefore ?? ''}`;
     process.env.REAL_GIT = realGit;
     process.env.MALICIOUS_GIT_RAN = wrapperRan;
     process.env.MALICIOUS_GIT_WORKSPACE_MARKER = workspaceMarker;
     if (process.platform === 'win32') {
-      process.env.NODE_OPTIONS = [nodeOptionsBefore, '--require', `"${script}"`]
+      process.env[nodeOptionsKey] = [nodeOptionsBefore, '--require', `"${script}"`]
         .filter((value) => value !== undefined && value !== '')
         .join(' ');
+      const resolvedGit = execFileSync('where.exe', ['git'], { encoding: 'utf8' }).split(
+        /\r?\n/u,
+      )[0];
+      expect(realpathSync.native(resolvedGit)).toBe(realpathSync.native(wrapper));
     }
     try {
       let observed: unknown;
@@ -509,16 +521,20 @@ describe('runTddGate', { timeout: 30_000, concurrent: false }, () => {
       } catch (error) {
         observed = error;
       }
-      expect(existsSync(wrapperRan)).toBe(true);
+      const observedDetail =
+        observed instanceof Error
+          ? `${observed.name}: ${observed.message}`
+          : JSON.stringify(observed);
+      expect(existsSync(wrapperRan), observedDetail).toBe(true);
       expect(readFileSync(wrapperRan, 'utf8')).toBe('yes');
       expect(existsSync(workspaceMarker)).toBe(true);
       expect(readFileSync(workspaceMarker, 'utf8')).toBe('bad');
       expect(observed).toMatchObject({ name: 'WorkspaceSafetyError', code: 'isolated' });
     } finally {
-      if (pathBefore === undefined) delete process.env.PATH;
-      else process.env.PATH = pathBefore;
-      if (nodeOptionsBefore === undefined) delete process.env.NODE_OPTIONS;
-      else process.env.NODE_OPTIONS = nodeOptionsBefore;
+      if (pathBefore === undefined) delete process.env[pathKey];
+      else process.env[pathKey] = pathBefore;
+      if (nodeOptionsBefore === undefined) delete process.env[nodeOptionsKey];
+      else process.env[nodeOptionsKey] = nodeOptionsBefore;
       delete process.env.REAL_GIT;
       delete process.env.MALICIOUS_GIT_RAN;
       delete process.env.MALICIOUS_GIT_WORKSPACE_MARKER;
