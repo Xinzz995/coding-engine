@@ -20,15 +20,125 @@ import {
   waitForProcessGone,
 } from './windows-supervisor.test-support.js';
 import { windowsTestTargetEnvironment } from './windows-test-environment.js';
+import { readWindowsProcessIdentity } from './windows-identity-transport.js';
 
 const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
 
-function processIdsFrom(path: string): number[] {
+interface CleanupProcessReference {
+  readonly identity?: string;
+  readonly label: string;
+  readonly pid: number;
+}
+
+function processReferencesFrom(path: string): CleanupProcessReference[] {
   if (!existsSync(path)) return [];
   const state = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-  return [...new Set(Object.values(state))].filter(
-    (value): value is number => Number.isSafeInteger(value) && Number(value) > 0,
-  );
+  let inspectorPid = state.inspectorPid;
+  let inspectorIdentity = state.inspectorIdentity;
+  const inspectorIdentityPath = state.inspectorIdentityPath;
+  if (
+    (typeof inspectorIdentity !== 'string' || !/^[0-9]+$/u.test(inspectorIdentity)) &&
+    typeof inspectorIdentityPath === 'string' &&
+    existsSync(inspectorIdentityPath)
+  ) {
+    const handshake = JSON.parse(readFileSync(inspectorIdentityPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    const handshakePid = handshake.pid;
+    if (
+      Number.isSafeInteger(handshakePid) &&
+      Number(handshakePid) > 0 &&
+      (inspectorPid === undefined || inspectorPid === handshakePid)
+    ) {
+      inspectorPid = handshakePid;
+      inspectorIdentity = handshake.processIdentity;
+    }
+  }
+  const normalizedState: Record<string, unknown> = {
+    ...state,
+    inspectorPid,
+    inspectorIdentity,
+  };
+  const fields = [
+    ['supervisorPid', 'supervisorIdentity', 'supervisor'],
+    ['rootPid', 'rootIdentity', 'root target'],
+    ['descendantPid', 'descendantIdentity', 'descendant target'],
+    ['inspectorPid', 'inspectorIdentity', 'snapshot inspector'],
+  ] as const;
+  return fields.flatMap(([pidKey, identityKey, label]) => {
+    const pid = normalizedState[pidKey];
+    if (!Number.isSafeInteger(pid) || Number(pid) <= 0) return [];
+    const identity = identityKey ? normalizedState[identityKey] : undefined;
+    return [
+      {
+        pid: Number(pid),
+        label,
+        ...(typeof identity === 'string' && /^[0-9]+$/u.test(identity) ? { identity } : {}),
+      },
+    ];
+  });
+}
+
+function exactProcessRemains(reference: CleanupProcessReference): boolean | undefined {
+  if (!reference.identity) return undefined;
+  const observed = readWindowsProcessIdentity(reference.pid);
+  if (observed.status === 'unknown') return undefined;
+  return observed.status === 'found' && observed.value === reference.identity;
+}
+
+function readHandleInventory(path: unknown): Record<string, unknown> {
+  if (typeof path !== 'string' || path.length === 0) {
+    throw new Error('handle inventory path is invalid');
+  }
+  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+}
+
+function inventoryHandles(inventory: Record<string, unknown>, label: string): string[] {
+  if (
+    !Array.isArray(inventory.handles) ||
+    inventory.handles.some((value) => typeof value !== 'string' || !/^[0-9]+$/u.test(value))
+  ) {
+    throw new Error(`${label} handle inventory is invalid`);
+  }
+  const handles = inventory.handles as string[];
+  expect(handles, label).toHaveLength(3);
+  expect(new Set(handles).size, label).toBe(3);
+  return handles;
+}
+
+function expectSuspendedHandleBinding({
+  snapshot,
+  runtime,
+  snapshotRole,
+  runtimeRole,
+  pid,
+  processIdentity,
+}: {
+  snapshot: Record<string, unknown>;
+  runtime: Record<string, unknown>;
+  snapshotRole: string;
+  runtimeRole: string;
+  pid: unknown;
+  processIdentity: unknown;
+}): void {
+  expect(snapshot).toMatchObject({
+    kind: 'suspended-handle-snapshot-v1',
+    role: snapshotRole,
+    pid,
+    processIdentity,
+  });
+  expect([4, 8]).toContain(snapshot.pointerSize);
+  expect(snapshot.entrySize).toBe(Number(snapshot.pointerSize) * 3 + 16);
+  expect(runtime).toMatchObject({
+    kind: 'runtime-standard-handles-v1',
+    role: runtimeRole,
+    pid,
+    processIdentity,
+  });
+  const snapshotHandles = inventoryHandles(snapshot, `${snapshotRole} snapshot`);
+  const runtimeHandles = inventoryHandles(runtime, `${runtimeRole} runtime`);
+  expect(runtimeHandles).toEqual(snapshotHandles);
 }
 
 async function settleParentCrashProcesses(
@@ -42,24 +152,36 @@ async function settleParentCrashProcesses(
   } catch (error) {
     cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
   }
-  let recordedProcessIds: number[] = [];
+  let recordedProcesses: CleanupProcessReference[] = [];
   try {
-    recordedProcessIds = processIdsFrom(cleanupStatePath);
+    recordedProcesses = processReferencesFrom(cleanupStatePath);
   } catch (error) {
     cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
   }
-  const processIds = [...new Set([parent.pid, ...recordedProcessIds])].filter(
-    (pid): pid is number => Number.isSafeInteger(pid) && Number(pid) > 0 && pid !== process.pid,
+  const processIds = [...new Set(recordedProcesses.map((reference) => reference.pid))].filter(
+    (pid) => pid !== process.pid && pid !== parent.pid,
   );
   const naturalResults = await Promise.allSettled(
     processIds.map(async (pid) => await waitForProcessGone(pid, 5_000)),
   );
-  const lingering = processIds.filter(
+  const lingeringIds = processIds.filter(
     (_pid, index) => naturalResults[index]?.status === 'rejected',
   );
-  for (const pid of lingering) {
+  const forced: CleanupProcessReference[] = [];
+  for (const pid of lingeringIds) {
+    const reference = recordedProcesses.find((item) => item.pid === pid)!;
+    const remains = exactProcessRemains(reference);
+    if (remains !== true) {
+      if (remains === undefined) {
+        cleanupErrors.push(
+          new Error(`refused to kill ${reference.label} ${String(pid)} without exact identity`),
+        );
+      }
+      continue;
+    }
     try {
       process.kill(pid, 'SIGKILL');
+      forced.push(reference);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
         cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
@@ -67,19 +189,22 @@ async function settleParentCrashProcesses(
     }
   }
   const forcedResults = await Promise.allSettled(
-    lingering.map(async (pid) => await waitForProcessGone(pid, 5_000)),
+    forced.map(async ({ pid }) => await waitForProcessGone(pid, 5_000)),
   );
   for (const [index, result] of forcedResults.entries()) {
-    if (result.status === 'rejected') {
+    const reference = forced[index];
+    if (result.status === 'rejected' && exactProcessRemains(reference) === true) {
       cleanupErrors.push(
-        new Error(`could not clean up parent-crash process ${String(lingering[index])}`),
+        new Error(`could not clean up ${reference.label} ${String(reference.pid)}`),
       );
     }
   }
-  if (lingering.length > 0) {
+  if (forced.length > 0) {
     cleanupErrors.push(
       new Error(
-        `parent-crash fixture required forced cleanup for processes ${lingering.join(', ')}`,
+        `parent-crash fixture required forced cleanup for processes ${forced
+          .map(({ pid }) => String(pid))
+          .join(', ')}`,
       ),
     );
   }
@@ -170,7 +295,7 @@ windowsOnly(
       ).toBe(false);
     });
 
-    it('drains the full Job after a hard parent kill and exposes only three inheritable handles', async () => {
+    it('drains the full Job after a hard parent kill and binds exactly three inherited handles', async () => {
       const workspace = createWindowsWorkspace('parent-crash');
       const parentReadyPath = join(workspace, 'parent-ready.json');
       const cleanupStatePath = join(workspace, 'parent-cleanup.json');
@@ -211,27 +336,27 @@ windowsOnly(
         await waitForFile(parentReadyPath, 60_000);
         const ready = JSON.parse(readFileSync(parentReadyPath, 'utf8')) as Record<string, unknown>;
         expect(ready.error, stderr).toBeUndefined();
-        const rootInventory = JSON.parse(
-          readFileSync(String(ready.rootInventoryPath), 'utf8'),
-        ) as Record<string, unknown>;
-        const descendantInventory = JSON.parse(
-          readFileSync(String(ready.descendantInventoryPath), 'utf8'),
-        ) as Record<string, unknown>;
-        expect(rootInventory).toMatchObject({
-          role: 'root',
+        const rootInventory = readHandleInventory(ready.rootInventoryPath);
+        const rootRuntimeInventory = readHandleInventory(ready.rootRuntimeInventoryPath);
+        const descendantInventory = readHandleInventory(ready.descendantInventoryPath);
+        const descendantRuntimeInventory = readHandleInventory(
+          ready.descendantRuntimeInventoryPath,
+        );
+        expectSuspendedHandleBinding({
+          snapshot: rootInventory,
+          runtime: rootRuntimeInventory,
+          snapshotRole: 'root-prestart',
+          runtimeRole: 'root-runtime',
           pid: ready.rootPid,
-          inheritableCount: 3,
-          stdinIncluded: true,
-          stdoutIncluded: true,
-          stderrIncluded: true,
+          processIdentity: ready.rootIdentity,
         });
-        expect(descendantInventory).toMatchObject({
-          role: 'descendant',
+        expectSuspendedHandleBinding({
+          snapshot: descendantInventory,
+          runtime: descendantRuntimeInventory,
+          snapshotRole: 'descendant-prestart',
+          runtimeRole: 'descendant-runtime',
           pid: ready.descendantPid,
-          inheritableCount: 3,
-          stdinIncluded: true,
-          stdoutIncluded: true,
-          stderrIncluded: true,
+          processIdentity: ready.descendantIdentity,
         });
         expect(ready.rootPid).not.toBe(ready.descendantPid);
 

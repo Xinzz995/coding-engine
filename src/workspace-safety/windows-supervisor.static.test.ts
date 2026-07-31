@@ -212,10 +212,17 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(breakawayTarget).toContain('Add-Type -Path $resolvedAssembly');
     expect(handleInventory).toContain('NtQuerySystemInformation');
     expect(handleInventory).toContain('HANDLE_FLAG_INHERIT');
+    expect(handleInventory).toContain('OBJ_INHERIT');
+    expect(handleInventory).toContain('AssertSnapshotCalibration');
+    expect(handleInventory).toContain('OpenProcess');
     expect(handleInventory).toMatch(/dwFillAttribute;\s+internal uint dwFlags;/u);
     expect(handleInventory).toContain('public static int Main(string[] arguments)');
     expect(handleInventory).toContain('PROC_THREAD_ATTRIBUTE_HANDLE_LIST');
     expect(handleInventory).toContain('EXTENDED_STARTUPINFO_PRESENT');
+    expect(handleInventory).toContain('CREATE_SUSPENDED');
+    expect(handleInventory).toContain('ResumeThread');
+    expect(handleInventory).toContain('runtime-standard-handles-v1');
+    expect(handleInventory).toContain('WriteInspectorIdentity(arguments[5])');
     expect(handleInventory).toContain('IntPtr[] inherited = new IntPtr[]');
     expect(parentCrash).toContain('supervisorPid: bound.supervisorPid');
     expect(parentCrash).toContain(
@@ -223,7 +230,12 @@ describe('fixed Windows Job supervisor assets', () => {
     );
     expect(parentCrash).toContain('detached: true');
     expect(parentCrash).toContain('executable: handleExecutable');
+    expect(parentCrash).toContain("role: 'root-prestart'");
+    expect(parentCrash).toContain("role: 'descendant-prestart'");
+    expect(parentCrash).toContain("writeFileSync(descendantProceedPath, 'inspected')");
     expect(parentCrash).toContain('persistCleanupState');
+    expect(parentCrash).toContain('inspectorIdentityPath');
+    expect(parentCrash).toContain('writeCommittedJson(cleanupStatePath, cleanupState)');
     expect(parentCrash).not.toContain('powershell');
     expect(parentCrash).toContain("events.next('RESULT')");
     expect(parentCrash).toContain('target exited before ready');

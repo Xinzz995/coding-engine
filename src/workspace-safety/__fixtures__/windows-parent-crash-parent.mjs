@@ -1,6 +1,13 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
@@ -26,6 +33,12 @@ function send(child, type, message, extra = {}) {
       messageBase64: Buffer.from(JSON.stringify(message), 'utf8').toString('base64'),
     })}\n`,
   );
+}
+
+function writeCommittedJson(path, value) {
+  const temporary = `${path}.tmp-${String(process.pid)}`;
+  writeFileSync(temporary, JSON.stringify(value));
+  renameSync(temporary, path);
 }
 
 class Events {
@@ -69,8 +82,8 @@ class Events {
   }
 }
 
-async function waitForFile(path) {
-  const deadline = Date.now() + 45_000;
+async function waitForFile(path, timeoutMs = 45_000) {
+  const deadline = Date.now() + timeoutMs;
   while (!existsSync(path) && Date.now() <= deadline) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -150,6 +163,100 @@ function installPrepared(workspace, helperDigest, bound) {
   return { activePath, prepared };
 }
 
+async function inspectSuspendedTarget({
+  executable,
+  role,
+  pid,
+  identity,
+  outputPath,
+  workspace,
+  cleanupState,
+  persistCleanupState,
+}) {
+  const inspectorIdentityPath = `${outputPath}.inspector.json`;
+  cleanupState.inspectorIdentityPath = inspectorIdentityPath;
+  delete cleanupState.inspectorIdentity;
+  persistCleanupState();
+  const inspector = spawn(
+    executable,
+    ['inspect', role, String(pid), identity, outputPath, inspectorIdentityPath],
+    {
+      cwd: workspace,
+      env: {
+        SystemRoot: process.env.SystemRoot,
+        TEMP: process.env.TEMP,
+        TMP: process.env.TMP,
+      },
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    },
+  );
+  if (!inspector.pid) throw new Error(`${role} inspector did not expose a process id`);
+  cleanupState.inspectorPid = inspector.pid;
+  persistCleanupState();
+  let stderr = '';
+  inspector.stderr.setEncoding('utf8');
+  inspector.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk}`.slice(-8192);
+  });
+  let exited = false;
+  try {
+    const exitPromise = new Promise((resolve, reject) => {
+      inspector.once('error', (error) => {
+        reject(error);
+      });
+      inspector.once('exit', (code, signal) => {
+        exited = true;
+        resolve({ code, signal });
+      });
+    });
+    const handshake = await Promise.race([
+      waitForFile(inspectorIdentityPath, 5_000).then(() => 'identity'),
+      exitPromise.then(() => 'exit'),
+    ]);
+    if (handshake === 'exit' && !existsSync(inspectorIdentityPath)) {
+      throw new Error(`${role} inspector exited before binding its identity: ${stderr}`);
+    }
+    const inspectorIdentity = JSON.parse(readFileSync(inspectorIdentityPath, 'utf8'));
+    if (
+      inspectorIdentity.pid !== inspector.pid ||
+      typeof inspectorIdentity.processIdentity !== 'string' ||
+      !/^[0-9]+$/u.test(inspectorIdentity.processIdentity)
+    ) {
+      throw new Error(`${role} inspector identity handshake is invalid`);
+    }
+    cleanupState.inspectorIdentity = inspectorIdentity.processIdentity;
+    persistCleanupState();
+    const timeout = new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 5000));
+    const first = await Promise.race([exitPromise, timeout]);
+    if (first.timedOut === true) {
+      inspector.kill('SIGKILL');
+      await Promise.race([
+        exitPromise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`${role} inspector could not be stopped`)), 5000),
+        ),
+      ]);
+      throw new Error(`${role} inspector timed out`);
+    }
+    const exit = first;
+    if (exit.code !== 0 || exit.signal !== null) {
+      throw new Error(
+        `${role} inspector failed with code ${String(exit.code)} and signal ${String(exit.signal)}: ${stderr}`,
+      );
+    }
+    if (!existsSync(outputPath)) throw new Error(`${role} inspector did not write its snapshot`);
+  } finally {
+    if (exited) {
+      delete cleanupState.inspectorPid;
+      delete cleanupState.inspectorIdentity;
+      delete cleanupState.inspectorIdentityPath;
+      persistCleanupState();
+    }
+  }
+}
+
 async function main() {
   const [assetRootInput, workspaceInput, parentReadyPath, cleanupStatePath, handleExecutableInput] =
     process.argv.slice(2);
@@ -197,17 +304,27 @@ async function main() {
   const cleanupState = {
     parentPid: process.pid,
     supervisorPid: helper.pid,
+    supervisorIdentity: null,
   };
-  const persistCleanupState = () => writeFileSync(cleanupStatePath, JSON.stringify(cleanupState));
+  const persistCleanupState = () => writeCommittedJson(cleanupStatePath, cleanupState);
   persistCleanupState();
   const events = new Events(helper);
   const bound = await events.next('BOUND');
   if (bound.supervisorPid !== helper.pid) {
     throw new Error('BOUND pid does not identify the directly spawned supervisor');
   }
+  if (typeof bound.supervisorIdentity !== 'string' || !/^[0-9]+$/u.test(bound.supervisorIdentity)) {
+    throw new Error('BOUND did not bind the supervisor identity');
+  }
+  cleanupState.supervisorIdentity = bound.supervisorIdentity;
+  persistCleanupState();
   const authority = installPrepared(workspace, helperDigest, bound);
   const rootInventoryPath = join(workspace, 'root-handle-inventory.json');
+  const rootRuntimeInventoryPath = join(workspace, 'root-runtime-handles.json');
   const descendantInventoryPath = join(workspace, 'descendant-handle-inventory.json');
+  const descendantRuntimeInventoryPath = join(workspace, 'descendant-runtime-handles.json');
+  const descendantCreatedPath = join(workspace, 'descendant-created.json');
+  const descendantProceedPath = join(workspace, 'descendant-proceed');
   const targetReadyPath = join(workspace, 'handle-target-ready.json');
   send(
     helper,
@@ -221,8 +338,10 @@ async function main() {
         args: [
           'root',
           handleExecutable,
-          rootInventoryPath,
-          descendantInventoryPath,
+          rootRuntimeInventoryPath,
+          descendantCreatedPath,
+          descendantRuntimeInventoryPath,
+          descendantProceedPath,
           targetReadyPath,
         ],
         cwd: workspace,
@@ -236,8 +355,29 @@ async function main() {
     { workspacePath: workspace },
   );
   const armedEvent = await events.next('ARMED');
-  cleanupState.rootPid = armedEvent.containment.targetPid;
+  const rootPid = Number(armedEvent.containment.targetPid);
+  const rootIdentity = armedEvent.containment.targetIdentity;
+  if (
+    !Number.isSafeInteger(rootPid) ||
+    rootPid <= 0 ||
+    typeof rootIdentity !== 'string' ||
+    !/^[0-9]+$/u.test(rootIdentity)
+  ) {
+    throw new Error('ARMED did not bind the suspended root identity');
+  }
+  cleanupState.rootPid = rootPid;
+  cleanupState.rootIdentity = rootIdentity;
   persistCleanupState();
+  await inspectSuspendedTarget({
+    executable: handleExecutable,
+    role: 'root-prestart',
+    pid: rootPid,
+    identity: rootIdentity,
+    outputPath: rootInventoryPath,
+    workspace,
+    cleanupState,
+    persistCleanupState,
+  });
   const armedBytes = Buffer.from(
     JSON.stringify({
       ...authority.prepared,
@@ -255,29 +395,55 @@ async function main() {
     activeChildDigest: digest(armedBytes),
   });
   await events.next('STARTED');
-  await Promise.race([
-    waitForFile(targetReadyPath),
-    events.next('RESULT').then((result) => {
-      throw new Error(
-        `handle inventory target exited before ready with code ${String(result.code)}; stdout: ${events.outputTail.stdout}; stderr: ${events.outputTail.stderr}`,
-      );
-    }),
-  ]);
-  const targetReady = JSON.parse(readFileSync(targetReadyPath, 'utf8'));
-  cleanupState.rootPid = targetReady.rootPid;
-  cleanupState.descendantPid = targetReady.descendantPid;
+  const targetResult = events.next('RESULT').then((result) => {
+    throw new Error(
+      `handle inventory target exited before ready with code ${String(result.code)}; stdout: ${events.outputTail.stdout}; stderr: ${events.outputTail.stderr}`,
+    );
+  });
+  await Promise.race([waitForFile(descendantCreatedPath), targetResult]);
+  const descendantCreated = JSON.parse(readFileSync(descendantCreatedPath, 'utf8'));
+  const descendantPid = Number(descendantCreated.descendantPid);
+  if (
+    !Number.isSafeInteger(descendantPid) ||
+    descendantPid <= 0 ||
+    descendantPid === rootPid ||
+    typeof descendantCreated.descendantIdentity !== 'string'
+  ) {
+    throw new Error('root did not bind the suspended descendant identity');
+  }
+  cleanupState.descendantPid = descendantPid;
+  cleanupState.descendantIdentity = descendantCreated.descendantIdentity;
   persistCleanupState();
-  writeFileSync(
-    parentReadyPath,
-    JSON.stringify({
-      parentPid: process.pid,
-      supervisorPid: bound.supervisorPid,
-      rootPid: targetReady.rootPid,
-      descendantPid: targetReady.descendantPid,
-      rootInventoryPath,
-      descendantInventoryPath,
-    }),
-  );
+  await inspectSuspendedTarget({
+    executable: handleExecutable,
+    role: 'descendant-prestart',
+    pid: descendantPid,
+    identity: descendantCreated.descendantIdentity,
+    outputPath: descendantInventoryPath,
+    workspace,
+    cleanupState,
+    persistCleanupState,
+  });
+  writeFileSync(descendantProceedPath, 'inspected');
+  await Promise.race([waitForFile(targetReadyPath), targetResult]);
+  const targetReady = JSON.parse(readFileSync(targetReadyPath, 'utf8'));
+  if (targetReady.rootPid !== rootPid || targetReady.descendantPid !== descendantPid) {
+    throw new Error('target ready identities do not match the inspected process tree');
+  }
+  persistCleanupState();
+  writeCommittedJson(parentReadyPath, {
+    parentPid: process.pid,
+    supervisorPid: bound.supervisorPid,
+    supervisorIdentity: bound.supervisorIdentity,
+    rootPid: targetReady.rootPid,
+    descendantPid: targetReady.descendantPid,
+    rootIdentity,
+    descendantIdentity: descendantCreated.descendantIdentity,
+    rootInventoryPath,
+    rootRuntimeInventoryPath,
+    descendantInventoryPath,
+    descendantRuntimeInventoryPath,
+  });
   await new Promise(() => {});
 }
 
@@ -287,10 +453,9 @@ try {
 } catch (error) {
   const parentReadyPath = process.argv[4];
   if (parentReadyPath) {
-    writeFileSync(
-      parentReadyPath,
-      JSON.stringify({ error: error instanceof Error ? error.stack : String(error) }),
-    );
+    writeCommittedJson(parentReadyPath, {
+      error: error instanceof Error ? error.stack : String(error),
+    });
   }
   process.exit(2);
 }
