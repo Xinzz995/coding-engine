@@ -13,6 +13,10 @@ function digest(value) {
   return `sha256:${createHash('sha256').update(value).digest('hex')}`;
 }
 
+function jsonBytes(value) {
+  return Buffer.from(`${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
 function helperBundle(assetRoot) {
   return Buffer.concat([SUPERVISOR_DOMAIN, readFileSync(join(assetRoot, SUPERVISOR_EXECUTABLE))]);
 }
@@ -245,7 +249,7 @@ async function main() {
       ...authority.prepared,
       state: 'armed',
       containment: armedEvent.containment,
-      containmentDigest: digest(JSON.stringify(armedEvent.containment)),
+      containmentDigest: digest(jsonBytes(armedEvent.containment)),
     }),
     'utf8',
   );

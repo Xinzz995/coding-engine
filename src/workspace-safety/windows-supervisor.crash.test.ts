@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ASSET_ROOT,
+  containmentDigestFor,
   createSupervisor,
   createWindowsWorkspace,
   DIGEST,
@@ -303,7 +304,7 @@ windowsOnly(
           ...authority.prepared,
           state: 'armed',
           containment,
-          containmentDigest: DIGEST(JSON.stringify(containment)),
+          containmentDigest: containmentDigestFor(containment),
         }),
         'utf8',
       );

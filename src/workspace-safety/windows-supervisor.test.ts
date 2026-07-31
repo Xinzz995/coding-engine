@@ -17,6 +17,7 @@ import {
   ASSET_ROOT,
   BREAKAWAY_SOURCE,
   BREAKAWAY_TARGET,
+  containmentDigestFor,
   created,
   CTRL_C_DRIVER,
   CTRL_C_DRIVER_SOURCE,
@@ -271,7 +272,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       ...authority.prepared,
       state: 'armed',
       containment,
-      containmentDigest: DIGEST(JSON.stringify(containment)),
+      containmentDigest: containmentDigestFor(containment),
     };
     const armedBytes = Buffer.from(JSON.stringify(armed), 'utf8');
     writeFileSync(authority.activePath, armedBytes);
@@ -306,6 +307,48 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       operationId: OPERATION_ID,
       receiptDigest: message.receiptDigest,
     });
+    await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it('accepts a delegated baseline above the control-message JSON limit', async () => {
+    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-windows-baseline-')));
+    created.push(workspace);
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    const entries = Array.from({ length: 1_000 }, (_, index) => ({
+      path: `${String(index).padStart(4, '0')}-${'x'.repeat(160)}`,
+      type: 'file',
+      bytes: 0,
+      digest: DIGEST(`large-baseline-${String(index)}`),
+    }));
+    const authority = installPreparedAuthority(
+      workspace,
+      launch.assets.helperDigest,
+      bound,
+      {
+        kind: 'final-review',
+        delegation: 'read-only-v1',
+        semantic: { version: 'read-only-v1' },
+      },
+      entries,
+    );
+    expect(authority.baselineBytes.byteLength).toBeGreaterThan(128 * 1024);
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      ['-e', 'process.exit(0)'],
+      windowsTestTargetEnvironment(),
+    );
+    await events.next('ARMED');
+    sendEmbedded(child, 'ABORT_BEFORE_START', {
+      schemaVersion: 1,
+      type: 'ABORT_BEFORE_START',
+      operationId: OPERATION_ID,
+    });
+    await events.next('PRESTART_DRAINED');
     await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
   });
 
@@ -421,7 +464,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
         ...authority.prepared,
         state: 'armed',
         containment,
-        containmentDigest: DIGEST(JSON.stringify(containment)),
+        containmentDigest: containmentDigestFor(containment),
       }),
       'utf8',
     );
@@ -490,7 +533,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
         ...authority.prepared,
         state: 'armed',
         containment,
-        containmentDigest: DIGEST(JSON.stringify(containment)),
+        containmentDigest: containmentDigestFor(containment),
       }),
       'utf8',
     );
@@ -542,7 +585,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
         ...authority.prepared,
         state: 'armed',
         containment,
-        containmentDigest: DIGEST(JSON.stringify(containment)),
+        containmentDigest: containmentDigestFor(containment),
       }),
       'utf8',
     );
@@ -684,7 +727,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
         ...authority.prepared,
         state: 'armed',
         containment,
-        containmentDigest: DIGEST(JSON.stringify(containment)),
+        containmentDigest: containmentDigestFor(containment),
       }),
       'utf8',
     );

@@ -15,6 +15,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { afterEach } from 'vitest';
 import { canonicalJson } from './baseline-contract.js';
+import { digestBytes, jsonBytes } from './filesystem.js';
 import { createWindowsSupervisorLaunch, spawnWindowsJobSupervisor } from './windows-supervisor.js';
 
 export const ASSET_ROOT = realpathSync(
@@ -50,6 +51,7 @@ export const PARENT_CRASH_PARENT = fileURLToPath(
 
 export const DIGEST = (value: string | Buffer): string =>
   `sha256:${createHash('sha256').update(value).digest('hex')}`;
+export const containmentDigestFor = (value: unknown): string => digestBytes(jsonBytes(value));
 export const OPERATION_ID = '12345678-1234-4234-8234-123456789abc';
 const OWNER_ID = 'abcdefab-cdef-4abc-8def-abcdefabcdef';
 export const created: string[] = [];
@@ -235,7 +237,12 @@ export function installPreparedAuthority(
     delegation: 'read-only-v1',
     semantic: { version: 'read-only-v1' },
   },
-): { readonly activePath: string; readonly prepared: Record<string, unknown> } {
+  baselineEntries: readonly unknown[] = [],
+): {
+  readonly activePath: string;
+  readonly baselineBytes: Buffer;
+  readonly prepared: Record<string, unknown>;
+} {
   const timestamp = new Date().toISOString();
   const protocol = {
     schemaVersion: 1,
@@ -275,7 +282,7 @@ export function installPreparedAuthority(
     workspaceIdentity: protocol.workspaceIdentity,
     contract,
     contractDigest: DIGEST(canonicalJson(contract)),
-    entries: [],
+    entries: baselineEntries,
     capturedAt: timestamp,
     manifestDigest: DIGEST('manifest'),
   };
@@ -305,7 +312,7 @@ export function installPreparedAuthority(
   writeFileSync(join(operation, 'delegated-baseline.json'), baselineBytes);
   const activePath = join(operation, 'active-child.json');
   writeFileSync(activePath, JSON.stringify(prepared));
-  return { activePath, prepared };
+  return { activePath, baselineBytes, prepared };
 }
 
 export function sendData(
@@ -343,7 +350,7 @@ export function installArmedAuthority(
       ...authority.prepared,
       state: 'armed',
       containment,
-      containmentDigest: DIGEST(JSON.stringify(containment)),
+      containmentDigest: containmentDigestFor(containment),
     }),
     'utf8',
   );

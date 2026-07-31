@@ -156,6 +156,11 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(authority.indexOf('AuthorityBinding.ReadArmed')).toBeLessThan(
       authority.indexOf('jobTarget.Resume()'),
     );
+    expect(authority).toContain(
+      'Hashing.Digest(WindowsContainmentBytes(targetPid, targetIdentity))',
+    );
+    expect(authority).not.toContain('Hashing.Utf8(StrictJson.Serialize(containment))');
+    expect(authority).toContain('result.Baseline, "delegated baseline", 64 * 1024 * 1024');
     expect(authority.indexOf('binding.InstallReceipt')).toBeLessThan(
       authority.indexOf('{ "schemaVersion", 1 }, { "type", "DRAINED" }'),
     );

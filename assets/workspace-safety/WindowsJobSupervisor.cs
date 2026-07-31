@@ -367,12 +367,19 @@ namespace CodingX.WorkspaceSafety
 
         internal static Dictionary<string, object> ParseObject(string text, string label)
         {
-            if (text == null || text.Length == 0 || text.Length > MaximumJsonCharacters)
+            return ParseObject(text, label, MaximumJsonCharacters);
+        }
+
+        internal static Dictionary<string, object> ParseObject(
+            string text, string label, int maximumJsonCharacters)
+        {
+            if (maximumJsonCharacters < 1 ||
+                text == null || text.Length == 0 || text.Length > maximumJsonCharacters)
                 throw new SafetyException(label + " is empty or too large");
             DuplicateKeyScanner scanner = new DuplicateKeyScanner(text);
             scanner.Scan();
             JavaScriptSerializer serializer = new JavaScriptSerializer();
-            serializer.MaxJsonLength = MaximumJsonCharacters;
+            serializer.MaxJsonLength = maximumJsonCharacters;
             object parsed = serializer.DeserializeObject(text);
             Dictionary<string, object> record = parsed as Dictionary<string, object>;
             if (record == null) throw new SafetyException(label + " must be a JSON object");

@@ -62,53 +62,59 @@ describe('Windows path attribute executable transport', () => {
     },
   );
 
-  it('honors the bounded process-identity helper timeout', () => {
-    vi.mocked(spawnSync).mockReturnValue({
-      pid: 1234,
-      output: [null, Buffer.from('{}'), Buffer.alloc(0)],
-      stdout: Buffer.from('{}'),
-      stderr: Buffer.alloc(0),
-      status: 0,
-      signal: null,
-    });
+  it.skipIf(process.platform === 'win32')(
+    'honors the bounded process-identity helper timeout',
+    () => {
+      vi.mocked(spawnSync).mockReturnValue({
+        pid: 1234,
+        output: [null, Buffer.from('{}'), Buffer.alloc(0)],
+        stdout: Buffer.from('{}'),
+        stderr: Buffer.alloc(0),
+        status: 0,
+        signal: null,
+      });
 
-    invokeWindowsPathAttributeHelper({
-      executablePath: 'C:\\fixed\\coding-x-windows-path-inspector.exe',
-      helperDigest: `sha256:${'0'.repeat(64)}`,
-      requestBytes: Buffer.from('{}'),
-      maxResponseBytes: 1024,
-      timeoutMs: 3_000,
-    });
-
-    expect(spawnSync).toHaveBeenCalledWith(
-      'C:\\fixed\\coding-x-windows-path-inspector.exe',
-      expect.any(Array),
-      expect.objectContaining({ timeout: 3_000 }),
-    );
-  });
-
-  it('reports the bounded process identity failure stage without stderr details', () => {
-    vi.mocked(spawnSync).mockReturnValue({
-      pid: 1234,
-      output: [
-        null,
-        Buffer.alloc(0),
-        Buffer.from('CXWPI_FAILURE_V1 stage=process-identity-read code=incomplete'),
-      ],
-      stdout: Buffer.alloc(0),
-      stderr: Buffer.from('CXWPI_FAILURE_V1 stage=process-identity-read code=incomplete'),
-      status: 2,
-      signal: null,
-    });
-
-    expect(() =>
       invokeWindowsPathAttributeHelper({
         executablePath: 'C:\\fixed\\coding-x-windows-path-inspector.exe',
         helperDigest: `sha256:${'0'.repeat(64)}`,
         requestBytes: Buffer.from('{}'),
         maxResponseBytes: 1024,
         timeoutMs: 3_000,
-      }),
-    ).toThrow(/stage process-identity-read/u);
-  });
+      });
+
+      expect(spawnSync).toHaveBeenCalledWith(
+        'C:\\fixed\\coding-x-windows-path-inspector.exe',
+        expect.any(Array),
+        expect.objectContaining({ timeout: 3_000 }),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reports the bounded process identity failure stage without stderr details',
+    () => {
+      vi.mocked(spawnSync).mockReturnValue({
+        pid: 1234,
+        output: [
+          null,
+          Buffer.alloc(0),
+          Buffer.from('CXWPI_FAILURE_V1 stage=process-identity-read code=incomplete'),
+        ],
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.from('CXWPI_FAILURE_V1 stage=process-identity-read code=incomplete'),
+        status: 2,
+        signal: null,
+      });
+
+      expect(() =>
+        invokeWindowsPathAttributeHelper({
+          executablePath: 'C:\\fixed\\coding-x-windows-path-inspector.exe',
+          helperDigest: `sha256:${'0'.repeat(64)}`,
+          requestBytes: Buffer.from('{}'),
+          maxResponseBytes: 1024,
+          timeoutMs: 3_000,
+        }),
+      ).toThrow(/stage process-identity-read/u);
+    },
+  );
 });

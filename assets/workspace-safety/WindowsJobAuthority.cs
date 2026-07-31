@@ -42,7 +42,8 @@ namespace CodingX.WorkspaceSafety
             Dictionary<string, object> owner = AuthorityBinding.Parse(result.Owner, "owner");
             Dictionary<string, object> protocol = AuthorityBinding.Parse(result.Protocol, "protocol");
             Dictionary<string, object> active = AuthorityBinding.Parse(result.Active, "prepared-bound active-child");
-            Dictionary<string, object> baseline = AuthorityBinding.Parse(result.Baseline, "delegated baseline");
+            Dictionary<string, object> baseline = AuthorityBinding.Parse(
+                result.Baseline, "delegated baseline", 64 * 1024 * 1024);
             StrictJson.ExactKeys(marker, "workspace marker", "schemaVersion", "initializedBy",
                 "workspaceIdentity", "protocolDigest", "initializedAt");
             StrictJson.ExactKeys(protocol, "protocol", "schemaVersion", "protocol",
@@ -270,12 +271,13 @@ namespace CodingX.WorkspaceSafety
             return bytes;
         }
 
-        internal static Dictionary<string, object> Parse(byte[] bytes, string label)
+        internal static Dictionary<string, object> Parse(
+            byte[] bytes, string label, int maximumJsonCharacters = 128 * 1024)
         {
             string text;
             try { text = new UTF8Encoding(false, true).GetString(bytes); }
             catch { throw new SafetyException(label + " is not strict UTF-8"); }
-            return StrictJson.ParseObject(text, label);
+            return StrictJson.ParseObject(text, label, maximumJsonCharacters);
         }
 
         internal static AuthorityBinding ReadArmed(TargetSpec target, PreparedAuthority prepared,
@@ -323,7 +325,7 @@ namespace CodingX.WorkspaceSafety
                 StrictJson.String(containment, "targetIdentity", "targetIdentity", false) != targetIdentity)
                 throw new SafetyException("live Windows containment binding mismatch");
             string containmentDigest = StrictJson.String(activeObject, "containmentDigest", "containmentDigest", false);
-            if (containmentDigest != Hashing.Digest(Hashing.Utf8(StrictJson.Serialize(containment))))
+            if (containmentDigest != Hashing.Digest(WindowsContainmentBytes(targetPid, targetIdentity)))
                 throw new SafetyException("containment digest mismatch");
             string baselineDigest = StrictJson.String(activeObject, "delegatedBaselineDigest", "baseline digest", false);
             if (baselineDigest != Hashing.Digest(baseline)) throw new SafetyException("baseline digest mismatch");
@@ -346,6 +348,21 @@ namespace CodingX.WorkspaceSafety
             binding.WorkspacePath = target.WorkspacePath;
             binding.MarkerDigest = Hashing.Digest(marker);
             return binding;
+        }
+
+        private static byte[] WindowsContainmentBytes(uint targetPid, string targetIdentity)
+        {
+            ulong identity;
+            if (!UInt64.TryParse(targetIdentity, NumberStyles.None, CultureInfo.InvariantCulture,
+                    out identity) ||
+                identity.ToString(CultureInfo.InvariantCulture) != targetIdentity)
+                throw new SafetyException("target process identity is not canonical");
+            return Hashing.Utf8(
+                "{\n" +
+                "  \"platform\": \"windows-job-v1\",\n" +
+                "  \"targetPid\": " + targetPid.ToString(CultureInfo.InvariantCulture) + ",\n" +
+                "  \"targetIdentity\": \"" + targetIdentity + "\"\n" +
+                "}\n");
         }
 
         internal static AuthorityBinding ReadCurrentArmed(TargetSpec target,
