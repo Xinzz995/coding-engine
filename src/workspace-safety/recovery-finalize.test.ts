@@ -128,6 +128,29 @@ function deferred(): { readonly promise: Promise<void>; readonly resolve: () => 
 }
 
 describe('mechanical-empty recovery finalization', () => {
+  it('binds every formal recovery mode to the same final-rename interrupt check', () => {
+    const source = readFileSync(
+      fileURLToPath(new URL('./recovery-session.ts', import.meta.url)),
+      'utf8',
+    );
+    for (const factory of [
+      'mechanicalFinalizer',
+      'createBootstrapRecoverySession',
+      'createDelegatedRecoverySession',
+      'createPrestartRecoverySession',
+      'createSameHostRebootRecoverySession',
+      'createMutationRecoverySession',
+    ]) {
+      const start = source.indexOf(`function ${factory}(`);
+      const nextFunction = source.indexOf('\nexport function ', start + 1);
+      const body = source.slice(start, nextFunction < 0 ? undefined : nextFunction);
+      expect(start, `${factory} is missing`).toBeGreaterThanOrEqual(0);
+      expect(body, `${factory} bypasses the final rename interrupt check`).toContain(
+        'finalRenameCommitCheck',
+      );
+    }
+  });
+
   it('coalesces two finalization calls for the same attempt into one commit', async () => {
     const { workspace, handle } = await installMechanicalRecovery();
     const session = createRecoverySessionWithAuthority(handle, {

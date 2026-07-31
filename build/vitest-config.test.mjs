@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import { ordinaryWindowsPathAttributesTransportAlias } from '../vitest.config.ts';
-import { nativeWindowsPathAttributesTransportAlias } from './vitest.windows-native.config.mjs';
+import ordinaryVitestConfig, {
+  ordinaryWindowsPathAttributesTransportAlias,
+} from '../vitest.config.ts';
+import nativeWindowsVitestConfig, {
+  nativeWindowsPathAttributesTransportAlias,
+} from './vitest.windows-native.config.mjs';
 
 const transportImportIds = [
   './windows-path-attributes-transport.js',
@@ -29,6 +33,13 @@ describe('ordinary Windows Vitest transport alias', () => {
       expect(importId).not.toMatch(find);
       expect(importId.replace(find, replacement)).toBe(importId);
     }
+  });
+});
+
+describe('Vitest process-suite scheduling', () => {
+  it('keeps ordinary and native suites serial on every platform', () => {
+    expect(ordinaryVitestConfig.test?.fileParallelism).toBe(false);
+    expect(nativeWindowsVitestConfig.test?.fileParallelism).toBe(false);
   });
 });
 

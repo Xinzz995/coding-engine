@@ -3,23 +3,21 @@ import { join } from 'node:path';
 import type { QualityContract } from '../quality/contract.js';
 import {
   GITHUB_ACTIONS_APP_ID,
-  GhGitHubQualityClient,
   GitHubQualityError,
   type GitHubQualityErrorKind,
   type GitHubIssueInfo,
   type GitHubQualityClient,
   type RequiredStatusCheck,
 } from '../quality/github.js';
+import { GhGitHubQualityClient } from '../quality/github-unmanaged.js';
 import { renderManagedGitHubFiles } from '../quality/github-workflows.js';
 import { findManagedRuleset, validateManagedRuleset } from '../quality/ruleset.js';
 import {
   findManagedReleaseRuleset,
   validateManagedReleaseRuleset,
 } from '../quality/release-ruleset.js';
-import {
-  validateP1DeferralIssue,
-  validatePolicyExceptionIssue,
-} from '../review/decisions.js';
+import { validateP1DeferralIssue, validatePolicyExceptionIssue } from '../review/decisions.js';
+import { digestReviewBinding } from '../review/binding.js';
 import { readFinalReviewState, readReviewDecisions } from '../review/state.js';
 
 export interface DeliveryGateIssue {
@@ -55,16 +53,25 @@ function normalizeLineEndings(value: string): string {
   return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
 }
 
-function localIssues(root: string, workspace: string, contract: QualityContract): DeliveryGateIssue[] {
+function localIssues(
+  root: string,
+  workspace: string,
+  contract: QualityContract,
+): DeliveryGateIssue[] {
   const issues: DeliveryGateIssue[] = [];
   for (const [relativePath, expected] of Object.entries(renderManagedGitHubFiles(contract))) {
     const path = join(root, relativePath);
     if (!existsSync(path)) {
-      issues.push({ file: relativePath, message: '缺少由质量契约生成的托管文件；请重跑 coding-x init' });
+      issues.push({
+        file: relativePath,
+        message: '缺少由质量契约生成的托管文件；请重跑 coding-x init',
+      });
       continue;
     }
     let actual: string;
-    try { actual = readFileSync(path, 'utf8'); } catch (error) {
+    try {
+      actual = readFileSync(path, 'utf8');
+    } catch (error) {
       issues.push({
         file: relativePath,
         message: `无法读取托管文件：${error instanceof Error ? error.message : String(error)}`,
@@ -93,13 +100,21 @@ function localIssues(root: string, workspace: string, contract: QualityContract)
 function currentP1IssueNumbers(root: string, workspace: string): number[] {
   const review = readFinalReviewState(join(root, workspace));
   if (review.status !== 'ready') return [];
-  const decisions = readReviewDecisions(join(root, workspace)).decisions
-    .filter((decision) => decision.headSha === review.state.binding.headSha);
+  const bindingDigest = digestReviewBinding(review.state.binding);
+  const decisions = readReviewDecisions(join(root, workspace)).decisions.filter(
+    (decision) =>
+      decision.headSha === review.state.binding.headSha &&
+      decision.reviewBindingDigest === bindingDigest,
+  );
   const latest = new Map<string, (typeof decisions)[number]>();
   for (const decision of decisions) latest.set(decision.findingId, decision);
-  return [...new Set([...latest.values()]
-    .filter((decision) => decision.action === 'p1-deferred')
-    .map((decision) => decision.issue ?? 0))];
+  return [
+    ...new Set(
+      [...latest.values()]
+        .filter((decision) => decision.action === 'p1-deferred')
+        .map((decision) => decision.issue ?? 0),
+    ),
+  ];
 }
 
 /** 本地生成物与真实 GitHub 状态的只读漂移检查。 */
@@ -113,10 +128,16 @@ export function checkDeliveryGate(options: {
 }): DeliveryGateCheckResult {
   if (!options.contract) {
     return {
-      status: 'skipped', remoteChecked: false, repository: null, rulesetId: null,
+      status: 'skipped',
+      remoteChecked: false,
+      repository: null,
+      rulesetId: null,
       remoteFailure: null,
-      releaseRulesetId: null, immutableReleases: null,
-      managedFilesChecked: 0, exceptionIssuesChecked: 0, issues: [],
+      releaseRulesetId: null,
+      immutableReleases: null,
+      managedFilesChecked: 0,
+      exceptionIssuesChecked: 0,
+      issues: [],
     };
   }
   const contract = options.contract;
@@ -141,11 +162,14 @@ export function checkDeliveryGate(options: {
   let remoteFailure: DeliveryGateCheckResult['remoteFailure'] = null;
   try {
     const repository = client.discoverRepository(options.root);
-    if (repository.fullName !== contract.repository.fullName
-        || repository.defaultBranch !== contract.repository.defaultBranch) {
+    if (
+      repository.fullName !== contract.repository.fullName ||
+      repository.defaultBranch !== contract.repository.defaultBranch
+    ) {
       issues.push({
         file: '.coding-x/quality.json',
-        message: `契约绑定 ${contract.repository.fullName}/${contract.repository.defaultBranch}，` +
+        message:
+          `契约绑定 ${contract.repository.fullName}/${contract.repository.defaultBranch}，` +
           `实际远端为 ${repository.fullName}/${repository.defaultBranch}`,
       });
     }
@@ -180,10 +204,12 @@ export function checkDeliveryGate(options: {
       issues.push({ file: 'GitHub Ruleset', message: '未找到 coding-x 管理的默认分支 Ruleset' });
     } else {
       base.rulesetId = ruleset.id;
-      const expectedChecks: RequiredStatusCheck[] = contract.github.requiredChecks.map((context) => ({
-        context,
-        integration_id: GITHUB_ACTIONS_APP_ID,
-      }));
+      const expectedChecks: RequiredStatusCheck[] = contract.github.requiredChecks.map(
+        (context) => ({
+          context,
+          integration_id: GITHUB_ACTIONS_APP_ID,
+        }),
+      );
       for (const message of validateManagedRuleset(
         ruleset,
         expectedChecks,
@@ -196,7 +222,10 @@ export function checkDeliveryGate(options: {
     if (contract.release.protectedRefs.length > 0) {
       const releaseRuleset = findManagedReleaseRuleset(rulesets);
       if (!releaseRuleset) {
-        issues.push({ file: 'GitHub Release Ruleset', message: '未找到 coding-x 管理的发布标签 Ruleset' });
+        issues.push({
+          file: 'GitHub Release Ruleset',
+          message: '未找到 coding-x 管理的发布标签 Ruleset',
+        });
       } else {
         base.releaseRulesetId = releaseRuleset.id;
         for (const message of validateManagedReleaseRuleset(
@@ -238,11 +267,17 @@ export function checkDeliveryGate(options: {
     const referenced = currentP1IssueNumbers(options.root, options.workspace);
     for (const number of referenced) {
       if (number < 1) {
-        issues.push({ file: join(options.workspace, 'review-decisions.json'), message: 'P1 延期决定缺少 Issue 编号' });
+        issues.push({
+          file: join(options.workspace, 'review-decisions.json'),
+          message: 'P1 延期决定缺少 Issue 编号',
+        });
         continue;
       }
       if (!client.getIssue) {
-        issues.push({ file: `GitHub Issue #${number}`, message: '当前 GitHub 适配器无法核验 P1 延期 Issue' });
+        issues.push({
+          file: `GitHub Issue #${number}`,
+          message: '当前 GitHub 适配器无法核验 P1 延期 Issue',
+        });
         continue;
       }
       const issue = client.getIssue(repository.fullName, number);
@@ -254,13 +289,14 @@ export function checkDeliveryGate(options: {
   } catch (error) {
     if (error instanceof GitHubQualityError) {
       remoteFailure = { kind: error.kind, attempts: error.attempts };
-      const prefix = error.kind === 'transient'
-        ? `GitHub 远端暂时不可用，${error.attempts} 次尝试后仍无法完成核验`
-        : error.kind === 'unauthenticated'
-          ? 'GitHub CLI 未认证，无法完成远端核验'
-          : error.kind === 'forbidden'
-            ? 'GitHub 权限不足，无法完成远端核验'
-            : 'GitHub 返回结果无法完成远端核验';
+      const prefix =
+        error.kind === 'transient'
+          ? `GitHub 远端暂时不可用，${error.attempts} 次尝试后仍无法完成核验`
+          : error.kind === 'unauthenticated'
+            ? 'GitHub CLI 未认证，无法完成远端核验'
+            : error.kind === 'forbidden'
+              ? 'GitHub 权限不足，无法完成远端核验'
+              : 'GitHub 返回结果无法完成远端核验';
       issues.push({ file: 'GitHub Probe', message: `${prefix}：${error.detail ?? error.message}` });
     } else {
       remoteFailure = { kind: 'unknown', attempts: 1 };

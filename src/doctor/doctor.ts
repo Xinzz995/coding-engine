@@ -8,8 +8,8 @@ import {
 } from '../engine/model-catalog.js';
 import { readModelRouting } from '../engine/models.js';
 import { tryReadPrd } from '../engine/prd.js';
-import { isPidAlive, readLockInfo, LOCK_FILE } from '../engine/lock.js';
-import { checkTddPolicy, readTddConfig } from '../engine/tdd-gate.js';
+import { readTddConfig } from '../engine/tdd-gate.js';
+import { checkTddPolicy } from '../engine/tdd-policy-unmanaged.js';
 import {
   assessQualityRuntime,
   deriveQualityChecks,
@@ -19,6 +19,11 @@ import {
   type QualityContract,
 } from '../quality/contract.js';
 import type { GitHubQualityClient } from '../quality/github.js';
+import {
+  inspectWorkspaceSafetyStatus,
+  renderWorkspaceSafetyStatusLines,
+  type WorkspaceSafetyStatusSnapshot,
+} from '../workspace-safety/status.js';
 import { checkDeliveryGate, type DeliveryGateCheckResult } from './delivery.js';
 import { CODING_X_VERSION } from '../version.js';
 
@@ -96,14 +101,6 @@ export interface TddConfigCheckResult {
   issues: DoctorIssue[];
 }
 
-export interface LockCheckResult {
-  /** engine.lock 是否存在；不存在=无引擎实例在运行，正常态 */
-  found: boolean;
-  /** 存在时：持锁 pid 已死或锁损坏（stale，上次异常退出遗留）；引擎运行中为 false */
-  stale: boolean;
-  pid: number | null;
-}
-
 export interface WorkspaceGitCheckResult {
   /** 展示用的 workspace 路径（默认 .workspace）。 */
   workspacePath: string;
@@ -151,7 +148,8 @@ export interface DoctorReport {
   tdd: TddConfigCheckResult;
   modelCatalog: ModelCatalogCheckResult;
   workspaceGit: WorkspaceGitCheckResult;
-  lock: LockCheckResult;
+  /** 只读诊断快照；CLI 正式入口始终提供，非 ready 会让 doctor 非绿。 */
+  workspaceSafety?: WorkspaceSafetyStatusSnapshot;
 }
 
 const REQUIRED_FIELDS = ['title', 'status', 'updated', 'scope'] as const;
@@ -595,17 +593,11 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
       }
     }
   }
-  const lockPath = resolve(root, workspace, LOCK_FILE);
-  let lock: LockCheckResult = { found: false, stale: false, pid: null };
-  if (existsSync(lockPath)) {
-    const info = readLockInfo(lockPath);
-    lock = { found: true, stale: !(info !== null && isPidAlive(info.pid)), pid: info?.pid ?? null };
-  }
   const docsDir = join(root, 'docs');
   if (!existsSync(docsDir) || !statSync(docsDir).isDirectory()) {
     return {
       docsFound: false, frontmatter: null, freshness: null, agentsIndex: null, links: null,
-      quality, delivery, tdd, modelCatalog, workspaceGit, lock,
+      quality, delivery, tdd, modelCatalog, workspaceGit,
     };
   }
   const files = walkMarkdownFiles(docsDir);
@@ -692,8 +684,21 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     tdd,
     modelCatalog,
     workspaceGit,
-    lock,
   };
+}
+
+/**
+ * Activated read-only doctor entrypoint. It adds the production disk evaluator result without
+ * turning that observation into write authority.
+ */
+export async function runDoctorWithWorkspaceSafety(
+  root: string,
+  options: DoctorOptions = {},
+): Promise<DoctorReport & { workspaceSafety: WorkspaceSafetyStatusSnapshot }> {
+  const report = runDoctor(root, options);
+  const workspacePath = resolve(root, options.workspace ?? '.workspace');
+  const workspaceSafety = await inspectWorkspaceSafetyStatus(workspacePath);
+  return { ...report, workspaceSafety };
 }
 
 function renderQualityLines(result: QualityContractCheckResult): string[] {
@@ -785,18 +790,6 @@ function renderModelCatalogLines(result: ModelCatalogCheckResult): string[] {
   return lines;
 }
 
-function renderLockLines(lock: LockCheckResult): string[] {
-  const lines = ['🔒 workspace 锁'];
-  if (!lock.found) {
-    lines.push('  ✅ 无 engine.lock（当前没有引擎实例在运行）');
-  } else if (lock.stale) {
-    lines.push(`  💡 发现 stale 锁${lock.pid !== null ? `（pid ${lock.pid} 已不存在）` : '（锁文件损坏）'}：上次异常退出遗留，下次 coding-x 运行将自动接管（建议项，不计失败）`);
-  } else {
-    lines.push(`  ℹ️  引擎运行中（pid ${lock.pid}）：请勿对同一 workspace 并行启动 run/repair`);
-  }
-  return lines;
-}
-
 function renderWorkspaceGitLines(result: WorkspaceGitCheckResult): string[] {
   const lines = ['🧹 workspace Git 隔离'];
   if (!result.gitAvailable) {
@@ -821,9 +814,11 @@ function renderWorkspaceGitLines(result: WorkspaceGitCheckResult): string[] {
 }
 
 export function renderDoctorReport(report: DoctorReport): { text: string; exitCode: number } {
+  const workspaceSafetyIssues =
+    report.workspaceSafety === undefined || report.workspaceSafety.status === 'ready' ? 0 : 1;
   if (!report.docsFound) {
     const total = report.modelCatalog.issues.length + report.tdd.issues.length
-      + report.quality.issues.length + report.delivery.issues.length;
+      + report.quality.issues.length + report.delivery.issues.length + workspaceSafetyIssues;
     return {
       text: [
         'ℹ️  未找到 docs/ 目录：建议先运行 /init-docs 生成知识库，再用 doctor 做健康检查。',
@@ -831,8 +826,10 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
         '', ...renderDeliveryLines(report.delivery),
         '', ...renderTddLines(report.tdd),
         '', ...renderModelCatalogLines(report.modelCatalog),
+        ...(report.workspaceSafety === undefined
+          ? []
+          : ['', ...renderWorkspaceSafetyStatusLines(report.workspaceSafety)]),
         '', ...renderWorkspaceGitLines(report.workspaceGit),
-        '', ...renderLockLines(report.lock),
       ].join('\n'),
       exitCode: total === 0 ? 0 : 1,
     };
@@ -876,11 +873,13 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   lines.push('', ...renderDeliveryLines(report.delivery));
   lines.push('', ...renderTddLines(report.tdd));
   lines.push('', ...renderModelCatalogLines(report.modelCatalog));
+  if (report.workspaceSafety !== undefined) {
+    lines.push('', ...renderWorkspaceSafetyStatusLines(report.workspaceSafety));
+  }
   lines.push('', ...renderWorkspaceGitLines(report.workspaceGit));
-  lines.push('', ...renderLockLines(report.lock));
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
     + report.modelCatalog.issues.length + report.tdd.issues.length + report.quality.issues.length
-    + report.delivery.issues.length;
+    + report.delivery.issues.length + workspaceSafetyIssues;
   lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
   return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
 }

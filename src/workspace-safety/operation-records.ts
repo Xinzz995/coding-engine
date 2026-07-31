@@ -204,8 +204,6 @@ export type OperationHandleState =
   ActiveChildRecord['state'] | 'receipt-installed' | 'quarantined' | 'settled' | 'failed';
 type StrictRecord = Record<string, unknown>;
 
-export const NEVER: Promise<never> = new Promise(() => undefined);
-
 export function invalid(message: string): never {
   throw new WorkspaceSafetyError('invalid', `Invalid workspace operation: ${message}`);
 }

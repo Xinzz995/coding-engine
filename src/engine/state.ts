@@ -16,6 +16,7 @@ import {
   type ValidationRequest,
   type ValidationReceipt,
 } from '../contracts/validation-contract.js';
+import type { WorkspaceWriter } from '../workspace-safety/session.js';
 
 export {
   parseValidationReceipt,
@@ -141,15 +142,36 @@ export function readDisplayState(path: string, prd: Prd): DisplayStateRead {
   };
 }
 
-// 启动时保证 state.json 存在：缺失则从 prd 初始化（含旧格式抽取迁移）并落盘。
-// 文件存在但解析失败时不覆盖（留给 npx coding-x repair），内存中按初始值继续。
+const STATE_FILE = 'state.json';
+
+/**
+ * @deprecated 仅供激活前旧控制流与同步单元测试使用。正式控制流必须使用
+ * ensureStateFileWithWriter，不得拿裸 workspace 写业务文件。
+ */
 export function ensureStateFile(workspace: string, prd: Prd): RunState {
-  const path = join(workspace, 'state.json');
+  const path = join(workspace, STATE_FILE);
   if (existsSync(path)) {
     return tryReadState(path) ?? initialStateFor(prd);
   }
   const state = initialStateFor(prd);
   writeFileAtomicSync(path, JSON.stringify(state, null, 2));
+  return state;
+}
+
+/**
+ * 启动时保证 state.json 存在：缺失则从 prd 初始化并由当前 owner 落盘。
+ * 文件存在但解析失败时不覆盖（留给 repair），内存中按初始值继续。
+ */
+export async function ensureStateFileWithWriter(
+  writer: WorkspaceWriter,
+  prd: Prd,
+): Promise<RunState> {
+  const path = join(writer.workspacePath, STATE_FILE);
+  if (existsSync(path)) {
+    return tryReadState(path) ?? initialStateFor(prd);
+  }
+  const state = initialStateFor(prd);
+  await writer.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
   return state;
 }
 

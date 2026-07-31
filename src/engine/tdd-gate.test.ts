@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -9,22 +11,52 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Prd } from './prd.js';
 import {
-  checkTddPolicy,
   classifyValidationOnlyTddFailure,
   readTddConfig,
   runTddGate,
   type TddConfig,
   type TddGateFailure,
 } from './tdd-gate.js';
+import { checkTddPolicy } from './tdd-policy-unmanaged.js';
+import { createManagedProcessTestSession } from './managed-process-test-support.js';
+import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
+import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
+import { createWorkspaceSession } from '../workspace-safety/session.js';
+
+async function runManagedTddGate(
+  config: TddConfig,
+  projectRoot: string,
+  timeoutMs?: number,
+): ReturnType<typeof runTddGate> {
+  const fixture = await createManagedProcessTestSession();
+  try {
+    return await runTddGate(config, projectRoot, timeoutMs, {
+      session: fixture.session,
+      kind: 'tdd-check',
+    });
+  } finally {
+    await fixture.close();
+  }
+}
+
+async function createRepoWorkspaceSession(projectRoot: string) {
+  const workspacePath = join(projectRoot, '.workspace');
+  await bootstrapWorkspace({ workspacePath });
+  const lease = await acquireWorkspaceLease({ workspacePath, command: 'run' });
+  return { session: createWorkspaceSession(lease), workspacePath };
+}
 
 const cleanups: Array<() => void> = [];
 
 afterEach(() => {
-  cleanups.splice(0).reverse().forEach((cleanup) => cleanup());
+  cleanups
+    .splice(0)
+    .reverse()
+    .forEach((cleanup) => cleanup());
 });
 
 function prdWith(tdd?: unknown): Prd {
@@ -124,27 +156,42 @@ describe('readTddConfig', () => {
     ['parent source pathspec', baseConfig({ sourcePathspecs: ['src/../secret/**'] })],
     ['exclude-only source pathspec', baseConfig({ sourcePathspecs: [':(exclude)src/**'] })],
     ['non-array policy files', baseConfig({ policyFiles: {} })],
-    ['duplicate policy path', baseConfig({
-      policyFiles: [
-        { path: 'coverage.mjs', sha256: 'a'.repeat(64) },
-        { path: 'coverage.mjs', sha256: 'b'.repeat(64) },
-      ],
-    })],
-    ['absolute policy path', baseConfig({
-      policyFiles: [{ path: '/tmp/coverage.mjs', sha256: 'a'.repeat(64) }],
-    })],
-    ['parent policy path', baseConfig({
-      policyFiles: [{ path: '../coverage.mjs', sha256: 'a'.repeat(64) }],
-    })],
-    ['invalid policy sha', baseConfig({
-      policyFiles: [{ path: 'coverage.mjs', sha256: 'ABC' }],
-    })],
+    [
+      'duplicate policy path',
+      baseConfig({
+        policyFiles: [
+          { path: 'coverage.mjs', sha256: 'a'.repeat(64) },
+          { path: 'coverage.mjs', sha256: 'b'.repeat(64) },
+        ],
+      }),
+    ],
+    [
+      'absolute policy path',
+      baseConfig({
+        policyFiles: [{ path: '/tmp/coverage.mjs', sha256: 'a'.repeat(64) }],
+      }),
+    ],
+    [
+      'parent policy path',
+      baseConfig({
+        policyFiles: [{ path: '../coverage.mjs', sha256: 'a'.repeat(64) }],
+      }),
+    ],
+    [
+      'invalid policy sha',
+      baseConfig({
+        policyFiles: [{ path: 'coverage.mjs', sha256: 'ABC' }],
+      }),
+    ],
     ['invalid baseline', baseConfig({ baselineRef: 'HEAD' })],
     ['empty forbidden patterns', baseConfig({ forbiddenAddedPatterns: [] })],
     ['blank forbidden pattern', baseConfig({ forbiddenAddedPatterns: [''] })],
-    ['duplicate forbidden pattern', baseConfig({
-      forbiddenAddedPatterns: ['c8 ignore', 'c8 ignore'],
-    })],
+    [
+      'duplicate forbidden pattern',
+      baseConfig({
+        forbiddenAddedPatterns: ['c8 ignore', 'c8 ignore'],
+      }),
+    ],
   ])('fails closed for %s', (_label, value) => {
     const result = readTddConfig(prdWith(value));
     expect(result.status).toBe('invalid');
@@ -153,13 +200,12 @@ describe('readTddConfig', () => {
 });
 
 describe('classifyValidationOnlyTddFailure', () => {
-  it.each([
-    'policy-file-missing',
-    'policy-hash-mismatch',
-    'forbidden-pattern-added',
-  ] as const)('把能直接证明候选违反冻结政策的 %s 分类为明确失败', (code) => {
-    expect(classifyValidationOnlyTddFailure(tddFailure(code))).toBe('failed');
-  });
+  it.each(['policy-file-missing', 'policy-hash-mismatch', 'forbidden-pattern-added'] as const)(
+    '把能直接证明候选违反冻结政策的 %s 分类为明确失败',
+    (code) => {
+      expect(classifyValidationOnlyTddFailure(tddFailure(code))).toBe('failed');
+    },
+  );
 
   it.each([
     'project-root-unreadable',
@@ -175,17 +221,29 @@ describe('classifyValidationOnlyTddFailure', () => {
   });
 
   it('按普通门禁规则分类 coverage 命令的明确失败与基础设施异常', () => {
-    expect(classifyValidationOnlyTddFailure(tddFailure('coverage-check-failed', {
-      exitCode: 7,
-    }))).toBe('failed');
-    expect(classifyValidationOnlyTddFailure(tddFailure('coverage-check-failed', {
-      exitCode: null,
-      timedOut: true,
-    }))).toBe('unverifiable');
-    expect(classifyValidationOnlyTddFailure(tddFailure('coverage-check-failed', {
-      exitCode: null,
-      timedOut: false,
-    }))).toBe('unverifiable');
+    expect(
+      classifyValidationOnlyTddFailure(
+        tddFailure('coverage-check-failed', {
+          exitCode: 7,
+        }),
+      ),
+    ).toBe('failed');
+    expect(
+      classifyValidationOnlyTddFailure(
+        tddFailure('coverage-check-failed', {
+          exitCode: null,
+          timedOut: true,
+        }),
+      ),
+    ).toBe('unverifiable');
+    expect(
+      classifyValidationOnlyTddFailure(
+        tddFailure('coverage-check-failed', {
+          exitCode: null,
+          timedOut: false,
+        }),
+      ),
+    ).toBe('unverifiable');
   });
 });
 
@@ -200,10 +258,13 @@ describe('checkTddPolicy', () => {
 
   it('fails closed when the baseline is unreachable', () => {
     const fixture = repo();
-    const result = checkTddPolicy({
-      ...fixture.config,
-      baselineRef: 'f'.repeat(40),
-    }, fixture.root);
+    const result = checkTddPolicy(
+      {
+        ...fixture.config,
+        baselineRef: 'f'.repeat(40),
+      },
+      fixture.root,
+    );
     expect(result).toMatchObject({
       ok: false,
       failure: { code: 'baseline-unreachable' },
@@ -232,10 +293,15 @@ describe('checkTddPolicy', () => {
     writeFileSync(outsideFile, 'process.exit(0);\n');
     rmSync(linked.policyPath);
     symlinkSync(outsideFile, linked.policyPath);
-    expect(checkTddPolicy({
-      ...linked.config,
-      policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(outsideFile) }],
-    }, linked.root)).toMatchObject({
+    expect(
+      checkTddPolicy(
+        {
+          ...linked.config,
+          policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(outsideFile) }],
+        },
+        linked.root,
+      ),
+    ).toMatchObject({
       ok: false,
       failure: { code: 'policy-file-outside-root' },
     });
@@ -271,7 +337,7 @@ describe('checkTddPolicy', () => {
   });
 });
 
-describe('runTddGate', () => {
+describe('runTddGate', { timeout: 30_000, concurrent: false }, () => {
   it('runs the approved command only after policy integrity succeeds', async () => {
     const fixture = repo();
     const marker = join(fixture.root, 'coverage-ran');
@@ -284,7 +350,7 @@ describe('runTddGate', () => {
       policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(fixture.policyPath) }],
     };
 
-    expect(await runTddGate(config, fixture.root)).toMatchObject({
+    expect(await runManagedTddGate(config, fixture.root)).toMatchObject({
       ok: true,
       policyOk: true,
       commandRan: true,
@@ -304,7 +370,7 @@ describe('runTddGate', () => {
       policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(fixture.policyPath) }],
     };
 
-    const result = await runTddGate(config, fixture.root);
+    const result = await runManagedTddGate(config, fixture.root);
     expect(result).toMatchObject({
       ok: false,
       policyOk: true,
@@ -324,13 +390,36 @@ describe('runTddGate', () => {
       policyFiles: [{ path: 'scripts/coverage.mjs', sha256: '0'.repeat(64) }],
     };
 
-    expect(await runTddGate(config, fixture.root)).toMatchObject({
+    expect(await runManagedTddGate(config, fixture.root)).toMatchObject({
       ok: false,
       policyOk: false,
       commandRan: false,
       failure: { code: 'policy-hash-mismatch' },
     });
     expect(() => readFileSync(marker)).toThrow();
+  });
+
+  it('rechecks policy after a successful coverage command mutates a policy file', async () => {
+    const fixture = repo();
+    writeFileSync(
+      fixture.policyPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(fixture.policyPath)}, 'process.exit(0);\\n');`,
+        '',
+      ].join('\n'),
+    );
+    const config = {
+      ...fixture.config,
+      policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(fixture.policyPath) }],
+    };
+
+    expect(await runManagedTddGate(config, fixture.root)).toMatchObject({
+      ok: false,
+      policyOk: false,
+      commandRan: true,
+      failure: { code: 'policy-hash-mismatch' },
+    });
   });
 
   it('times out the coverage command through the shared gate runner', async () => {
@@ -341,11 +430,95 @@ describe('runTddGate', () => {
       policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(fixture.policyPath) }],
     };
 
-    expect(await runTddGate(config, fixture.root, 200)).toMatchObject({
+    expect(await runManagedTddGate(config, fixture.root, 200)).toMatchObject({
       ok: false,
       policyOk: true,
       commandRan: true,
       failure: { code: 'coverage-check-failed', exitCode: null, timedOut: true },
     });
+  });
+
+  it('rejects a PATH git wrapper that writes the active workspace during a policy probe', async () => {
+    const fixture = repo();
+    const managed = await createRepoWorkspaceSession(fixture.root);
+    const bin = join(fixture.root, 'malicious-bin');
+    const script = join(bin, 'malicious-git.mjs');
+    const wrapper = join(bin, process.platform === 'win32' ? 'git.CMD' : 'git');
+    const wrapperRan = join(fixture.root, 'malicious-git-ran');
+    const workspaceMarker = join(managed.workspacePath, 'malicious-git-write');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(
+      script,
+      [
+        "import { spawnSync } from 'node:child_process';",
+        "import { writeFileSync } from 'node:fs';",
+        "writeFileSync(process.env.MALICIOUS_GIT_RAN, 'yes');",
+        "writeFileSync(process.env.MALICIOUS_GIT_WORKSPACE_MARKER, 'bad');",
+        "const result = spawnSync(process.env.REAL_GIT, process.argv.slice(2), { stdio: 'inherit' });",
+        'if (result.error) throw result.error;',
+        'process.exit(result.status ?? 1);',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      wrapper,
+      process.platform === 'win32'
+        ? `@"${process.execPath}" "${script}" %*\r\n`
+        : `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`,
+    );
+    if (process.platform !== 'win32') chmodSync(wrapper, 0o755);
+
+    const pathBefore = process.env.PATH;
+    const realGit =
+      process.platform === 'win32'
+        ? execFileSync('where.exe', ['git'], { encoding: 'utf8' }).split(/\r?\n/u)[0]
+        : execFileSync('/bin/sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    process.env.PATH = `${bin}${delimiter}${pathBefore ?? ''}`;
+    process.env.REAL_GIT = realGit;
+    process.env.MALICIOUS_GIT_RAN = wrapperRan;
+    process.env.MALICIOUS_GIT_WORKSPACE_MARKER = workspaceMarker;
+    try {
+      await expect(
+        runTddGate(fixture.config, fixture.root, undefined, {
+          session: managed.session,
+          kind: 'tdd-check',
+        }),
+      ).rejects.toMatchObject({ name: 'WorkspaceSafetyError', code: 'isolated' });
+      expect(readFileSync(wrapperRan, 'utf8')).toBe('yes');
+      expect(readFileSync(workspaceMarker, 'utf8')).toBe('bad');
+    } finally {
+      if (pathBefore === undefined) delete process.env.PATH;
+      else process.env.PATH = pathBefore;
+      delete process.env.REAL_GIT;
+      delete process.env.MALICIOUS_GIT_RAN;
+      delete process.env.MALICIOUS_GIT_WORKSPACE_MARKER;
+      await managed.session.close().catch(() => undefined);
+    }
+  });
+
+  it('rejects a coverage command that writes the active workspace', async () => {
+    const fixture = repo();
+    const managed = await createRepoWorkspaceSession(fixture.root);
+    const workspaceMarker = join(managed.workspacePath, 'coverage-write');
+    writeFileSync(
+      fixture.policyPath,
+      `import { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(workspaceMarker)}, 'bad');\n`,
+    );
+    const config = {
+      ...fixture.config,
+      policyFiles: [{ path: 'scripts/coverage.mjs', sha256: hash(fixture.policyPath) }],
+    };
+
+    try {
+      await expect(
+        runTddGate(config, fixture.root, undefined, {
+          session: managed.session,
+          kind: 'tdd-check',
+        }),
+      ).rejects.toMatchObject({ name: 'WorkspaceSafetyError', code: 'isolated' });
+      expect(existsSync(workspaceMarker)).toBe(true);
+    } finally {
+      await managed.session.close().catch(() => undefined);
+    }
   });
 });

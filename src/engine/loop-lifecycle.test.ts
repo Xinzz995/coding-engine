@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { writeFileSync, rmSync, readFileSync, realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, rmSync, readFileSync, realpathSync, existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
+import {
+  ACTIVE_LEASE_DIR,
+  OPERATION_DIR,
+  PROTOCOL_ROOT_DIR,
+  WORKSPACE_MARKER_FILE,
+} from '../workspace-safety/types.js';
 import { readEvidence } from './evidence.js';
 import { runLoop as runProductionLoop } from './loop.js';
 import {
@@ -9,14 +16,66 @@ import {
   runLoop,
   setupGitProject,
   strictConfig,
+  fakeBoundValidator,
+  fakeCounting,
+  previousFinalReview,
 } from './loop-test-support.js';
+
+interface OwnershipViolationScenario {
+  readonly name: string;
+  readonly phase: 'builder' | 'validator';
+  readonly mutation: string;
+}
+
+const ownershipViolationScenarios: readonly OwnershipViolationScenario[] = [
+  {
+    name: 'Validator 删除当前 story',
+    phase: 'validator',
+    mutation: "delete state['US-001'];",
+  },
+  {
+    name: 'Validator 删除当前 story 的 validated 字段',
+    phase: 'validator',
+    mutation: "delete state['US-001'].validated;",
+  },
+  {
+    name: 'Builder 伪造非当前 story 的 passes、validated 与 escalated',
+    phase: 'builder',
+    mutation:
+      "state['US-002'].passes = true; state['US-002'].validated = true; state['US-002'].escalated = true;",
+  },
+  {
+    name: 'Builder 给当前 story 写入畸形 validationReceipt',
+    phase: 'builder',
+    mutation:
+      "state['US-001'].passes = true; state['US-001'].validationReceipt = { schemaVersion: 1 };",
+  },
+  {
+    name: 'Builder 给非当前 story 写入畸形 validationReceipt',
+    phase: 'builder',
+    mutation:
+      "state['US-001'].passes = true; state['US-002'].validationReceipt = { schemaVersion: 1 };",
+  },
+  {
+    name: 'Validator 伪造非当前 story 的 passes、validated 与 escalated',
+    phase: 'validator',
+    mutation:
+      "state['US-002'].passes = true; state['US-002'].validated = true; state['US-002'].escalated = true;",
+  },
+  {
+    name: 'Builder 删除非当前 story',
+    phase: 'builder',
+    mutation: "delete state['US-002'];",
+  },
+];
+
 describe('runLoop', () => {
   it('implements two Stories first, then revalidates the stale earlier candidate at the final HEAD', async () => {
     const first = story({ id: 'US-001', acceptanceCriteria: ['first works'] });
     const second = story({ id: 'US-002', acceptanceCriteria: ['second works'], priority: 2 });
     const project = setupGitProject([first, second]);
     const fake = join(project.workspace, 'fake-two-story.mjs');
-    const calls = join(project.workspace, 'two-story-calls.txt');
+    const calls = join(project.projectRoot, 'two-story-calls.txt');
     const statePath = join(project.workspace, 'state.json');
     writeFileSync(
       fake,
@@ -65,11 +124,13 @@ describe('runLoop', () => {
     );
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
 
-    expect(await runProductionLoop({
-      ...strictConfig(project.workspace, project.instructionsDir),
-      projectRoot: project.projectRoot,
-      maxIterations: 3,
-    })).toBe(0);
+    expect(
+      await runProductionLoop({
+        ...strictConfig(project.workspace, project.instructionsDir),
+        projectRoot: project.projectRoot,
+        maxIterations: 3,
+      }),
+    ).toBe(0);
 
     const finalHead = project.head();
     expect(readFileSync(calls, 'utf8').trim().split('\n')).toEqual([
@@ -82,33 +143,13 @@ describe('runLoop', () => {
     const state = JSON.parse(readFileSync(statePath, 'utf8'));
     expect(state['US-001'].validationReceipt.gitHead).toBe(finalHead);
     expect(state['US-002'].validationReceipt.gitHead).toBe(finalHead);
-  });
+  }, 30_000);
 
   it('returns 0 when all stories are already resolved after one pass', async () => {
-    // fake agent: developer pass marks the only story passes=true by writing state.json
     const { workspace, instructionsDir } = setup([story()]);
-    const fake = join(workspace, 'fake.mjs');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
-      }));
-      process.exit(0);
-    `,
-    );
+    const fake = fakeBoundValidator(workspace, 'passed');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    const code = await runLoop({
-      kind: 'claude',
-      maxIterations: 5,
-      devTimeoutMs: 5000,
-      valTimeoutMs: 5000,
-      workspace,
-      instructionsDir,
-      port: 0,
-      openBrowser: false,
-    });
+    const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
     expect(code).toBe(0);
     expect(
       JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'],
@@ -123,19 +164,8 @@ describe('runLoop', () => {
   it('does not accept a builder-only passes=true when validator.md is missing', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     rmSync(join(instructionsDir, 'validator.md'));
-    const fake = join(workspace, 'fake-builder-only.mjs');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync, appendFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
-      }));
-      appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## 2026-07-22 10:00 - US-001\\n');
-      process.exit(0);
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const fake = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
     try {
       const code = await runLoop({
         kind: 'claude',
@@ -164,357 +194,63 @@ describe('runLoop', () => {
     }
   });
 
-  it('does not issue a receipt from a restored candidate when validator deletes the story', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
-    const fake = join(workspace, 'fake-validator-delete-story.mjs');
-    const calls = join(workspace, 'calls.txt');
-    const statePath = join(workspace, 'state.json');
-    writeFileSync(
-      fake,
-      `
-      import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      const statePath = ${JSON.stringify(statePath)};
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      if (!existsSync(${JSON.stringify(calls)})) {
-        state['US-001'].passes = true;
-        writeFileSync(${JSON.stringify(calls)}, 'builder');
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## builder done\\n');
-      } else {
-        delete state['US-001'];
-      }
-      writeFileSync(statePath, JSON.stringify(state));
-      process.exit(0);
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(1);
-      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toMatchObject({
-        passes: false,
-        validated: false,
-      });
-      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
-      expect(iteration).toMatchObject({
-        validatorOutcome: 'completed',
-        validationRollback: true,
-        stateValidationTamper: [{ expected: false, received: 'missing', side: 'validator' }],
-      });
-      expect(iteration).not.toHaveProperty('validationReceipt');
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  });
-
-  it('records field-only validated deletion before issuing a legitimate receipt', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
-    const fake = join(workspace, 'fake-validator-delete-field.mjs');
-    const calls = join(workspace, 'calls.txt');
-    const statePath = join(workspace, 'state.json');
-    writeFileSync(
-      fake,
-      `
-      import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      const statePath = ${JSON.stringify(statePath)};
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      if (!existsSync(${JSON.stringify(calls)})) {
-        state['US-001'].passes = true;
-        writeFileSync(${JSON.stringify(calls)}, 'builder');
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## builder done\\n');
-      } else {
-        delete state['US-001'].validated;
-      }
-      writeFileSync(statePath, JSON.stringify(state));
-      process.exit(0);
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(0);
-      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toMatchObject({
-        passes: true,
-        validated: true,
-      });
-      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
-      expect(iteration).toMatchObject({
-        validationReceipt: true,
-        stateValidationTamper: [{ expected: false, received: 'missing', side: 'validator' }],
-      });
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  });
-
-  it('restores builder-forged ownership fields on a non-current story instead of exiting false-green', async () => {
-    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
-    const fake = join(workspace, 'fake-builder-cross-story.mjs');
-    const calls = join(workspace, 'calls.txt');
-    const observed = join(workspace, 'call3-passes.txt');
-    const statePath = join(workspace, 'state.json');
-    writeFileSync(
-      fake,
-      `
-      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      const statePath = ${JSON.stringify(statePath)};
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      appendFileSync(${JSON.stringify(calls)}, 'x');
-      const call = readFileSync(${JSON.stringify(calls)}, 'utf-8').length;
-      if (call === 1) {
-        state['US-001'].passes = true;
-        state['US-002'].passes = true;
-        state['US-002'].validated = true;
-        state['US-002'].escalated = true;
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## US-001 builder done\\n');
-      } else if (call === 3) {
-        writeFileSync(${JSON.stringify(observed)}, String(state['US-002'].passes));
-        if (state['US-002'].passes !== false) process.exit(0);
-        state['US-002'].passes = true;
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## US-002 builder done\\n');
-      }
-      writeFileSync(statePath, JSON.stringify(state));
-      process.exit(0);
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 2,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(0);
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      expect(state['US-001']).toMatchObject({ passes: true, validated: true });
-      expect(state['US-002']).toMatchObject({ passes: true, validated: true, escalated: false });
-      expect(readFileSync(observed, 'utf-8')).toBe('true');
-      const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
-      expect(iterations).toHaveLength(2);
-      const iteration = iterations[0];
-      expect(iteration).toMatchObject({
-        storyId: 'US-001',
-        validationReceipt: true,
-        stateRouteTamper: [{ storyId: 'US-002', expected: false, received: true, side: 'builder' }],
-        stateValidationTamper: [
-          { storyId: 'US-002', expected: false, received: true, side: 'builder' },
-        ],
-      });
-      expect(iterations[1]).toMatchObject({
-        storyId: 'US-002', builderRan: false, validationReceipt: true,
-      });
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  });
-
-  it.each([
-    ['current', 'US-001'],
-    ['non-current', 'US-002'],
-  ] as const)(
-    'restores the full pre-Builder state when %s Story receives a malformed receipt',
-    async (_label, tamperedStoryId) => {
-      const { workspace, instructionsDir } = setup([
+  it.each(ownershipViolationScenarios)(
+    '生产 runLoop 在 $name 时退出 2、保留隔离现场且不写普通轮次 evidence',
+    async ({ phase, mutation }) => {
+      const { projectRoot, workspace, instructionsDir } = setup([
         story(),
         story({ id: 'US-002', priority: 2 }),
       ]);
+      const fake = join(workspace, 'fake-ownership-violation.mjs');
+      const calls = join(projectRoot, 'ownership-violation-calls.txt');
       const statePath = join(workspace, 'state.json');
-      const calls = join(workspace, 'malformed-receipt-calls.txt');
-      const fake = join(workspace, `fake-malformed-${tamperedStoryId}.mjs`);
       writeFileSync(
         fake,
         `
-        import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
-        const state = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf8'));
-        state['US-001'].passes = true;
-        state[${JSON.stringify(tamperedStoryId)}].validationReceipt = { schemaVersion: 1 };
-        writeFileSync(${JSON.stringify(statePath)}, JSON.stringify(state));
-        appendFileSync(${JSON.stringify(calls)}, 'builder');
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder changed state\\n');
+        import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+        const calls = ${JSON.stringify(calls)};
+        const call = existsSync(calls) ? Number(readFileSync(calls, 'utf8')) + 1 : 1;
+        writeFileSync(calls, String(call));
+        const statePath = ${JSON.stringify(statePath)};
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        const phase = ${JSON.stringify(phase)};
+        if (phase === 'validator' && call === 1) {
+          state['US-001'].passes = true;
+          writeFileSync(statePath, JSON.stringify(state));
+          appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder completed\\n');
+          process.exit(0);
+        }
+        ${mutation}
+        writeFileSync(statePath, JSON.stringify(state));
         process.exit(0);
       `,
       );
       process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      const errors: string[] = [];
+      const originalError = console.error;
+      console.error = (...args: unknown[]) => errors.push(args.join(' '));
 
       try {
-        expect(await runLoop({
-          kind: 'claude',
-          maxIterations: 2,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        })).toBe(1);
-        const state = JSON.parse(readFileSync(statePath, 'utf8'));
-        expect(state['US-001']).toMatchObject({
-          passes: false,
-          validated: false,
-          validationReceipt: null,
-        });
-        expect(state['US-002']).toMatchObject({
-          passes: false,
-          validated: false,
-          validationReceipt: null,
-        });
-        expect(readFileSync(calls, 'utf8')).toBe('builder');
-        expect(readEvidence(workspace).records.find((record) => record.type === 'iteration'))
-          .toMatchObject({ builderRan: true, validatorRan: false, builderOutcome: 'completed' });
+        expect(
+          await runProductionLoop({
+            ...strictConfig(workspace, instructionsDir),
+            maxIterations: 1,
+          }),
+        ).toBe(2);
+        const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+        expect(existsSync(join(operation, QUARANTINE_FILE))).toBe(true);
+        expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(true);
+        expect(errors.some((line) => line.includes('workspace 安全执行失败'))).toBe(true);
+        expect(readEvidence(workspace).records.some((record) => record.type === 'iteration')).toBe(
+          false,
+        );
       } finally {
+        console.error = originalError;
         delete process.env.CODING_X_CLAUDE_BIN;
       }
     },
+    20_000,
   );
-
-  it('restores validator-forged ownership fields on a non-current story instead of exiting false-green', async () => {
-    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
-    const fake = join(workspace, 'fake-validator-cross-story.mjs');
-    const calls = join(workspace, 'calls.txt');
-    const observed = join(workspace, 'call3-passes.txt');
-    const statePath = join(workspace, 'state.json');
-    writeFileSync(
-      fake,
-      `
-      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      const statePath = ${JSON.stringify(statePath)};
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      appendFileSync(${JSON.stringify(calls)}, 'x');
-      const call = readFileSync(${JSON.stringify(calls)}, 'utf-8').length;
-      if (call === 1) {
-        state['US-001'].passes = true;
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## US-001 builder done\\n');
-      } else if (call === 2) {
-        state['US-002'].passes = true;
-        state['US-002'].validated = true;
-        state['US-002'].escalated = true;
-      } else if (call === 3) {
-        writeFileSync(${JSON.stringify(observed)}, String(state['US-002'].passes));
-        if (state['US-002'].passes !== false) process.exit(0);
-        state['US-002'].passes = true;
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## US-002 builder done\\n');
-      }
-      writeFileSync(statePath, JSON.stringify(state));
-      process.exit(0);
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 2,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(0);
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      expect(state['US-001']).toMatchObject({ passes: true, validated: true });
-      expect(state['US-002']).toMatchObject({ passes: true, validated: true, escalated: false });
-      expect(readFileSync(observed, 'utf-8')).toBe('true');
-      const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
-      expect(iterations).toHaveLength(2);
-      const iteration = iterations[0];
-      expect(iteration).toMatchObject({
-        storyId: 'US-001',
-        validationReceipt: true,
-        stateRouteTamper: [
-          { storyId: 'US-002', expected: false, received: true, side: 'validator' },
-        ],
-        stateValidationTamper: [
-          { storyId: 'US-002', expected: false, received: true, side: 'validator' },
-        ],
-      });
-      expect(iterations[1]).toMatchObject({
-        storyId: 'US-002', builderRan: false, validationReceipt: true,
-      });
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  });
-
-  it('restores a non-current story deleted by the builder and records its real storyId', async () => {
-    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
-    const fake = join(workspace, 'fake-builder-delete-other.mjs');
-    const calls = join(workspace, 'calls.txt');
-    const statePath = join(workspace, 'state.json');
-    writeFileSync(
-      fake,
-      `
-      import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      const statePath = ${JSON.stringify(statePath)};
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
-      if (!existsSync(${JSON.stringify(calls)})) {
-        state['US-001'].passes = true;
-        delete state['US-002'];
-        writeFileSync(${JSON.stringify(calls)}, 'builder');
-        appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, '## builder done\\n');
-      }
-      writeFileSync(statePath, JSON.stringify(state));
-      process.exit(0);
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(1);
-      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-002']).toMatchObject({
-        passes: false,
-        validated: false,
-        escalated: false,
-      });
-      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
-      expect(iteration).toMatchObject({
-        stateRouteTamper: [
-          { storyId: 'US-002', expected: false, received: 'missing', side: 'builder' },
-        ],
-        stateValidationTamper: [
-          { storyId: 'US-002', expected: false, received: 'missing', side: 'builder' },
-        ],
-      });
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  });
 
   it('keeps a cross-run candidate and revalidates it without calling Developer again', async () => {
     const { workspace, instructionsDir } = setup([story()]);
@@ -559,7 +295,9 @@ describe('runLoop', () => {
         notes: 'builder done',
         validationReceipt: { schemaVersion: 1 },
       });
-      expect(warnings.some((line) => line.includes('待验收状态') && line.includes('US-001'))).toBe(false);
+      expect(warnings.some((line) => line.includes('待验收状态') && line.includes('US-001'))).toBe(
+        false,
+      );
       expect(readEvidence(workspace).records.find((r) => r.type === 'iteration')).toMatchObject({
         builderRan: false,
         validatorRan: true,
@@ -612,17 +350,7 @@ describe('runLoop', () => {
 
   it('enters final review instead of treating story convergence as delivery-ready', async () => {
     const { workspace, instructionsDir } = setup([story()]);
-    const fake = join(workspace, 'fake.mjs');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-      process.exit(0);
-    `,
-    );
+    const fake = fakeBoundValidator(workspace, 'passed');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const logs: string[] = [];
     const orig = console.log;
@@ -630,16 +358,7 @@ describe('runLoop', () => {
       logs.push(args.join(' '));
     };
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 5,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      });
+      const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
       expect(code).toBe(0);
       expect(logs.some((l) => l.includes('开始针对当前 PR 最新提交执行本地最终 Review'))).toBe(
         true,
@@ -682,32 +401,11 @@ describe('runLoop', () => {
     // marker file (absolute path) and flips the single story to passes:true so
     // the loop resolves and exits.
     const { workspace, instructionsDir, projectRoot } = setup([story()]);
-    const fake = join(workspace, 'fake-cwd.mjs');
-    const marker = join(workspace, 'agent-cwd.txt');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync } from 'node:fs';
-      const cwd = process.cwd();
-      writeFileSync(${JSON.stringify(marker)}, cwd);
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-      process.exit(0);
-    `,
-    );
+    const marker = join(resolve(workspace, '..'), 'agent-cwd.txt');
+    const fake = fakeBoundValidator(workspace, 'passed', { builderCwdMarker: marker });
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 5,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      });
+      const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
       expect(code).toBe(0);
       const recorded = readFileSync(marker, 'utf8');
       // The agent must run at the explicit project root, NOT inside .workspace.
@@ -728,33 +426,11 @@ describe('runLoop', () => {
       join(instructionsDir, 'builder.md'),
       'read {{WORKSPACE}}/prd.json and {{WORKSPACE}}/progress.md',
     );
-    const fake = join(workspace, 'fake-prompt.mjs');
-    const marker = join(workspace, 'agent-prompt.txt');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync, existsSync } from 'node:fs';
-      // Capture only the first (Developer) invocation's prompt; the Validator
-      // runs afterward with the same binary and would otherwise overwrite it.
-      if (!existsSync(${JSON.stringify(marker)})) writeFileSync(${JSON.stringify(marker)}, process.argv[process.argv.length - 1]);
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-      process.exit(0);
-    `,
-    );
+    const marker = join(resolve(workspace, '..'), 'agent-prompt.txt');
+    const fake = fakeBoundValidator(workspace, 'passed', { builderPromptMarker: marker });
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 5,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      });
+      const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
       expect(code).toBe(0);
       const prompt = readFileSync(marker, 'utf8');
       expect(prompt).toContain(`${workspace}/prd.json`);
@@ -765,12 +441,13 @@ describe('runLoop', () => {
     }
   });
 
-  it('migrates legacy prd.json state fields into state.json on startup', async () => {
-    // v0.4 旧格式：story 自带 passes:true 且无 state.json —— 引擎启动即抽取迁移，
-    // 循环第一轮就判定全部完成并以 0 退出。
+  it('materializes legacy in-PRD state only inside an already initialized new workspace', async () => {
+    // setup 已先建立新版 workspace marker 与永久协议根；这里仅覆盖新 workspace 中收到
+    // legacy PRD 数据时的字段抽取，不代表 coding-x 会接管或迁移旧的非空 workspace。
     const { workspace, instructionsDir } = setup([
       story({ passes: true, notes: '', retryCount: 0, blocked: false }),
     ]);
+    expect(existsSync(join(workspace, WORKSPACE_MARKER_FILE))).toBe(true);
     // 用真实 stub 文件而非 `node -e` 一行式：后者的脚本字符串后面还跟着
     // buildAgentArgs 拼的 --print --dangerously-skip-permissions 等参数，
     // node 会把它们当成自己的 CLI 选项重新解析（非脚本 argv），导致
@@ -799,71 +476,81 @@ describe('runLoop', () => {
     }
   });
 
-  it('does not resurrect legacy in-story state when state.json is corrupted mid-run', async () => {
-    // 胖 prd.json（story 自带 passes:true）+ 损坏的 state.json：
-    // 运行期回退必须按全部未开始处理（而非复活 legacy passes），循环跑满返回 1，且不覆盖损坏文件。
-    const { workspace, instructionsDir } = setup([
+  it('keeps corrupt state bytes and never resurrects legacy PRD passes in production runLoop', async () => {
+    const { projectRoot, workspace, instructionsDir } = setup([
       story({ passes: true, notes: '', retryCount: 0, blocked: false }),
     ]);
-    writeFileSync(join(workspace, 'state.json'), '{ broken');
-    // 用真实 stub 文件而非 `node -e` 一行式：见 :187 注释，`-e` 后面的脚本字符串会被
-    // buildAgentArgs 拼的 --print --dangerously-skip-permissions 参数干扰，node 把它们
-    // 当自己的 CLI 选项重新解析、以退出码 9 崩溃——脚本从未真正跑到 process.exit(0)。
-    // 这个假崩溃会让每轮都走 builder-error continue，完成判定永远到不了，
-    // 而完成判定（allStoriesResolved）正是本用例要守的位置：legacy passes 若被复活，
-    // 只有走到这里才会被判定误判全绿吃掉。stub 必须真的干净退出 0。
-    const fake = join(workspace, 'fake.mjs');
-    writeFileSync(fake, 'process.exit(0);');
+    const statePath = join(workspace, 'state.json');
+    const called = join(projectRoot, 'corrupt-state-agent-called.txt');
+    writeFileSync(statePath, '{ broken');
+    const fake = join(workspace, 'fake-corrupt-state.mjs');
+    writeFileSync(
+      fake,
+      `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(called)}, 'called');`,
+    );
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const errors: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => errors.push(args.join(' '));
+
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 2,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      });
-      expect(code).toBe(1);
-      expect(readFileSync(join(workspace, 'state.json'), 'utf-8')).toBe('{ broken');
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(2);
+      expect(readFileSync(statePath, 'utf8')).toBe('{ broken');
+      expect(existsSync(called)).toBe(false);
+      expect(readEvidence(workspace).records.some((record) => record.type === 'iteration')).toBe(
+        false,
+      );
+      expect(errors.some((line) => line.includes('workspace 安全执行失败'))).toBe(true);
+      expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
     } finally {
+      console.error = originalError;
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
 
   it('writes report.html when the loop completes', async () => {
     const { workspace, instructionsDir } = setup([story()]);
-    const fake = join(workspace, 'fake.mjs');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-      process.exit(0);
-    `,
-    );
+    const fake = fakeBoundValidator(workspace, 'passed');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 5,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      });
+      const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
       expect(code).toBe(0);
       const html = readFileSync(join(workspace, 'report.html'), 'utf-8');
       expect(html).toContain('<!DOCTYPE html>');
       expect(html).toContain('US-001');
       expect(html).toContain('Story 验证完成');
       expect(html).toContain('Story 结果不等于可交付');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('passes the just-completed Final Review outcome directly into the automatic report', async () => {
+    const project = setup([story()]);
+    const fake = fakeBoundValidator(project.workspace, 'passed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const review = previousFinalReview(project.head());
+      const code = await runProductionLoop({
+        ...strictConfig(project.workspace, project.instructionsDir),
+        finalReviewRunner: async (options) => {
+          // Production runFinalReview persists this exact state through the active run session
+          // before returning it to the loop; mirror that boundary instead of returning a claim.
+          await options.session.writer.writeFile(
+            'final-review.json',
+            `${JSON.stringify(review)}\n`,
+          );
+          return {
+            exitCode: 0,
+            message: 'fixture current final review',
+            state: review,
+          };
+        },
+      });
+      expect(code).toBe(0);
+      expect(readFileSync(join(project.workspace, 'report.html'), 'utf-8')).toContain(
+        '本地 Review 与 GitHub 交付条件已就绪',
+      );
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -895,74 +582,23 @@ describe('runLoop', () => {
     }
   });
 
-  it('uses the PRD guard snapshot for the final report even when restoring disk fails', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
-    const prdPath = join(workspace, 'prd.json');
-    const fake = join(workspace, 'fake-prd-directory.mjs');
-    // 把 prd.json 换成目录：guard 能检出篡改，但原子 rename 无法覆盖目录，稳定制造 restoreFailed。
-    writeFileSync(
-      fake,
-      `
-      import { rmSync, mkdirSync } from 'node:fs';
-      rmSync(${JSON.stringify(prdPath)});
-      mkdirSync(${JSON.stringify(prdPath)});
-      process.exit(0);
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(1);
-      const html = readFileSync(join(workspace, 'report.html'), 'utf-8');
-      expect(html).toContain('US-001');
-      expect(html).toContain('引擎启动快照');
-      expect(html).not.toContain('验证报告未生成');
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  });
+  // PRD 篡改检测与恢复失败由 prd-guard.test.ts 覆盖；新版委托边界已经禁止
+  // agent 把 prd.json 替换为目录，因此 loop 层不再重复不可达的破坏场景。
 });
 
 describe('runLoop keepOpen', () => {
   it('keeps the dashboard serving after completion until interrupt resolves', async () => {
     const { workspace, instructionsDir } = setup([story()]);
-    const fake = join(workspace, 'fake.mjs');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync } from 'node:fs';
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-      process.exit(0);
-    `,
-    );
+    const fake = fakeBoundValidator(workspace, 'passed');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const port = 18100 + (process.pid % 1000);
     let release!: () => void;
     const interrupt = new Promise<void>((r) => {
       release = r;
     });
-    const running = runLoop({
-      kind: 'claude',
-      maxIterations: 5,
-      devTimeoutMs: 5000,
-      valTimeoutMs: 5000,
-      workspace,
-      instructionsDir,
+    const running = runProductionLoop({
+      ...strictConfig(workspace, instructionsDir),
       port,
-      openBrowser: false,
       keepOpen: true,
       interrupt,
     });
@@ -1009,29 +645,13 @@ describe('runLoop keepOpen', () => {
 
   it('closes immediately after completion when keepOpen is not set', async () => {
     const { workspace, instructionsDir } = setup([story()]);
-    const fake = join(workspace, 'fake.mjs');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-      process.exit(0);
-    `,
-    );
+    const fake = fakeBoundValidator(workspace, 'passed');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const port = 19100 + (process.pid % 1000);
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 5,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
+      const code = await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
         port,
-        openBrowser: false,
       });
       expect(code).toBe(0);
       await expect(fetch(`http://127.0.0.1:${port}/api/state`)).rejects.toThrow();

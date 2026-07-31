@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
-import { setState, buildApiResponse, start, configureWorkspace, browserOpenCommand } from './server.js';
+import { setState, buildApiResponse, start, configureWorkspace } from './server.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -15,14 +15,24 @@ afterEach(() => {
 function tempWorkspace(): string {
   const dir = mkdtempSync(join(tmpdir(), 'ws-'));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-    project: '任务应用', branchName: 'ralph/x', description: 'd',
-    sourcePrd: 'docs/prds/prd-x.md',
-    userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 }],
-  }));
-  writeFileSync(join(dir, 'state.json'), JSON.stringify({
-    'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-  }));
+  writeFileSync(
+    join(dir, 'prd.json'),
+    JSON.stringify({
+      project: '任务应用',
+      branchName: 'ralph/x',
+      description: 'd',
+      sourcePrd: 'docs/prds/prd-x.md',
+      userStories: [
+        { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 },
+      ],
+    }),
+  );
+  writeFileSync(
+    join(dir, 'state.json'),
+    JSON.stringify({
+      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+    }),
+  );
   writeFileSync(join(dir, 'progress.md'), '## US-001\n- done');
   return dir;
 }
@@ -37,8 +47,18 @@ type DashboardStory = {
 };
 
 const dashboardAssets = [
-  { label: '普通页', file: 'dashboard.html', stateFunction: 'getState', currentStoryArgument: true },
-  { label: '像素页', file: 'dashboard-p.html', stateFunction: 'getStoryState', currentStoryArgument: false },
+  {
+    label: '普通页',
+    file: 'dashboard.html',
+    stateFunction: 'getState',
+    currentStoryArgument: true,
+  },
+  {
+    label: '像素页',
+    file: 'dashboard-p.html',
+    stateFunction: 'getStoryState',
+    currentStoryArgument: false,
+  },
 ] as const;
 
 function readDashboardAsset(file: string): string {
@@ -46,7 +66,9 @@ function readDashboardAsset(file: string): string {
 }
 
 function extractStateFunction(html: string, name: string): string {
-  const source = html.match(new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}`));
+  const source = html.match(
+    new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}`),
+  );
   expect(source, `${name} should remain an inline dashboard function`).not.toBeNull();
   return source![0];
 }
@@ -69,7 +91,13 @@ function dashboardState(
 
 describe.each(dashboardAssets)('$label dashboard published-state contract', (asset) => {
   const story = (over: Partial<DashboardStory> = {}): DashboardStory => ({
-    id: 'US-001', passes: false, validated: false, notes: '', retryCount: 0, blocked: false, ...over,
+    id: 'US-001',
+    passes: false,
+    validated: false,
+    notes: '',
+    retryCount: 0,
+    blocked: false,
+    ...over,
   });
 
   it('按 active/blocked/passed/awaiting/failed/pending 状态矩阵分类', () => {
@@ -94,6 +122,14 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
     expect(html).toContain('state.json 已损坏');
     expect(html).toContain('stateCorrupted');
   });
+
+  it('展示统一的 workspace 安全分类、摘要与处理提示', () => {
+    const html = readDashboardAsset(asset.file);
+    expect(html).toContain('workspaceSafety');
+    expect(html).toContain('display.label');
+    expect(html).toContain('display.summary');
+    expect(html).toContain('display.guidance');
+  });
 });
 
 describe('buildApiResponse', () => {
@@ -116,11 +152,27 @@ describe('buildApiResponse', () => {
   it('falls back to legacy in-story state when state.json is absent (v0.4 workspace)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ws-legacy-'));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-      project: 'p', branchName: 'ralph/x', description: 'd',
-      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
-        priority: 1, passes: true, notes: '', retryCount: 0, blocked: false }],
-    }));
+    writeFileSync(
+      join(dir, 'prd.json'),
+      JSON.stringify({
+        project: 'p',
+        branchName: 'ralph/x',
+        description: 'd',
+        userStories: [
+          {
+            id: 'US-001',
+            title: 't',
+            description: 'd',
+            acceptanceCriteria: [],
+            priority: 1,
+            passes: true,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+          },
+        ],
+      }),
+    );
     writeFileSync(join(dir, 'progress.md'), '');
     configureWorkspace(dir, 50);
     const r = buildApiResponse();
@@ -132,25 +184,48 @@ describe('buildApiResponse', () => {
   it('fails closed and exposes a warning flag when state.json exists but is corrupt', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ws-corrupt-'));
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
-    writeFileSync(join(dir, 'prd.json'), JSON.stringify({
-      project: 'p', branchName: 'ralph/x', description: 'd',
-      userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [],
-        priority: 1, passes: true, notes: '旧备注', retryCount: 2, blocked: false }],
-    }));
+    writeFileSync(
+      join(dir, 'prd.json'),
+      JSON.stringify({
+        project: 'p',
+        branchName: 'ralph/x',
+        description: 'd',
+        userStories: [
+          {
+            id: 'US-001',
+            title: 't',
+            description: 'd',
+            acceptanceCriteria: [],
+            priority: 1,
+            passes: true,
+            notes: '旧备注',
+            retryCount: 2,
+            blocked: false,
+          },
+        ],
+      }),
+    );
     writeFileSync(join(dir, 'state.json'), '{ broken');
     writeFileSync(join(dir, 'progress.md'), '');
     configureWorkspace(dir, 50);
     const r = buildApiResponse();
     expect(r.stateCorrupted).toBe(true);
     expect(r.stories[0]).toMatchObject({
-      passes: false, validated: false, notes: '', retryCount: 0, blocked: false,
+      passes: false,
+      validated: false,
+      notes: '',
+      retryCount: 0,
+      blocked: false,
     });
   });
 
   it('exposes the current actual route in runtime and defaults it to null', () => {
     setState({
-      phase: 'developing', model: 'opus', routeSource: 'difficulty',
-      storyDifficulty: 'high', runner: 'claude',
+      phase: 'developing',
+      model: 'opus',
+      routeSource: 'difficulty',
+      storyDifficulty: 'high',
+      runner: 'claude',
     });
     expect(buildApiResponse().runtime.model).toBe('opus');
     expect(buildApiResponse().runtime.route_source).toBe('difficulty');
@@ -165,28 +240,19 @@ describe('buildApiResponse', () => {
     const path = join(ws, 'prd.json');
     const prd = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
     prd.models = {
-      runner: 'codex', builder: { low: 'lo', medium: 'mid', high: 'hi' },
-      validator: 'val', escalation: 'esc',
+      runner: 'codex',
+      builder: { low: 'lo', medium: 'mid', high: 'hi' },
+      validator: 'val',
+      escalation: 'esc',
     };
     (prd.userStories as Array<Record<string, unknown>>)[0].difficulty = 'medium';
     (prd.userStories as Array<Record<string, unknown>>)[0].difficultyReason = '命中 medium-1';
     writeFileSync(path, JSON.stringify(prd));
     configureWorkspace(ws, 50);
     expect(buildApiResponse().modelRouting).toMatchObject({
-      status: 'enabled', config: { runner: 'codex', validator: 'val', escalation: 'esc' },
+      status: 'enabled',
+      config: { runner: 'codex', validator: 'val', escalation: 'esc' },
     });
-  });
-});
-
-describe('browserOpenCommand', () => {
-  it('darwin → open', () => {
-    expect(browserOpenCommand('darwin', 'http://x')).toEqual({ cmd: 'open', args: ['http://x'] });
-  });
-  it('win32 → cmd /c start "" url', () => {
-    expect(browserOpenCommand('win32', 'http://x')).toEqual({ cmd: 'cmd', args: ['/c', 'start', '', 'http://x'] });
-  });
-  it('linux → xdg-open', () => {
-    expect(browserOpenCommand('linux', 'http://x')).toEqual({ cmd: 'xdg-open', args: ['http://x'] });
   });
 });
 
@@ -199,13 +265,19 @@ describe('start', () => {
     writeFileSync(join(pub, 'dashboard.html'), '<html>main</html>');
     writeFileSync(join(pub, 'dashboard-p.html'), '<html>pixel</html>');
 
-    const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
+    const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub });
     cleanup.push(() => srv.close());
     const addr = await srv.ready;
     expect(srv.address()).toEqual(addr);
     const res = await fetch(`http://127.0.0.1:${addr.port}/api/state`);
     const body = await res.json();
     expect(body.runtime.max_iterations).toBe(50);
+    expect(body.workspaceSafety).toMatchObject({
+      status: 'legacy',
+      observedClassification: 'legacy',
+      probeEvidence: 'system',
+      display: { label: '旧版工作区' },
+    });
     expect(res.headers.get('content-type')).toContain('application/json');
     expect(res.headers.get('access-control-allow-origin')).toBe('*');
   });
@@ -216,7 +288,7 @@ describe('start', () => {
     cleanup.push(() => rmSync(pub, { recursive: true, force: true }));
     const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
-    const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false });
+    const srv = start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub });
     cleanup.push(() => srv.close());
     const addr = await srv.ready;
     const res = await fetch(`http://127.0.0.1:${addr.port}/`);
@@ -238,7 +310,7 @@ describe('start', () => {
     writeFileSync(join(pub, 'dashboard-p.html'), '<html>pixel</html>');
 
     const servers = Array.from({ length: 12 }, () =>
-      start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub, openBrowser: false }),
+      start({ workspace: ws, maxIterations: 50, port: 0, publicDir: pub }),
     );
     cleanup.push(() => servers.forEach((server) => server.close()));
     const addresses = await Promise.all(servers.map((server) => server.ready));

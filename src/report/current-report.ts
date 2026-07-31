@@ -1,0 +1,203 @@
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { CODING_X_VERSION } from '../version.js';
+import { readQualityContract, type QualityContractReadResult } from '../quality/contract.js';
+import {
+  createManagedReviewObservation,
+  type ManagedReviewObservation,
+  type ManagedReviewTermination,
+} from '../review/managed-observation.js';
+import {
+  revalidateReviewContext,
+  runReviewPreflight,
+  type ReviewContextRevalidation,
+  type ReviewPreflightResult,
+} from '../review/preflight.js';
+import { evaluateManagedReviewRemoteState } from '../review/remote.js';
+import { readRunnerVersion } from '../review/runner.js';
+import { readFinalReviewState, type ReviewStateRead } from '../review/state.js';
+import {
+  evaluateCurrentReviewStatus,
+  type CurrentReviewStatus,
+  type RunnerVersionObservation,
+} from '../review/currentness.js';
+import type { ReviewRemoteState } from '../review/types.js';
+import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { WorkspaceSafetyError } from '../workspace-safety/types.js';
+import { writeReportWithWriter, type WriteReportResult } from './report.js';
+
+interface CurrentReportAdapters {
+  readContract(projectRoot: string): QualityContractReadResult;
+  createObservation(options: {
+    session: WorkspaceSession;
+    root: string;
+    termination?: ManagedReviewTermination;
+  }): ManagedReviewObservation;
+  preflight(options: Parameters<typeof runReviewPreflight>[0]): Promise<ReviewPreflightResult>;
+  readVersion(options: Parameters<typeof readRunnerVersion>[0]): Promise<string>;
+  remote(
+    options: Parameters<typeof evaluateManagedReviewRemoteState>[0],
+  ): Promise<ReviewRemoteState>;
+  revalidate(
+    ...options: Parameters<typeof revalidateReviewContext>
+  ): Promise<ReviewContextRevalidation>;
+  readReview(workspace: string): ReviewStateRead;
+  now(): Date;
+}
+
+const CURRENT_REPORT_ADAPTERS: CurrentReportAdapters = {
+  readContract: readQualityContract,
+  createObservation: createManagedReviewObservation,
+  preflight: runReviewPreflight,
+  readVersion: readRunnerVersion,
+  remote: evaluateManagedReviewRemoteState,
+  revalidate: revalidateReviewContext,
+  readReview: readFinalReviewState,
+  now: () => new Date(),
+};
+
+function staleReview(read: ReviewStateRead, reason: string): CurrentReviewStatus {
+  return {
+    read,
+    current: false,
+    staleReasons: read.status === 'ready' ? [reason] : [],
+  };
+}
+
+function addStaleReason(status: CurrentReviewStatus, reason: string): CurrentReviewStatus {
+  return {
+    ...status,
+    current: false,
+    staleReasons: [...status.staleReasons, reason],
+  };
+}
+
+function runnerObservation(
+  read: Extract<ReviewStateRead, { status: 'ready' }>,
+  version: string,
+): RunnerVersionObservation {
+  return { status: 'ready', runner: read.state.binding.runner, version };
+}
+
+/**
+ * Manual report currentness is observed and persisted under one report lease. Every Runner, git
+ * and GitHub subprocess is reached only through the managed observation/coordinator bound to that
+ * session. The ordinary report module stays process-free so automatic loop reporting cannot reach
+ * a second observation path.
+ */
+export async function writeCurrentReportWithSession(options: {
+  session: WorkspaceSession;
+  workspace: string;
+  projectRoot: string;
+  refreshRemote: boolean;
+  termination?: ManagedReviewTermination;
+  codingXVersion?: string;
+  /** @internal Deterministic observation seams; production always uses the fixed adapters above. */
+  adapters?: Partial<CurrentReportAdapters>;
+}): Promise<WriteReportResult> {
+  if (
+    realpathSync(resolve(options.workspace)) !==
+    realpathSync(resolve(options.session.writer.workspacePath))
+  ) {
+    throw new Error('手动报告的 workspace 与受控会话不一致');
+  }
+  const adapters = { ...CURRENT_REPORT_ADAPTERS, ...options.adapters };
+  const read = adapters.readReview(options.workspace);
+  let currentReview: CurrentReviewStatus;
+
+  if (read.status !== 'ready') {
+    currentReview = { read, current: false, staleReasons: [] };
+  } else {
+    const contract = adapters.readContract(options.projectRoot);
+    if (contract.status !== 'ready') {
+      currentReview = staleReview(read, `质量契约不可用：${contract.status}`);
+    } else {
+      const observation = adapters.createObservation({
+        session: options.session,
+        root: options.projectRoot,
+        ...(options.termination === undefined ? {} : { termination: options.termination }),
+      });
+      const preflight = await adapters.preflight({
+        root: options.projectRoot,
+        workspace: options.workspace,
+        currentContract: contract.contract,
+        observation,
+      });
+      if (preflight.status !== 'ready') {
+        currentReview = staleReview(read, preflight.message);
+      } else {
+        const context = preflight.context;
+        let initialRunner: RunnerVersionObservation;
+        try {
+          initialRunner = runnerObservation(
+            read,
+            await adapters.readVersion({
+              session: options.session,
+              runner: read.state.binding.runner,
+              ...(options.termination === undefined ? {} : { termination: options.termination }),
+            }),
+          );
+        } catch (error) {
+          if (error instanceof WorkspaceSafetyError) throw error;
+          initialRunner = {
+            status: 'unverifiable',
+            runner: read.state.binding.runner,
+            message: error instanceof Error ? error.message : String(error),
+          };
+        }
+        currentReview = evaluateCurrentReviewStatus({
+          read,
+          context,
+          runnerVersionObservation: initialRunner,
+          codingXVersion: options.codingXVersion ?? CODING_X_VERSION,
+        });
+
+        if (currentReview.current) {
+          let refreshedRemote: ReviewRemoteState | undefined;
+          if (options.refreshRemote) {
+            refreshedRemote = await adapters.remote({
+              context,
+              contract: context.baseContract,
+              client: observation.github,
+            });
+          }
+
+          // Match final Review's trust sequence: after the remote read, re-observe the complete
+          // git/PR context and Runner identity immediately before the parent writes report.html.
+          let finalRunner: RunnerVersionObservation;
+          try {
+            finalRunner = runnerObservation(
+              read,
+              await adapters.readVersion({
+                session: options.session,
+                runner: read.state.binding.runner,
+                ...(options.termination === undefined ? {} : { termination: options.termination }),
+              }),
+            );
+          } catch (error) {
+            if (error instanceof WorkspaceSafetyError) throw error;
+            finalRunner = {
+              status: 'unverifiable',
+              runner: read.state.binding.runner,
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+          const revalidated = await adapters.revalidate(context, options.workspace, observation);
+          currentReview = evaluateCurrentReviewStatus({
+            read,
+            context,
+            runnerVersionObservation: finalRunner,
+            codingXVersion: options.codingXVersion ?? CODING_X_VERSION,
+            ...(refreshedRemote === undefined ? {} : { refreshedRemote }),
+          });
+          if (!revalidated.ok) currentReview = addStaleReason(currentReview, revalidated.message);
+        }
+      }
+    }
+  }
+
+  // generatedAt is captured only after every observation, keeping the timestamp aligned with the
+  // state that is about to be rendered. writeReportWithWriter re-reads final-review.json and
+  // deep-compares it with currentReview, closing the remaining workspace-state replacement race.
+  return await writeReportWithWriter(options.session.writer, adapters.now(), { currentReview });
+}

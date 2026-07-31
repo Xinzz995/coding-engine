@@ -36,7 +36,6 @@ import {
   ACTIVE_STAGING_PREFIX,
   DELEGATED_BASELINE_FILE,
   DRAINED_RECEIPT_FILE,
-  NEVER,
   OPERATION_STAGING_PATTERN,
   PRESTART_ABORT_FILE,
   PRESTART_ABORT_SCHEMA_VERSION,
@@ -872,7 +871,6 @@ export function runWorkspaceOperationControlled<T>(
       }
       resolveOnce(result);
     } catch (error) {
-      rejectOnce(error);
       const canonical = join(
         lease.workspace.path,
         PROTOCOL_ROOT_DIR,
@@ -884,10 +882,14 @@ export function runWorkspaceOperationControlled<T>(
         !operation?.settled &&
         (await pathExists(canonical))
       ) {
-        // A canonical unfinished operation is an intentional write fence. The public call fails,
-        // while this exclusive action remains pending so queued parent writes/release cannot pass it.
-        return NEVER;
+        // A canonical unfinished operation is an intentional write fence. Mark the session before
+        // rejecting the public call: queued writes and close then fail immediately while the lease,
+        // operation, and quarantine remain on disk for diagnosis/recovery.
+        session.retainLeaseForIsolation();
+        rejectOnce(error);
+        return;
       }
+      rejectOnce(error);
       throw error;
     }
   });

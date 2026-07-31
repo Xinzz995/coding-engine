@@ -182,7 +182,8 @@ function reviewStatusLabel(status: 'passed' | 'failed' | 'unverifiable'): string
 }
 
 function renderFinalReview(data: ReportData, stories: StoryView[]): string {
-  const review = data.finalReview;
+  const currentReview = data.finalReview;
+  const review = currentReview.read;
   if (review.status === 'missing') {
     return `<section class="card"><h2>交付状态</h2>
 <div class="banner running">⏳ Story 结果不等于可交付</div>
@@ -194,6 +195,7 @@ function renderFinalReview(data: ReportData, stories: StoryView[]): string {
 <p>${text(review.error)}</p></section>`;
   }
   const state = review.state;
+  const remote = currentReview.refreshedRemote ?? state.remote;
   const findings = state.axes.flatMap((axis) => axis.findings);
   const axes = state.axes.map((axis) =>
     `<li>${text(axis.axis)}：${text(reviewStatusLabel(axis.status))} · ${axis.findings.length} 个 finding</li>`,
@@ -202,17 +204,43 @@ function renderFinalReview(data: ReportData, stories: StoryView[]): string {
     && stories.length > 0
     && stories.every(isStoryPassed);
   const deliveryReady = implementationReady
-    && state.status === 'passed' && state.remote.status === 'ready' && !state.shadow;
+    && currentReview.current
+    && currentReview.refreshedRemote !== undefined
+    && state.status === 'passed'
+    && remote.status === 'ready'
+    && !state.shadow;
   const banner = deliveryReady
     ? '<div class="banner ok">✅ 本地 Review 与 GitHub 交付条件已就绪</div>'
-    : `<div class="banner ${state.status === 'failed' || state.status === 'unverifiable' || !implementationReady ? 'blocked' : 'running'}">` +
-      `${state.shadow ? '🧪 Shadow 结果不能表示可交付'
-        : !implementationReady ? '❌ Story 状态未完成或不可验证，不能交付'
-          : '⏳ 尚未达到交付条件'}</div>`;
+    : `<div class="banner ${
+        state.status === 'failed'
+        || state.status === 'unverifiable'
+        || !implementationReady
+        || !currentReview.current
+          ? 'blocked'
+          : 'running'
+      }">` +
+      `${
+        state.shadow
+          ? '🧪 Shadow 结果不能表示可交付'
+          : !implementationReady
+            ? '❌ Story 状态未完成或不可验证，不能交付'
+            : !currentReview.current
+              ? '❌ 本地最终 Review 已过期或未完成当前性核验'
+              : currentReview.refreshedRemote === undefined
+                ? '⏳ GitHub 交付条件尚未重新核验'
+              : '⏳ 尚未达到交付条件'
+      }</div>`;
+  const staleReasons =
+    currentReview.current || currentReview.staleReasons.length === 0
+      ? ''
+      : `<ul class="checks">${currentReview.staleReasons
+          .map((reason) => `<li>当前性：${text(reason)}</li>`)
+          .join('')}</ul>`;
   return `<section class="card"><h2>交付状态</h2>
 ${banner}
-<div class="meta-line">本地 Review：${text(reviewStatusLabel(state.status))} · GitHub：${text(state.remote.status)} · finding：${findings.length}</div>
+<div class="meta-line">本地 Review：${text(reviewStatusLabel(state.status))} · GitHub：${text(remote.status)} · finding：${findings.length}</div>
 <div class="meta-line">PR #${state.binding.prNumber} · head <code>${text(state.binding.headSha.slice(0, 12))}</code> · ${text(state.binding.runner)} / ${text(state.binding.model)}</div>
+${staleReasons}
 ${axes ? `<ul class="checks">${axes}</ul>` : ''}
 <p class="placeholder">这是本机 workspace 中的结果展示，不是 GitHub 共享证明；共享交付记录以 GitHub 检查与 PR 历史为准。</p>
 </section>`;

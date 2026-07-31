@@ -375,6 +375,7 @@ describe('fixed Windows path attribute protocol', () => {
       'lease.ts',
       'mutation.ts',
       'mutation-recovery.ts',
+      'product-mutations.ts',
       'windows-identity-transport.ts',
       'windows-path-attributes.ts',
     ]);

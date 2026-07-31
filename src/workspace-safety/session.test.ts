@@ -6,6 +6,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -69,6 +70,148 @@ afterEach(() => {
 });
 
 describe('WorkspaceSession and WorkspaceWriter', () => {
+  it('serializes append and remove actions while preserving exact append order', async () => {
+    const workspace = temporaryWorkspace();
+    const session = await openSession(workspace);
+
+    await Promise.all([
+      session.writer.appendFile('evidence.jsonl', 'first\n'),
+      session.writer.appendFile('evidence.jsonl', 'second\n'),
+      session.writer.appendFile('evidence.jsonl', Buffer.from('third\n')),
+    ]);
+    expect(readFileSync(join(workspace, 'evidence.jsonl'), 'utf8')).toBe('first\nsecond\nthird\n');
+
+    await session.writer.removeFile('evidence.jsonl');
+    await session.writer.removeFile('evidence.jsonl');
+    await session.writer.removeFile('missing-parent/validation-result.json');
+
+    expect(existsSync(join(workspace, 'evidence.jsonl'))).toBe(false);
+    expect(existsSync(join(workspace, 'missing-parent'))).toBe(false);
+    await session.close();
+  });
+
+  it('rechecks ownership before committing an append', async () => {
+    const workspace = temporaryWorkspace();
+    let allowCommit!: () => void;
+    const commitBarrier = new Promise<void>((resolve) => {
+      allowCommit = resolve;
+    });
+    let tempCreated!: () => void;
+    const tempReady = new Promise<void>((resolve) => {
+      tempCreated = resolve;
+    });
+    const session = await openSession(workspace, {
+      hooks: {
+        afterTempCreated: async () => {
+          tempCreated();
+          await commitBarrier;
+        },
+      },
+    });
+    writeFileSync(join(workspace, 'evidence.jsonl'), 'original\n');
+    const append = session.writer.appendFile('evidence.jsonl', 'stale\n');
+    await tempReady;
+
+    const protocolRoot = join(workspace, PROTOCOL_ROOT_DIR);
+    renameSync(
+      join(protocolRoot, ACTIVE_LEASE_DIR),
+      join(protocolRoot, INCIDENTS_DIR, 'simulated-stale-append-owner'),
+    );
+    const current = await acquireWorkspaceLease({
+      workspacePath: workspace,
+      identity: identity(3),
+      ownerId: OWNER_B,
+      command: 'run',
+    });
+    allowCommit();
+
+    await expect(append).rejects.toMatchObject({ code: 'lease-lost' });
+    expect(readFileSync(join(workspace, 'evidence.jsonl'), 'utf8')).toBe('original\n');
+    await current.release();
+  });
+
+  it('rechecks ownership immediately before removing a file', async () => {
+    const workspace = temporaryWorkspace();
+    let allowRemove!: () => void;
+    const removeBarrier = new Promise<void>((resolve) => {
+      allowRemove = resolve;
+    });
+    let removeReached!: () => void;
+    const removeReady = new Promise<void>((resolve) => {
+      removeReached = resolve;
+    });
+    const session = await openSession(workspace, {
+      hooks: {
+        beforeRemoveCommit: async () => {
+          removeReached();
+          await removeBarrier;
+        },
+      },
+    });
+    writeFileSync(join(workspace, 'validation-result.json'), 'keep');
+    const remove = session.writer.removeFile('validation-result.json');
+    await removeReady;
+
+    const protocolRoot = join(workspace, PROTOCOL_ROOT_DIR);
+    renameSync(
+      join(protocolRoot, ACTIVE_LEASE_DIR),
+      join(protocolRoot, INCIDENTS_DIR, 'simulated-stale-remove-owner'),
+    );
+    const current = await acquireWorkspaceLease({
+      workspacePath: workspace,
+      identity: identity(3),
+      ownerId: OWNER_B,
+      command: 'run',
+    });
+    allowRemove();
+
+    await expect(remove).rejects.toMatchObject({ code: 'lease-lost' });
+    expect(readFileSync(join(workspace, 'validation-result.json'), 'utf8')).toBe('keep');
+    await current.release();
+  });
+
+  it('rejects unsafe append and remove targets without touching links or protocol paths', async () => {
+    const workspace = temporaryWorkspace();
+    const outside = temporaryWorkspace('workspace-session-append-remove-outside-');
+    const session = await openSession(workspace);
+    writeFileSync(join(outside, 'escape.txt'), 'outside');
+    symlinkSync(
+      outside,
+      join(workspace, 'link'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    symlinkSync(
+      join(outside, 'escape.txt'),
+      join(workspace, 'file-link'),
+      process.platform === 'win32' ? 'file' : undefined,
+    );
+
+    for (const path of [
+      '../escape.txt',
+      'link/escape.txt',
+      'link/missing/escape.txt',
+      'ENGINE.LOCK/escape.txt',
+      'Workspace-Safety.json',
+    ]) {
+      await expect(session.writer.appendFile(path, 'never')).rejects.toMatchObject({
+        code: 'invalid',
+      });
+      await expect(session.writer.removeFile(path)).rejects.toMatchObject({
+        code: 'invalid',
+      });
+    }
+    await expect(session.writer.removeFile('file-link')).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    await expect(session.writer.appendFile('file-link', 'never')).rejects.toMatchObject({
+      code: 'invalid',
+    });
+
+    expect(readFileSync(join(outside, 'escape.txt'), 'utf8')).toBe('outside');
+    expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(true);
+    await session.close();
+  });
+
   it('serializes an in-flight write before release and rejects every later action', async () => {
     const workspace = temporaryWorkspace();
     let tempPath = '';

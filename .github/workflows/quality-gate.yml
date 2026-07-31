@@ -36,7 +36,7 @@ jobs:
         run: '''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 10
+        timeout-minutes: 15
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -101,7 +101,7 @@ jobs:
         run: '''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 10
+        timeout-minutes: 15
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'
@@ -136,7 +136,7 @@ jobs:
         run: '''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 10
+        timeout-minutes: 15
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -176,7 +176,7 @@ jobs:
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 10
+        timeout-minutes: 15
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -216,7 +216,7 @@ jobs:
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 10
+        timeout-minutes: 15
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'

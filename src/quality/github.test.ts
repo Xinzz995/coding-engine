@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
-  GhGitHubQualityClient,
   GitHubQualityError,
-  type GitHubCommandExecutor,
-  type GitHubCommandInvocation,
   type GitHubRulesetPayload,
 } from './github.js';
+import {
+  GhGitHubQualityClient,
+  type GitHubCommandExecutor,
+  type GitHubCommandInvocation,
+} from './github-unmanaged.js';
 
 const REPOSITORY_JSON = JSON.stringify({
   nameWithOwner: 'owner/repository',

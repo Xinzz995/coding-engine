@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Story } from './prd.js';
@@ -64,6 +71,29 @@ describe('validation request', () => {
   it('reads a real Git HEAD and reports non-Git directories as unavailable', () => {
     expect(readGitHead(process.cwd())).toMatch(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
     expect(readGitHead(tempDir())).toBeNull();
+  });
+
+  it('reads linked-worktree loose and packed refs without launching Git', () => {
+    const root = tempDir();
+    const checkout = join(root, 'checkout');
+    const gitDirectory = join(root, 'git-common', 'worktrees', 'fixture');
+    const commonDirectory = join(root, 'git-common');
+    mkdirSync(checkout);
+    mkdirSync(join(gitDirectory), { recursive: true });
+    mkdirSync(join(commonDirectory, 'refs', 'heads'), { recursive: true });
+    writeFileSync(join(checkout, '.git'), 'gitdir: ../git-common/worktrees/fixture\n');
+    writeFileSync(join(gitDirectory, 'commondir'), '../..\n');
+    writeFileSync(join(gitDirectory, 'HEAD'), 'ref: refs/heads/feature\n');
+    writeFileSync(join(commonDirectory, 'refs', 'heads', 'feature'), `${'a'.repeat(40)}\n`);
+
+    expect(readGitHead(checkout)).toBe('a'.repeat(40));
+
+    rmSync(join(commonDirectory, 'refs', 'heads', 'feature'));
+    writeFileSync(
+      join(commonDirectory, 'packed-refs'),
+      `# pack-refs with: peeled fully-peeled\n${'b'.repeat(64)} refs/heads/feature\n`,
+    );
+    expect(readGitHead(checkout)).toBe('b'.repeat(64));
   });
 
   it('binds one request to the exact story, AC snapshot, artifact and workspace path', () => {

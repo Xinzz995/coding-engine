@@ -1,15 +1,20 @@
-import { spawn } from 'node:child_process';
-import { accessSync, constants } from 'node:fs';
-import { delimiter, join } from 'node:path';
-import { forceKillProcessTreeOnExit, terminateProcessTree } from './process-tree.js';
+import { accessSync, constants, realpathSync } from 'node:fs';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
+import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
+import type { OperationDelegationScope } from '../workspace-safety/operation.js';
+import type { WorkspaceSession } from '../workspace-safety/session.js';
+import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
 
 export type AgentKind = 'claude' | 'codex' | 'cursor';
 
 export function permissionWarning(kind: AgentKind): string {
-  const flag = kind === 'codex' ? '--dangerously-bypass-approvals-and-sandbox'
-    : kind === 'cursor' ? '--force'
-    : '--dangerously-skip-permissions';
+  const flag =
+    kind === 'codex'
+      ? '--dangerously-bypass-approvals-and-sandbox'
+      : kind === 'cursor'
+        ? '--force'
+        : '--dangerously-skip-permissions';
   return [
     '',
     '⚠️  coding-x 将以【跳过权限】模式自动运行 AI agent：',
@@ -22,9 +27,8 @@ export function permissionWarning(kind: AgentKind): string {
 
 function executableOnPath(name: string): boolean {
   const path = process.env.PATH ?? '';
-  const extensions = process.platform === 'win32'
-    ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')
-    : [''];
+  const extensions =
+    process.platform === 'win32' ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';') : [''];
   for (const dir of path.split(delimiter).filter(Boolean)) {
     for (const extension of extensions) {
       try {
@@ -36,6 +40,36 @@ function executableOnPath(name: string): boolean {
     }
   }
   return false;
+}
+
+export function resolveExecutablePath(
+  name: string,
+  cwd: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const candidates: string[] = [];
+  if (isAbsolute(name)) {
+    candidates.push(name);
+  } else if (name.includes('/') || name.includes('\\')) {
+    candidates.push(resolve(cwd, name));
+  } else {
+    const extensions =
+      process.platform === 'win32'
+        ? (environment.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')
+        : [''];
+    for (const directory of (environment.PATH ?? '').split(delimiter).filter(Boolean)) {
+      for (const extension of extensions) candidates.push(join(directory, `${name}${extension}`));
+    }
+  }
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK);
+      return realpathSync(candidate);
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  throw new Error(`找不到可执行文件：${name}`);
 }
 
 export function resolveBinary(kind: AgentKind): string {
@@ -64,8 +98,12 @@ export interface RunResult {
   exitCode: number | null;
   /** 从 spawn 前到 runner stdio 关闭的墙钟耗时；超时路径含整棵进程树终止等待。 */
   durationMs: number;
-  /** stdout/stderr 实时 tee 后保留的有界合并尾部；是否持久化由 loop 按结局决定。 */
+  /** 受控进程完成收口后转发 stdout/stderr，并保留有界合并尾部。 */
   outputTail: string;
+  /** 根进程成功/失败后仍有后代；本轮结果必须丢弃。 */
+  processTreeNotEmpty?: boolean;
+  /** timeout 以外的受控终止来源。 */
+  terminationReason?: SupervisorTerminationReason | null;
 }
 
 export function runAgent(opts: {
@@ -77,6 +115,15 @@ export function runAgent(opts: {
   model?: string;
   /** coding-x 运行上下文等显式子进程环境；其余环境原样继承。 */
   env?: NodeJS.ProcessEnv;
+  /** 所有 agent/reviewer 子进程都必须绑定当前 workspace owner domain。 */
+  managed: {
+    readonly session: WorkspaceSession;
+    readonly operation: OperationDelegationScope;
+    readonly termination?: {
+      readonly signal: AbortSignal;
+      readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+    };
+  };
 }): Promise<RunResult> {
   // buildAgentArgs()[0] may itself be "node /path mode" when overridden by an
   // env var in tests; split it so the stub receives its trailing args.
@@ -84,66 +131,46 @@ export function runAgent(opts: {
   const head = argv[0].split(' ');
   const cmd = head[0];
   const args = [...head.slice(1), ...argv.slice(1)];
+  const environment = { ...process.env, ...opts.env };
 
-  return new Promise((resolve, reject) => {
-    const startedAt = Date.now();
-    const child = spawn(cmd, args, {
-      cwd: opts.cwd, stdio: ['inherit', 'pipe', 'pipe'], detached: process.platform !== 'win32',
-      env: { ...process.env, ...opts.env },
+  let executable: string;
+  let cwd: string;
+  try {
+    executable = resolveExecutablePath(cmd, opts.cwd, environment);
+    cwd = realpathSync(opts.cwd);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\n❌ Agent 错误: ${message}`);
+    return Promise.resolve({
+      timedOut: false,
+      exitCode: 1,
+      durationMs: 0,
+      outputTail: message.slice(-EVIDENCE_DIAGNOSTIC_CHARS),
+      processTreeNotEmpty: false,
+      terminationReason: null,
     });
-    let outputTail = '';
-    const keep = (chunk: Buffer | string) => {
-      outputTail = (outputTail + String(chunk)).slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+  }
+  return runManagedWorkspaceProcess(opts.managed.session, {
+    ...opts.managed.operation,
+    executable,
+    args,
+    cwd,
+    environment: environmentEntries(environment),
+    timeoutMs: opts.timeoutMs,
+    termination: opts.managed.termination,
+  }).then((result) => {
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    const outputTail = Buffer.concat([result.stdout, result.stderr])
+      .toString('utf8')
+      .slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+    return {
+      timedOut: result.timedOut,
+      exitCode: result.processTreeNotEmpty ? 1 : result.exitCode,
+      durationMs: result.durationMs,
+      outputTail,
+      processTreeNotEmpty: result.processTreeNotEmpty,
+      terminationReason: result.terminationReason,
     };
-    // headless runner 的 stdout/stderr 继续实时可见，同时只滚动保留最近的有界尾部。
-    // 与 gate 的 tee 语义一致；不等待整段输出、不把成功 transcript 持久化。
-    child.stdout?.on('data', (chunk: Buffer) => { process.stdout.write(chunk); keep(chunk); });
-    child.stderr?.on('data', (chunk: Buffer) => { process.stderr.write(chunk); keep(chunk); });
-    let settled = false;
-    let terminating = false;
-    const killOnParentExit = () => forceKillProcessTreeOnExit(child);
-    process.once('exit', killOnParentExit);
-
-    const finish = (timedOut: boolean, exitCode: number | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      process.removeListener('exit', killOnParentExit);
-      resolve({
-        timedOut,
-        exitCode,
-        durationMs: Math.max(0, Date.now() - startedAt),
-        outputTail,
-      });
-    };
-    const fail = (err: unknown) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      // 终止失败时保持 exit hook；趁根 pid 尚在同步补杀整树，避免 Windows 先杀根后遗失孙进程。
-      forceKillProcessTreeOnExit(child);
-      reject(err instanceof Error ? err : new Error(String(err)));
-    };
-
-    const timer = setTimeout(() => {
-      if (settled || terminating) return;
-      terminating = true;
-      void terminateProcessTree(child).then(() => {
-        finish(true, null);
-      }, fail);
-    }, opts.timeoutMs);
-
-    // close 晚于 exit，保证 pipe 中最后一段 stdout/stderr 已被 tee/采集后再写 evidence。
-    child.once('close', (code) => {
-      if (terminating) return;
-      finish(false, code);
-    });
-
-    child.once('error', (err) => {
-      if (terminating) return;
-      console.error(`\n❌ Agent 错误: ${err.message}`);
-      keep(err.message);
-      finish(false, 1);
-    });
   });
 }

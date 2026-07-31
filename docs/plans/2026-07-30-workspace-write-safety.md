@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离实施计划
 status: active
-updated: 2026-07-30
+updated: 2026-07-31
 scope: root
 ---
 
@@ -127,6 +127,20 @@ Issue #91 干净检出。
 - 正式启用 `workspace-safety.json`，缺少标记或旧 workspace 时失败关闭；
 - 所有三平台破坏性任务再次以生产入口运行。
 
+本 PR 冻结以下产品归档策略（2026-07-31 用户确认）：
+
+- apply-prd 换功能时，归档旧 `prd.json`、`state.json`、`progress.md`、`review-*.md`、
+  `final-review.json`、`review-decisions.json`、`evidence.jsonl`、`report.html`、`screenshots/` 与
+  `prd.tampered-*.json`（存在才纳入）；`validation-result.json` 只删除，不归档；
+- apply-prd 同功能再派生时，只归档会失效的 `prd.json`、`state.json`、`review-*.md`、
+  `final-review.json`、`review-decisions.json` 与 `evidence.jsonl`，保留 `progress.md`；
+  `validation-result.json` 同样只删除；
+- repair 只归档本次实际修复前的 `prd.json` 与存在时的 `state.json` 原始字节；
+- 0.34.0 不自动删除上述归档，也不按天数或份数清理。未来若增加清理，必须由用户显式触发并另行
+  冻结可恢复规则；
+- 两种动作分别固定白名单和 secret canary；未列出的普通业务文件不会被 mutation 安全元数据顺手
+  复制。归档路径本身可能包含用户主动选择保留的截图或本地证据，文案不得承诺这些输入不含秘密。
+
 完成信号：任一正式入口不能绕过 owner domain；root 成功但遗留后代不能假绿；recovery 和 mutation
 中断都有可执行出路；0.34.0 行为文档与代码一致。
 
@@ -188,7 +202,7 @@ Issue #91 干净检出。
 
 ## 代码范围预估
 
-- `src/engine/lock.ts`：只保留旧实现到 activation；新版拆为 safety evaluator 与 owner lease；
+- 旧 `src/engine/lock.ts`：activation 时删除；新版拆为 safety evaluator 与 owner lease；
 - 新增 workspace session/writer、operation coordinator、supervisor protocol、platform identity；
 - 固定 POSIX supervisor 与 Windows 预编译 C# Job helper；
 - `agent.ts`、`gate.ts`、`tdd-gate.ts`、review runner：统一受管 spawn；

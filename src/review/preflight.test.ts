@@ -7,9 +7,13 @@ import { readQualityContract, type QualityContract } from '../quality/contract.j
 import type { GitHubQualityClient } from '../quality/github.js';
 import {
   containsGitBinaryPatch,
-  runReviewPreflight,
+  type ReviewPreflightContext,
   validatePullRequestIntent,
 } from './preflight.js';
+import {
+  revalidateUnmanagedReviewContext,
+  runUnmanagedReviewPreflight,
+} from './unmanaged-preflight.js';
 
 const completeBody = `
 ## 本次目标
@@ -36,10 +40,9 @@ describe('validatePullRequestIntent', () => {
   });
 
   it('does not count template comments or empty headings as intent', () => {
-    const result = validatePullRequestIntent(completeBody.replace(
-      'docs/specs/review.md 与 PR 验收说明。',
-      '<!-- 请填写 -->',
-    ));
+    const result = validatePullRequestIntent(
+      completeBody.replace('docs/specs/review.md 与 PR 验收说明。', '<!-- 请填写 -->'),
+    );
     expect(result).toEqual({ ok: false, missing: ['Spec 与验收标准来源'] });
   });
 
@@ -48,10 +51,9 @@ describe('validatePullRequestIntent', () => {
     ['punctuation only', '<!-- 请填写 -->\n---'],
     ['unfinished comment', '<!-- 尚未填写'],
   ])('rejects %s as meaningful intent', (_label, replacement) => {
-    const result = validatePullRequestIntent(completeBody.replace(
-      'docs/specs/review.md 与 PR 验收说明。',
-      replacement,
-    ));
+    const result = validatePullRequestIntent(
+      completeBody.replace('docs/specs/review.md 与 PR 验收说明。', replacement),
+    );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.missing).toContain('Spec 与验收标准来源');
   });
@@ -117,13 +119,20 @@ describe('runReviewPreflight old-policy boundary', () => {
       const source = readQualityContract(process.cwd());
       if (source.status !== 'ready') throw new Error(`contract unavailable: ${source.status}`);
       const baseContract: QualityContract = structuredClone(source.contract);
-      baseContract.repository = { provider: 'github', fullName: 'owner/repo', defaultBranch: 'main' };
+      baseContract.repository = {
+        provider: 'github',
+        fullName: 'owner/repo',
+        defaultBranch: 'main',
+      };
       baseContract.generatedPaths = [];
       baseContract.sources.engineeringStandards = ['AGENTS.md'];
       mkdirSync(join(root, '.coding-x'), { recursive: true });
       mkdirSync(join(root, 'docs/specs'), { recursive: true });
       mkdirSync(join(root, 'src'), { recursive: true });
-      writeFileSync(join(root, '.coding-x/quality.json'), `${JSON.stringify(baseContract, null, 2)}\n`);
+      writeFileSync(
+        join(root, '.coding-x/quality.json'),
+        `${JSON.stringify(baseContract, null, 2)}\n`,
+      );
       writeFileSync(join(root, 'AGENTS.md'), '# Rules\n');
       writeFileSync(join(root, 'docs/specs/review.md'), '# Spec\n');
       writeFileSync(join(root, 'src/a.ts'), 'export const a = 1;\n');
@@ -136,24 +145,141 @@ describe('runReviewPreflight old-policy boundary', () => {
       run(root, ['switch', '-q', '-c', 'feature/review']);
       const currentContract = structuredClone(baseContract);
       currentContract.generatedPaths = ['src/**'];
-      writeFileSync(join(root, '.coding-x/quality.json'), `${JSON.stringify(currentContract, null, 2)}\n`);
+      writeFileSync(
+        join(root, '.coding-x/quality.json'),
+        `${JSON.stringify(currentContract, null, 2)}\n`,
+      );
       run(root, ['add', '.coding-x/quality.json']);
       run(root, ['commit', '-q', '-m', 'weaken generated paths']);
       const headSha = run(root, ['rev-parse', 'HEAD']);
       writeFileSync(join(root, 'src/a.ts'), 'export const a = 999;\n');
 
       const client = {
-        discoverRepository: () => ({ fullName: 'owner/repo', defaultBranch: 'main', isPrivate: true }),
+        discoverRepository: () => ({
+          fullName: 'owner/repo',
+          defaultBranch: 'main',
+          isPrivate: true,
+        }),
         findOpenPullRequest: () => ({
-          number: 1, headSha, baseBranch: 'main', baseSha,
-          url: 'https://example.test/1', title: 'policy change', body: completeBody, labels: [],
+          number: 1,
+          headSha,
+          baseBranch: 'main',
+          baseSha,
+          url: 'https://example.test/1',
+          title: 'policy change',
+          body: completeBody,
+          labels: [],
         }),
       } as unknown as GitHubQualityClient;
-      const result = runReviewPreflight({
-        root, workspace: join(root, '.workspace'), currentContract, client,
+      const result = runUnmanagedReviewPreflight({
+        root,
+        workspace: join(root, '.workspace'),
+        currentContract,
+        client,
       });
       expect(result).toMatchObject({ status: 'config-error' });
       if (result.status !== 'ready') expect(result.message).toContain('src/a.ts');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(remote, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('revalidateUnmanagedReviewContext', () => {
+  it('rejects PR intent drift and new unexpected worktree changes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'review-revalidate-'));
+    const remote = mkdtempSync(join(tmpdir(), 'review-revalidate-remote-'));
+    try {
+      run(remote, ['init', '--bare', '-q']);
+      run(root, ['init', '-q', '-b', 'main']);
+      run(root, ['config', 'user.email', 'review@test.local']);
+      run(root, ['config', 'user.name', 'review-test']);
+      writeFileSync(join(root, 'source.txt'), 'base\n');
+      run(root, ['add', '-A']);
+      run(root, ['commit', '-q', '-m', 'base']);
+      run(root, ['remote', 'add', 'origin', remote]);
+      run(root, ['push', '-q', '-u', 'origin', 'main']);
+      const baseSha = run(root, ['rev-parse', 'HEAD']);
+
+      run(root, ['switch', '-q', '-c', 'feature/review']);
+      writeFileSync(join(root, 'source.txt'), 'feature\n');
+      run(root, ['add', '-A']);
+      run(root, ['commit', '-q', '-m', 'feature']);
+      const headSha = run(root, ['rev-parse', 'HEAD']);
+
+      const source = readQualityContract(process.cwd());
+      if (source.status !== 'ready') throw new Error(`contract unavailable: ${source.status}`);
+      const baseContract: QualityContract = structuredClone(source.contract);
+      baseContract.repository = {
+        provider: 'github',
+        fullName: 'owner/repo',
+        defaultBranch: 'main',
+      };
+      baseContract.generatedPaths = [];
+      let currentBody = completeBody;
+      const client = {
+        discoverRepository: () => ({
+          fullName: 'owner/repo',
+          defaultBranch: 'main',
+          isPrivate: true,
+        }),
+        findOpenPullRequest: () => ({
+          number: 1,
+          headSha,
+          baseBranch: 'main',
+          baseSha,
+          url: 'https://example.test/1',
+          title: 'feature review',
+          body: currentBody,
+          labels: [],
+        }),
+      } as unknown as GitHubQualityClient;
+      const context: ReviewPreflightContext = {
+        root,
+        branch: 'feature/review',
+        baseSha,
+        headSha,
+        pullRequest: {
+          number: 1,
+          headSha,
+          baseBranch: 'main',
+          baseSha,
+          url: 'https://example.test/1',
+          title: 'feature review',
+          body: completeBody,
+          labels: [],
+        },
+        baseContract,
+        baseContractDigest: 'sha256:contract',
+        changedFiles: ['source.txt'],
+        files: [{ path: 'source.txt', base: 'base\n', head: 'feature\n' }],
+        diff: '-base\n+feature\n',
+        specs: [],
+        engineeringStandards: [],
+        history: `${headSha}\tfeature`,
+        prSections: {
+          本次目标: 'feature',
+          明确的非目标: 'none',
+          'Spec 与验收标准来源': 'PR',
+          验证方式: 'tests',
+          风险说明: 'low',
+        },
+      };
+      const workspace = join(root, '.workspace');
+
+      expect(revalidateUnmanagedReviewContext(context, workspace, client)).toEqual({ ok: true });
+
+      currentBody = `${completeBody}\nchanged after remote read\n`;
+      const changedIntent = revalidateUnmanagedReviewContext(context, workspace, client);
+      expect(changedIntent).toMatchObject({ ok: false });
+      if (!changedIntent.ok) expect(changedIntent.message).toContain('标题或正文');
+
+      currentBody = completeBody;
+      writeFileSync(join(root, 'unexpected.txt'), 'uncommitted\n');
+      const dirty = revalidateUnmanagedReviewContext(context, workspace, client);
+      expect(dirty).toMatchObject({ ok: false });
+      if (!dirty.ok) expect(dirty.message).toContain('unexpected.txt');
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(remote, { recursive: true, force: true });

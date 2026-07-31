@@ -75,6 +75,7 @@ describe('operation and mutation capability boundary', () => {
       [
         'operation',
         new Set([
+          'workspace-safety/coordinator.ts',
           'workspace-safety/posix-supervisor.ts',
           'workspace-safety/windows-supervisor-integration.ts',
         ]),
@@ -84,7 +85,7 @@ describe('operation and mutation capability boundary', () => {
         'mutation-domain',
         new Set(['workspace-safety/mutation.ts', 'workspace-safety/mutation-recovery.ts']),
       ],
-      ['mutation', new Set()],
+      ['mutation', new Set(['workspace-safety/product-mutations.ts'])],
     ]);
     const offenders: string[] = [];
     for (const path of productionFiles(root)) {
@@ -138,7 +139,10 @@ describe('operation and mutation capability boundary', () => {
   it('keeps direct Controlled use inside the operation and mutation coordinator allowlists', () => {
     const root = fileURLToPath(new URL('../', import.meta.url));
     const allowedByName = new Map<string, ReadonlySet<string>>([
-      ['runWorkspaceOperationControlled', new Set(['workspace-safety/operation.ts'])],
+      [
+        'runWorkspaceOperationControlled',
+        new Set(['workspace-safety/coordinator.ts', 'workspace-safety/operation.ts']),
+      ],
       [
         'WorkspaceOperationHandleControlled',
         new Set([
@@ -211,7 +215,10 @@ describe('operation and mutation capability boundary', () => {
           'workspace-safety/windows-supervisor-integration.ts',
         ]),
       ],
-      ['runWorkspaceMutationControlled', new Set(['workspace-safety/mutation.ts'])],
+      [
+        'runWorkspaceMutationControlled',
+        new Set(['workspace-safety/mutation.ts', 'workspace-safety/product-mutations.ts']),
+      ],
       [
         'createMutationWriterAuthorityControlled',
         new Set([

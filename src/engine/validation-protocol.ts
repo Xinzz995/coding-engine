@@ -1,7 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { closeSync, constants, fstatSync, openSync, readFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   acceptanceHash,
   parseValidationResultBytes,
@@ -11,6 +18,7 @@ import {
   type ValidationRequest,
 } from '../contracts/validation-contract.js';
 import type { Story } from './prd.js';
+import type { WorkspaceWriter } from '../workspace-safety/session.js';
 
 export const VALIDATION_RESULT_FILE = 'validation-result.json';
 export {
@@ -32,19 +40,80 @@ export type {
  * 或空字符串伪装成 artifact identity。
  */
 export function readGitHead(cwd: string): string | null {
-  try {
-    const value = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5_000,
-    })
-      .trim()
-      .toLowerCase();
-    return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value) ? value : null;
-  } catch {
-    return null;
+  const objectId = (value: string): string | null => {
+    const normalized = value.trim().toLowerCase();
+    return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(normalized) ? normalized : null;
+  };
+  const readBounded = (path: string, maximumBytes: number): string | null => {
+    try {
+      const info = statSync(path);
+      if (!info.isFile() || info.size > maximumBytes) return null;
+      return readFileSync(path, 'utf8');
+    } catch {
+      return null;
+    }
+  };
+  const locateGitDirectory = (): string | null => {
+    let current = resolve(cwd);
+    for (;;) {
+      const marker = join(current, '.git');
+      try {
+        const info = statSync(marker);
+        if (info.isDirectory()) return marker;
+        if (info.isFile()) {
+          const text = readBounded(marker, 4096);
+          const match = text?.match(/^gitdir:\s*(.+?)\s*$/u);
+          if (!match) return null;
+          return isAbsolute(match[1]) ? resolve(match[1]) : resolve(current, match[1]);
+        }
+      } catch {
+        // Continue towards the filesystem root.
+      }
+      const parent = dirname(current);
+      if (parent === current) return null;
+      current = parent;
+    }
+  };
+  const gitDirectory = locateGitDirectory();
+  if (!gitDirectory) return null;
+  const commonDirectoryText = readBounded(join(gitDirectory, 'commondir'), 4096);
+  const commonDirectory = commonDirectoryText
+    ? resolve(gitDirectory, commonDirectoryText.trim())
+    : gitDirectory;
+  const packedRefs = (): Map<string, string> => {
+    const values = new Map<string, string>();
+    const text = readBounded(join(commonDirectory, 'packed-refs'), 16 * 1024 * 1024);
+    if (!text) return values;
+    for (const line of text.split(/\r?\n/u)) {
+      if (line === '' || line.startsWith('#') || line.startsWith('^')) continue;
+      const separator = line.indexOf(' ');
+      if (separator <= 0) continue;
+      const id = objectId(line.slice(0, separator));
+      const ref = line.slice(separator + 1).trim();
+      if (id && ref.startsWith('refs/')) values.set(ref, id);
+    }
+    return values;
+  };
+  const packed = packedRefs();
+  let value = readBounded(join(gitDirectory, 'HEAD'), 4096);
+  for (let depth = 0; value !== null && depth < 8; depth += 1) {
+    const id = objectId(value);
+    if (id) return id;
+    const match = value.trim().match(/^ref:\s*(refs\/[^\0\r\n]+)$/u);
+    if (!match) return null;
+    const ref = match[1];
+    const parts = ref.split('/');
+    if (
+      parts.some((part) => part === '' || part === '.' || part === '..' || part.includes('\\'))
+    ) {
+      return null;
+    }
+    value =
+      readBounded(join(gitDirectory, ...parts), 4096) ??
+      readBounded(join(commonDirectory, ...parts), 4096);
+    if (value === null) return packed.get(ref) ?? null;
   }
+  return null;
 }
 
 export function createValidationRequest(
@@ -87,13 +156,21 @@ ${JSON.stringify(request, null, 2)}
 `;
 }
 
-/** 每轮前只清理引擎固定的临时 result 路径；ENOENT 是合法空态。 */
+/**
+ * @deprecated 仅供激活前旧控制流与同步单元测试使用。正式控制流必须使用
+ * clearValidationResultWithWriter，不得接受任意结果路径。
+ */
 export function clearValidationResult(path: string): void {
   try {
     unlinkSync(path);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
+}
+
+/** 每轮前由当前 owner 清理固定的 validation-result.json；文件缺失是合法空态。 */
+export function clearValidationResultWithWriter(writer: WorkspaceWriter): Promise<void> {
+  return writer.removeFile(VALIDATION_RESULT_FILE);
 }
 
 /**

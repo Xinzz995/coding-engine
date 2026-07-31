@@ -178,6 +178,7 @@
       <div class="phase-dot" id="phaseDot" style="background:var(--mac-gray)"></div>
       <div class="phase-text" id="phaseText">等待启动</div>
     </div>
+    <div class="clock" id="workspaceSafetyText">workspace 安全状态读取中</div>
     <div class="clock" id="routingText"></div>
     <div class="clock" id="clock"></div>
   </div>
@@ -302,6 +303,17 @@ function renderPhase(rt, routing, stateCorrupted) {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString('zh-CN');
 }
 
+function renderWorkspaceSafety(safety) {
+  const target = document.getElementById('workspaceSafetyText');
+  if (!safety) {
+    target.textContent = 'workspace 安全状态未读取';
+    return;
+  }
+  const guidance = safety.display.guidance ? ` · ${safety.display.guidance}` : '';
+  target.textContent =
+    `🧱 ${safety.display.label}（${safety.status}） · ${safety.display.summary}${guidance}`;
+}
+
 // ─── Data fetch ───
 // 三种状态：正常轮询 / 服务器停止（曾有真实数据 → 冻结最后画面 + 横幅，继续探测以便恢复）
 // / 演示模式（从未连上过服务器，如直接打开本 HTML 预览 → 使用内置演示数据）
@@ -317,6 +329,7 @@ const FALLBACK = {
   runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340, model: 'opus', route_source: 'difficulty', story_difficulty: 'medium', runner: 'claude' },
   stateCorrupted: false,
   modelRouting: { status: 'disabled', config: null, errors: [] },
+  workspaceSafety: null,
   project: '简易笔记系统',
   stories: [
     { id:'US-001', title:'初始化项目结构与静态导出配置', passes:true, validated:true, notes:'', retryCount:0, blocked:false },
@@ -358,6 +371,7 @@ async function poll() {
   renderProgress(data.stories);
   renderLogs(data.logs);
   renderPhase(data.runtime, data.modelRouting, data.stateCorrupted);
+  renderWorkspaceSafety(data.workspaceSafety);
 }
 
 setInterval(poll, POLL_MS);

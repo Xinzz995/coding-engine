@@ -1,15 +1,15 @@
 ---
 title: 008-workspace-single-writer-lock
-status: active
-updated: 2026-07-30
+status: superseded
+updated: 2026-07-31
 scope: root
 ---
 
 # 008. workspace 单写者锁（engine.lock）
 
-> 2026-07-30 事实修正：Issue #106 证明 pid-only stale 自动接管、轮首删锁重建和 signal 先删锁
-> 不能保证旧子进程树已经失去写能力。ADR-021 已批准 owner-bound 写租约与活动进程隔离，计划在
-> 0.34.0 取代这些规则；实施完成前，本文件仍描述 0.33.3 的实际行为，不得据此宣称崩溃窗口已关闭。
+> 2026-07-31 起由 ADR-021 取代。本文只保留 0.21.0 至 0.33.3 的 pid-only 文件锁历史取舍，
+> 不再描述当前实现。当前使用永久 `engine.lock/` 协议根、owner-bound workspace 写租约和显式恢复；
+> 不做 stale 自动接管，也不要求用户手工删锁。
 
 ## 背景
 

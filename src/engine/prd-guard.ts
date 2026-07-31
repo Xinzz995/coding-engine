@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
 import { join, dirname } from 'node:path';
 import type { Prd } from './prd.js';
+import type { WorkspaceWriter } from '../workspace-safety/session.js';
 
 export interface PrdReadResult {
   /** 快照建立后恒为快照解析结果；仅快照未建立且磁盘缺失/损坏时为 null */
@@ -28,9 +29,109 @@ export interface PrdGuard {
   summary(): TamperSummary;
 }
 
+export interface ManagedPrdGuard {
+  read(): Promise<PrdReadResult>;
+  summary(): TamperSummary;
+}
+
 function fileStamp(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+/**
+ * 正式运行守卫。所有恢复与归档都经过当前 owner 的 WorkspaceWriter；调用方必须等待
+ * read() 完成后才能启动下一个受委托进程。
+ */
+export function createManagedPrdGuard(
+  prdPath: string,
+  writer: WorkspaceWriter,
+): ManagedPrdGuard {
+  let snapshotRaw: string | null = null;
+  let snapshotPrd: Prd | null = null;
+  let lastTampered: string | null | undefined;
+  let count = 0;
+  const archives: string[] = [];
+
+  const tryReadRaw = (): string | null => {
+    try {
+      return readFileSync(prdPath, 'utf-8');
+    } catch {
+      return null;
+    }
+  };
+
+  const handleTamper = async (
+    raw: string | null,
+  ): Promise<{ restoreFailed: boolean; tamperedArchive?: string | null }> => {
+    const isNew = lastTampered === undefined || raw !== lastTampered;
+    let tamperedArchive: string | null | undefined;
+    if (isNew) {
+      lastTampered = raw;
+      count += 1;
+      tamperedArchive = null;
+      let archiveNote = '文件被删除或不可读';
+      if (raw !== null) {
+        const stem = `prd.tampered-${fileStamp(new Date())}`;
+        let archiveName = `${stem}.json`;
+        let sequence = 1;
+        while (existsSync(join(dirname(prdPath), archiveName))) {
+          archiveName = `${stem}-${sequence}.json`;
+          sequence += 1;
+        }
+        try {
+          await writer.writeFile(archiveName, raw);
+          const archivePath = join(dirname(prdPath), archiveName);
+          archives.push(archivePath);
+          tamperedArchive = archivePath;
+          archiveNote = `篡改版已存档：${archivePath}`;
+        } catch (error) {
+          archiveNote = `篡改版存档写入失败（${error instanceof Error ? error.message : String(error)}）`;
+        }
+      }
+      console.warn(
+        `⚠️  检测到 prd.json 在运行期被修改（${archiveNote}）。引擎已按启动快照恢复并继续；` +
+          '若是你本人想改需求：停引擎 → 修订源 PRD → prd-to-json 再派生 → 重跑。',
+      );
+    }
+    try {
+      await writer.writeFile('prd.json', snapshotRaw!);
+      return { restoreFailed: false, tamperedArchive };
+    } catch (error) {
+      console.warn(
+        `⚠️  prd.json 快照写回失败（${error instanceof Error ? error.message : String(error)}）：` +
+          '磁盘仍是篡改版，本轮 validator 验收不可信',
+      );
+      return { restoreFailed: true, tamperedArchive };
+    }
+  };
+
+  return {
+    async read(): Promise<PrdReadResult> {
+      const raw = tryReadRaw();
+      if (snapshotRaw === null) {
+        if (raw === null) return { prd: null, restoreFailed: false };
+        try {
+          const parsed = JSON.parse(raw) as Prd;
+          snapshotRaw = raw;
+          snapshotPrd = parsed;
+          return { prd: parsed, restoreFailed: false };
+        } catch {
+          return { prd: null, restoreFailed: false };
+        }
+      }
+      if (raw === snapshotRaw) return { prd: snapshotPrd, restoreFailed: false };
+      const handled = await handleTamper(raw);
+      return {
+        prd: snapshotPrd,
+        restoreFailed: handled.restoreFailed,
+        tamperedArchive: handled.tamperedArchive,
+      };
+    },
+    summary(): TamperSummary {
+      return { count, archives: [...archives] };
+    },
+  };
 }
 
 /**

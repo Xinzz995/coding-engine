@@ -6,6 +6,7 @@ import type {
   ValidationCheck,
   ValidationProtocolErrorCode,
 } from './validation-protocol.js';
+import type { WorkspaceWriter } from '../workspace-safety/session.js';
 
 export interface ValidationTargetEvidence {
   requestId: string;
@@ -125,9 +126,20 @@ export function clipEvidenceDiagnostic(value: string): string {
   return value.slice(-EVIDENCE_DIAGNOSTIC_CHARS);
 }
 
-/** 追加一条记录（一行 JSON）；IO 失败向上抛——调用方定语义（loop 吞错仅 warn）。 */
+/**
+ * @deprecated 仅供激活前旧控制流与同步单元测试使用。正式控制流必须使用
+ * appendEvidenceWithWriter，不得拿裸 workspace 追加业务文件。
+ */
 export function appendEvidence(workspace: string, record: EvidenceRecord): void {
   appendFileSync(join(workspace, EVIDENCE_FILE), JSON.stringify(record) + '\n', 'utf-8');
+}
+
+/** 由当前 owner 追加一条记录；写入失败完整向上抛。 */
+export function appendEvidenceWithWriter(
+  writer: WorkspaceWriter,
+  record: EvidenceRecord,
+): Promise<void> {
+  return writer.appendFile(EVIDENCE_FILE, `${JSON.stringify(record)}\n`);
 }
 
 export interface EvidenceReadResult {

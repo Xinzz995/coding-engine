@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离设计
 status: active
-updated: 2026-07-30
+updated: 2026-07-31
 scope: root
 ---
 
@@ -605,9 +605,21 @@ manifest/逐字节相同；半份 staging 不是最终 archive，可由 Recovery
 `kind` 首版固定为 `apply-prd-v1 | repair-v1 | generic-v1`：前两项保留未来正式调用入口的真实目的，
 `generic-v1` 仅供 dark implementation 与破坏性测试使用。通用 mutation 核心只执行调用方显式提供的
 有限 writes、deletes 与 archivePaths，不替 apply-prd/repair 决定要归档哪些业务文件；该策略仍留给
-后续公开接线裁决。generic-v1 的 canary 只能证明“未选入的普通业务秘密不被安全元数据额外复制”，
-不能证明任意 archivePaths 都不含秘密。后续 apply-prd/repair 必须各自冻结允许路径，并对真实固定
-路径执行独立 canary；本 PR 不选择路径或保留时长。
+公开接线裁决。generic-v1 的 canary 只能证明“未选入的普通业务秘密不被安全元数据额外复制”，
+不能证明任意 archivePaths 都不含秘密。
+
+一次性产品启用冻结两个独立白名单：
+
+- apply-prd 换功能：归档旧 `prd.json`、`state.json`、`progress.md`、`review-*.md`、
+  `final-review.json`、`review-decisions.json`、`evidence.jsonl`、`report.html`、`screenshots/` 与
+  `prd.tampered-*.json`；同功能再派生不归档 `progress.md`、报告、截图和篡改副本，只归档
+  `prd.json`、`state.json`、`review-*.md`、`final-review.json`、`review-decisions.json` 与
+  `evidence.jsonl`。两种模式都只删除、不归档一次性 `validation-result.json`；
+- repair：只归档本次实际修复前的 `prd.json` 与存在时的 `state.json` 原始字节。
+
+0.34.0 对这些归档不做自动期限或份数清理；未来清理必须是用户显式动作。两种固定动作都要用真实
+路径 secret canary 证明未列入白名单的普通文件不会被额外复制，但不承诺用户主动归档的截图或证据
+不含秘密。`generic-v1` 仍不得成为公开入口。
 
 v1 的 plannedPaths/archivePaths 一律拒绝永久协议根、安全标记、路径逃逸、软链接、硬链接与内部
 staging 名称。业务写的父目录必须已经存在；目录创建尚未进入 manifest 状态机，因此不能隐式创建。
@@ -902,9 +914,9 @@ child 是唯一明确例外，其允许变化由 delta checker 裁决。
 - `prd-to-json` 在命令外只做发现、用户确认、候选与可选源文档编辑。apply 时绑定 source bytes、
   Git HEAD、quality digest 和 candidate digest；租约外不直接写 workspace，并把用户选择的同一
   `--workspace` 原样交给 CLI，禁止硬编码 `.workspace`；
-- `coding-x workspace record-review-decision --workspace <dir>` 在短 session 内重核 Final Review
-  binding、HEAD、现有决定和
-  延期 Issue 后原子覆盖结构化文件；
+- `coding-x workspace record-review-decision --workspace <dir>` 在短 session 开始和提交前重核完整
+  Final Review binding（含 PR 意图、base、Spec、工程规则、质量契约、Runner 与风险）、HEAD、现有
+  决定和延期 Issue；决定绑定完整 Review binding 摘要后原子覆盖结构化文件；
 - `/review-loop` 不直接改文件；
 - status/doctor/dashboard 只读；report collect 可只读，写 report.html 时必须持 session。
 
@@ -1138,10 +1150,11 @@ POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代
    Builder 服务合同；没有“新 run + 旧旁路”的中间产品状态。
 4. closeout PR 只做真实 dogfood、文档对账和 Issue 证据。
 
-dark foundation 的 `workspace-safety` 生产模块只公开进程放置与集合状态的只读检查；POSIX 组信号只存在于
-摘要绑定的固定 launcher 内。0.33.3 仍在使用的 `src/engine/process-tree.ts` 是 activation PR 必须整体
-替换的已知旧边界，不属于本 PR 的新安全证明，也不能被新模块导入。测试失败后的破坏性清理仅允许位于
-test-only fixture，并在发送信号前重核已记录 launcher 的进程身份与 session/pgid。
+dark foundation 阶段的 `workspace-safety` 生产模块只公开进程放置与集合状态的只读检查；POSIX 组信号
+只存在于摘要绑定的固定 launcher 内。0.33.3 当时仍使用的 `src/engine/process-tree.ts` 是 activation
+PR 必须整体替换的已知旧边界，未被计入新安全证明，也未被新模块导入；当前启用阶段已经完成替换并删除
+旧路径。测试失败后的破坏性清理仅允许位于 test-only fixture，并在发送信号前重核已记录 launcher 的
+进程身份与 session/pgid。
 
 0.34.0 初始化真实测试实际运行冻结 0.33.3 binary 面对新版目录：
 

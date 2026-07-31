@@ -753,17 +753,23 @@ describe('workspace operation protocol', () => {
     await allowed.session.close();
 
     const rejected = await setup();
+    let queuedWrite: Promise<void> | undefined;
     await expect(
       runWorkspaceOperation(rejected.session, defaultOptions(), async (operation) => {
         const { machine, armed } = await driveToArmed(operation);
         machine.acceptStart(encodeSupervisorStart(OPERATION_ID, armed.activeChildDigest), armed);
         writeFileSync(join(rejected.workspace, 'unexpected-business.txt'), 'not-authorized');
+        queuedWrite = rejected.session.writer.writeFile('must-not-pass-fence.txt', 'never');
         const drained = machine.drain('posix-group-empty-and-pipes-eof-v1');
         await operation.installDrainedReceiptControlled(drained.receiptBytes, drained.messageBytes);
         return operation.settleArmedControlled({ supervisor: 'dead', containment: 'empty' });
       }),
     ).rejects.toMatchObject({ code: 'isolated' });
     expect(existsSync(operationPath(rejected.workspace))).toBe(true);
+    expect(rejected.session.state).toBe('isolated');
+    await expect(queuedWrite).rejects.toMatchObject({ code: 'isolated' });
+    expect(existsSync(join(rejected.workspace, 'must-not-pass-fence.txt'))).toBe(false);
+    await expect(rejected.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
 
   it('never lets a parent downgrade armed to prestart abort', async () => {

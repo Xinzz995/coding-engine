@@ -1,7 +1,7 @@
 import type { QualityContract, QualityRiskCategory } from '../quality/contract.js';
 import { digest, matchesAny } from './common.js';
 import type { ReviewFileContent, ReviewPreflightContext } from './preflight.js';
-import type { ReviewRiskAssessment } from './types.js';
+import type { ReviewAxisResult, ReviewRiskAssessment } from './types.js';
 
 const GENERATED_OR_VENDOR = [
   '**/node_modules/**',
@@ -16,7 +16,8 @@ const GENERATED_OR_VENDOR = [
 
 const CATEGORY_PATTERNS: Partial<Record<QualityRiskCategory, RegExp>> = {
   policy: /(?:^|\/)(?:\.coding-x|\.github\/workflows|review|validator|gate|policy)(?:\/|\.|$)/i,
-  'public-contract': /(?:^|\/)(?:api|public|cli|command|config|schema|plugin|manifest)(?:\/|\.|-|$)/i,
+  'public-contract':
+    /(?:^|\/)(?:api|public|cli|command|config|schema|plugin|manifest)(?:\/|\.|-|$)/i,
   state: /(?:state|store|cache|session|receipt)/i,
   migration: /(?:migrat|schema-version|upgrade)/i,
   recovery: /(?:recover|repair|rollback|restore|resume)/i,
@@ -32,16 +33,13 @@ const CATEGORY_PATTERNS: Partial<Record<QualityRiskCategory, RegExp>> = {
 };
 
 function moduleOf(contract: QualityContract, path: string): string | null {
-  const candidates = contract.modules.filter((module) => (
-    module.path === '.' || path === module.path || path.startsWith(`${module.path}/`)
-  ));
+  const candidates = contract.modules.filter(
+    (module) => module.path === '.' || path === module.path || path.startsWith(`${module.path}/`),
+  );
   return candidates.sort((a, b) => b.path.length - a.path.length)[0]?.id ?? null;
 }
 
-function handWrittenLargeFile(
-  file: ReviewFileContent,
-  generatedPaths: string[],
-): boolean {
+function handWrittenLargeFile(file: ReviewFileContent, generatedPaths: string[]): boolean {
   if (file.head === null) return false;
   if (matchesAny(file.path, [...generatedPaths, ...GENERATED_OR_VENDOR])) return false;
   return file.head.split('\n').length > 1000;
@@ -59,7 +57,9 @@ export function assessReviewRisk(context: ReviewPreflightContext): ReviewRiskAss
     rule.categories.forEach((category) => categories.add(category));
     reasons.push(`项目风险规则命中 ${hits.join('、')}`);
   }
-  const highRisk = context.changedFiles.filter((path) => matchesAny(path, contract.risk.highRiskPaths));
+  const highRisk = context.changedFiles.filter((path) =>
+    matchesAny(path, contract.risk.highRiskPaths),
+  );
   if (highRisk.length > 0) {
     categories.add('high-risk-path');
     reasons.push(`高风险目录命中 ${highRisk.join('、')}`);
@@ -72,9 +72,13 @@ export function assessReviewRisk(context: ReviewPreflightContext): ReviewRiskAss
     }
   }
 
-  const changedModules = [...new Set(context.changedFiles
-    .map((path) => moduleOf(contract, path))
-    .filter((value): value is string => value !== null))].sort();
+  const changedModules = [
+    ...new Set(
+      context.changedFiles
+        .map((path) => moduleOf(contract, path))
+        .filter((value): value is string => value !== null),
+    ),
+  ].sort();
   if (changedModules.length >= 3) {
     categories.add('cross-module');
     reasons.push(`一次影响 ${changedModules.length} 个模块`);
@@ -99,4 +103,28 @@ export function assessReviewRisk(context: ReviewPreflightContext): ReviewRiskAss
     changedModules,
   };
   return { ...value, digest: digest(value) };
+}
+
+/**
+ * Rebuild the final risk identity after the two primary Review axes have run.
+ *
+ * Deep Review is scheduled from the Spec/engineering outputs, so a request emitted by the deep
+ * axis itself must not retroactively change the binding. Keeping this rule here lets the writer
+ * and every later currentness check derive exactly the same digest from persisted axis results.
+ */
+export function applyReviewerRequestedDeepReview(
+  risk: ReviewRiskAssessment,
+  axes: readonly Pick<ReviewAxisResult, 'axis' | 'requestDeepReview'>[],
+): ReviewRiskAssessment {
+  const requested = axes.some(
+    (axis) => (axis.axis === 'spec' || axis.axis === 'engineering') && axis.requestDeepReview,
+  );
+  if (!requested || risk.categories.includes('reviewer-request')) return risk;
+  const value = {
+    ...risk,
+    triggered: true,
+    categories: [...risk.categories, 'reviewer-request' as const].sort(),
+    reasons: [...risk.reasons, 'Spec 或工程 Reviewer 主动升级为深度结构评审'].sort(),
+  };
+  return { ...value, digest: digest({ ...value, digest: undefined }) };
 }

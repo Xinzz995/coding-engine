@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status.js';
 import { digest } from '../review/common.js';
 import { acceptanceHash } from '../engine/validation-protocol.js';
+import type {
+  WorkspaceSafetyStatus,
+  WorkspaceSafetyStatusSnapshot,
+} from '../workspace-safety/status.js';
 
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), 'status-ws-'));
@@ -12,53 +16,78 @@ function makeWorkspace(): string {
 
 function writeReadyFinalReview(workspace: string, shadow = false): void {
   const risk = {
-    triggered: false, categories: [], reasons: [], changedFiles: ['src/demo.ts'],
+    triggered: false,
+    categories: [],
+    reasons: [],
+    changedFiles: ['src/demo.ts'],
     changedModules: ['src'],
   };
   const riskDigest = digest(risk);
-  writeFileSync(join(workspace, 'final-review.json'), JSON.stringify({
-    schemaVersion: 1,
-    status: 'passed',
-    deliveryStatus: shadow ? 'shadow' : 'ready',
-    binding: {
-      prNumber: 123,
-      targetBranch: 'main',
-      baseSha: 'a'.repeat(40),
-      headSha: 'b'.repeat(40),
-      prTitleDigest: 'sha256:title',
-      prBodyDigest: 'sha256:body',
-      specDigest: 'sha256:spec',
-      engineeringStandardsDigest: 'sha256:standards',
-      qualityContractDigest: 'sha256:contract',
-      codingXVersion: '0.29.0',
-      runner: 'codex',
-      model: 'gpt-test',
-      runnerVersion: 'codex-test',
-      reviewRulesVersion: '1.0.0',
-      reviewRulesDigest: 'sha256:rules',
-      riskDigest,
-    },
-    risk: { ...risk, digest: riskDigest },
-    axes: [
-      {
-        axis: 'spec', status: 'passed', summary: 'spec ok', findings: [],
-        requestDeepReview: false, durationMs: 1, attempts: 1,
+  writeFileSync(
+    join(workspace, 'final-review.json'),
+    JSON.stringify({
+      schemaVersion: 1,
+      status: 'passed',
+      deliveryStatus: shadow ? 'shadow' : 'ready',
+      binding: {
+        prNumber: 123,
+        targetBranch: 'main',
+        baseSha: 'a'.repeat(40),
+        headSha: 'b'.repeat(40),
+        prTitleDigest: 'sha256:title',
+        prBodyDigest: 'sha256:body',
+        specDigest: 'sha256:spec',
+        engineeringStandardsDigest: 'sha256:standards',
+        qualityContractDigest: 'sha256:contract',
+        codingXVersion: '0.29.0',
+        runner: 'codex',
+        model: 'gpt-test',
+        runnerVersion: 'codex-test',
+        reviewRulesVersion: '1.0.0',
+        reviewRulesDigest: 'sha256:rules',
+        riskDigest,
       },
-      {
-        axis: 'engineering', status: 'passed', summary: 'engineering ok', findings: [],
-        requestDeepReview: false, durationMs: 1, attempts: 1,
+      risk: { ...risk, digest: riskDigest },
+      axes: [
+        {
+          axis: 'spec',
+          status: 'passed',
+          summary: 'spec ok',
+          findings: [],
+          requestDeepReview: false,
+          durationMs: 1,
+          attempts: 1,
+        },
+        {
+          axis: 'engineering',
+          status: 'passed',
+          summary: 'engineering ok',
+          findings: [],
+          requestDeepReview: false,
+          durationMs: 1,
+          attempts: 1,
+        },
+      ],
+      remote: {
+        status: 'ready',
+        checks: [],
+        rulesetErrors: [],
+        checkedAt: new Date().toISOString(),
       },
-    ],
-    remote: { status: 'ready', checks: [], rulesetErrors: [], checkedAt: new Date().toISOString() },
-    round: 1,
-    shadow,
-    startedAt: new Date().toISOString(),
-    completedAt: new Date().toISOString(),
-  }));
+      round: 1,
+      shadow,
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+    }),
+  );
 }
 
 const story = (id: string, title: string, priority: number) => ({
-  id, title, description: 'd', acceptanceCriteria: ['ac'], priority,
+  id,
+  title,
+  description: 'd',
+  acceptanceCriteria: ['ac'],
+  priority,
 });
 
 const passedState = (target: ReturnType<typeof story>) => ({
@@ -80,8 +109,30 @@ const PRD = {
   project: 'demo-proj',
   branchName: 'ralph/demo',
   description: 'd',
-  userStories: [story('US-001', '第一个故事', 1), story('US-002', '第二个故事', 2), story('US-003', '第三个故事', 3)],
+  userStories: [
+    story('US-001', '第一个故事', 1),
+    story('US-002', '第二个故事', 2),
+    story('US-003', '第三个故事', 3),
+  ],
 };
+
+function workspaceSafety(status: WorkspaceSafetyStatus): WorkspaceSafetyStatusSnapshot {
+  return {
+    status,
+    observedClassification: status === 'uninitialized' ? 'uninitialized-empty' : status,
+    reason: 'none',
+    operationState: 'none',
+    operationLocation: 'none',
+    probeEvidence: 'system',
+    safetyFingerprint: null,
+    diagnostic: null,
+    display: {
+      label: status,
+      summary: `${status} workspace`,
+      guidance: status === 'ready' ? null : 'resolve workspace safety state',
+    },
+  };
+}
 
 // v0.4 旧格式：状态字段内嵌在 story 上（无独立 state.json）
 const LEGACY_PRD = {
@@ -133,11 +184,14 @@ describe('collectStatus', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: false, notes: '', retryCount: 2, blocked: false },
-        'US-003': { passes: false, notes: '', retryCount: 1, blocked: true },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': { passes: false, notes: '', retryCount: 2, blocked: false },
+          'US-003': { passes: false, notes: '', retryCount: 1, blocked: true },
+        }),
+      );
       const report = collectStatus(ws);
       if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
       expect(report.prd.project).toBe('demo-proj');
@@ -175,10 +229,15 @@ describe('collectStatus', () => {
       const report = collectStatus(ws);
       if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
       expect(report.stateCorrupted).toBe(true);
-      expect(report.stories.map((s) => ({
-        passes: s.passes, validated: s.validated, notes: s.notes,
-        retryCount: s.retryCount, blocked: s.blocked,
-      }))).toEqual([
+      expect(
+        report.stories.map((s) => ({
+          passes: s.passes,
+          validated: s.validated,
+          notes: s.notes,
+          retryCount: s.retryCount,
+          blocked: s.blocked,
+        })),
+      ).toEqual([
         { passes: false, validated: false, notes: '', retryCount: 0, blocked: false },
         { passes: false, validated: false, notes: '', retryCount: 0, blocked: false },
       ]);
@@ -210,7 +269,10 @@ describe('renderStatusReport', () => {
   });
 
   it('suggests coding-x repair and exits 2 for an unparsable prd.json', () => {
-    const { text, exitCode } = renderStatusReport({ status: 'unparsable', workspace: '.workspace' });
+    const { text, exitCode } = renderStatusReport({
+      status: 'unparsable',
+      workspace: '.workspace',
+    });
     expect(text).toContain('coding-x repair');
     expect(exitCode).toBe(2);
   });
@@ -219,9 +281,10 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
-        PRD.userStories.map((s) => [s.id, passedState(s)]),
-      )));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify(Object.fromEntries(PRD.userStories.map((s) => [s.id, passedState(s)]))),
+      );
       const { text, exitCode } = renderStatusReport(collectStatus(ws));
       expect(text).toContain('demo-proj');
       expect(text).toContain('ralph/demo');
@@ -238,11 +301,14 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: false, notes: '', retryCount: 2, blocked: false },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': { passes: false, notes: '', retryCount: 2, blocked: false },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
+        }),
+      );
       const { text, exitCode } = renderStatusReport(collectStatus(ws));
       const lineOf = (id: string) => {
         const line = text.split('\n').find((l) => l.includes(id));
@@ -267,11 +333,14 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-003': { passes: false, notes: '', retryCount: 3, blocked: true },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-003': { passes: false, notes: '', retryCount: 3, blocked: true },
+        }),
+      );
       const { exitCode } = renderStatusReport(collectStatus(ws));
       expect(exitCode).toBe(3);
     } finally {
@@ -295,11 +364,19 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: false, notes: '第一行失败记录\n第二行详情', retryCount: 1, blocked: false },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': {
+            passes: false,
+            notes: '第一行失败记录\n第二行详情',
+            retryCount: 1,
+            blocked: false,
+          },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const lines = text.split('\n');
       const idx1 = lines.findIndex((l) => l.includes('US-001'));
@@ -319,16 +396,20 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': {
-          passes: false,
-          notes: '普通失败说明\n[需求冲突] 2026-07-04 10:00 源文档说 X，acceptanceCriteria 说 Y，已按 Y 实现',
-          retryCount: 0,
-          blocked: false,
-        },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': {
+            passes: false,
+            notes:
+              '普通失败说明\n[需求冲突] 2026-07-04 10:00 源文档说 X，acceptanceCriteria 说 Y，已按 Y 实现',
+            retryCount: 0,
+            blocked: false,
+          },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const lines = text.split('\n');
       const ordinary = lines.find((l) => l.includes('普通失败说明'));
@@ -346,16 +427,20 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': {
-          passes: false,
-          notes: '普通失败说明\n[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已置 blocked 待人工',
-          retryCount: 0,
-          blocked: false,
-        },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': {
+            passes: false,
+            notes:
+              '普通失败说明\n[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已置 blocked 待人工',
+            retryCount: 0,
+            blocked: false,
+          },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const line = text.split('\n').find((l) => l.includes('[需要人工核实]'));
       expect(line).toBeDefined();
@@ -369,11 +454,14 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': passedState(PRD.userStories[0]),
-        'US-002': { passes: false, notes: '', retryCount: 0, blocked: false },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': passedState(PRD.userStories[0]),
+          'US-002': { passes: false, notes: '', retryCount: 0, blocked: false },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const hint = text.split('\n').find((l) => l.includes('当前 story'));
       expect(hint).toBeDefined();
@@ -388,11 +476,14 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': passedState(PRD.userStories[0]),
-        'US-002': { passes: false, notes: '', retryCount: 0, blocked: true },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': passedState(PRD.userStories[0]),
+          'US-002': { passes: false, notes: '', retryCount: 0, blocked: true },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const hint = text.split('\n').find((l) => l.includes('当前 story'));
       expect(hint).toContain('US-003');
@@ -405,11 +496,14 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': passedState(PRD.userStories[0]),
-        'US-002': passedState(PRD.userStories[1]),
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': passedState(PRD.userStories[0]),
+          'US-002': passedState(PRD.userStories[1]),
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       expect(text).not.toContain('当前 story');
     } finally {
@@ -421,11 +515,14 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: false, notes: '', retryCount: 0, blocked: true },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': { passes: false, notes: '', retryCount: 0, blocked: true },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const summary = text.split('\n').find((l) => l.includes('story 通过'));
       expect(summary).toContain('阻塞 2');
@@ -438,11 +535,14 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: false, notes: '', retryCount: 0, blocked: false },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
-      }));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+          'US-002': { passes: false, notes: '', retryCount: 0, blocked: false },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: false },
+        }),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const summary = text.split('\n').find((l) => l.includes('story 通过'));
       expect(summary).not.toContain('阻塞');
@@ -455,19 +555,22 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'progress.md'), [
-        '# Progress',
-        '',
-        '## Codebase Patterns',
-        '- 某个 pattern',
-        '',
-        '## 2026-07-04 10:00 - US-001',
-        '- 做了 A',
-        '---',
-        '## 2026-07-04 12:30 - US-002',
-        '- 做了 B',
-        '---',
-      ].join('\n'));
+      writeFileSync(
+        join(ws, 'progress.md'),
+        [
+          '# Progress',
+          '',
+          '## Codebase Patterns',
+          '- 某个 pattern',
+          '',
+          '## 2026-07-04 10:00 - US-001',
+          '- 做了 A',
+          '---',
+          '## 2026-07-04 12:30 - US-002',
+          '- 做了 B',
+          '---',
+        ].join('\n'),
+      );
       const { text } = renderStatusReport(collectStatus(ws));
       const line = text.split('\n').find((l) => l.includes('最近进展'));
       expect(line).toBeDefined();
@@ -488,7 +591,10 @@ describe('renderStatusReport', () => {
       writeFileSync(join(ws, 'progress.md'), '# Progress\n\n还没有迭代记录\n');
       expect(renderStatusReport(collectStatus(ws)).text).not.toContain('最近进展');
       // 只有 Codebase Patterns 段、尚无日期开头的迭代记录：不把 Patterns 标题当最近进展
-      writeFileSync(join(ws, 'progress.md'), '# Progress\n\n## Codebase Patterns\n- 某个 pattern\n');
+      writeFileSync(
+        join(ws, 'progress.md'),
+        '# Progress\n\n## Codebase Patterns\n- 某个 pattern\n',
+      );
       expect(renderStatusReport(collectStatus(ws)).text).not.toContain('最近进展');
     } finally {
       rmSync(ws, { recursive: true, force: true });
@@ -514,23 +620,43 @@ describe('renderStatusReport', () => {
       const routed = {
         ...PRD,
         models: {
-          runner: 'codex', builder: { low: 'lo', medium: 'mid', high: 'hi' },
-          validator: 'val', escalation: 'esc',
+          runner: 'codex',
+          builder: { low: 'lo', medium: 'mid', high: 'hi' },
+          validator: 'val',
+          escalation: 'esc',
         },
         userStories: PRD.userStories.map((s) => ({
-          ...s, difficulty: 'medium', difficultyReason: `命中 medium-1：${s.id} 涉及多文件。`,
+          ...s,
+          difficulty: 'medium',
+          difficultyReason: `命中 medium-1：${s.id} 涉及多文件。`,
         })),
       };
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(routed));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: false, notes: '', retryCount: 1, blocked: false, escalated: true },
-      }));
-      writeFileSync(join(ws, 'evidence.jsonl'), JSON.stringify({
-        type: 'iteration', source: 'engine', at: '2026-07-21T00:00:00.000Z',
-        iteration: 4, storyId: 'US-001', builderRan: true, builderModel: 'esc',
-        validatorRan: true, validatorModel: 'val', skippedValidator: false, agentBlocked: false,
-        builderRouteSource: 'escalation', validatorRouteSource: 'validator', storyDifficulty: 'medium',
-      }) + '\n');
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: false, notes: '', retryCount: 1, blocked: false, escalated: true },
+        }),
+      );
+      writeFileSync(
+        join(ws, 'evidence.jsonl'),
+        JSON.stringify({
+          type: 'iteration',
+          source: 'engine',
+          at: '2026-07-21T00:00:00.000Z',
+          iteration: 4,
+          storyId: 'US-001',
+          builderRan: true,
+          builderModel: 'esc',
+          validatorRan: true,
+          validatorModel: 'val',
+          skippedValidator: false,
+          agentBlocked: false,
+          builderRouteSource: 'escalation',
+          validatorRouteSource: 'validator',
+          storyDifficulty: 'medium',
+        }) + '\n',
+      );
 
       const report = collectStatus(ws);
       const human = renderStatusReport(report).text;
@@ -545,7 +671,10 @@ describe('renderStatusReport', () => {
       const json = JSON.parse(renderStatusJson(report).text);
       expect(json.modelRouting.status).toBe('enabled');
       expect(json.stories[0]).toMatchObject({ difficulty: 'medium', escalated: true });
-      expect(json.recentActual['US-001'].builder).toMatchObject({ model: 'esc', source: 'escalation' });
+      expect(json.recentActual['US-001'].builder).toMatchObject({
+        model: 'esc',
+        source: 'escalation',
+      });
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -555,16 +684,29 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'evidence.jsonl'), JSON.stringify({
-        type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z',
-        iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
-        validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
-        builderRouteSource: 'runner-default', builderOutcome: 'error',
-        builderInvocation: {
-          durationMs: 4571, exitCode: 1,
-          diagnosticTail: 'API Error: 402 Account overdue',
-        },
-      }) + '\n');
+      writeFileSync(
+        join(ws, 'evidence.jsonl'),
+        JSON.stringify({
+          type: 'iteration',
+          source: 'engine',
+          at: '2026-07-22T10:40:23.145Z',
+          iteration: 1,
+          storyId: 'US-001',
+          builderRan: true,
+          builderModel: null,
+          validatorRan: false,
+          validatorModel: null,
+          skippedValidator: false,
+          agentBlocked: false,
+          builderRouteSource: 'runner-default',
+          builderOutcome: 'error',
+          builderInvocation: {
+            durationMs: 4571,
+            exitCode: 1,
+            diagnosticTail: 'API Error: 402 Account overdue',
+          },
+        }) + '\n',
+      );
 
       const report = collectStatus(ws);
       const human = renderStatusReport(report).text;
@@ -574,7 +716,8 @@ describe('renderStatusReport', () => {
       expect(json.recentActual['US-001'].builder).toMatchObject({
         outcome: 'error',
         invocation: {
-          durationMs: 4571, exitCode: 1,
+          durationMs: 4571,
+          exitCode: 1,
           diagnosticTail: 'API Error: 402 Account overdue',
         },
       });
@@ -587,20 +730,43 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
-      }));
-      writeFileSync(join(ws, 'evidence.jsonl'), JSON.stringify({
-        type: 'iteration', source: 'engine', at: '2026-07-22T11:00:00.000Z',
-        iteration: 5, storyId: 'US-001', builderRan: true, builderModel: null,
-        validatorRan: true, validatorModel: null, skippedValidator: false, agentBlocked: false,
-        validationProtocol: 'invalid',
-        validationTarget: {
-          requestId: 'request-5', storyId: 'US-001',
-          acceptanceHash: `sha256:${'a'.repeat(64)}`, gitHead: null,
-        },
-        validationProtocolError: { code: 'binding-mismatch', diagnostic: 'story ID 不匹配' },
-      }) + '\n');
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: false,
+            validated: false,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
+      writeFileSync(
+        join(ws, 'evidence.jsonl'),
+        JSON.stringify({
+          type: 'iteration',
+          source: 'engine',
+          at: '2026-07-22T11:00:00.000Z',
+          iteration: 5,
+          storyId: 'US-001',
+          builderRan: true,
+          builderModel: null,
+          validatorRan: true,
+          validatorModel: null,
+          skippedValidator: false,
+          agentBlocked: false,
+          validationProtocol: 'invalid',
+          validationTarget: {
+            requestId: 'request-5',
+            storyId: 'US-001',
+            acceptanceHash: `sha256:${'a'.repeat(64)}`,
+            gitHead: null,
+          },
+          validationProtocolError: { code: 'binding-mismatch', diagnostic: 'story ID 不匹配' },
+        }) + '\n',
+      );
 
       const report = collectStatus(ws);
       const human = renderStatusReport(report).text;
@@ -610,7 +776,8 @@ describe('renderStatusReport', () => {
 
       const json = JSON.parse(renderStatusJson(report).text);
       expect(json.recentValidation['US-001']).toMatchObject({
-        protocol: 'invalid', iteration: 5,
+        protocol: 'invalid',
+        iteration: 5,
         error: { code: 'binding-mismatch', diagnostic: 'story ID 不匹配' },
         target: { gitHead: null },
       });
@@ -624,12 +791,18 @@ describe('renderStatusJson', () => {
   it('emits a single JSON.parse-able object with all required fields and exits 1 while unfinished', () => {
     const ws = makeWorkspace();
     try {
-      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, sourcePrd: 'docs/prds/demo.md' }));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': passedState(PRD.userStories[0]),
-        'US-002': { passes: false, notes: '一条失败记录', retryCount: 2, blocked: false },
-        'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
-      }));
+      writeFileSync(
+        join(ws, 'prd.json'),
+        JSON.stringify({ ...PRD, sourcePrd: 'docs/prds/demo.md' }),
+      );
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': passedState(PRD.userStories[0]),
+          'US-002': { passes: false, notes: '一条失败记录', retryCount: 2, blocked: false },
+          'US-003': { passes: false, notes: '', retryCount: 0, blocked: true },
+        }),
+      );
       const { text, exitCode } = renderStatusJson(collectStatus(ws));
       const obj = JSON.parse(text); // 可解析性
       expect(obj.project).toBe('demo-proj');
@@ -637,8 +810,15 @@ describe('renderStatusJson', () => {
       expect(obj.sourcePrd).toBe('docs/prds/demo.md');
       expect(obj.stories).toHaveLength(3);
       expect(obj.stories[1]).toEqual({
-        id: 'US-002', title: '第二个故事', priority: 2,
-        passes: false, validated: false, notes: '一条失败记录', retryCount: 2, blocked: false, escalated: false,
+        id: 'US-002',
+        title: '第二个故事',
+        priority: 2,
+        passes: false,
+        validated: false,
+        notes: '一条失败记录',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
       });
       expect(obj.summary).toEqual({ total: 3, passed: 1, blocked: 1 });
       expect(exitCode).toBe(3);
@@ -662,9 +842,10 @@ describe('renderStatusJson', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
-        PRD.userStories.map((s) => [s.id, passedState(s)]),
-      )));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify(Object.fromEntries(PRD.userStories.map((s) => [s.id, passedState(s)]))),
+      );
       const { text, exitCode } = renderStatusJson(collectStatus(ws));
       expect(JSON.parse(text).summary).toEqual({ total: 3, passed: 3, blocked: 0 });
       expect(exitCode).toBe(6);
@@ -689,8 +870,15 @@ describe('renderStatusJson', () => {
       const { text, exitCode } = renderStatusJson(collectStatus(ws));
       const obj = JSON.parse(text);
       expect(obj.stories[0]).toEqual({
-        id: 'US-001', title: '旧一', priority: 1,
-        passes: true, validated: false, notes: '旧备注', retryCount: 2, blocked: false, escalated: false,
+        id: 'US-001',
+        title: '旧一',
+        priority: 1,
+        passes: true,
+        validated: false,
+        notes: '旧备注',
+        retryCount: 2,
+        blocked: false,
+        escalated: false,
       });
       expect(obj.stories[1].blocked).toBe(true);
       expect(obj.summary).toEqual({ total: 2, passed: 0, blocked: 1 });
@@ -710,7 +898,11 @@ describe('renderStatusJson', () => {
       expect(obj.stateCorrupted).toBe(true);
       expect(obj.summary).toEqual({ total: 2, passed: 0, blocked: 0 });
       expect(obj.stories[0]).toMatchObject({
-        passes: false, validated: false, notes: '', retryCount: 0, blocked: false,
+        passes: false,
+        validated: false,
+        notes: '',
+        retryCount: 0,
+        blocked: false,
       });
       expect(rendered.exitCode).toBe(1);
     } finally {
@@ -733,10 +925,23 @@ describe('renderStatusJson', () => {
   it('does not count passes=true without an engine validation receipt as passed', () => {
     const ws = makeWorkspace();
     try {
-      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [PRD.userStories[0]] }));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false },
-      }));
+      writeFileSync(
+        join(ws, 'prd.json'),
+        JSON.stringify({ ...PRD, userStories: [PRD.userStories[0]] }),
+      );
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: false,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
       const report = collectStatus(ws);
       const human = renderStatusReport(report);
       expect(human.text).toContain('待引擎验收');
@@ -753,15 +958,23 @@ describe('renderStatusJson', () => {
     }
   });
 
-  it('exits 0 only when stories, local Review and GitHub delivery are all ready', () => {
+  it('renders exit 0 only when stories, a current local Review and GitHub delivery are all ready', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify(Object.fromEntries(
-        PRD.userStories.map((s) => [s.id, passedState(s)]),
-      )));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify(Object.fromEntries(PRD.userStories.map((s) => [s.id, passedState(s)]))),
+      );
       writeReadyFinalReview(ws);
-      const report = collectStatus(ws);
+      const collected = collectStatus(ws);
+      if (collected.status !== 'ok') throw new Error(`expected ok, got ${collected.status}`);
+      // Renderer contract fixture: production obtains `current=true` only after project, PR,
+      // rules, risk and supervised Runner-version currentness have all been revalidated.
+      const report = {
+        ...collected,
+        finalReview: { ...collected.finalReview, current: true, staleReasons: [] },
+      };
       const human = renderStatusReport(report);
       expect(human.text).toContain('实现验证、本地 Review 与 GitHub 交付条件均已就绪');
       expect(human.exitCode).toBe(0);
@@ -771,13 +984,49 @@ describe('renderStatusJson', () => {
     }
   });
 
+  it.each(['active', 'recoverable', 'isolated'] satisfies WorkspaceSafetyStatus[])(
+    'never reports delivery ready while workspace safety is %s',
+    (safetyStatus) => {
+      const ws = makeWorkspace();
+      try {
+        writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+        writeFileSync(
+          join(ws, 'state.json'),
+          JSON.stringify(Object.fromEntries(PRD.userStories.map((s) => [s.id, passedState(s)]))),
+        );
+        writeReadyFinalReview(ws);
+        const report = { ...collectStatus(ws), workspaceSafety: workspaceSafety(safetyStatus) };
+        const human = renderStatusReport(report);
+        expect(human.text).toContain('workspace 安全状态未就绪');
+        expect(human.text).not.toContain('均已就绪');
+        expect(human.exitCode).toBe(2);
+        expect(renderStatusJson(report).exitCode).toBe(2);
+      } finally {
+        rmSync(ws, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('gives blocked precedence over contradictory pass and receipt fields', () => {
     const ws = makeWorkspace();
     try {
-      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [PRD.userStories[0]] }));
-      writeFileSync(join(ws, 'state.json'), JSON.stringify({
-        'US-001': { passes: true, validated: true, notes: '', retryCount: 5, blocked: true, escalated: false },
-      }));
+      writeFileSync(
+        join(ws, 'prd.json'),
+        JSON.stringify({ ...PRD, userStories: [PRD.userStories[0]] }),
+      );
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: true,
+            notes: '',
+            retryCount: 5,
+            blocked: true,
+            escalated: false,
+          },
+        }),
+      );
       const report = collectStatus(ws);
       const human = renderStatusReport(report);
       expect(human.text).toContain('⛔ US-001');

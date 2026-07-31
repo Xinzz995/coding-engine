@@ -228,8 +228,16 @@ describe('runQualityInit', () => {
   it('does not write managed files when the user declines the minimum remote rule', async () => {
     const root = repositoryFixture();
     const client = new FakeGitHubClient();
-    const result = await runQualityInit(options(root, client, [false]));
+    let workspacePrepared = false;
+    const result = await runQualityInit({
+      ...options(root, client, [false]),
+      prepareWorkspace: () => {
+        workspacePrepared = true;
+      },
+    });
     expect(result).toMatchObject({ status: 'cancelled', exitCode: 6 });
+    expect(result.message).toContain('已完成的 workspace 安全初始化保留');
+    expect(workspacePrepared).toBe(true);
     expect(client.rulesets).toEqual([]);
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(false);
   });
