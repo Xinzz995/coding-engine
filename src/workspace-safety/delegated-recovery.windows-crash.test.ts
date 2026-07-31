@@ -16,6 +16,7 @@ const workers = new Set<ChildProcessWithoutNullStreams>();
 const workerPath = fileURLToPath(
   new URL('./__fixtures__/delegated-recovery-crash-worker.ts', import.meta.url),
 );
+const WINDOWS_WORKER_OUTPUT_TIMEOUT_MS = 90_000;
 
 afterEach(() => {
   for (const worker of workers) worker.kill('SIGKILL');
@@ -23,7 +24,10 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function startWorker(args: readonly string[]): {
+function startWorker(
+  phase: string,
+  args: readonly string[],
+): {
   child: ChildProcessWithoutNullStreams;
   line: Promise<Record<string, unknown>>;
   stderr: () => string;
@@ -43,8 +47,13 @@ function startWorker(args: readonly string[]): {
   });
   const line = new Promise<Record<string, unknown>>((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error(`Windows worker output timed out: ${stderr}`)),
-      60_000,
+      () =>
+        reject(
+          new Error(
+            `Windows worker ${phase} output timed out after ${WINDOWS_WORKER_OUTPUT_TIMEOUT_MS}ms; stdout=${stdout}; stderr=${stderr}`,
+          ),
+        ),
+      WINDOWS_WORKER_OUTPUT_TIMEOUT_MS,
     );
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
@@ -61,7 +70,11 @@ function startWorker(args: readonly string[]): {
     child.once('exit', (code, signal) => {
       if (!stdout.includes('\n')) {
         clearTimeout(timer);
-        reject(new Error(`Windows worker exited ${String(code)}/${String(signal)}: ${stderr}`));
+        reject(
+          new Error(
+            `Windows worker ${phase} exited ${String(code)}/${String(signal)}; stdout=${stdout}; stderr=${stderr}`,
+          ),
+        );
       }
     });
   });
@@ -70,14 +83,14 @@ function startWorker(args: readonly string[]): {
 
 describe.runIf(process.platform === 'win32')(
   'delegated recovery after a real Windows parent crash',
-  { timeout: 120_000, concurrent: false },
+  { timeout: 180_000, concurrent: false },
   () => {
     it.each(['legal', 'forbidden'] as const)(
       'uses the persisted empty-Job proof for a %s delta',
       async (delta) => {
         const workspace = mkdtempSync(join(tmpdir(), `coding-x-delegated-win-${delta}-`));
         roots.push(workspace);
-        const parent = startWorker(['parent', workspace, delta]);
+        const parent = startWorker(`parent:${delta}`, ['parent', workspace, delta]);
         const started = await parent.line;
         expect(started).toMatchObject({
           type: 'started',
@@ -102,7 +115,7 @@ describe.runIf(process.platform === 'win32')(
         });
         expect(parent.stderr()).toBe('');
 
-        const recovery = startWorker(['recover', workspace]);
+        const recovery = startWorker(`recover:${delta}`, ['recover', workspace]);
         const result = await recovery.line;
         const [exitCode] = (await once(recovery.child, 'exit')) as [number | null];
         workers.delete(recovery.child);

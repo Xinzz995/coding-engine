@@ -6,6 +6,7 @@ import { MutationWriterAuthorityControlled } from './mutation-domain.js';
 import { WorkspaceOperationHandleControlled } from './operation.js';
 
 const TEST_SEAMS = new Set([
+  'workspace-safety/identity-authority-test-seam.ts',
   'workspace-safety/mutation-authority-test-seam.ts',
   'workspace-safety/operation-authority-test-seam.ts',
   'workspace-safety/recovery-authority-test-seam.ts',
@@ -48,6 +49,16 @@ function sourcePath(root: string, path: string): string {
 }
 
 describe('operation and mutation capability boundary', () => {
+  it('forbids production code from importing the identity authority test seam', () => {
+    const root = fileURLToPath(new URL('../', import.meta.url));
+    const offenders = productionFiles(root).filter((path) =>
+      /from\s+['"][^'"]*identity-authority-test-seam(?:\.js)?['"]/u.test(
+        readFileSync(path, 'utf8'),
+      ),
+    );
+    expect(offenders).toEqual([]);
+  });
+
   it('forbids production code from importing the operation or mutation test seam', () => {
     const root = fileURLToPath(new URL('../', import.meta.url));
     const offenders = productionFiles(root).filter((path) =>

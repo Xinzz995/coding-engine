@@ -841,6 +841,7 @@ export async function acquirePrestartRecovery(
     helperBytes: readFixedPlatformHelperBundle(),
     identity: system.identity,
     probeSourceOwner: system.probeOwner,
+    probeAttemptOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,
   });
 }

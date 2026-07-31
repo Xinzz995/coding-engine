@@ -407,7 +407,13 @@ bootstrap 协议根的目录、以及任何 0.33 runtime 文件，一律 legacy�
 - Linux：使用 boot ID 与 `/proc/<pid>/stat` start time；
 - Windows：process-only 热路径由摘要固定的原生检查器使用 `OpenProcess + GetProcessTimes`
   读取 creation FILETIME，并在读取前后确认进程仍存活；host/boot/current owner 组合快照仍使用
-  系统 PowerShell/CIM，同时结合 Job/target/supervisor 状态；
+  系统 PowerShell/CIM，同时结合 Job/target/supervisor 状态。每个正式入口先取得一份完整组合快照；
+  非 reboot-proof 的同一 current-process authority 内，host/boot 是随当前进程存活的固定锚点，每个
+  权限写入和最终 rename 前仍由原生检查器重新读取当前 PID、source owner 或 recovery attempt owner
+  的 creation FILETIME。内存 authority 及其缓存不落盘、不跨进程复用；已哈希的 host/boot 身份仍按
+  owner 合同落盘，新入口与崩溃后的新进程必须重新取得完整快照。authority 存活期间把 MachineGuid
+  稳定视为本机信任边界的一部分；管理员在进程运行时改写机器身份不在本合同保证范围。reboot-proof
+  coordinator 仍按独立合同重读完整当前身份；
 - macOS：使用 boot session identity 与可取得的进程启动信息；若精度不足以排除同秒 PID 复用，
   相等只判 unknown，不判安全死亡；
 - 主机身份使用有界哈希，不保存原始机器标识；任一平台来源不可用都返回 unknown。

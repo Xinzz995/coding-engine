@@ -11,6 +11,7 @@ import {
   WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
   type IdentityProbeAdapter,
 } from './identity.js';
+import { captureExactCurrentIdentityAuthorityWithAdapter } from './identity-authority-test-seam.js';
 import { WorkspaceSafetyError } from './types.js';
 import { MAX_SAFETY_STRING_LENGTH } from './schema.js';
 import {
@@ -291,6 +292,115 @@ describe('platform identity probe', () => {
       }),
     ).toBe('dead');
     expect(readIdentitySnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('captures one Windows system snapshot per authority and rechecks process identity at every boundary', () => {
+    const readIdentitySnapshot = vi.fn(() => ({
+      processIdentity: { status: 'found' as const, value: 'start-a' },
+      bootIdentity: 'boot-a',
+      hostIdentity: 'host-a',
+    }));
+    const readProcessIdentity = vi.fn(() => ({
+      status: 'found' as const,
+      value: 'start-a',
+    }));
+    const source: IdentityProbeAdapter = {
+      ...adapter('win32'),
+      readIdentitySnapshot,
+      readProcessIdentity,
+    };
+    const authority = captureExactCurrentIdentityAuthorityWithAdapter(source);
+    const owner = ownerFrom(source, authority.identity);
+
+    expect(authority.probeOwner(owner)).toBe('alive');
+    authority.verifyCurrent();
+    authority.verifyCurrent();
+    expect(readIdentitySnapshot).toHaveBeenCalledTimes(1);
+    expect(readProcessIdentity).toHaveBeenCalledTimes(3);
+    expect(readProcessIdentity).toHaveBeenNthCalledWith(1, owner.pid);
+    expect(readProcessIdentity).toHaveBeenNthCalledWith(2, source.pid);
+    expect(readProcessIdentity).toHaveBeenNthCalledWith(3, source.pid);
+  });
+
+  it.each([
+    ['missing', { status: 'missing' as const }],
+    ['unknown', { status: 'unknown' as const }],
+    ['changed', { status: 'found' as const, value: 'start-b' }],
+    ['empty', { status: 'found' as const, value: '' }],
+    ['unbounded', { status: 'found' as const, value: 'x'.repeat(MAX_SAFETY_STRING_LENGTH + 1) }],
+  ])('fails closed when a Windows authority process recheck is %s', (_label, observed) => {
+    const source: IdentityProbeAdapter = {
+      ...adapter('win32'),
+      readIdentitySnapshot: () => ({
+        processIdentity: { status: 'found', value: 'start-a' },
+        bootIdentity: 'boot-a',
+        hostIdentity: 'host-a',
+      }),
+      readProcessIdentity: () => observed,
+    };
+    const authority = captureExactCurrentIdentityAuthorityWithAdapter(source);
+
+    expect(() => authority.verifyCurrent()).toThrowError(
+      expect.objectContaining({ code: 'lease-lost' }),
+    );
+  });
+
+  it('uses the captured Windows host and boot anchors while preserving owner verdicts', () => {
+    const readIdentitySnapshot = vi.fn(() => ({
+      processIdentity: { status: 'found' as const, value: 'start-a' },
+      bootIdentity: 'boot-a',
+      hostIdentity: 'host-a',
+    }));
+    const readProcessIdentity = vi.fn((pid: number) =>
+      pid === 100 ? { status: 'found' as const, value: 'start-a' } : { status: 'missing' as const },
+    );
+    const source: IdentityProbeAdapter = {
+      ...adapter('win32'),
+      readIdentitySnapshot,
+      readProcessIdentity,
+    };
+    const authority = captureExactCurrentIdentityAuthorityWithAdapter(source);
+    const owner = ownerFrom(source, authority.identity);
+
+    expect(authority.probeOwner({ ...owner, hostId: digest })).toBe('unknown');
+    expect(authority.probeOwner({ ...owner, bootIdentity: digest })).toBe('dead');
+    expect(
+      authority.probeOwner({
+        ...owner,
+        processIdentity: { kind: 'linux-boot-start', value: 'start-a' },
+      }),
+    ).toBe('unknown');
+    expect(
+      authority.probeOwner({
+        ...owner,
+        processIdentity: { kind: 'windows-filetime', value: 'start-b' },
+      }),
+    ).toBe('dead');
+    expect(authority.probeOwner({ ...owner, pid: 101 })).toBe('dead');
+    expect(readIdentitySnapshot).toHaveBeenCalledTimes(1);
+    expect(readProcessIdentity).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps non-Windows exact authorities on full identity revalidation', () => {
+    const readHostIdentity = vi.fn(() => 'host-a');
+    const readBootIdentity = vi.fn(() => 'boot-a');
+    const readProcessIdentity = vi.fn(() => ({
+      status: 'found' as const,
+      value: 'start-a',
+    }));
+    const source: IdentityProbeAdapter = {
+      ...adapter('linux'),
+      readHostIdentity,
+      readBootIdentity,
+      readProcessIdentity,
+    };
+    const authority = captureExactCurrentIdentityAuthorityWithAdapter(source);
+
+    authority.verifyCurrent();
+    expect(authority.probeOwner(ownerFrom(source, authority.identity))).toBe('alive');
+    expect(readHostIdentity).toHaveBeenCalledTimes(3);
+    expect(readBootIdentity).toHaveBeenCalledTimes(3);
+    expect(readProcessIdentity).toHaveBeenCalledTimes(3);
   });
 
   it('fails closed and never falls back when the combined snapshot transport fails', () => {

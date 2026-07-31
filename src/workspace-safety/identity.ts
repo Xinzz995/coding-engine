@@ -42,6 +42,11 @@ export interface IdentityProbeAdapter {
   };
 }
 
+export type ProcessIdentitySubject = Pick<
+  OwnerRecord,
+  'pid' | 'processIdentity' | 'bootIdentity' | 'hostId'
+>;
+
 const KIND_BY_PLATFORM: Record<SupportedIdentityPlatform, ProcessIdentityKind> = {
   linux: 'linux-boot-start',
   darwin: 'macos-boot-start',
@@ -102,7 +107,10 @@ function currentSnapshot(adapter: IdentityProbeAdapter): ProcessIdentitySnapshot
   };
 }
 
-function probeRecord(adapter: IdentityProbeAdapter, record: OwnerRecord): IdentityVerdict {
+function probeRecord(
+  adapter: IdentityProbeAdapter,
+  record: ProcessIdentitySubject,
+): IdentityVerdict {
   try {
     const expectedKind = KIND_BY_PLATFORM[adapter.platform];
     if (record.processIdentity.kind !== expectedKind) return 'unknown';
@@ -152,8 +160,95 @@ export function createIdentityProbe(
 
 export interface ExactCurrentIdentityAuthority {
   readonly identity: ProcessIdentitySnapshot;
-  readonly probeOwner: (owner: OwnerRecord) => IdentityVerdict;
+  readonly probeOwner: (owner: ProcessIdentitySubject) => IdentityVerdict;
   readonly verifyCurrent: () => void;
+}
+
+function cloneIdentitySnapshot(identity: ProcessIdentitySnapshot): ProcessIdentitySnapshot {
+  return {
+    pid: identity.pid,
+    processIdentity: { ...identity.processIdentity },
+    bootIdentity: identity.bootIdentity,
+    hostId: identity.hostId,
+  };
+}
+
+function probeRecordAgainstCapturedSystem(
+  adapter: IdentityProbeAdapter,
+  captured: ProcessIdentitySnapshot,
+  record: ProcessIdentitySubject,
+): IdentityVerdict {
+  try {
+    if (record.processIdentity.kind !== KIND_BY_PLATFORM[adapter.platform]) return 'unknown';
+    if (record.hostId !== captured.hostId) return 'unknown';
+    if (record.bootIdentity !== captured.bootIdentity) return 'dead';
+
+    const processIdentity = adapter.readProcessIdentity(record.pid);
+    if (processIdentity.status === 'missing') return 'dead';
+    if (processIdentity.status === 'unknown') return 'unknown';
+    const observedValue = boundedRawIdentity(processIdentity.value, 'process identity');
+    if (observedValue !== record.processIdentity.value) return 'dead';
+    return adapter.platform === 'darwin' ? 'unknown' : 'alive';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function verifyCapturedCurrentProcess(
+  adapter: IdentityProbeAdapter,
+  captured: ProcessIdentitySnapshot,
+): void {
+  try {
+    const processIdentity = adapter.readProcessIdentity(captured.pid);
+    if (
+      adapter.pid === captured.pid &&
+      captured.processIdentity.kind === KIND_BY_PLATFORM[adapter.platform] &&
+      processIdentity.status === 'found' &&
+      boundedRawIdentity(processIdentity.value, 'process identity') ===
+        captured.processIdentity.value
+    ) {
+      return;
+    }
+  } catch {
+    // Every read/parse failure loses authority below.
+  }
+  throw new WorkspaceSafetyError('lease-lost', 'system process authority changed');
+}
+
+/**
+ * @internal Authority-controlled core exposed to deterministic tests only through the test seam.
+ */
+export function captureExactCurrentIdentityAuthorityControlled(
+  adapter: IdentityProbeAdapter,
+): ExactCurrentIdentityAuthority {
+  const probe = createIdentityProbe(adapter);
+  const captured = probe.current();
+  const identity = cloneIdentitySnapshot(captured);
+
+  if (adapter.platform === 'win32') {
+    return {
+      identity,
+      probeOwner: (owner) => probeRecordAgainstCapturedSystem(adapter, captured, owner),
+      verifyCurrent: () => verifyCapturedCurrentProcess(adapter, captured),
+    };
+  }
+
+  return {
+    identity,
+    probeOwner: (owner) => probeRecord(adapter, owner),
+    verifyCurrent: () => {
+      const current = probe.current();
+      if (
+        current.pid !== captured.pid ||
+        current.hostId !== captured.hostId ||
+        current.bootIdentity !== captured.bootIdentity ||
+        current.processIdentity.kind !== captured.processIdentity.kind ||
+        current.processIdentity.value !== captured.processIdentity.value
+      ) {
+        throw new WorkspaceSafetyError('lease-lost', 'system process authority changed');
+      }
+    },
+  };
 }
 
 /**
@@ -161,24 +256,7 @@ export interface ExactCurrentIdentityAuthority {
  * There is intentionally no adapter parameter: production recovery wrappers cannot inject it.
  */
 export function captureExactCurrentIdentityAuthority(): ExactCurrentIdentityAuthority {
-  const probe = createIdentityProbe();
-  const identity = probe.current();
-  return {
-    identity,
-    probeOwner: (owner) => probe.probe(owner),
-    verifyCurrent: () => {
-      const current = probe.current();
-      if (
-        current.pid !== identity.pid ||
-        current.hostId !== identity.hostId ||
-        current.bootIdentity !== identity.bootIdentity ||
-        current.processIdentity.kind !== identity.processIdentity.kind ||
-        current.processIdentity.value !== identity.processIdentity.value
-      ) {
-        throw new WorkspaceSafetyError('lease-lost', 'system process authority changed');
-      }
-    },
-  };
+  return captureExactCurrentIdentityAuthorityControlled(createSystemIdentityAdapter());
 }
 
 export type SameHostRebootIdentityVerdict =

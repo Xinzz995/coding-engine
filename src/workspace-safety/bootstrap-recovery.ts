@@ -872,7 +872,7 @@ export async function acquireBootstrapRecoveryAttempt(
     workspacePath: options.workspacePath,
     identity: system.identity,
     probeSourceOwner: system.probeOwner,
-    probeAttemptOwner: (owner) => system.probeOwner(asProbeOwner(owner)),
+    probeAttemptOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,
   });
 }

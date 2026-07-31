@@ -100,6 +100,7 @@ type ForbiddenAuthorityKey =
   | 'rebootProof';
 
 const TEST_SEAM_PATHS = new Set([
+  'workspace-safety/identity-authority-test-seam.ts',
   'workspace-safety/mutation-authority-test-seam.ts',
   'workspace-safety/operation-authority-test-seam.ts',
   'workspace-safety/recovery-authority-test-seam.ts',
@@ -161,6 +162,7 @@ function productionTypeScriptFiles(root: string): string[] {
 
 const AUTHORITY_CONTROLLED_MODULES = new Set([
   'bootstrap',
+  'identity',
   'lease',
   'recovery-attempt',
   'recovery-finalize',
@@ -249,10 +251,10 @@ describe('workspace authority boundary', () => {
     >().toEqualTypeOf<never>();
   });
 
-  it('forbids production code from importing either test-only authority seam', () => {
+  it('forbids production code from importing any test-only authority seam', () => {
     const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
     const offenders = productionTypeScriptFiles(sourceRoot).filter((path) =>
-      /from\s+['"][^'"]*(?:recovery|workspace)-authority-test-seam(?:\.js)?['"]/u.test(
+      /from\s+['"][^'"]*(?:identity|recovery|workspace)-authority-test-seam(?:\.js)?['"]/u.test(
         readFileSync(path, 'utf8'),
       ),
     );
@@ -293,6 +295,13 @@ describe('workspace authority boundary', () => {
       }
     }
     expect(offenders).toEqual([]);
+    const identityAuthorityOffenders = productionTypeScriptFiles(sourceRoot)
+      .filter((path) => sourcePath(sourceRoot, path) !== 'workspace-safety/identity.ts')
+      .filter((path) =>
+        readFileSync(path, 'utf8').includes('captureExactCurrentIdentityAuthorityControlled'),
+      )
+      .map((path) => sourcePath(sourceRoot, path));
+    expect(identityAuthorityOffenders).toEqual([]);
     expect(readFileSync(join(workspaceSafety, 'recovery.ts'), 'utf8')).not.toContain('Controlled');
   });
 
@@ -322,6 +331,28 @@ describe('workspace authority boundary', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('threads the exact system owner probe through every formal attempt acquisition', () => {
+    const workspaceSafety = fileURLToPath(new URL('.', import.meta.url));
+    const wrappers = [
+      ['recovery-attempt.ts', 'acquireRecoveryAttempt'],
+      ['bootstrap-recovery.ts', 'acquireBootstrapRecoveryAttempt'],
+      ['delegated-recovery.ts', 'acquireDelegatedFinalizeRecovery'],
+      ['prestart-recovery.ts', 'acquirePrestartRecovery'],
+      ['mutation-recovery.ts', 'acquireMutationRecoveryAttempt'],
+    ] as const;
+
+    for (const [filename, functionName] of wrappers) {
+      const source = readFileSync(join(workspaceSafety, filename), 'utf8');
+      const start = source.indexOf(`export async function ${functionName}(`);
+      expect(start, `${functionName} formal wrapper is missing`).toBeGreaterThanOrEqual(0);
+      const nextExport = source.indexOf('\nexport ', start + 1);
+      const body = source.slice(start, nextExport < 0 ? undefined : nextExport);
+      expect(body, `${functionName} can fall back to a separate attempt-owner probe`).toContain(
+        'probeAttemptOwner: system.probeOwner',
+      );
+    }
   });
 
   it('keeps workspace owner cores and handle construction inside their fixed modules', () => {

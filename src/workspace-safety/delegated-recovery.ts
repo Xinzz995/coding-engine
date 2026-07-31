@@ -743,6 +743,7 @@ export async function acquireDelegatedFinalizeRecovery(
     workspacePath: options.workspacePath,
     identity: system.identity,
     probeSourceOwner: system.probeOwner,
+    probeAttemptOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,
   });
 }

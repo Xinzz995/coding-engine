@@ -407,10 +407,15 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 15_000);
 
-  it('times out a stubborn root and grandchild without requiring STARTED or RESULT for proof', async () => {
+  it('times out and drains a confirmed-live stubborn root and grandchild', async () => {
     const setupState = await setup();
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-timeout-'));
+    roots.push(controlRoot);
+    const grandchildReady = join(controlRoot, 'grandchild-ready');
     const stubbornGrandchild = [
+      "const fs = require('node:fs');",
       "process.on('SIGTERM', () => {});",
+      `fs.writeFileSync(${JSON.stringify(grandchildReady)}, 'ready');`,
       'setInterval(() => {}, 1000);',
     ].join('');
     const stubbornRoot = [
@@ -427,11 +432,14 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
       async (operation) =>
         runDarkPosixSupervisedOperation(operation, {
           target: target(stubbornRoot, setupState.workspace),
-          commandTimeoutMs: 500,
+          commandTimeoutMs: 5000,
           timeouts: { naturalDrainMs: 100, termMs: 100, killMs: 3000, pollMs: 20 },
           hooks: {
             onArmed: ({ containment }) => {
               trackGroup(containment);
+            },
+            onStarted: async () => {
+              await waitUntil(() => existsSync(grandchildReady), 4000);
             },
           },
         }),
@@ -441,11 +449,12 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     expect(outcome.verdict).toBe('terminated');
     expect(outcome.terminationReason).toBe('timeout');
     expect(outcome.leftover).toBe(false);
+    expect(readFileSync(grandchildReady, 'utf8')).toBe('ready');
     expect(outcome.stdout.toString('utf8')).toContain('stubborn-started');
     expect(outcome.receipt.drainReason).toBe('timeout');
     expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
     await setupState.session.close();
-  }, 15_000);
+  }, 20_000);
 
   it.each([
     ['SIGINT', 130],

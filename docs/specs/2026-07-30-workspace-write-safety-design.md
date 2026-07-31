@@ -489,12 +489,19 @@ containment quarantine → 其余状态，因此 strict reboot proof 建立 reco
 authority，必须在模块内捕获精确当前身份；返回的 lease handle 由模块私有能力创建，并永久携带同一
 身份复核器。不存在可供普通生产调用方读取 owner 后重新 attach 的入口。正式 recovery 的
 install/acquire/finalize/resume 同样不得接收调用方提供的 identity、liveness probe、containment probe
-或自定义 authority；它们必须在每个权限相关写入及最终 rename 前重新核对同一
-pid/host/boot/process identity。确定性测试所需的伪身份只开放在名称明确的
-`workspace-authority-test-seam` 与 `recovery-authority-test-seam`，production 与未来 CLI activation
-禁止导入这些 seam 或直接调用 Controlled core。同机重启 coordinator 是唯一受控内部例外：它仍从
-真实系统 boot change 与精确 quarantine 建立 authority，并在最终写入前重复核对，不能退化为
-fixture probe。
+或自定义 authority。每个正式入口都先捕获完整 pid/host/boot/process identity；Linux/macOS 在每个
+权限相关写入及最终 rename 前继续重读完整身份。Windows 在同一内存 authority 内把首次捕获的
+host/boot 作为随当前进程存活的固定锚点，但每次仍通过摘要固定的原生检查器重读当前 PID 的 creation
+FILETIME；source owner 与已有 recovery attempt owner 的竞争探测也先比对同一 host/boot 锚点，再重读
+目标 PID 的 FILETIME，不得回退到另一份组合快照。任一读取失败、unknown 或不一致都失去写权。
+authority 不序列化、不落盘、不跨正式入口或进程复用；新入口和崩溃后的新进程
+必须重新取得完整组合快照；已哈希的 host/boot 身份仍按 owner 合同落盘。Windows authority 存活期间
+把 MachineGuid 稳定视为现有本机信任边界的一部分，管理员在进程运行时改写机器身份不在保证范围。
+确定性测试所需的伪身份只开放在名称明确的
+`identity-authority-test-seam`、`workspace-authority-test-seam` 与
+`recovery-authority-test-seam`，production 与未来 CLI activation 禁止导入这些 seam 或直接调用
+Controlled core。同机重启 coordinator 是唯一受控内部例外：它仍从真实系统 boot change 与精确
+quarantine 建立 authority，并在最终写入前重复核对，不能退化为 fixture probe。
 
 `claim.json` 一旦安装便不可变：
 
@@ -811,7 +818,11 @@ parent IPC 后终止 Job、
 - Linux：`/proc/sys/kernel/random/boot_id` + `/proc/<pid>/stat` starttime；
 - Windows：process-only 热路径通过固定摘要的原生检查器读取 GetProcessTimes creation FILETIME，
   前后确认进程仍存活；host、boot 与当前 owner 的组合快照仍通过系统 PowerShell/CIM 获取，
-  reboot proof 使用 `Win32_OperatingSystem.LastBootUpTime` 与 `GetTickCount64` 推导值交叉核对；
+  reboot proof 使用 `Win32_OperatingSystem.LastBootUpTime` 与 `GetTickCount64` 推导值交叉核对。
+  非 reboot-proof 的同一 Windows current-process authority 只读取一次组合快照，之后每个权限边界只
+  复用该进程不可能跨重启继续存活的 host/boot 锚点，并用原生检查器重新读取 FILETIME；不得退回
+  pid-only、PowerShell `Get-Process` 或失败后的降级路径。reboot-proof coordinator 仍按其独立合同
+  重读完整当前身份；
 - macOS：`kern.bootsessionuuid` + 可取得的启动时间。若只有秒级信息，PID 存活且值相同判 unknown，
   不判 exact alive/dead；
 - hostId 对 Linux `/etc/machine-id`、macOS IOPlatformUUID、Windows MachineGuid 做带域分隔的

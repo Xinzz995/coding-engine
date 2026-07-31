@@ -133,10 +133,7 @@ if (mode === 'parent') {
 } else if (mode === 'recover') {
   try {
     const recoveryPath = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, RECOVERY_DIR);
-    const options = {
-      workspacePath: workspace,
-      identity: createIdentityProbe().current(),
-    };
+    const options = { workspacePath: workspace };
     const handle = existsSync(recoveryPath)
       ? await acquireDelegatedFinalizeRecovery(options)
       : await installDelegatedFinalizeRecovery(options);
