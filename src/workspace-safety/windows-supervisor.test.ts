@@ -577,7 +577,11 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     const breakawayAssembly = process.env.CODING_X_WINDOWS_BREAKAWAY_ASSEMBLY;
     const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
     const child = spawnWindowsJobSupervisor(launch);
-    const events = new EventReader(child, breakawayAssembly ? 15_000 : 60_000);
+    // Hosted Windows does not guarantee PowerShell, CLR, and assembly loading within 15 seconds.
+    // Keep the previously proven native-scenario budget; this is execution allowance, not a
+    // safety verdict. The assertions below still require a real access-denied result and prove
+    // that no escaped process wrote the marker.
+    const events = new EventReader(child, 60_000);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
     const powershell = win32.join(
