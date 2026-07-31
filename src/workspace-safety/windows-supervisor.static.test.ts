@@ -183,6 +183,12 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(processSource).toContain('CREATE_UNICODE_ENVIRONMENT');
     expect(processSource).toContain('CREATE_SUSPENDED');
     expect(processSource).toContain('CREATE_NO_WINDOW');
+    expect(processSource).toContain(
+      'cmd.exe target must use the fixed /d /s /c shape',
+    );
+    expect(processSource).toContain(
+      '.Append(" /d /s /c \\"").Append(target.Arguments[3]).Append(\'"\')',
+    );
     expect(processSource.indexOf('Native.ResumeThread(thread)')).toBeLessThan(
       processSource.indexOf('Native.Close(ref thread)'),
     );

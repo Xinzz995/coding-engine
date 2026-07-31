@@ -1,0 +1,40 @@
+name: Temporary Windows supervisor generation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-supervisor-generate-temporary.yml'
+      - 'native/windows-supervisor/**'
+      - 'assets/workspace-safety/WindowsSupervisorProgram.cs'
+      - 'assets/workspace-safety/WindowsJobSupervisor.cs'
+      - 'assets/workspace-safety/WindowsJobProcess.cs'
+      - 'assets/workspace-safety/WindowsJobAuthority.cs'
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    name: generate-windows-supervisor
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Generate deterministic Windows supervisor
+        shell: pwsh
+        run: >-
+          & 'pwsh' '-NoLogo' '-NoProfile' '-NonInteractive'
+          '-ExecutionPolicy' 'Bypass' '-File'
+          'native/windows-supervisor/build.ps1'
+          '-Mode' 'Generate' '-Target' 'Supervisor'
+          '-OutputDirectory' 'generated'
+      - name: Upload generated supervisor
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-supervisor-${{ github.event.pull_request.head.sha }}
+          path: generated/
+          if-no-files-found: error
+          retention-days: 1

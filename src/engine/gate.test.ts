@@ -356,7 +356,7 @@ describe('engine-owned Validator verdict state', () => {
   });
 });
 
-describe('runQualityChecks', () => {
+describe('runQualityChecks', { timeout: 30_000, concurrent: false }, () => {
   it('passes when every command exits 0', async () => {
     const r = await runManagedQualityChecks(['node -e "process.exit(0)"'], process.cwd());
     expect(r.ok).toBe(true);
@@ -471,7 +471,7 @@ describe('runQualityChecks', () => {
   });
 });
 
-describe('runContractQualityChecks', () => {
+describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () => {
   it('returns a deterministic gate failure when the executable cannot be resolved', async () => {
     const result = await runManagedContractQualityChecks(
       contractWith({

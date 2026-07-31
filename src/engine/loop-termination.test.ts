@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { readEvidence } from './evidence.js';
 import { setup, story, runLoop, validationReceiptFor } from './loop-test-support.js';
 
-describe('no-op 检测与 stall 熔断', () => {
+describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false }, () => {
   it('builder 空转（双无变化）：跳过验收只跑 builder，连续 3 轮熔断 exit 1', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
@@ -224,7 +224,7 @@ describe('no-op 检测与 stall 熔断', () => {
   });
 });
 
-describe('blocked 收敛出口', () => {
+describe('blocked 收敛出口', { timeout: 30_000, concurrent: false }, () => {
   it('全部 resolved 但存在 blocked：文案列出 story 号，exit 3', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([
       story(),

@@ -14,6 +14,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveBinary, resolveExecutablePath, type AgentKind } from '../engine/agent.js';
 import {
+  canonicalManagedProcessPath,
   environmentEntries,
   runManagedWorkspaceProcess,
   type ManagedWorkspaceProcessOptions,
@@ -318,21 +319,22 @@ async function runProcess(options: {
   managedProcess?: ManagedProcessRunner;
 }): Promise<ProcessResult> {
   const environment = allowedEnvironment(options.runner);
-  const executable = resolveExecutablePath(resolveBinary(options.runner), options.cwd, environment);
-  const args = runnerArgs(options);
+  const cwd = canonicalManagedProcessPath(options.cwd);
+  const executable = resolveExecutablePath(resolveBinary(options.runner), cwd, environment);
+  const args = runnerArgs({ ...options, cwd });
   const invocation = createRunnerInvocation({
     runner: options.runner,
     executable,
     args,
-    cwd: options.cwd,
+    cwd,
     prompt: options.prompt,
   });
   try {
     const result = await (options.managedProcess ?? runManagedWorkspaceProcess)(options.session, {
       ...FINAL_REVIEW_OPERATION,
-      executable: resolveExecutablePath(process.execPath, options.cwd, environment),
+      executable: resolveExecutablePath(process.execPath, cwd, environment),
       args: [invocation.proxyPath, invocation.configPath],
-      cwd: resolve(options.cwd),
+      cwd,
       environment: environmentEntries(environment),
       timeoutMs: options.timeoutMs,
       termination: options.termination,

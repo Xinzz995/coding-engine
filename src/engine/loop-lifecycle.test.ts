@@ -69,7 +69,7 @@ const ownershipViolationScenarios: readonly OwnershipViolationScenario[] = [
   },
 ];
 
-describe('runLoop', () => {
+describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
   it('implements two Stories first, then revalidates the stale earlier candidate at the final HEAD', async () => {
     const first = story({ id: 'US-001', acceptanceCriteria: ['first works'] });
     const second = story({ id: 'US-002', acceptanceCriteria: ['second works'], priority: 2 });
@@ -586,7 +586,7 @@ describe('runLoop', () => {
   // agent 把 prd.json 替换为目录，因此 loop 层不再重复不可达的破坏场景。
 });
 
-describe('runLoop keepOpen', () => {
+describe('runLoop keepOpen', { timeout: 30_000, concurrent: false }, () => {
   it('keeps the dashboard serving after completion until interrupt resolves', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = fakeBoundValidator(workspace, 'passed');

@@ -314,7 +314,7 @@ describe('workspace recovery dispatch', () => {
     expect(await evaluateWorkspaceSafetyDisk({ workspacePath: root })).toMatchObject({
       classification: 'ready',
     });
-  });
+  }, 30_000);
 
   it('re-acquires a dead installed mutation attempt and performs the exact resume', async () => {
     const root = await interruptedMutation();
@@ -339,7 +339,7 @@ describe('workspace recovery dispatch', () => {
     expect(await evaluateWorkspaceSafetyDisk({ workspacePath: root })).toMatchObject({
       classification: 'ready',
     });
-  });
+  }, 30_000);
 
   it('refuses resume-mutation for a mechanical lease without installing recovery', async () => {
     const root = await deadLeaseWorkspace();

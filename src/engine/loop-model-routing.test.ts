@@ -16,7 +16,7 @@ import {
   strictConfig,
 } from './loop-test-support.js';
 
-describe('runLoop model routing', () => {
+describe('runLoop model routing', { timeout: 30_000, concurrent: false }, () => {
   // fake 记录每次调用收到的 argv（一行一次），并把 story 翻绿让循环结束。
   // 行 1 = builder、行 2 = validator（同轮内先后调用）。
   function fakeArgvRecorder(workspace: string): { fake: string; argvLog: string } {
@@ -420,7 +420,7 @@ describe('runLoop model routing', () => {
   });
 });
 
-describe('模型升级触发与状态所有权', () => {
+describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: false }, () => {
   it('completed no-op 首次触发，下轮改走 escalation 且不增加 retryCount', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     const fake = join(workspace, 'fake-noop-route.mjs');

@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import type { DelegatedSemanticCandidate } from '../contracts/delegated-operation-contract.js';
 import { runWorkspaceOperationControlled, type OperationDelegationScope } from './operation.js';
 import { readDarkPosixHelperBundle, runDarkPosixSupervisedOperation } from './posix-supervisor.js';
@@ -44,6 +45,16 @@ export interface ManagedWorkspaceProcessResult {
   readonly candidate?: DelegatedSemanticCandidate;
 }
 
+/** 固定 supervisor 只接收操作系统解析后的真实目标，拒绝短路径和符号链接别名漂移。 */
+export function canonicalManagedProcessPath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new WorkspaceSafetyError('invalid', `受管子进程路径不可用：${detail}`);
+  }
+}
+
 export function environmentEntries(
   environment: NodeJS.ProcessEnv,
 ): { readonly name: string; readonly value: string }[] {
@@ -86,6 +97,12 @@ export async function runManagedWorkspaceProcess(
   options: ManagedWorkspaceProcessOptions,
 ): Promise<ManagedWorkspaceProcessResult> {
   const platform = assertSupportedPlatform();
+  const target = {
+    executable: canonicalManagedProcessPath(options.executable),
+    args: options.args,
+    cwd: canonicalManagedProcessPath(options.cwd),
+    environment: options.environment,
+  };
   const helperBytes =
     platform === 'windows-job-v1' ? readDarkWindowsHelperBundle() : readDarkPosixHelperBundle();
   const startedAt = Date.now();
@@ -97,12 +114,6 @@ export async function runManagedWorkspaceProcess(
       helperBytes,
     },
     async (operation) => {
-      const target = {
-        executable: options.executable,
-        args: options.args,
-        cwd: options.cwd,
-        environment: options.environment,
-      };
       if (platform === 'windows-job-v1') {
         return await runDarkWindowsSupervisedOperation(operation, {
           target,

@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -366,6 +374,45 @@ describe('managed Final Review runner execution', () => {
     expect(result.ok).toBe(true);
     expect(calls).toBe(1);
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'binds the proxy and managed target to one native canonical review root',
+    async () => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const original = packageFixture('{}');
+      const alias = `${original.root}-alias`;
+      symlinkSync(original.root, alias, 'dir');
+      temporaryRoots.push(alias);
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        const config = JSON.parse(readFileSync(options.args[1], 'utf8')) as { cwd: string };
+        const canonical = realpathSync.native(original.root);
+        expect(options.cwd).toBe(canonical);
+        expect(config.cwd).toBe(canonical);
+        return managedResult(
+          codexAnswer({
+            status: 'passed',
+            summary: 'ok',
+            requestDeepReview: false,
+            unverifiableReason: null,
+            findings: [],
+          }),
+        );
+      };
+
+      await expect(
+        runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage: { ...original, root: alias },
+          timeoutMs: 1000,
+          managedProcess: managed,
+        }),
+      ).resolves.toMatchObject({ output: { status: 'passed' } });
+    },
+  );
 
   it('keeps a large Codex prompt out of argv and preserves all bytes in the proxy input file', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);

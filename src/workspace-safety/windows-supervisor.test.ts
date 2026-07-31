@@ -700,6 +700,54 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
   });
 
+  it('preserves nested quotes for the fixed cmd.exe /d /s /c target shape', async () => {
+    const workspace = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'coding-x-windows-cmd-shell-')),
+    );
+    created.push(workspace);
+    const marker = join(workspace, 'cmd-shell-ran.txt');
+    const commandProcessor = realpathSync.native(process.env.ComSpec!);
+    const node = realpathSync.native(process.execPath);
+    const script =
+      `${JSON.stringify(node)} -e ` +
+      `"require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'quoted-ok')"`;
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    sendData(
+      child,
+      workspace,
+      commandProcessor,
+      ['/d', '/s', '/c', script],
+      windowsTestTargetEnvironment(),
+    );
+    const armedEvent = await events.next('ARMED');
+    const containment = armedEvent.containment as Record<string, unknown>;
+    const armedBytes = installArmedAuthority(authority, containment);
+    sendEmbedded(child, 'START', {
+      schemaVersion: 1,
+      type: 'START',
+      operationId: OPERATION_ID,
+      activeChildDigest: DIGEST(armedBytes),
+    });
+    await events.next('STARTED');
+    expect((await events.next('RESULT')).code).toBe(0);
+    const drained = await events.next('DRAINED');
+    const message = JSON.parse(
+      Buffer.from(String(drained.messageBase64), 'base64').toString('utf8'),
+    ) as Record<string, unknown>;
+    expect(readFileSync(marker, 'utf8')).toBe('quoted-ok');
+    sendEmbedded(child, 'ACK', {
+      schemaVersion: 1,
+      type: 'ACK',
+      operationId: OPERATION_ID,
+      receiptDigest: message.receiptDigest,
+    });
+    await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
+  });
+
   it('drains large stdout and stderr without hiding EOF behind a green root result', async () => {
     const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-windows-output-')));
     created.push(workspace);

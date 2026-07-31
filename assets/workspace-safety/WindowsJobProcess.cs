@@ -200,6 +200,20 @@ namespace CodingX.WorkspaceSafety
                 command.Append('"');
                 return command;
             }
+            string commandProcessor = Environment.GetEnvironmentVariable("ComSpec");
+            if (!String.IsNullOrEmpty(commandProcessor) &&
+                String.Equals(Path.GetFullPath(commandProcessor), target.Executable,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                if (target.Arguments.Length != 4 ||
+                    !String.Equals(target.Arguments[0], "/d", StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(target.Arguments[1], "/s", StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(target.Arguments[2], "/c", StringComparison.OrdinalIgnoreCase))
+                    throw new SafetyException("cmd.exe target must use the fixed /d /s /c shape");
+                application = target.Executable;
+                return new StringBuilder(QuoteArgument(application))
+                    .Append(" /d /s /c \"").Append(target.Arguments[3]).Append('"');
+            }
             application = target.Executable;
             return new StringBuilder(String.Join(" ",
                 new string[] { application }.Concat(target.Arguments).Select(QuoteArgument).ToArray()));
