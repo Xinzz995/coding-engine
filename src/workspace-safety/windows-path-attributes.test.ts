@@ -160,12 +160,49 @@ describe('fixed Windows path attribute protocol', () => {
 
   it('keeps the ordinary Windows suite seam out of the required native config', () => {
     const ordinary = readFileSync(join(sourceRoot, '..', '..', 'vitest.config.ts'), 'utf8');
+    const nativeRunner = readFileSync(
+      join(sourceRoot, '..', '..', 'build', 'windows-native-proof.mjs'),
+      'utf8',
+    );
     const native = readFileSync(
       join(sourceRoot, '..', '..', 'build', 'vitest.windows-native.config.mjs'),
       'utf8',
     );
+    const register = readFileSync(
+      join(sourceRoot, '__fixtures__', 'ordinary-windows-test-register.mjs'),
+      'utf8',
+    );
+    const loader = readFileSync(
+      join(sourceRoot, '__fixtures__', 'ordinary-windows-test-loader.mjs'),
+      'utf8',
+    );
     expect(ordinary).toContain('windows-path-attributes-test-transport.ts');
+    expect(register).toContain("register(new URL('./ordinary-windows-test-loader.mjs'");
+    expect(register).not.toContain('NODE_OPTIONS');
+    expect(loader).toContain('PATH_ATTRIBUTES_PARENT');
+    expect(loader).toContain('IDENTITY_PARENT');
+    expect(loader).toContain('PATH_ATTRIBUTES_PRODUCTION_TRANSPORTS');
+    expect(loader).toContain('IDENTITY_PRODUCTION_TRANSPORTS');
     expect(native).not.toContain('windows-path-attributes-test-transport');
     expect(native).not.toContain('setupFiles');
+    for (const forbidden of [
+      'ordinary-windows-test-register',
+      'ordinary-windows-test-loader',
+      'cross-process-fixture.test-support',
+    ]) {
+      expect(native).not.toContain(forbidden);
+      expect(nativeRunner).not.toContain(forbidden);
+    }
+    for (const suite of [
+      'windows-supervisor.test.ts',
+      'windows-supervisor.crash.test.ts',
+      'windows-supervisor-integration.test.ts',
+      'delegated-recovery.windows-crash.test.ts',
+      'windows-reparse-point.windows.test.ts',
+    ]) {
+      const source = readFileSync(join(sourceRoot, suite), 'utf8');
+      expect(source, suite).not.toContain('ordinary-windows-test-register');
+      expect(source, suite).not.toContain('cross-process-fixture.test-support');
+    }
   });
 });

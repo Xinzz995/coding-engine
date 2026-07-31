@@ -13,6 +13,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseDelegatedBaselineBytes } from './baseline.js';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureExecArgv,
+} from './cross-process-fixture.test-support.js';
 import { digestBytes, jsonBytes } from './filesystem.js';
 import {
   ACTIVE_CHILD_FILE,
@@ -54,12 +58,17 @@ import {
 } from './__fixtures__/operation-test-support.js';
 
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 const ACCEPTANCE_HASH = `sha256:${'c'.repeat(64)}`;
 const GIT_HEAD = 'd'.repeat(40);
 const setup = async () => await setupOperationTest(roots);
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function waitForWorkerMessage(child: ChildProcess, expected: string): Promise<void> {
@@ -297,10 +306,12 @@ describe('workspace operation protocol', () => {
     let worker: ChildProcess | undefined;
 
     const settled = await runWorkspaceOperation(session, defaultOptions(), async (operation) => {
-      worker = fork(workerPath, [workspace, barrier], {
-        execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
-      });
+      worker = fixtureProcesses.track(
+        fork(workerPath, [workspace, barrier], {
+          execArgv: typeScriptFixtureExecArgv(),
+          stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+        }),
+      );
       await waitForWorkerMessage(worker, 'staged');
       expect(
         readdirSync(join(workspace, PROTOCOL_ROOT_DIR)).filter((entry) =>

@@ -1,17 +1,8 @@
 import { existsSync } from 'node:fs';
 import { acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease } from '../workspace-authority-test-seam.js';
-import type { ProcessIdentitySnapshot } from '../types.js';
+import { currentCrossProcessTestIdentity } from './identity-test-support.js';
 
 const [workspacePath, barrierPath] = process.argv.slice(2);
-
-function workerIdentity(): ProcessIdentitySnapshot {
-  return {
-    pid: process.pid,
-    processIdentity: { kind: 'linux-boot-start', value: String(100_000 + process.pid) },
-    bootIdentity: `sha256:${'a'.repeat(64)}`,
-    hostId: `sha256:${'b'.repeat(64)}`,
-  };
-}
 
 async function send(message: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -30,7 +21,7 @@ if (!workspacePath || !barrierPath || typeof process.send !== 'function') {
       workspacePath,
       // This fixture proves a real cross-process directory race. OS identity transport is covered
       // separately and must not make the deterministic contention barrier depend on PowerShell.
-      identity: workerIdentity(),
+      identity: currentCrossProcessTestIdentity(),
       command: 'run',
       hooks: {
         beforeLeaseInstall: async () => {

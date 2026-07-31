@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from './workspace-authority-test-seam.js';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureNodeArgs,
+} from './cross-process-fixture.test-support.js';
 import { digestBytes } from './filesystem.js';
 import {
   ACTIVE_LEASE_DIR,
@@ -18,6 +22,7 @@ import {
 } from './types.js';
 
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 
 function temporaryWorkspace(): string {
   const root = mkdtempSync(join(tmpdir(), 'workspace-bootstrap-'));
@@ -48,12 +53,10 @@ interface WorkerCapture {
 
 function startBootstrapWorker(workspace: string, ownerId: string, pid: number): WorkerCapture {
   const fixture = fileURLToPath(new URL('./fixtures/bootstrap-worker.ts', import.meta.url));
-  const child = spawn(
-    process.execPath,
-    ['--import=tsx', fixture, workspace, ownerId, String(pid)],
-    {
+  const child = fixtureProcesses.track(
+    spawn(process.execPath, typeScriptFixtureNodeArgs(fixture, [workspace, ownerId, String(pid)]), {
       stdio: ['pipe', 'pipe', 'pipe'],
-    },
+    }),
   );
   let output = '';
   let markReady!: () => void;
@@ -108,9 +111,13 @@ function startBootstrapWorker(workspace: string, ownerId: string, pid: number): 
   return { child, ready, installReady, result };
 }
 
-afterEach(() => {
-  for (const root of roots.splice(0)) {
-    rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

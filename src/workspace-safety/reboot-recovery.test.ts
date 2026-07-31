@@ -16,6 +16,10 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from './workspace-authority-test-seam.js';
 import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureNodeArgs,
+} from './cross-process-fixture.test-support.js';
+import {
   ACCEPTANCE_HASH,
   HELPER_BYTES,
   OPERATION_ID,
@@ -56,6 +60,7 @@ import {
 } from './types.js';
 
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 const OWNER_ID = '00000000-0000-4000-8000-000000000071';
 const RECOVERY_ID = '00000000-0000-4000-8000-000000000072';
 const ATTEMPT_A = '00000000-0000-4000-8000-000000000073';
@@ -64,8 +69,12 @@ const BOOT_A = `sha256:${'a'.repeat(64)}`;
 const BOOT_B = `sha256:${'b'.repeat(64)}`;
 const HOST_A = `sha256:${'c'.repeat(64)}`;
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function leasePath(workspace: string): string {
@@ -178,10 +187,12 @@ async function installInExitedWorker(
   const fixture = fileURLToPath(
     new URL('./__fixtures__/reboot-recovery-install-worker.ts', import.meta.url),
   );
-  const child = spawn(
-    process.execPath,
-    ['--import=tsx', fixture, mode, workspace, RECOVERY_ID, ATTEMPT_A],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+  const child = fixtureProcesses.track(
+    spawn(
+      process.execPath,
+      typeScriptFixtureNodeArgs(fixture, [mode, workspace, RECOVERY_ID, ATTEMPT_A]),
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    ),
   );
   let stdout = '';
   let stderr = '';

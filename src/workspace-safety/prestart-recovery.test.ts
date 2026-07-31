@@ -21,6 +21,10 @@ import {
   supervisor,
   type OperationTestSetup,
 } from './__fixtures__/operation-test-support.js';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureExecArgv,
+} from './cross-process-fixture.test-support.js';
 import { jsonBytes } from './filesystem.js';
 import { createIdentityProbe } from './identity.js';
 import { SETTLED_OPERATIONS_DIR } from './operation.js';
@@ -39,6 +43,7 @@ import { QUARANTINE_FILE } from './quarantine.js';
 import { ACTIVE_LEASE_DIR, PROTOCOL_ROOT_DIR, RECOVERY_DIR } from './types.js';
 
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 const RECOVERY_ID = '00000000-0000-4000-8000-0000000000f1';
 const ATTEMPT_A = '00000000-0000-4000-8000-0000000000f2';
 const ATTEMPT_B = '00000000-0000-4000-8000-0000000000f3';
@@ -50,8 +55,12 @@ interface OwnerCrashMessage {
   readonly supervisorPid: number;
 }
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function recoveryPath(workspace: string): string {
@@ -401,10 +410,12 @@ describe('prestart mechanical recovery finalization', () => {
       const fixture = fileURLToPath(
         new URL('./__fixtures__/prestart-recovery-finalize-worker.ts', import.meta.url),
       );
-      const child = fork(fixture, [setup.workspace, ATTEMPT_B, barrier], {
-        execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      });
+      const child = fixtureProcesses.track(
+        fork(fixture, [setup.workspace, ATTEMPT_B, barrier], {
+          execArgv: typeScriptFixtureExecArgv(),
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        }),
+      );
       try {
         await waitForFinalizeBarrier(child);
 
@@ -503,10 +514,12 @@ describe('real owner hard-crash recovery', () => {
       const fixture = fileURLToPath(
         new URL('./__fixtures__/prestart-recovery-owner-worker.ts', import.meta.url),
       );
-      const child = fork(fixture, [workspace, mode, markerPath], {
-        execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      });
+      const child = fixtureProcesses.track(
+        fork(fixture, [workspace, mode, markerPath], {
+          execArgv: typeScriptFixtureExecArgv(),
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        }),
+      );
       const message = await waitForOwnerReady(child);
       expect(existsSync(markerPath)).toBe(false);
       await hardKill(child);

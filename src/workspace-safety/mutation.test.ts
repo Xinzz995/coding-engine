@@ -14,6 +14,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from './workspace-authority-test-seam.js';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureExecArgv,
+} from './cross-process-fixture.test-support.js';
 import { createIdentityProbe } from './identity.js';
 import { acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease } from './workspace-authority-test-seam.js';
 import {
@@ -36,12 +40,17 @@ import { readRecoveryDomain } from './recovery.js';
 import { ACTIVE_LEASE_DIR, PROTOCOL_ROOT_DIR, RECOVERY_DIR } from './types.js';
 
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 const crashWorker = fileURLToPath(
   new URL('./__fixtures__/mutation-crash-worker.ts', import.meta.url),
 );
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 async function sessionWithFiles(): Promise<{ root: string; session: WorkspaceSession }> {
@@ -147,9 +156,10 @@ async function hardKillWorker(
   barrier: string,
 ): Promise<void> {
   const child = fork(crashWorker, [mode, root, barrier], {
-    execArgv: ['--import', 'tsx'],
+    execArgv: typeScriptFixtureExecArgv(),
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
   });
+  fixtureProcesses.track(child);
   await waitForMessage(child, `reached:${barrier}`);
   const exited = new Promise<void>((resolve, reject) => {
     child.once('error', reject);
@@ -535,10 +545,12 @@ describe('dark workspace mutation core', () => {
     roots.push(control);
     const barrier = join(control, 'go');
     const workers = [0, 1].map(() =>
-      fork(crashWorker, ['race', root, barrier], {
-        execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      }),
+      fixtureProcesses.track(
+        fork(crashWorker, ['race', root, barrier], {
+          execArgv: typeScriptFixtureExecArgv(),
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        }),
+      ),
     );
     await Promise.all(workers.map((worker) => waitForMessage(worker, 'ready')));
     const results = workers.map((worker) =>

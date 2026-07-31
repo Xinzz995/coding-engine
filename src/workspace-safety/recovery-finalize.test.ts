@@ -15,6 +15,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureExecArgv,
+} from './cross-process-fixture.test-support.js';
 import { digestBytes } from './filesystem.js';
 import { createIdentityProbe } from './identity.js';
 import {
@@ -51,9 +55,14 @@ const ATTEMPT_C = '00000000-0000-4000-8000-0000000000b3';
 const DIGEST_A = `sha256:${'a'.repeat(64)}`;
 const TIMESTAMP = '2026-07-30T00:10:00.000Z';
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
+  }
 });
 
 function temporaryDirectory(prefix: string): string {
@@ -326,10 +335,12 @@ describe('mechanical-empty recovery finalization', () => {
       new URL('./__fixtures__/recovery-finalize-worker.ts', import.meta.url),
     );
     const workers = [ATTEMPT_B, ATTEMPT_C].map((attemptId) =>
-      fork(workerPath, [workspace, attemptId, barrier], {
-        execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-      }),
+      fixtureProcesses.track(
+        fork(workerPath, [workspace, attemptId, barrier], {
+          execArgv: typeScriptFixtureExecArgv(),
+          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        }),
+      ),
     );
     await Promise.all(workers.map((worker) => waitForWorker(worker, new Set(['ready']))));
     const results = workers.map((worker) =>
@@ -413,10 +424,12 @@ async function createLinkedFinalManifestCrash(): Promise<{ workspace: string }> 
   const fixture = fileURLToPath(
     new URL('./__fixtures__/recovery-linked-finalize-worker.ts', import.meta.url),
   );
-  const child = fork(fixture, [workspace, ATTEMPT_B], {
-    execArgv: ['--import', 'tsx'],
-    stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
-  });
+  const child = fixtureProcesses.track(
+    fork(fixture, [workspace, ATTEMPT_B], {
+      execArgv: typeScriptFixtureExecArgv(),
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    }),
+  );
   await waitForWorker(child, new Set(['linked']));
   const exited = new Promise<void>((resolve, reject) => {
     child.once('error', reject);

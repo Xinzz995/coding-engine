@@ -12,6 +12,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureExecArgv,
+} from './cross-process-fixture.test-support.js';
 import { digestBytes, jsonBytes } from './filesystem.js';
 import { createQuarantineRecordBytes, QUARANTINE_FILE } from './quarantine.js';
 import {
@@ -43,6 +47,7 @@ import {
 } from './types.js';
 
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 const RECOVERY_ID = '00000000-0000-4000-8000-0000000000a1';
 const ATTEMPT_A = '00000000-0000-4000-8000-0000000000b1';
 const ATTEMPT_B = '00000000-0000-4000-8000-0000000000b2';
@@ -51,8 +56,12 @@ const DIGEST_A = `sha256:${'a'.repeat(64)}`;
 const DIGEST_B = `sha256:${'b'.repeat(64)}`;
 const TIMESTAMP = '2026-07-30T00:10:00.000Z';
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
+  }
 });
 
 function temporaryWorkspace(): string {
@@ -701,10 +710,12 @@ describe('recovery domain installation and takeover', () => {
     );
     const barrier = join(workspace, 'start-workers');
     const workers = [ATTEMPT_B, ATTEMPT_C].map((attemptId) =>
-      fork(workerPath, [workspace, attemptId, barrier], {
-        execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
-      }),
+      fixtureProcesses.track(
+        fork(workerPath, [workspace, attemptId, barrier], {
+          execArgv: typeScriptFixtureExecArgv(),
+          stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+        }),
+      ),
     );
     await Promise.all(workers.map(waitForReady));
     const resultPromises = workers.map(waitForResult);

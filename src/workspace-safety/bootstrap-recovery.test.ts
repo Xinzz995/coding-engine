@@ -16,6 +16,10 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from './workspace-authority-test-seam.js';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureNodeArgs,
+} from './cross-process-fixture.test-support.js';
 import { readExactFile } from './filesystem.js';
 import { createIdentityProbe } from './identity.js';
 import {
@@ -41,9 +45,14 @@ const RECOVERY_ID = '00000000-0000-4000-8000-0000000000d1';
 const ATTEMPT_A = '00000000-0000-4000-8000-0000000000e1';
 const ATTEMPT_B = '00000000-0000-4000-8000-0000000000e2';
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function temporaryWorkspace(): string {
@@ -240,10 +249,12 @@ function startWorker(workspace: string, mode: string, barrier?: string): Worker 
   const fixture = fileURLToPath(
     new URL('./__fixtures__/bootstrap-recovery-worker.ts', import.meta.url),
   );
-  const child = spawn(
-    process.execPath,
-    ['--import=tsx', fixture, mode, workspace, ...(barrier ? [barrier] : [])],
-    { stdio: ['pipe', 'pipe', 'pipe'] },
+  const child = fixtureProcesses.track(
+    spawn(
+      process.execPath,
+      typeScriptFixtureNodeArgs(fixture, [mode, workspace, ...(barrier ? [barrier] : [])]),
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    ),
   );
   let output = '';
   const ready = new Promise<void>((resolve, reject) => {

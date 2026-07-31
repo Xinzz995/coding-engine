@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createCrossProcessFixtureTracker,
+  typeScriptFixtureNodeArgs,
+} from './cross-process-fixture.test-support.js';
 import { digestBytes, jsonBytes, readExactFile } from './filesystem.js';
 import {
   ABORT_STAGING_PATTERN,
@@ -27,19 +31,26 @@ const OWNER_ID = '123e4567-e89b-42d3-a456-426614174000';
 const OPERATION_ID = '223e4567-e89b-42d3-a456-426614174000';
 const DIGEST = `sha256:${'a'.repeat(64)}`;
 const roots: string[] = [];
+const fixtureProcesses = createCrossProcessFixtureTracker();
 const worker = fileURLToPath(
   new URL('./__fixtures__/linked-file-install-crash-worker.ts', import.meta.url),
 );
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await fixtureProcesses.settle();
+  } finally {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 async function leaveHardCrashWindow(source: string, target: string): Promise<void> {
-  const child = spawn(process.execPath, ['--import', 'tsx', worker, source, target], {
-    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-    env: { ...process.env },
-  });
+  const child = fixtureProcesses.track(
+    spawn(process.execPath, typeScriptFixtureNodeArgs(worker, [source, target]), {
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      env: { ...process.env },
+    }),
+  );
   let stderr = '';
   child.stderr?.setEncoding('utf8');
   child.stderr?.on('data', (chunk: string) => {

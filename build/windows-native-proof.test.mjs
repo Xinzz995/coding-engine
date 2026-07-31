@@ -235,10 +235,12 @@ describe('Windows native proof report', () => {
   it('keeps ordinary Windows parent and spawned-fixture identities on one deterministic seam', () => {
     const workerNames = [
       'bootstrap-recovery-worker.ts',
+      'lease-contender-worker.ts',
       'mutation-crash-worker.ts',
       'prestart-recovery-finalize-worker.ts',
       'prestart-recovery-owner-worker.ts',
       'reboot-recovery-install-worker.ts',
+      'recovery-attempt-worker.ts',
       'recovery-finalize-worker.ts',
       'recovery-linked-finalize-worker.ts',
     ];
@@ -256,6 +258,10 @@ describe('Windows native proof report', () => {
     ]) {
       const source = readFileSync(`src/workspace-safety/__fixtures__/${name}`, 'utf8');
       expect(source, name).toContain('attemptIdentity: currentCrossProcessTestIdentity()');
+    }
+    for (const name of ['lease-contender-worker.ts', 'recovery-attempt-worker.ts']) {
+      const source = readFileSync(`src/workspace-safety/__fixtures__/${name}`, 'utf8');
+      expect(source, name).toContain('identity: currentCrossProcessTestIdentity()');
     }
     const rebootWorker = readFileSync(
       'src/workspace-safety/__fixtures__/reboot-recovery-install-worker.ts',
