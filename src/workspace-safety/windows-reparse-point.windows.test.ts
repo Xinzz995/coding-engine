@@ -46,13 +46,25 @@ function compactWithWof(path: string): void {
     ([name]) => name.toLowerCase() === 'systemroot',
   )?.[1];
   if (!systemRoot) throw new Error('SystemRoot is unavailable');
+  const cwd = win32.dirname(path);
+  const filename = win32.basename(path);
   const result = spawnSync(
     win32.join(systemRoot, 'System32', 'compact.exe'),
-    ['/C', '/EXE:LZX', '/F', path],
-    { encoding: 'utf8', windowsHide: true, shell: false, timeout: 60_000 },
+    ['/C', '/EXE:LZX', '/F', filename],
+    { cwd, encoding: 'utf8', windowsHide: true, shell: false, timeout: 60_000 },
   );
   if (result.error) throw result.error;
   expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  const [record] = inspectWindowsPathAttributes([path]);
+  if (
+    record?.status !== 'found' ||
+    (record.attributes & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT) === 0
+  ) {
+    const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+    throw new Error(
+      `compact.exe returned success without creating WOF in ${cwd}\\${filename}\n${output.slice(-4000)}`,
+    );
+  }
 }
 
 function expectNodeBlindWof(path: string): void {

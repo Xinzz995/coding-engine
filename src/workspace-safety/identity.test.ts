@@ -9,6 +9,7 @@ import {
   resolveWindowsIdentityPowerShellLaunch,
   resolveWindowsPowerShellPath,
   WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
+  WINDOWS_IDENTITY_SNAPSHOT_SCRIPT,
   type IdentityProbeAdapter,
 } from './identity.js';
 import { captureExactCurrentIdentityAuthorityWithAdapter } from './identity-authority-test-seam.js';
@@ -59,7 +60,10 @@ function ownerFrom(
 describe('platform identity probe', () => {
   it('gives Windows cold-start probes a bounded CI budget without weakening POSIX bounds', () => {
     expect(POSIX_IDENTITY_COMMAND_TIMEOUT_MS).toBe(5_000);
-    expect(WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS).toBe(30_000);
+    expect(WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS).toBe(60_000);
+    expect(WINDOWS_IDENTITY_SNAPSHOT_SCRIPT).toContain(
+      'Get-CimInstance -ClassName Win32_OperatingSystem -Property LastBootUpTime',
+    );
   });
 
   it('resolves Windows PowerShell from the system directory without consulting PATH or cwd', () => {

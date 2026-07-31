@@ -2,7 +2,7 @@ import { uptime } from 'node:os';
 import { win32 } from 'node:path';
 import { WorkspaceSafetyError } from './types.js';
 
-export const WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS = 30_000;
+export const WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS = 60_000;
 
 export interface WindowsIdentityPowerShellLaunch {
   readonly command: string;
@@ -64,7 +64,7 @@ export const WINDOWS_IDENTITY_SNAPSHOT_SCRIPT = [
   '    $processStatus = "found"',
   '  } catch { $processStatus = "unknown" }',
   '}',
-  '$bootIdentity = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O")',
+  '$bootIdentity = (Get-CimInstance -ClassName Win32_OperatingSystem -Property LastBootUpTime).LastBootUpTime.ToUniversalTime().ToString("O")',
   '$hostIdentity = [string](Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Cryptography").MachineGuid',
   '[Console]::Out.Write((@{ processStatus = $processStatus; processValue = $processValue; bootIdentity = $bootIdentity; hostIdentity = $hostIdentity } | ConvertTo-Json -Compress))',
 ].join('\n');

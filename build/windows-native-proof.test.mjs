@@ -199,6 +199,18 @@ describe('Windows native proof report', () => {
     expect(WINDOWS_NATIVE_TOTAL_TIMEOUT_MS).toBeLessThan(20 * 60_000);
   });
 
+  it('runs compact from the WOF target directory and verifies the native reparse result', () => {
+    const source = readFileSync(
+      'src/workspace-safety/windows-reparse-point.windows.test.ts',
+      'utf8',
+    );
+    expect(source).toContain('const cwd = win32.dirname(path)');
+    expect(source).toContain('const filename = win32.basename(path)');
+    expect(source).toContain("{ cwd, encoding: 'utf8'");
+    expect(source).toContain('compact.exe returned success without creating WOF');
+    expect(source).toContain('WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT');
+  });
+
   it('forces an isolated native config that resolves only the production transport', () => {
     const runner = readFileSync('build/windows-native-proof.mjs', 'utf8');
     const nativeConfig = readFileSync('build/vitest.windows-native.config.mjs', 'utf8');
