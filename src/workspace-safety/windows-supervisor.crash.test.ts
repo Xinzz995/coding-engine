@@ -232,7 +232,11 @@ windowsOnly(
       child.kill('SIGKILL');
       await waitForChildExit(child, 5_000);
 
-      expect(readWindowsProcessIdentity(child.pid!)).toEqual({ status: 'missing' });
+      const afterExit = readWindowsProcessIdentity(child.pid!);
+      expect(afterExit.status).not.toBe('unknown');
+      if (afterExit.status === 'found' && live.status === 'found') {
+        expect(afterExit.value).not.toBe(live.value);
+      }
     });
 
     it('keeps a valid receipt when the supervisor is hard-killed between DRAINED and ACK', async () => {

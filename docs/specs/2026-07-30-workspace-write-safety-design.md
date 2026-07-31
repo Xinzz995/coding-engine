@@ -782,7 +782,7 @@ Windows 原生检查另带一份由固定源码确定性构建的 `.NET Framewor
 并核对固定摘要；helper 通过 GetFileAttributesW 与 FindFirstFileW/FindNextFileW 流式读取系统属性、
 规范名称和有界目录树，也通过 OpenProcess、GetProcessTimes 与前后两次零等待存活检查读取进程
 creation FILETIME。路径和进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；
-进程读取另有小于 supervisor 5 秒 handshake 的 3 秒硬上限。输入输出和失败阶段都采用有界协议，
+进程 helper 子进程执行另有小于 supervisor 5 秒 handshake 的 3 秒硬上限。输入输出和失败阶段都采用有界协议，
 任何摘要、请求绑定、路径、进程存活、重解析点、枚举完整性或关闭句柄无法确认都按不可验证阻断。
 
 parent IPC EOF 时 supervisor 主动 TerminateJobObject。canonical active-child 仍是 prepared-bound 时，

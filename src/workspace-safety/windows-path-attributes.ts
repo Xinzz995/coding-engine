@@ -16,7 +16,7 @@ import { invokeWindowsPathAttributeHelper } from './windows-path-attributes-tran
 export const WINDOWS_PATH_ATTRIBUTES_EXECUTABLE = 'coding-x-windows-path-inspector.exe';
 export const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 export const WINDOWS_PATH_ATTRIBUTES_EXECUTABLE_DIGEST =
-  'sha256:2924e3c605017abdf9597fe0eefe05a4d51e81576e302f33ca85a2e3ce0af648';
+  'sha256:a8ebaa0a7d89941f4fd3b1f454fb8757503695a5108e46e2a524281a0d2aa4c8';
 export const WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS = 3_000;
 const EXECUTABLE_DIGEST_DOMAIN = Buffer.from('coding-x-windows-path-inspector-exe-v1\0', 'utf8');
 const UNSIGNED_64_MAX = 18_446_744_073_709_551_615n;
