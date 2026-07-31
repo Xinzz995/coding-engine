@@ -3,21 +3,32 @@ const ORDINARY_WINDOWS_TEST_REGISTER = new URL(
   './__fixtures__/ordinary-windows-test-register.mjs',
   import.meta.url,
 ).href;
+const ORDINARY_WINDOWS_PATH_TEST_REGISTER = new URL(
+  './__fixtures__/ordinary-windows-path-test-register.mjs',
+  import.meta.url,
+).href;
 
-export function typeScriptFixtureExecArgv(platform: NodeJS.Platform = process.platform): string[] {
-  return [
-    '--import',
-    'tsx',
-    ...(platform === 'win32' ? ['--import', ORDINARY_WINDOWS_TEST_REGISTER] : []),
-  ];
+export interface TypeScriptFixtureLaunchOptions {
+  readonly platform?: NodeJS.Platform;
+  /** Keep native FILETIME only when the fixture starts the real Windows supervisor. */
+  readonly windowsIdentity?: 'deterministic' | 'production';
+}
+
+export function typeScriptFixtureExecArgv(options: TypeScriptFixtureLaunchOptions = {}): string[] {
+  const platform = options.platform ?? process.platform;
+  const windowsRegister =
+    options.windowsIdentity === 'production'
+      ? ORDINARY_WINDOWS_PATH_TEST_REGISTER
+      : ORDINARY_WINDOWS_TEST_REGISTER;
+  return ['--import', 'tsx', ...(platform === 'win32' ? ['--import', windowsRegister] : [])];
 }
 
 export function typeScriptFixtureNodeArgs(
   workerPath: string,
   args: readonly string[],
-  platform: NodeJS.Platform = process.platform,
+  options: TypeScriptFixtureLaunchOptions = {},
 ): string[] {
-  return [...typeScriptFixtureExecArgv(platform), workerPath, ...args];
+  return [...typeScriptFixtureExecArgv(options), workerPath, ...args];
 }
 
 export interface CrossProcessFixtureTracker {

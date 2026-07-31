@@ -69,12 +69,22 @@ function recoveryPath(workspace: string): string {
 
 function waitForOwnerReady(child: ChildProcess): Promise<OwnerCrashMessage> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => finish(new Error('owner crash worker timed out')), 10_000);
+    let stderr = '';
+    const timer = setTimeout(
+      () =>
+        finish(
+          new Error(
+            `owner crash worker ${String(child.pid)} timed out; stderr: ${stderr || '<empty>'}`,
+          ),
+        ),
+      10_000,
+    );
     function cleanup(): void {
       clearTimeout(timer);
       child.off('error', onError);
-      child.off('exit', onExit);
+      child.off('close', onClose);
       child.off('message', onMessage);
+      child.stderr?.off('data', onStderr);
     }
     function finish(error?: Error, message?: OwnerCrashMessage): void {
       cleanup();
@@ -84,8 +94,15 @@ function waitForOwnerReady(child: ChildProcess): Promise<OwnerCrashMessage> {
     function onError(error: Error): void {
       finish(error);
     }
-    function onExit(code: number | null): void {
-      finish(new Error(`owner crash worker exited before ready: ${String(code)}`));
+    function onClose(code: number | null, signal: NodeJS.Signals | null): void {
+      finish(
+        new Error(
+          `owner crash worker ${String(child.pid)} closed before ready with code ${String(code)} and signal ${String(signal)}; stderr: ${stderr || '<empty>'}`,
+        ),
+      );
+    }
+    function onStderr(chunk: string | Buffer): void {
+      stderr = `${stderr}${String(chunk)}`.slice(-8192);
     }
     function onMessage(value: unknown): void {
       if (
@@ -97,8 +114,9 @@ function waitForOwnerReady(child: ChildProcess): Promise<OwnerCrashMessage> {
       }
     }
     child.once('error', onError);
-    child.once('exit', onExit);
+    child.once('close', onClose);
     child.on('message', onMessage);
+    child.stderr?.on('data', onStderr);
   });
 }
 
@@ -516,8 +534,8 @@ describe('real owner hard-crash recovery', () => {
       );
       const child = fixtureProcesses.track(
         fork(fixture, [workspace, mode, markerPath], {
-          execArgv: typeScriptFixtureExecArgv(),
-          stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+          execArgv: typeScriptFixtureExecArgv({ windowsIdentity: 'production' }),
+          stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
         }),
       );
       const message = await waitForOwnerReady(child);

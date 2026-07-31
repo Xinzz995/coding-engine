@@ -8,11 +8,16 @@ import {
 
 describe('cross-process fixture support', () => {
   it('adds the isolated resolver only to ordinary Windows TypeScript workers', () => {
-    const windows = typeScriptFixtureExecArgv('win32');
+    const windows = typeScriptFixtureExecArgv({ platform: 'win32' });
     expect(windows.slice(0, 3)).toEqual(['--import', 'tsx', '--import']);
     expect(windows[3]).toMatch(/^file:.*\/ordinary-windows-test-register\.mjs$/u);
-    expect(typeScriptFixtureExecArgv('linux')).toEqual(['--import', 'tsx']);
-    expect(typeScriptFixtureNodeArgs('/fixture.ts', ['one'], 'darwin')).toEqual([
+    const nativeIdentity = typeScriptFixtureExecArgv({
+      platform: 'win32',
+      windowsIdentity: 'production',
+    });
+    expect(nativeIdentity[3]).toMatch(/^file:.*\/ordinary-windows-path-test-register\.mjs$/u);
+    expect(typeScriptFixtureExecArgv({ platform: 'linux' })).toEqual(['--import', 'tsx']);
+    expect(typeScriptFixtureNodeArgs('/fixture.ts', ['one'], { platform: 'darwin' })).toEqual([
       '--import',
       'tsx',
       '/fixture.ts',

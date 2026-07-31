@@ -176,6 +176,14 @@ describe('fixed Windows path attribute protocol', () => {
       join(sourceRoot, '__fixtures__', 'ordinary-windows-test-loader.mjs'),
       'utf8',
     );
+    const pathRegister = readFileSync(
+      join(sourceRoot, '__fixtures__', 'ordinary-windows-path-test-register.mjs'),
+      'utf8',
+    );
+    const pathLoader = readFileSync(
+      join(sourceRoot, '__fixtures__', 'ordinary-windows-path-test-loader.mjs'),
+      'utf8',
+    );
     expect(ordinary).toContain('windows-path-attributes-test-transport.ts');
     expect(register).toContain("register(new URL('./ordinary-windows-test-loader.mjs'");
     expect(register).not.toContain('NODE_OPTIONS');
@@ -183,11 +191,22 @@ describe('fixed Windows path attribute protocol', () => {
     expect(loader).toContain('IDENTITY_PARENT');
     expect(loader).toContain('PATH_ATTRIBUTES_PRODUCTION_TRANSPORTS');
     expect(loader).toContain('IDENTITY_PRODUCTION_TRANSPORTS');
+    expect(pathRegister).toContain("register(new URL('./ordinary-windows-path-test-loader.mjs'");
+    expect(pathLoader).toContain('PATH_ATTRIBUTES_PRODUCTION_TRANSPORTS');
+    expect(pathLoader).not.toContain('IDENTITY_PARENT');
+    const prestartRecovery = readFileSync(join(sourceRoot, 'prestart-recovery.test.ts'), 'utf8');
+    const ownerFixtureLaunch = prestartRecovery.slice(
+      prestartRecovery.indexOf("new URL('./__fixtures__/prestart-recovery-owner-worker.ts'"),
+    );
+    expect(ownerFixtureLaunch).toContain("windowsIdentity: 'production'");
+    expect(prestartRecovery.match(/windowsIdentity: 'production'/gu)).toHaveLength(1);
     expect(native).not.toContain('windows-path-attributes-test-transport');
     expect(native).not.toContain('setupFiles');
     for (const forbidden of [
       'ordinary-windows-test-register',
       'ordinary-windows-test-loader',
+      'ordinary-windows-path-test-register',
+      'ordinary-windows-path-test-loader',
       'cross-process-fixture.test-support',
     ]) {
       expect(native).not.toContain(forbidden);
