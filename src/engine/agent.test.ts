@@ -16,6 +16,7 @@ import {
   resolveBinary,
   resolveExecutablePath,
   resolveRunnerExecutablePath,
+  resolveRunnerInvocation,
   runAgent,
 } from './agent.js';
 import { createManagedProcessTestSession } from './managed-process-test-support.js';
@@ -272,6 +273,30 @@ describe('resolveRunnerExecutablePath', () => {
       expect(resolveRunnerExecutablePath('claude', script, dir, process.env, 'linux')).toBe(
         realpathSync.native(script),
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers an exact native executable path containing spaces before legacy test splitting', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x runner native-'));
+    const executable = join(dir, 'native runner.exe');
+    writeFileSync(executable, '');
+    chmodSync(executable, 0o755);
+    try {
+      expect(
+        resolveRunnerInvocation(
+          'codex',
+          executable,
+          ['exec', 'prompt'],
+          dir,
+          process.env,
+          'win32',
+        ),
+      ).toEqual({
+        executable: realpathSync.native(executable),
+        args: ['exec', 'prompt'],
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

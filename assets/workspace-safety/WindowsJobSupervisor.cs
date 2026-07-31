@@ -778,7 +778,7 @@ namespace CodingX.WorkspaceSafety
             StrictJson.ExactKeys(record, "timeouts",
                 "handshakeMs", "naturalDrainMs", "terminateMs", "ackMs", "pollMs");
             Timeouts result = new Timeouts();
-            result.HandshakeMs = Range(StrictJson.Integer(record, "handshakeMs", "handshakeMs"), 10, 60000);
+            result.HandshakeMs = Range(StrictJson.Integer(record, "handshakeMs", "handshakeMs"), 10, 300000);
             result.NaturalDrainMs = Range(StrictJson.Integer(record, "naturalDrainMs", "naturalDrainMs"), 0, 60000);
             result.TerminateMs = Range(StrictJson.Integer(record, "terminateMs", "terminateMs"), 1, 60000);
             result.AckMs = Range(StrictJson.Integer(record, "ackMs", "ackMs"), 10, 60000);

@@ -126,6 +126,31 @@ export function resolveRunnerExecutablePath(
   return executable;
 }
 
+/** @internal 保留历史测试使用的 `node <fixture> [mode]`，真实完整路径始终优先。 */
+export function resolveRunnerInvocation(
+  kind: AgentKind,
+  command: string,
+  trailingArgs: readonly string[],
+  cwd: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { readonly executable: string; readonly args: string[] } {
+  try {
+    return {
+      executable: resolveRunnerExecutablePath(kind, command, cwd, environment, platform),
+      args: [...trailingArgs],
+    };
+  } catch (error) {
+    if (error instanceof WorkspaceSafetyError || !command.includes(' ')) throw error;
+    const [head, ...leadingArgs] = command.split(' ').filter(Boolean);
+    if (!head) throw error;
+    return {
+      executable: resolveRunnerExecutablePath(kind, head, cwd, environment, platform),
+      args: [...leadingArgs, ...trailingArgs],
+    };
+  }
+}
+
 export function resolveBinary(kind: AgentKind): string {
   if (kind === 'codex') return process.env.CODING_X_CODEX_BIN ?? 'codex';
   if (kind === 'cursor') {
@@ -179,18 +204,20 @@ export function runAgent(opts: {
     };
   };
 }): Promise<RunResult> {
-  // buildAgentArgs()[0] may itself be "node /path mode" when overridden by an
-  // env var in tests; split it so the stub receives its trailing args.
   const argv = buildAgentArgs(opts.kind, opts.prompt, opts.model);
-  const head = argv[0].split(' ');
-  const cmd = head[0];
-  const args = [...head.slice(1), ...argv.slice(1)];
   const environment = { ...process.env, ...opts.env };
 
   let executable: string;
+  let args: string[];
   let cwd: string;
   try {
-    executable = resolveRunnerExecutablePath(opts.kind, cmd, opts.cwd, environment);
+    ({ executable, args } = resolveRunnerInvocation(
+      opts.kind,
+      argv[0],
+      argv.slice(1),
+      opts.cwd,
+      environment,
+    ));
     cwd = realpathSync(opts.cwd);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

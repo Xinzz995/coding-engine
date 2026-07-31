@@ -806,8 +806,9 @@ Windows 原生检查另带一份由固定源码确定性构建的 `.NET Framewor
 规范名称和有界目录树，并对扫描发现的非目录文件调用 WofIsExternalFile，返回明确的 physical/external
 状态；external 结果必须带 FILE/WIM provider，FILE provider 还必须带已知 compression algorithm。helper
 也通过 OpenProcess、GetProcessTimes 与前后两次零等待存活检查读取进程 creation FILETIME。路径和
-进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；进程 helper 子进程执行另有小于
-supervisor 5 秒 handshake 的 3 秒硬上限。输入输出和失败阶段都采用有界协议，任何摘要、请求绑定、
+进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；进程 helper 子进程执行有
+4 秒硬上限。supervisor 的阶段握手默认 120 秒，以覆盖开始项目代码前重复的身份、租约和目录证明，
+并仍受 300 秒配置上限约束。输入输出和失败阶段都采用有界协议，任何摘要、请求绑定、
 路径、进程存活、重解析点、外部承载状态、枚举完整性或关闭句柄无法确认都按不可验证阻断。
 
 `paths-v1` 对每个 `found` 记录增加严格的 `externalBacking`：目录为

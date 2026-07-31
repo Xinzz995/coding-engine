@@ -782,6 +782,31 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     expect(existsSync(marker)).toBe(false);
   });
 
+  it('rejects a non-system executable named cmd.exe before ARMED', async () => {
+    const workspace = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'coding-x-windows-fake-cmd-')),
+    );
+    created.push(workspace);
+    const commandProcessor = join(workspace, 'cmd.exe');
+    const marker = join(workspace, 'fake-cmd-ran.txt');
+    writeFileSync(commandProcessor, '');
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    sendData(
+      child,
+      workspace,
+      commandProcessor,
+      ['/d', '/s', '/c', `echo rejected>${JSON.stringify(marker)}`],
+      windowsTestTargetEnvironment(),
+    );
+    await expect(events.next('ARMED')).rejects.toThrow(/fixed system cmd\.exe/u);
+    await expect(events.exit).resolves.toEqual({ code: 2, signal: null });
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it('drains large stdout and stderr without hiding EOF behind a green root result', async () => {
     const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-windows-output-')));
     created.push(workspace);

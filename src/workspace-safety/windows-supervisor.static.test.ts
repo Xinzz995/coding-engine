@@ -64,7 +64,7 @@ describe('fixed Windows Job supervisor assets', () => {
       expect.any(String),
     ]);
     expect(JSON.parse(Buffer.from(launch.args[3], 'base64').toString('utf8'))).toEqual({
-      handshakeMs: 15_000,
+      handshakeMs: 120_000,
       naturalDrainMs: 5000,
       terminateMs: 5000,
       ackMs: 5000,
@@ -77,8 +77,11 @@ describe('fixed Windows Job supervisor assets', () => {
       TEMP: 'C:\\Windows\\Temp',
       TMP: 'C:\\Windows\\Temp',
     });
+    // BOUND→DATA and ARMED→START each contain repeated exact owner/target identity
+    // checks plus bounded workspace scans. Keep a full minute beyond the currently
+    // longest eleven sequential identity probes instead of racing the fixed helper.
     expect(DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS.handshakeMs).toBeGreaterThanOrEqual(
-      2 * WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS + 5000,
+      11 * WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS + 60_000,
     );
     expect(launch.detached).toBe(true);
     expect(launch.windowsHide).toBe(true);
@@ -175,6 +178,9 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(core).not.toContain('Console.InputEncoding');
     expect(core).not.toContain('Console.OutputEncoding');
     expect(core).not.toContain('SetConsoleCtrlHandler');
+    expect(core).toContain(
+      'Range(StrictJson.Integer(record, "handshakeMs", "handshakeMs"), 10, 300000)',
+    );
     expect(processSource.indexOf('CreateJobObjectW')).toBeLessThan(
       processSource.indexOf('CreateProcessW'),
     );
