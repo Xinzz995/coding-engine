@@ -363,6 +363,10 @@ namespace CodingX.WorkspaceSafety
 
     internal static class StrictJson
     {
+        private const int MaximumDecodedObjectBytes = 64 * 1024;
+        internal const int MaximumBase64ObjectCharacters =
+            4 * ((MaximumDecodedObjectBytes + 2) / 3);
+
         private const int MaximumJsonCharacters = 128 * 1024;
 
         internal static Dictionary<string, object> ParseObject(string text, string label)
@@ -511,6 +515,21 @@ namespace CodingX.WorkspaceSafety
             return value;
         }
 
+        internal static string Base64ObjectString(
+            Dictionary<string, object> record,
+            string key,
+            string label)
+        {
+            object raw;
+            if (!record.TryGetValue(key, out raw))
+                throw new SafetyException(label + " is missing");
+            string value = raw as string;
+            if (value == null || value.Length == 0 ||
+                value.Length > MaximumBase64ObjectCharacters || value.IndexOf('\0') >= 0)
+                throw new SafetyException(label + " is invalid");
+            return value;
+        }
+
         internal static int Integer(Dictionary<string, object> record, string key, string label)
         {
             object raw;
@@ -575,12 +594,13 @@ namespace CodingX.WorkspaceSafety
             string encoded,
             string label)
         {
-            if (encoded == null || encoded.Length == 0 || encoded.Length > 96 * 1024)
+            if (encoded == null || encoded.Length == 0 ||
+                encoded.Length > MaximumBase64ObjectCharacters)
                 throw new SafetyException(label + " base64 is invalid");
             byte[] bytes;
             try { bytes = Convert.FromBase64String(encoded); }
             catch { throw new SafetyException(label + " base64 is invalid"); }
-            if (bytes.Length > 64 * 1024 || Convert.ToBase64String(bytes) != encoded)
+            if (bytes.Length > MaximumDecodedObjectBytes || Convert.ToBase64String(bytes) != encoded)
                 throw new SafetyException(label + " base64 is non-canonical or too large");
             string text;
             try { text = new UTF8Encoding(false, true).GetString(bytes); }
@@ -908,7 +928,8 @@ namespace CodingX.WorkspaceSafety
             if (!Path.IsPathRooted(workspace) || Path.GetFullPath(workspace) != workspace)
                 throw new SafetyException("workspacePath must be canonical and absolute");
             Dictionary<string, object> message = StrictJson.DecodeBase64Object(
-                StrictJson.String(envelope, "messageBase64", "DATA messageBase64", false), "DATA");
+                StrictJson.Base64ObjectString(envelope, "messageBase64", "DATA messageBase64"),
+                "DATA");
             StrictJson.ExactKeys(message, "DATA", "schemaVersion", "type", "operationId", "target");
             if (StrictJson.Integer(message, "schemaVersion", "DATA schemaVersion") != 1 ||
                 StrictJson.String(message, "type", "DATA type", false) != "DATA")

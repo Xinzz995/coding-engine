@@ -126,6 +126,9 @@ export interface EvaluateWorkspaceSafetyDiskOptions {
 export interface ControlledEvaluateWorkspaceSafetyDiskOptions extends EvaluateWorkspaceSafetyDiskOptions {
   readonly probe?: WorkspaceSafetyDiskProbeAdapter;
   readonly now?: () => Date;
+  readonly hooks?: {
+    readonly afterInitialSafetySnapshot?: () => void | Promise<void>;
+  };
 }
 
 interface QuarantineEvidence {
@@ -146,6 +149,29 @@ interface LeaseInspection {
   readonly quarantine?: QuarantineEvidence;
   readonly quarantineInstallIncomplete: boolean;
 }
+
+type SafetyEntryKind = 'missing' | 'file' | 'directory';
+
+interface SafetyEntryObservation {
+  readonly kind: SafetyEntryKind;
+  readonly device?: string;
+  readonly inode?: string;
+  readonly links?: string;
+  readonly size?: string;
+  readonly modified?: string;
+  readonly changed?: string;
+}
+
+interface SafetyRootShape {
+  readonly marker: SafetyEntryObservation;
+  readonly protocolRoot: SafetyEntryObservation;
+  readonly fingerprint: string;
+}
+
+type SafetyRootMode =
+  | 'no-protocol-root'
+  | 'legacy-file-root'
+  | 'protocol-directory-root';
 
 function defaultFacts(): WorkspaceSafetyFacts {
   return {
@@ -278,6 +304,61 @@ async function safetyFingerprint(workspace: WorkspaceDirectory): Promise<string>
   }
   await assertWorkspaceDirectoryUnchanged(workspace);
   return digestBytes(Buffer.from(JSON.stringify(observations), 'utf8'));
+}
+
+async function observeSafetyEntry(path: string, label: string): Promise<SafetyEntryObservation> {
+  try {
+    const info = await lstat(path, { bigint: true });
+    if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) {
+      throw invalid(`${label} is not an ordinary file or directory`);
+    }
+    return {
+      kind: info.isDirectory() ? 'directory' : 'file',
+      device: info.dev.toString(),
+      inode: info.ino.toString(),
+      links: info.nlink.toString(),
+      size: info.size.toString(),
+      modified: info.mtimeNs.toString(),
+      changed: info.ctimeNs.toString(),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' };
+    throw error;
+  }
+}
+
+async function captureSafetyRootShape(workspace: WorkspaceDirectory): Promise<SafetyRootShape> {
+  const markerPath = join(workspace.path, WORKSPACE_MARKER_FILE);
+  const protocolRootPath = join(workspace.path, PROTOCOL_ROOT_DIR);
+  const paths = [markerPath, protocolRootPath];
+  await assertWorkspaceDirectoryUnchanged(workspace);
+  assertNoWindowsReparsePoints(paths, { allowMissing: true });
+  const observed = {
+    marker: await observeSafetyEntry(markerPath, WORKSPACE_MARKER_FILE),
+    protocolRoot: await observeSafetyEntry(protocolRootPath, PROTOCOL_ROOT_DIR),
+  };
+  await assertWorkspaceDirectoryUnchanged(workspace);
+  return {
+    ...observed,
+    fingerprint: digestBytes(Buffer.from(JSON.stringify(observed), 'utf8')),
+  };
+}
+
+function classifySafetyRootShape(shape: SafetyRootShape): SafetyRootMode {
+  if (shape.marker.kind === 'directory') {
+    throw invalid(`${WORKSPACE_MARKER_FILE} is not an ordinary file`);
+  }
+  if (shape.protocolRoot.kind === 'file') {
+    if (shape.marker.kind !== 'missing') {
+      throw invalid('workspace marker exists with a legacy file protocol root');
+    }
+    return 'legacy-file-root';
+  }
+  if (shape.protocolRoot.kind === 'directory') return 'protocol-directory-root';
+  if (shape.marker.kind !== 'missing') {
+    throw invalid('workspace marker exists without the permanent root');
+  }
+  return 'no-protocol-root';
 }
 
 function defaultProbeAdapter(): WorkspaceSafetyDiskProbeAdapter {
@@ -728,25 +809,21 @@ async function evaluateOnce(
   workspacePath: string,
   probe: WorkspaceSafetyDiskProbeAdapter,
   now: Date,
+  hooks: ControlledEvaluateWorkspaceSafetyDiskOptions['hooks'] = {},
 ): Promise<LogicalEvaluation> {
   const workspace = await canonicalizeWorkspaceDirectory(workspacePath);
-  assertNoWindowsReparsePoints(
-    [
-      join(workspace.path, WORKSPACE_MARKER_FILE),
-      join(workspace.path, PROTOCOL_ROOT_DIR),
-    ],
-    { allowMissing: true },
-  );
+  const rootBefore = await captureSafetyRootShape(workspace);
+  const rootMode = classifySafetyRootShape(rootBefore);
   const before = await safetyFingerprint(workspace);
-  const markerExists = await pathExists(join(workspace.path, WORKSPACE_MARKER_FILE));
-  const protocolRootExists = await pathExists(join(workspace.path, PROTOCOL_ROOT_DIR));
+  await hooks.afterInitialSafetySnapshot?.();
+  const markerExists = rootBefore.marker.kind === 'file';
 
-  if (markerExists && protocolRootExists) {
+  if (rootMode === 'protocol-directory-root') {
     assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
   }
 
   let logical: Omit<LogicalEvaluation, 'safetyFingerprint'>;
-  if (!markerExists && !protocolRootExists) {
+  if (rootMode === 'no-protocol-root') {
     assertWindowsWorkspaceTreeHasNoReparsePoints(workspace.path);
     const shape = await rootShape(workspace);
     assertWindowsWorkspaceTreeHasNoReparsePoints(workspace.path);
@@ -764,13 +841,20 @@ async function evaluateOnce(
       probeEvidence: probe.evidenceKind,
       unsupportedCanonical: [],
     };
-  } else if (!markerExists && protocolRootExists) {
-    const rootInfo = await lstat(join(workspace.path, PROTOCOL_ROOT_DIR));
-    if (
-      rootInfo.isSymbolicLink() ||
-      !rootInfo.isDirectory() ||
-      !(await pathExists(join(workspace.path, PROTOCOL_ROOT_DIR, PROTOCOL_FILE)))
-    ) {
+  } else if (rootMode === 'legacy-file-root') {
+    const facts = { ...defaultFacts(), legacyArtifacts: true };
+    logical = {
+      classification: classifyWorkspaceSafetyFacts(facts),
+      facts,
+      reason: 'legacy-runtime-artifacts',
+      operationState: 'none',
+      operationLocation: 'none',
+      probeEvidence: probe.evidenceKind,
+      unsupportedCanonical: [],
+      diagnostic: '检测到旧版 engine.lock 文件；新版安全协议要求 engine.lock 为永久协议根目录',
+    };
+  } else if (!markerExists) {
+    if (!(await pathExists(join(workspace.path, PROTOCOL_ROOT_DIR, PROTOCOL_FILE)))) {
       const facts = { ...defaultFacts(), legacyArtifacts: true };
       logical = {
         classification: classifyWorkspaceSafetyFacts(facts),
@@ -782,12 +866,10 @@ async function evaluateOnce(
         unsupportedCanonical: [],
       };
     } else {
-      assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
       const bootstrapping = await evaluateBootstrapState({ workspace, probe, fingerprint: before });
       logical = bootstrapping;
     }
   } else {
-    if (!protocolRootExists) throw invalid('workspace marker exists without the permanent root');
     let bootstrapping: LogicalEvaluation | undefined;
     try {
       // A legal bootstrap file-install crash already has the marker target, but it still has two
@@ -883,12 +965,13 @@ async function evaluateOnce(
   }
 
   const after = await safetyFingerprint(workspace);
+  const rootAfter = await captureSafetyRootShape(workspace);
   if (before !== after) throw invalid('safety records changed during evaluation');
-  if (protocolRootExists) {
-    const rootInfo = await lstat(join(workspace.path, PROTOCOL_ROOT_DIR));
-    if (!rootInfo.isSymbolicLink() && rootInfo.isDirectory()) {
-      assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
-    }
+  if (rootBefore.fingerprint !== rootAfter.fingerprint) {
+    throw invalid('safety root structure changed during evaluation');
+  }
+  if (rootAfter.protocolRoot.kind === 'directory') {
+    assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
   }
   await assertWorkspaceDirectoryUnchanged(workspace);
   return { ...logical, safetyFingerprint: after };
@@ -952,8 +1035,8 @@ export async function evaluateWorkspaceSafetyDiskControlled(
   const probe = options.probe ?? defaultProbeAdapter();
   const now = options.now ?? (() => new Date());
   try {
-    const first = await evaluateOnce(options.workspacePath, probe, now());
-    const second = await evaluateOnce(options.workspacePath, probe, now());
+    const first = await evaluateOnce(options.workspacePath, probe, now(), options.hooks);
+    const second = await evaluateOnce(options.workspacePath, probe, now(), options.hooks);
     return sameLogical(first, second) ? second : unstableProbeResult(first, second);
   } catch (error) {
     const message = errorMessage(error);

@@ -47,7 +47,10 @@ import {
   type WorkspaceMarker,
   WorkspaceSafetyError,
 } from './types.js';
-import { assertWindowsSafetyTreeHasNoReparsePoints } from './windows-path-attributes.js';
+import {
+  assertNoWindowsReparsePoints,
+  assertWindowsSafetyTreeHasNoReparsePoints,
+} from './windows-path-attributes.js';
 
 export interface ReadyWorkspaceRecords {
   readonly workspace: WorkspaceDirectory;
@@ -126,9 +129,10 @@ export async function readReadyWorkspaceRecords(
       ? await canonicalizeWorkspaceDirectory(workspacePath)
       : workspacePath;
   await assertWorkspaceDirectoryUnchanged(workspace);
-  assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
   const protocolRoot = join(workspace.path, PROTOCOL_ROOT_DIR);
+  assertNoWindowsReparsePoints([protocolRoot]);
   await assertStrictDirectory(protocolRoot, '永久协议根');
+  assertWindowsSafetyTreeHasNoReparsePoints(workspace.path);
   const rootEntries = await readdir(protocolRoot);
   for (const entry of rootEntries) {
     if (

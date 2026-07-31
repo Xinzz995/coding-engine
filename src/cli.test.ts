@@ -1230,21 +1230,20 @@ describe('repair 与工作区锁', () => {
   it('refuses to treat a legacy pid-only lock as a safe workspace (exit 2, files untouched)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-repair-lock-'));
     const brokenRaw = '{"project":"p","branchName":"b","description":"d","userStories":[],}'; // 尾逗号：可修复的坏 JSON
+    const legacyLockRaw = JSON.stringify({
+      pid: process.pid,
+      startedAt: '2026-07-16T00:00:00.000Z',
+      command: 'run',
+    });
     writeFileSync(join(dir, 'prd.json'), brokenRaw);
-    writeFileSync(
-      join(dir, 'engine.lock'),
-      JSON.stringify({
-        pid: process.pid,
-        startedAt: '2026-07-16T00:00:00.000Z',
-        command: 'run',
-      }),
-    );
+    writeFileSync(join(dir, 'engine.lock'), legacyLockRaw);
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const code = await main(['repair', '--workspace', dir]);
       expect(code).toBe(2);
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('永久协议根'));
       expect(readFileSync(join(dir, 'prd.json'), 'utf-8')).toBe(brokenRaw); // 未动文件
+      expect(readFileSync(join(dir, 'engine.lock'), 'utf-8')).toBe(legacyLockRaw);
     } finally {
       errSpy.mockRestore();
       rmSync(dir, { recursive: true, force: true });

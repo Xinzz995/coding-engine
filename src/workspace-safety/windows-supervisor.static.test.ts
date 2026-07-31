@@ -155,6 +155,18 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(program).toContain('--timeouts-base64');
     expect(program).toContain('arguments.Length != 4');
     expect(program).toContain('Assembly.Location');
+    expect(core).toContain('private const int MaximumDecodedObjectBytes = 64 * 1024');
+    expect(core).toContain(
+      '4 * ((MaximumDecodedObjectBytes + 2) / 3)',
+    );
+    expect(core).toContain(
+      'StrictJson.Base64ObjectString(envelope, "messageBase64", "DATA messageBase64")',
+    );
+    expect(core).not.toContain('encoded.Length > 96 * 1024');
+    expect(authority).toContain(
+      'StrictJson.String(envelope, "messageBase64", "messageBase64", false)',
+    );
+    expect(authority).not.toContain('StrictJson.Base64ObjectString(');
     expect(core).not.toContain('Console.InputEncoding');
     expect(core).not.toContain('Console.OutputEncoding');
     expect(core).not.toContain('SetConsoleCtrlHandler');
