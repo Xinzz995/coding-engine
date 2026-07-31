@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -41,9 +41,6 @@ export const BREAKAWAY_TARGET = fileURLToPath(
 export const BREAKAWAY_SOURCE = fileURLToPath(
   new URL('./__fixtures__/WindowsBreakawayAttempt.cs', import.meta.url),
 );
-export const HANDLE_INVENTORY_TARGET = fileURLToPath(
-  new URL('./__fixtures__/windows-handle-inventory-target.ps1', import.meta.url),
-);
 export const HANDLE_INVENTORY_SOURCE = fileURLToPath(
   new URL('./__fixtures__/WindowsHandleInventory.cs', import.meta.url),
 );
@@ -56,7 +53,33 @@ export const DIGEST = (value: string | Buffer): string =>
 export const OPERATION_ID = '12345678-1234-4234-8234-123456789abc';
 const OWNER_ID = 'abcdefab-cdef-4abc-8def-abcdefabcdef';
 export const created: string[] = [];
-const activeChildren = new Set<ChildProcessWithoutNullStreams>();
+const activeChildren = new Set<ChildProcess>();
+
+export function trackActiveChild<T extends ChildProcess>(child: T): T {
+  activeChildren.add(child);
+  child.once('exit', () => activeChildren.delete(child));
+  return child;
+}
+
+export async function waitForChildExit(
+  child: ChildProcess,
+  timeoutMs = 5000,
+): Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return { code: child.exitCode, signal: child.signalCode };
+  }
+  return await new Promise((resolve, reject) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    };
+    const timer = setTimeout(() => {
+      child.off('exit', onExit);
+      reject(new Error(`child process ${String(child.pid)} remained alive`));
+    }, timeoutMs);
+    child.once('exit', onExit);
+  });
+}
 
 afterEach(async () => {
   await Promise.all(

@@ -21,16 +21,19 @@ if ($Child) {
         @{
             environment = 'CODING_X_WINDOWS_BREAKAWAY_ASSEMBLY'
             output = 'CodingX.WindowsBreakawayAttempt.dll'
+            outputType = 'Library'
             source = 'WindowsBreakawayAttempt.cs'
         },
         @{
-            environment = 'CODING_X_WINDOWS_HANDLE_INVENTORY_ASSEMBLY'
-            output = 'CodingX.WindowsHandleInventory.dll'
+            environment = 'CODING_X_WINDOWS_HANDLE_INVENTORY_EXECUTABLE'
+            output = 'CodingX.WindowsHandleInventory.exe'
+            outputType = 'ConsoleApplication'
             source = 'WindowsHandleInventory.cs'
         },
         @{
             environment = 'CODING_X_WINDOWS_CTRL_C_DRIVER_ASSEMBLY'
             output = 'CodingX.WindowsCtrlCDriver.dll'
+            outputType = 'Library'
             source = 'WindowsCtrlCDriver.cs'
         }
     )
@@ -44,7 +47,8 @@ if ($Child) {
             -ExecutionPolicy Bypass `
             -File $fixtureCompiler `
             -SourcePath $sourcePath `
-            -OutputAssembly $assemblyPath
+            -OutputAssembly $assemblyPath `
+            -OutputType $fixture.outputType
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
             throw "Could not precompile the Windows test fixture $($fixture.source)"
         }

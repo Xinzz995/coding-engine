@@ -18,7 +18,10 @@ namespace CodingX.WorkspaceSafety.Tests
         private const int STD_OUTPUT_HANDLE = -11;
         private const int STD_ERROR_HANDLE = -12;
         private const uint STARTF_USESTDHANDLES = 0x00000100;
+        private const uint PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002;
+        private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+        private const uint CREATE_NO_WINDOW = 0x08000000;
         private const uint WAIT_TIMEOUT = 0x00000102;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -58,6 +61,13 @@ namespace CodingX.WorkspaceSafety.Tests
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        private struct STARTUPINFOEX
+        {
+            internal STARTUPINFO StartupInfo;
+            internal IntPtr lpAttributeList;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         private struct PROCESS_INFORMATION
         {
             internal IntPtr hProcess;
@@ -92,8 +102,22 @@ namespace CodingX.WorkspaceSafety.Tests
             uint creationFlags,
             IntPtr environment,
             string currentDirectory,
-            ref STARTUPINFO startupInfo,
+            ref STARTUPINFOEX startupInfo,
             out PROCESS_INFORMATION processInformation);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList(IntPtr attributeList,
+            int attributeCount, int flags, ref IntPtr size);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute(IntPtr attributeList, uint flags,
+            UIntPtr attribute, IntPtr value, IntPtr size, IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList(IntPtr attributeList);
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
@@ -216,36 +240,75 @@ namespace CodingX.WorkspaceSafety.Tests
             return 0;
         }
 
-        public static int RunRoot(string powershellPath, string scriptPath, string sourcePath,
-            string assemblyPath, string rootInventoryPath, string descendantInventoryPath,
-            string readyPath)
+        public static int RunRoot(string executablePath, string rootInventoryPath,
+            string descendantInventoryPath, string readyPath)
         {
             PROCESS_INFORMATION child = new PROCESS_INFORMATION();
+            IntPtr attributeSize = IntPtr.Zero;
+            IntPtr attributes = IntPtr.Zero;
+            IntPtr handlesValue = IntPtr.Zero;
+            bool attributesInitialized = false;
             bool ready = false;
             try
             {
                 WriteInventory("root", rootInventoryPath);
                 string[] arguments = new string[] {
-                    powershellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
-                    scriptPath, "-Mode", "descendant", "-SourcePath", sourcePath,
-                    "-AssemblyPath", assemblyPath,
-                    "-PowerShellPath", powershellPath, "-ScriptPath", scriptPath,
-                    "-RootInventoryPath", rootInventoryPath, "-DescendantInventoryPath",
-                    descendantInventoryPath, "-ReadyPath", readyPath
+                    executablePath, "descendant", descendantInventoryPath
                 };
                 StringBuilder commandLine = new StringBuilder(String.Join(" ",
                     arguments.Select(Quote).ToArray()));
-                STARTUPINFO startup = new STARTUPINFO();
-                startup.cb = Marshal.SizeOf(typeof(STARTUPINFO));
-                startup.dwFlags = STARTF_USESTDHANDLES;
-                startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-                startup.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-                startup.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-                if (!CreateProcessW(powershellPath, commandLine, IntPtr.Zero, IntPtr.Zero, true,
-                    CREATE_UNICODE_ENVIRONMENT, IntPtr.Zero, Path.GetDirectoryName(readyPath),
-                    ref startup, out child))
+                IntPtr[] inherited = new IntPtr[] {
+                    GetStdHandle(STD_INPUT_HANDLE),
+                    GetStdHandle(STD_OUTPUT_HANDLE),
+                    GetStdHandle(STD_ERROR_HANDLE)
+                };
+                foreach (IntPtr handle in inherited)
+                {
+                    uint handleFlags;
+                    if (!GetHandleInformation(handle, out handleFlags) ||
+                        (handleFlags & HANDLE_FLAG_INHERIT) == 0)
+                        throw new InvalidOperationException(
+                            "standard handle is not safely inheritable");
+                }
+
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);
+                if (attributeSize == IntPtr.Zero)
+                    throw new InvalidOperationException(
+                        "InitializeProcThreadAttributeList did not report a size");
+                attributes = Marshal.AllocHGlobal(attributeSize);
+                if (!InitializeProcThreadAttributeList(attributes, 1, 0, ref attributeSize))
+                    throw new InvalidOperationException(
+                        "InitializeProcThreadAttributeList failed with " +
+                        Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                attributesInitialized = true;
+                handlesValue = Marshal.AllocHGlobal(IntPtr.Size * inherited.Length);
+                for (int index = 0; index < inherited.Length; index++)
+                    Marshal.WriteIntPtr(handlesValue, index * IntPtr.Size, inherited[index]);
+                if (!UpdateProcThreadAttribute(attributes, 0,
+                    new UIntPtr(PROC_THREAD_ATTRIBUTE_HANDLE_LIST), handlesValue,
+                    new IntPtr(IntPtr.Size * inherited.Length), IntPtr.Zero, IntPtr.Zero))
+                    throw new InvalidOperationException(
+                        "UpdateProcThreadAttribute(HANDLE_LIST) failed with " +
+                        Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+
+                STARTUPINFOEX startup = new STARTUPINFOEX();
+                startup.StartupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFOEX));
+                startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                startup.StartupInfo.hStdInput = inherited[0];
+                startup.StartupInfo.hStdOutput = inherited[1];
+                startup.StartupInfo.hStdError = inherited[2];
+                startup.lpAttributeList = attributes;
+                if (!CreateProcessW(executablePath, commandLine, IntPtr.Zero, IntPtr.Zero, true,
+                    EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+                    IntPtr.Zero, Path.GetDirectoryName(readyPath), ref startup, out child))
                     throw new InvalidOperationException("CreateProcessW descendant failed with " +
                         Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture));
+                DeleteProcThreadAttributeList(attributes);
+                attributesInitialized = false;
+                Marshal.FreeHGlobal(attributes);
+                attributes = IntPtr.Zero;
+                Marshal.FreeHGlobal(handlesValue);
+                handlesValue = IntPtr.Zero;
                 CloseHandle(child.hThread);
                 child.hThread = IntPtr.Zero;
                 WaitForFile(descendantInventoryPath, child.hProcess);
@@ -268,6 +331,30 @@ namespace CodingX.WorkspaceSafety.Tests
                 if (!ready && child.hProcess != IntPtr.Zero) TerminateProcess(child.hProcess, 2);
                 if (child.hThread != IntPtr.Zero) CloseHandle(child.hThread);
                 if (child.hProcess != IntPtr.Zero) CloseHandle(child.hProcess);
+                if (attributes != IntPtr.Zero)
+                {
+                    if (attributesInitialized) DeleteProcThreadAttributeList(attributes);
+                    Marshal.FreeHGlobal(attributes);
+                }
+                if (handlesValue != IntPtr.Zero) Marshal.FreeHGlobal(handlesValue);
+            }
+        }
+
+        public static int Main(string[] arguments)
+        {
+            try
+            {
+                if (arguments.Length == 2 && arguments[0] == "descendant")
+                    return RunDescendant(arguments[1]);
+                if (arguments.Length == 5 && arguments[0] == "root")
+                    return RunRoot(arguments[1], arguments[2], arguments[3], arguments[4]);
+                Console.Error.WriteLine("coding-x Windows handle inventory arguments are invalid");
+                return 2;
+            }
+            catch (Exception error)
+            {
+                Console.Error.WriteLine(error.Message);
+                return 2;
             }
         }
     }

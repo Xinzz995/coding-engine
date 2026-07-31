@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)] [string]$SourcePath,
-    [Parameter(Mandatory = $true)] [string]$OutputAssembly
+    [Parameter(Mandatory = $true)] [string]$OutputAssembly,
+    [ValidateSet('Library', 'ConsoleApplication')] [string]$OutputType = 'Library'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,6 +10,9 @@ Set-StrictMode -Version Latest
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     throw 'PowerShell FullLanguage mode is required to compile the Windows test fixture'
+}
+if ($OutputType -eq 'ConsoleApplication' -and $PSVersionTable.PSEdition -ne 'Desktop') {
+    throw 'ConsoleApplication fixtures must be compiled by Windows PowerShell 5.1'
 }
 
 $resolvedSource = (Resolve-Path -LiteralPath $SourcePath).Path
@@ -26,7 +30,7 @@ Add-Type `
     -Language CSharp `
     -ReferencedAssemblies @('System.dll', 'System.Core.dll') `
     -OutputAssembly $OutputAssembly `
-    -OutputType Library `
+    -OutputType $OutputType `
     -ErrorAction Stop
 
 if (-not (Test-Path -LiteralPath $OutputAssembly -PathType Leaf)) {

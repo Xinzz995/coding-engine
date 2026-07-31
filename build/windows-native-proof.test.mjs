@@ -174,14 +174,20 @@ describe('Windows native proof report', () => {
     expect(script).toContain("$env:ImageOS -ne 'win22'");
     expect(script).toContain('-Credential $credential');
     expect(script).toContain('compile-windows-test-fixture.ps1');
+    expect(script).toContain('$windowsPowerShell');
+    expect(script).toContain('& $windowsPowerShell');
     expect(script).toContain('CODING_X_WINDOWS_BREAKAWAY_ASSEMBLY');
-    expect(script).toContain('CODING_X_WINDOWS_HANDLE_INVENTORY_ASSEMBLY');
+    expect(script).toContain('CODING_X_WINDOWS_HANDLE_INVENTORY_EXECUTABLE');
+    expect(script).toContain('CodingX.WindowsHandleInventory.exe');
+    expect(script).toContain("outputType = 'ConsoleApplication'");
     expect(script).toContain('CODING_X_WINDOWS_CTRL_C_DRIVER_ASSEMBLY');
     expect(script.indexOf('if ($Child)')).toBeLessThan(
       script.indexOf('compile-windows-test-fixture.ps1'),
     );
     expect(fixtureCompiler).toContain('-OutputAssembly $OutputAssembly');
-    expect(fixtureCompiler).toContain('-OutputType Library');
+    expect(fixtureCompiler).toContain("ValidateSet('Library', 'ConsoleApplication')");
+    expect(fixtureCompiler).toContain("$PSVersionTable.PSEdition -ne 'Desktop'");
+    expect(fixtureCompiler).toContain('-OutputType $OutputType');
     expect(script).toContain('Remove-LocalUser -Name $userName');
     expect(script).not.toContain('runas.exe');
     expect(nativeJob).toContain('build / windows-supervisor-reproducibility');

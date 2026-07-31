@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { join, win32 } from 'node:path';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe';
@@ -151,37 +151,22 @@ function installPrepared(workspace, helperDigest, bound) {
 }
 
 async function main() {
-  const [
-    assetRootInput,
-    workspaceInput,
-    parentReadyPath,
-    handleTargetInput,
-    handleSourceInput,
-    handleAssemblyInput = '',
-  ] = process.argv.slice(2);
+  const [assetRootInput, workspaceInput, parentReadyPath, cleanupStatePath, handleExecutableInput] =
+    process.argv.slice(2);
   if (
     !assetRootInput ||
     !workspaceInput ||
     !parentReadyPath ||
-    !handleTargetInput ||
-    !handleSourceInput
+    !cleanupStatePath ||
+    !handleExecutableInput
   ) {
     throw new Error('parent-crash fixture arguments are incomplete');
   }
   const assetRoot = realpathSync(assetRootInput);
   const workspace = realpathSync(workspaceInput);
-  const handleTarget = realpathSync(handleTargetInput);
-  const handleSource = realpathSync(handleSourceInput);
-  const handleAssembly = handleAssemblyInput ? realpathSync(handleAssemblyInput) : '';
+  const handleExecutable = realpathSync(handleExecutableInput);
   const helperDigest = digest(helperBundle(assetRoot));
   const supervisor = join(assetRoot, SUPERVISOR_EXECUTABLE);
-  const powershell = win32.join(
-    process.env.SystemRoot,
-    'System32',
-    'WindowsPowerShell',
-    'v1.0',
-    'powershell.exe',
-  );
   const timeouts = Buffer.from(
     JSON.stringify({
       handshakeMs: 10_000,
@@ -208,6 +193,13 @@ async function main() {
       stdio: ['pipe', 'pipe', 'pipe'],
     },
   );
+  if (!helper.pid) throw new Error('supervisor did not expose a process id');
+  const cleanupState = {
+    parentPid: process.pid,
+    supervisorPid: helper.pid,
+  };
+  const persistCleanupState = () => writeFileSync(cleanupStatePath, JSON.stringify(cleanupState));
+  persistCleanupState();
   const events = new Events(helper);
   const bound = await events.next('BOUND');
   if (bound.supervisorPid !== helper.pid) {
@@ -225,28 +217,12 @@ async function main() {
       type: 'DATA',
       operationId: OPERATION_ID,
       target: {
-        executable: powershell,
+        executable: handleExecutable,
         args: [
-          '-NoLogo',
-          '-NoProfile',
-          '-NonInteractive',
-          '-File',
-          handleTarget,
-          '-Mode',
           'root',
-          '-SourcePath',
-          handleSource,
-          '-AssemblyPath',
-          handleAssembly,
-          '-PowerShellPath',
-          powershell,
-          '-ScriptPath',
-          handleTarget,
-          '-RootInventoryPath',
+          handleExecutable,
           rootInventoryPath,
-          '-DescendantInventoryPath',
           descendantInventoryPath,
-          '-ReadyPath',
           targetReadyPath,
         ],
         cwd: workspace,
@@ -260,6 +236,8 @@ async function main() {
     { workspacePath: workspace },
   );
   const armedEvent = await events.next('ARMED');
+  cleanupState.rootPid = armedEvent.containment.targetPid;
+  persistCleanupState();
   const armedBytes = Buffer.from(
     JSON.stringify({
       ...authority.prepared,
@@ -286,6 +264,9 @@ async function main() {
     }),
   ]);
   const targetReady = JSON.parse(readFileSync(targetReadyPath, 'utf8'));
+  cleanupState.rootPid = targetReady.rootPid;
+  cleanupState.descendantPid = targetReady.descendantPid;
+  persistCleanupState();
   writeFileSync(
     parentReadyPath,
     JSON.stringify({

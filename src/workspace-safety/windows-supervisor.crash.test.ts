@@ -7,8 +7,6 @@ import {
   createSupervisor,
   createWindowsWorkspace,
   DIGEST,
-  HANDLE_INVENTORY_SOURCE,
-  HANDLE_INVENTORY_TARGET,
   PARENT_CRASH_PARENT,
   installArmedAuthority,
   installPreparedAuthority,
@@ -16,12 +14,79 @@ import {
   runOuterJobScenario,
   sendData,
   sendEmbedded,
+  trackActiveChild,
+  waitForChildExit,
   waitForFile,
   waitForProcessGone,
 } from './windows-supervisor.test-support.js';
 import { windowsTestTargetEnvironment } from './windows-test-environment.js';
 
 const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
+
+function processIdsFrom(path: string): number[] {
+  if (!existsSync(path)) return [];
+  const state = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  return [...new Set(Object.values(state))].filter(
+    (value): value is number => Number.isSafeInteger(value) && Number(value) > 0,
+  );
+}
+
+async function settleParentCrashProcesses(
+  parent: ReturnType<typeof spawn>,
+  cleanupStatePath: string,
+): Promise<void> {
+  const cleanupErrors: Error[] = [];
+  if (parent.exitCode === null && parent.signalCode === null) parent.kill('SIGKILL');
+  try {
+    await waitForChildExit(parent, 5_000);
+  } catch (error) {
+    cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
+  }
+  let recordedProcessIds: number[] = [];
+  try {
+    recordedProcessIds = processIdsFrom(cleanupStatePath);
+  } catch (error) {
+    cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
+  }
+  const processIds = [...new Set([parent.pid, ...recordedProcessIds])].filter(
+    (pid): pid is number => Number.isSafeInteger(pid) && Number(pid) > 0 && pid !== process.pid,
+  );
+  const naturalResults = await Promise.allSettled(
+    processIds.map(async (pid) => await waitForProcessGone(pid, 5_000)),
+  );
+  const lingering = processIds.filter(
+    (_pid, index) => naturalResults[index]?.status === 'rejected',
+  );
+  for (const pid of lingering) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  }
+  const forcedResults = await Promise.allSettled(
+    lingering.map(async (pid) => await waitForProcessGone(pid, 5_000)),
+  );
+  for (const [index, result] of forcedResults.entries()) {
+    if (result.status === 'rejected') {
+      cleanupErrors.push(
+        new Error(`could not clean up parent-crash process ${String(lingering[index])}`),
+      );
+    }
+  }
+  if (lingering.length > 0) {
+    cleanupErrors.push(
+      new Error(
+        `parent-crash fixture required forced cleanup for processes ${lingering.join(', ')}`,
+      ),
+    );
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, 'parent-crash fixture cleanup failed');
+  }
+}
 
 windowsOnly(
   'real Windows crash and outer-Job behavior',
@@ -108,78 +173,108 @@ windowsOnly(
     it('drains the full Job after a hard parent kill and exposes only three inheritable handles', async () => {
       const workspace = createWindowsWorkspace('parent-crash');
       const parentReadyPath = join(workspace, 'parent-ready.json');
-      const parent = spawn(
-        realpathSync(process.execPath),
-        [
-          PARENT_CRASH_PARENT,
-          ASSET_ROOT,
-          workspace,
-          parentReadyPath,
-          HANDLE_INVENTORY_TARGET,
-          HANDLE_INVENTORY_SOURCE,
-          process.env.CODING_X_WINDOWS_HANDLE_INVENTORY_ASSEMBLY ?? '',
-        ],
-        {
-          cwd: workspace,
-          env: {
-            SystemRoot: process.env.SystemRoot,
-            TEMP: process.env.TEMP,
-            TMP: process.env.TMP,
+      const cleanupStatePath = join(workspace, 'parent-cleanup.json');
+      const handleInventoryExecutable = process.env.CODING_X_WINDOWS_HANDLE_INVENTORY_EXECUTABLE;
+      if (!handleInventoryExecutable)
+        throw new Error('Windows handle inventory executable was not prepared');
+      const parent = trackActiveChild(
+        spawn(
+          realpathSync(process.execPath),
+          [
+            PARENT_CRASH_PARENT,
+            ASSET_ROOT,
+            workspace,
+            parentReadyPath,
+            cleanupStatePath,
+            realpathSync(handleInventoryExecutable),
+          ],
+          {
+            cwd: workspace,
+            env: {
+              SystemRoot: process.env.SystemRoot,
+              TEMP: process.env.TEMP,
+              TMP: process.env.TMP,
+            },
+            shell: false,
+            windowsHide: true,
+            stdio: ['ignore', 'ignore', 'pipe'],
           },
-          shell: false,
-          windowsHide: true,
-          stdio: ['ignore', 'ignore', 'pipe'],
-        },
+        ),
       );
       let stderr = '';
       parent.stderr.setEncoding('utf8');
       parent.stderr.on('data', (chunk: string) => {
         stderr += chunk;
       });
-      await waitForFile(parentReadyPath, 60_000);
-      const ready = JSON.parse(readFileSync(parentReadyPath, 'utf8')) as Record<string, unknown>;
-      expect(ready.error, stderr).toBeUndefined();
-      const rootInventory = JSON.parse(
-        readFileSync(String(ready.rootInventoryPath), 'utf8'),
-      ) as Record<string, unknown>;
-      const descendantInventory = JSON.parse(
-        readFileSync(String(ready.descendantInventoryPath), 'utf8'),
-      ) as Record<string, unknown>;
-      for (const inventory of [rootInventory, descendantInventory]) {
-        expect(inventory).toMatchObject({
+      let bodyError: Error | undefined;
+      try {
+        await waitForFile(parentReadyPath, 60_000);
+        const ready = JSON.parse(readFileSync(parentReadyPath, 'utf8')) as Record<string, unknown>;
+        expect(ready.error, stderr).toBeUndefined();
+        const rootInventory = JSON.parse(
+          readFileSync(String(ready.rootInventoryPath), 'utf8'),
+        ) as Record<string, unknown>;
+        const descendantInventory = JSON.parse(
+          readFileSync(String(ready.descendantInventoryPath), 'utf8'),
+        ) as Record<string, unknown>;
+        expect(rootInventory).toMatchObject({
+          role: 'root',
+          pid: ready.rootPid,
           inheritableCount: 3,
           stdinIncluded: true,
           stdoutIncluded: true,
           stderrIncluded: true,
         });
+        expect(descendantInventory).toMatchObject({
+          role: 'descendant',
+          pid: ready.descendantPid,
+          inheritableCount: 3,
+          stdinIncluded: true,
+          stdoutIncluded: true,
+          stderrIncluded: true,
+        });
+        expect(ready.rootPid).not.toBe(ready.descendantPid);
+
+        expect(parent.kill('SIGKILL')).toBe(true);
+        const parentExit = await waitForChildExit(parent, 10_000);
+        expect(parentExit.code === 0 && parentExit.signal === null).toBe(false);
+
+        await Promise.all([
+          waitForProcessGone(Number(ready.supervisorPid), 30_000),
+          waitForProcessGone(Number(ready.rootPid), 30_000),
+          waitForProcessGone(Number(ready.descendantPid), 30_000),
+        ]);
+        const receiptPath = join(
+          workspace,
+          'engine.lock',
+          'lease',
+          'operation',
+          'drained-receipt.json',
+        );
+        await waitForFile(receiptPath, 5_000);
+        const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, unknown>;
+        expect(receipt).toMatchObject({
+          drainReason: 'parent-shutdown',
+          proof: 'windows-job-zero-and-pipes-eof-v1',
+        });
+        expect(existsSync(parentReadyPath)).toBe(true);
+      } catch (error) {
+        bodyError = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        try {
+          await settleParentCrashProcesses(parent, cleanupStatePath);
+        } catch (cleanupError) {
+          const normalizedCleanupError =
+            cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError));
+          bodyError = bodyError
+            ? new AggregateError(
+                [bodyError, normalizedCleanupError],
+                'parent-crash proof and cleanup failed',
+              )
+            : normalizedCleanupError;
+        }
       }
-
-      expect(parent.kill('SIGKILL')).toBe(true);
-      const parentExit = await new Promise<{
-        code: number | null;
-        signal: NodeJS.Signals | null;
-      }>((resolve) => parent.once('exit', (code, signal) => resolve({ code, signal })));
-      expect(parentExit.code === 0 && parentExit.signal === null).toBe(false);
-
-      await Promise.all([
-        waitForProcessGone(Number(ready.supervisorPid), 30_000),
-        waitForProcessGone(Number(ready.rootPid), 30_000),
-        waitForProcessGone(Number(ready.descendantPid), 30_000),
-      ]);
-      const receiptPath = join(
-        workspace,
-        'engine.lock',
-        'lease',
-        'operation',
-        'drained-receipt.json',
-      );
-      await waitForFile(receiptPath, 30_000);
-      const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, unknown>;
-      expect(receipt).toMatchObject({
-        drainReason: 'parent-shutdown',
-        proof: 'windows-job-zero-and-pipes-eof-v1',
-      });
-      expect(existsSync(parentReadyPath)).toBe(true);
+      if (bodyError) throw bodyError;
     });
 
     it('fails atomically before target execution in an incompatible outer Job', async () => {

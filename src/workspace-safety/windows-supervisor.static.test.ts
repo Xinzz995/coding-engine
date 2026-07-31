@@ -17,7 +17,6 @@ import {
   CTRL_C_DRIVER_SOURCE,
   CTRL_C_PARENT,
   HANDLE_INVENTORY_SOURCE,
-  HANDLE_INVENTORY_TARGET,
   OUTER_JOB_DRIVER,
   PARENT_CRASH_PARENT,
   windowsEnvironment,
@@ -144,6 +143,9 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(processSource).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
     expect(processSource).toContain('PROC_THREAD_ATTRIBUTE_JOB_LIST');
     expect(processSource).toContain('PROC_THREAD_ATTRIBUTE_HANDLE_LIST');
+    expect(processSource).toMatch(
+      /IntPtr\[\] inherited = new IntPtr\[\] \{\s+standardInput, standardOutput\.ChildHandle, standardError\.ChildHandle\s+\};/u,
+    );
     expect(processSource).toContain('EXTENDED_STARTUPINFO_PRESENT');
     expect(processSource).toContain('CREATE_UNICODE_ENVIRONMENT');
     expect(processSource).toContain('CREATE_SUSPENDED');
@@ -203,7 +205,6 @@ describe('fixed Windows Job supervisor assets', () => {
     const breakaway = readFileSync(BREAKAWAY_SOURCE, 'utf8');
     const breakawayTarget = readFileSync(BREAKAWAY_TARGET, 'utf8');
     const handleInventory = readFileSync(HANDLE_INVENTORY_SOURCE, 'utf8');
-    const handleInventoryTarget = readFileSync(HANDLE_INVENTORY_TARGET, 'utf8');
     const parentCrash = readFileSync(PARENT_CRASH_PARENT, 'utf8');
     expect(breakaway).toContain('CREATE_BREAKAWAY_FROM_JOB');
     expect(breakaway).toContain('ERROR_ACCESS_DENIED = 5');
@@ -212,14 +213,18 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(handleInventory).toContain('NtQuerySystemInformation');
     expect(handleInventory).toContain('HANDLE_FLAG_INHERIT');
     expect(handleInventory).toMatch(/dwFillAttribute;\s+internal uint dwFlags;/u);
-    expect(handleInventoryTarget).toContain('Add-Type -Path $resolvedAssembly');
-    expect(handleInventoryTarget).toContain('Add-Type -TypeDefinition');
-    expect(handleInventory).toContain('"-AssemblyPath", assemblyPath');
+    expect(handleInventory).toContain('public static int Main(string[] arguments)');
+    expect(handleInventory).toContain('PROC_THREAD_ATTRIBUTE_HANDLE_LIST');
+    expect(handleInventory).toContain('EXTENDED_STARTUPINFO_PRESENT');
+    expect(handleInventory).toContain('IntPtr[] inherited = new IntPtr[]');
     expect(parentCrash).toContain('supervisorPid: bound.supervisorPid');
     expect(parentCrash).toContain(
       "const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe'",
     );
     expect(parentCrash).toContain('detached: true');
+    expect(parentCrash).toContain('executable: handleExecutable');
+    expect(parentCrash).toContain('persistCleanupState');
+    expect(parentCrash).not.toContain('powershell');
     expect(parentCrash).toContain("events.next('RESULT')");
     expect(parentCrash).toContain('target exited before ready');
     expect(parentCrash).toContain('await new Promise(() => {})');
