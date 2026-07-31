@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.Runtime.InteropServices;
 
 namespace CodingX.WorkspaceSafety
@@ -12,10 +13,35 @@ namespace CodingX.WorkspaceSafety
         internal const uint FileAttributeReparsePoint = 0x400;
 
         private const int ErrorFileNotFound = 2;
+        private const int ErrorInvalidParameter = 87;
         private const int ErrorNoMoreFiles = 18;
+        private const int ErrorNotFound = 1168;
         private const int MaximumPathCharacters = 32767;
         private const int MaximumNativeEntries = 200001;
+        private const uint ProcessQueryLimitedInformation = 0x00001000;
+        private const uint WaitObject0 = 0x00000000;
+        private const uint WaitTimeout = 0x00000102;
+        private const uint WaitFailed = 0xffffffff;
         private static readonly IntPtr InvalidFindHandle = new IntPtr(-1);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FileTime
+        {
+            internal uint LowDateTime;
+            internal uint HighDateTime;
+        }
+
+        internal sealed class ProcessIdentityRecord
+        {
+            internal readonly string Status;
+            internal readonly string Value;
+
+            internal ProcessIdentityRecord(string status, string value)
+            {
+                Status = status;
+                Value = value;
+            }
+        }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct FindData
@@ -65,6 +91,30 @@ namespace CodingX.WorkspaceSafety
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool FindClose(IntPtr findHandle);
 
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern IntPtr OpenProcess(
+            uint desiredAccess,
+            [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+            uint processId);
+
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetProcessTimes(
+            IntPtr process,
+            out FileTime creation,
+            out FileTime exit,
+            out FileTime kernel,
+            out FileTime user);
+
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        private static extern uint WaitForSingleObject(
+            IntPtr handle,
+            uint milliseconds);
+
+        [DllImport("kernel32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
         internal static string ExtendedPath(string path)
         {
             string normalized = ValidateAndNormalizeAbsolutePath(path);
@@ -85,6 +135,68 @@ namespace CodingX.WorkspaceSafety
             uint attributes = GetFileAttributesW(ExtendedPath(path));
             error = attributes == InvalidFileAttributes ? Marshal.GetLastWin32Error() : 0;
             return attributes;
+        }
+
+        internal static ProcessIdentityRecord ReadProcessIdentity(uint pid)
+        {
+            IntPtr process = OpenProcess(
+                ProcessQueryLimitedInformation,
+                false,
+                pid);
+            if (process == IntPtr.Zero)
+            {
+                int error = Marshal.GetLastWin32Error();
+                return new ProcessIdentityRecord(
+                    error == ErrorInvalidParameter || error == ErrorNotFound
+                        ? "missing"
+                        : "unknown",
+                    null);
+            }
+
+            try
+            {
+                uint waitBefore = WaitForSingleObject(process, 0);
+                if (waitBefore == WaitObject0)
+                    return new ProcessIdentityRecord("missing", null);
+                if (waitBefore == WaitFailed)
+                    return new ProcessIdentityRecord("unknown", null);
+                if (waitBefore != WaitTimeout)
+                    return new ProcessIdentityRecord("unknown", null);
+
+                FileTime creation;
+                FileTime exit;
+                FileTime kernel;
+                FileTime user;
+                if (!GetProcessTimes(
+                    process,
+                    out creation,
+                    out exit,
+                    out kernel,
+                    out user))
+                    return new ProcessIdentityRecord("unknown", null);
+
+                uint waitAfter = WaitForSingleObject(process, 0);
+                if (waitAfter == WaitObject0)
+                    return new ProcessIdentityRecord("missing", null);
+                if (waitAfter == WaitFailed)
+                    return new ProcessIdentityRecord("unknown", null);
+                if (waitAfter != WaitTimeout)
+                    return new ProcessIdentityRecord("unknown", null);
+
+                ulong value =
+                    ((ulong)creation.HighDateTime << 32) |
+                    creation.LowDateTime;
+                return new ProcessIdentityRecord(
+                    "found",
+                    value.ToString(CultureInfo.InvariantCulture));
+            }
+            finally
+            {
+                if (!CloseHandle(process))
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "native process handle cleanup failed");
+            }
         }
 
         internal static IEnumerable<string> Entries(string path)

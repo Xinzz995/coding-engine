@@ -48,8 +48,8 @@ const RECOVERY_ID = '00000000-0000-4000-8000-0000000000f1';
 const ATTEMPT_A = '00000000-0000-4000-8000-0000000000f2';
 const ATTEMPT_B = '00000000-0000-4000-8000-0000000000f3';
 const ATTEMPT_C = '00000000-0000-4000-8000-0000000000f5';
-// The real Windows supervisor validates the same PID identity both before and after BOUND.
-// Preserve both production command budgets plus handshake and hosted-runner startup allowance.
+// The real Windows owner still needs one combined host/boot snapshot, the fixed native inspector,
+// supervisor handshake, and hosted-runner startup allowance. Keep this conservative outer budget.
 const OWNER_READY_TIMEOUT_MS = 2 * WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS + 15_000;
 
 interface OwnerCrashMessage {

@@ -778,10 +778,12 @@ supervisor 存活至 receipt 落盘、目标 pgid 为空，而不是只调用 co
 12. supervisor 在仍持有 Job handle 时原子写、回读 drained receipt，再发送 DRAINED；
 13. parent 验证 receipt 并 ACK 后，supervisor 才关闭 Job handle 并退出。
 
-Windows 路径属性检查另带一份由固定源码确定性构建的 `.NET Framework 4.6` C# EXE。Node 直接启动
+Windows 原生检查另带一份由固定源码确定性构建的 `.NET Framework 4.6` C# EXE。Node 直接启动
 并核对固定摘要；helper 通过 GetFileAttributesW 与 FindFirstFileW/FindNextFileW 流式读取系统属性、
-规范名称和有界目录树，不经过 PowerShell、运行时编译或旧版 managed 路径枚举。输入输出和失败阶段
-都采用有界协议，任何摘要、路径、重解析点、枚举完整性或关闭句柄无法确认都按不可验证阻断。
+规范名称和有界目录树，也通过 OpenProcess、GetProcessTimes 与前后两次零等待存活检查读取进程
+creation FILETIME。路径和进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；
+进程读取另有小于 supervisor 5 秒 handshake 的 3 秒硬上限。输入输出和失败阶段都采用有界协议，
+任何摘要、请求绑定、路径、进程存活、重解析点、枚举完整性或关闭句柄无法确认都按不可验证阻断。
 
 parent IPC EOF 时 supervisor 主动 TerminateJobObject。canonical active-child 仍是 prepared-bound 时，
 它按 9-10 归零后直接退出且不写 receipt；若曾接受 START，按 9-11 使用缓存摘要写 receipt；若从未
@@ -807,8 +809,9 @@ parent IPC 后终止 Job、
 ### 进程身份
 
 - Linux：`/proc/sys/kernel/random/boot_id` + `/proc/<pid>/stat` starttime；
-- Windows：GetProcessTimes creation FILETIME；reboot proof 使用
-  `Win32_OperatingSystem.LastBootUpTime` 与 `GetTickCount64` 推导值交叉核对；
+- Windows：process-only 热路径通过固定摘要的原生检查器读取 GetProcessTimes creation FILETIME，
+  前后确认进程仍存活；host、boot 与当前 owner 的组合快照仍通过系统 PowerShell/CIM 获取，
+  reboot proof 使用 `Win32_OperatingSystem.LastBootUpTime` 与 `GetTickCount64` 推导值交叉核对；
 - macOS：`kern.bootsessionuuid` + 可取得的启动时间。若只有秒级信息，PID 存活且值相同判 unknown，
   不判 exact alive/dead；
 - hostId 对 Linux `/etc/machine-id`、macOS IOPlatformUUID、Windows MachineGuid 做带域分隔的
@@ -1084,12 +1087,14 @@ suite 不可用都让 job 失败。普通 `npm test` 中的条件 skip 不计入
 PATH 上的 `node` 和仓库相对 fixture，避免把 `Program Files` 绝对路径送入旧版按空格切分的 runner
 覆盖参数；不得因此替换冻结 tarball 或放宽摘要核验。
 
-普通 Windows 全量单测为避免每个 fixture 重复启动原生检查器，可由仓库 Vitest 配置把 transport
-解析到严格、有计数上限的 test-only 实现；这份结果不计入原生证明。required native runner 必须显式
-使用另一份无 test-only alias、setup 或环境旁路的固定配置，将 import 固定回生产 transport，直接调用
-真实固定 EXE 与 Windows 原生属性 API，并以 WOF、junction 和普通用户断言证明没有走 test transport。
-production API 不接收 transport/probe，也不读取测试旁路环境变量；配置、runner、固定 suite、辅助
-EXE 的可复现构建与属性规则都属于旧 policy 保护范围。
+普通 Windows 全量单测为避免每个 fixture 重复启动原生检查器，可由仓库 Vitest 配置把 identity 与
+path transport 解析到严格、有计数上限的 test-only 实现；这份结果不计入原生证明。启动真实
+supervisor 的专用子进程不安装任何 transport alias，进程身份与路径检查都使用同一份生产 EXE，
+避免“生产身份间接落到测试路径”的假证明。required native runner 也必须显式使用另一份无 test-only
+alias、setup 或环境旁路的固定配置，将 import 固定回生产 transport，直接调用真实固定 EXE 与 Windows
+原生 API，并以 WOF、junction、真实进程身份和普通用户断言证明没有走 test transport。production API
+不接收 transport/probe，也不读取测试旁路环境变量；配置、runner、固定 suite、辅助 EXE 的可复现
+构建、进程身份和属性规则都属于旧 policy 保护范围。
 
 POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代码、launcher 提前退出、pgid
 仍有成员、group probe unknown 和 START 后 parent 立即 kill。真实测试只证明普通进程继承合同；

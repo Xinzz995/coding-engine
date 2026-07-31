@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   WINDOWS_PATH_ATTRIBUTES_EXECUTABLE,
   WINDOWS_PATH_ATTRIBUTES_EXECUTABLE_DIGEST,
+  WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS,
   parseWindowsPathAttributeResponse,
   windowsPathAttributeExecutableDigest,
 } from './windows-path-attributes.js';
@@ -35,9 +36,16 @@ describe('fixed Windows path attribute protocol', () => {
     expect(attributesSource).toContain('FindFirstFileW');
     expect(attributesSource).toContain('FindNextFileW');
     expect(attributesSource).toContain('FindClose');
+    expect(attributesSource).toContain('OpenProcess');
+    expect(attributesSource).toContain('GetProcessTimes');
+    expect(attributesSource).toContain('WaitForSingleObject');
+    expect(attributesSource).toContain('CloseHandle');
     expect(attributesSource).toContain('StringComparison.OrdinalIgnoreCase');
     expect(attributesSource).not.toContain('Directory.EnumerateFileSystemEntries');
     expect(programSource).toContain('CXWPI_FAILURE_V1 stage=');
+    expect(programSource).toContain('process-identity-v1');
+    expect(programSource).toContain('process-identity-read');
+    expect(WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS).toBeLessThan(5_000);
 
     const transport = readFileSync(
       join(sourceRoot, 'windows-path-attributes-transport.ts'),
@@ -48,6 +56,93 @@ describe('fixed Windows path attribute protocol', () => {
     expect(transport).toContain('result.signal');
     expect(transport).not.toContain('String(result.stderr)');
     expect(transport).not.toContain('PowerShell');
+  });
+
+  it('accepts only a canonical process identity bound to the requested pid', () => {
+    const request = {
+      schemaVersion: 1 as const,
+      mode: 'process-identity-v1' as const,
+      payload: { pid: 1234 },
+    };
+    expect(
+      parseWindowsPathAttributeResponse(
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: 'process-identity-v1',
+          pid: 1234,
+          status: 'found',
+          value: '133989600000000000',
+        }),
+        request,
+      ),
+    ).toEqual({
+      schemaVersion: 1,
+      mode: 'process-identity-v1',
+      pid: 1234,
+      status: 'found',
+      value: '133989600000000000',
+    });
+    for (const status of ['missing', 'unknown'] as const) {
+      expect(
+        parseWindowsPathAttributeResponse(
+          JSON.stringify({
+            schemaVersion: 1,
+            mode: 'process-identity-v1',
+            pid: 1234,
+            status,
+            value: null,
+          }),
+          request,
+        ),
+      ).toMatchObject({ pid: 1234, status, value: null });
+    }
+  });
+
+  it.each([
+    {
+      name: 'different pid',
+      response: { pid: 1235, status: 'found', value: '133989600000000000' },
+    },
+    {
+      name: 'leading-zero identity',
+      response: { pid: 1234, status: 'found', value: '0133989600000000000' },
+    },
+    {
+      name: 'zero identity',
+      response: { pid: 1234, status: 'found', value: '0' },
+    },
+    {
+      name: 'identity above uint64',
+      response: { pid: 1234, status: 'found', value: '18446744073709551616' },
+    },
+    {
+      name: 'value on missing',
+      response: { pid: 1234, status: 'missing', value: '133989600000000000' },
+    },
+    {
+      name: 'extra field',
+      response: {
+        pid: 1234,
+        status: 'found',
+        value: '133989600000000000',
+        extra: true,
+      },
+    },
+  ])('rejects a $name process identity response', ({ response }) => {
+    expect(() =>
+      parseWindowsPathAttributeResponse(
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: 'process-identity-v1',
+          ...response,
+        }),
+        {
+          schemaVersion: 1,
+          mode: 'process-identity-v1',
+          payload: { pid: 1234 },
+        },
+      ),
+    ).toThrow(/process identity|unknown or missing fields/u);
   });
 
   it('accepts only a complete path response bound to exact request order', () => {
@@ -144,6 +239,7 @@ describe('fixed Windows path attribute protocol', () => {
       'lease.ts',
       'mutation.ts',
       'mutation-recovery.ts',
+      'windows-identity-transport.ts',
       'windows-path-attributes.ts',
     ]);
     const offenders: string[] = [];
@@ -195,14 +291,6 @@ describe('fixed Windows path attribute protocol', () => {
       join(sourceRoot, '__fixtures__', 'ordinary-windows-test-loader.mjs'),
       'utf8',
     );
-    const pathRegister = readFileSync(
-      join(sourceRoot, '__fixtures__', 'ordinary-windows-path-test-register.mjs'),
-      'utf8',
-    );
-    const pathLoader = readFileSync(
-      join(sourceRoot, '__fixtures__', 'ordinary-windows-path-test-loader.mjs'),
-      'utf8',
-    );
     expect(ordinary).toContain('windows-path-attributes-test-transport.ts');
     expect(register).toContain("register(new URL('./ordinary-windows-test-loader.mjs'");
     expect(register).not.toContain('NODE_OPTIONS');
@@ -210,22 +298,23 @@ describe('fixed Windows path attribute protocol', () => {
     expect(loader).toContain('IDENTITY_PARENT');
     expect(loader).toContain('PATH_ATTRIBUTES_PRODUCTION_TRANSPORTS');
     expect(loader).toContain('IDENTITY_PRODUCTION_TRANSPORTS');
-    expect(pathRegister).toContain("register(new URL('./ordinary-windows-path-test-loader.mjs'");
-    expect(pathLoader).toContain('PATH_ATTRIBUTES_PRODUCTION_TRANSPORTS');
-    expect(pathLoader).not.toContain('IDENTITY_PARENT');
+    expect(loader).toContain('windows-path-attributes-test-transport.ts');
     const prestartRecovery = readFileSync(join(sourceRoot, 'prestart-recovery.test.ts'), 'utf8');
     const ownerFixtureLaunch = prestartRecovery.slice(
       prestartRecovery.indexOf("new URL('./__fixtures__/prestart-recovery-owner-worker.ts'"),
     );
     expect(ownerFixtureLaunch).toContain("windowsIdentity: 'production'");
     expect(prestartRecovery.match(/windowsIdentity: 'production'/gu)).toHaveLength(1);
+    const fixtureSupport = readFileSync(
+      join(sourceRoot, 'cross-process-fixture.test-support.ts'),
+      'utf8',
+    );
+    expect(fixtureSupport).not.toContain('ordinary-windows-path-test-register');
     expect(native).not.toContain('windows-path-attributes-test-transport');
     expect(native).not.toContain('setupFiles');
     for (const forbidden of [
       'ordinary-windows-test-register',
       'ordinary-windows-test-loader',
-      'ordinary-windows-path-test-register',
-      'ordinary-windows-path-test-loader',
       'cross-process-fixture.test-support',
     ]) {
       expect(native).not.toContain(forbidden);

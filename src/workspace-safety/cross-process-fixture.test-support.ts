@@ -3,24 +3,22 @@ const ORDINARY_WINDOWS_TEST_REGISTER = new URL(
   './__fixtures__/ordinary-windows-test-register.mjs',
   import.meta.url,
 ).href;
-const ORDINARY_WINDOWS_PATH_TEST_REGISTER = new URL(
-  './__fixtures__/ordinary-windows-path-test-register.mjs',
-  import.meta.url,
-).href;
 
 export interface TypeScriptFixtureLaunchOptions {
   readonly platform?: NodeJS.Platform;
-  /** Keep native FILETIME only when the fixture starts the real Windows supervisor. */
+  /** Keep the complete native Windows inspector path when the fixture starts the real supervisor. */
   readonly windowsIdentity?: 'deterministic' | 'production';
 }
 
 export function typeScriptFixtureExecArgv(options: TypeScriptFixtureLaunchOptions = {}): string[] {
   const platform = options.platform ?? process.platform;
-  const windowsRegister =
-    options.windowsIdentity === 'production'
-      ? ORDINARY_WINDOWS_PATH_TEST_REGISTER
-      : ORDINARY_WINDOWS_TEST_REGISTER;
-  return ['--import', 'tsx', ...(platform === 'win32' ? ['--import', windowsRegister] : [])];
+  const useDeterministicWindowsTransport =
+    platform === 'win32' && options.windowsIdentity !== 'production';
+  return [
+    '--import',
+    'tsx',
+    ...(useDeterministicWindowsTransport ? ['--import', ORDINARY_WINDOWS_TEST_REGISTER] : []),
+  ];
 }
 
 export function typeScriptFixtureNodeArgs(

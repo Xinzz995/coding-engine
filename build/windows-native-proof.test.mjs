@@ -207,6 +207,11 @@ describe('Windows native proof report', () => {
       'src/workspace-safety/windows-identity-transport.ts',
       'utf8',
     );
+    const pathInspector = readFileSync('src/workspace-safety/windows-path-attributes.ts', 'utf8');
+    const pathInspectorProgram = readFileSync(
+      'assets/workspace-safety/WindowsPathInspectorProgram.cs',
+      'utf8',
+    );
     const testIdentityTransport = readFileSync(
       'src/workspace-safety/windows-identity-test-transport.ts',
       'utf8',
@@ -226,6 +231,14 @@ describe('Windows native proof report', () => {
     expect(ordinaryConfig).toContain('windows-identity-test-transport.ts');
     expect(productionIdentityTransport).toContain('WINDOWS_IDENTITY_SNAPSHOT_SCRIPT');
     expect(productionIdentityTransport).toContain('spawnSync');
+    const processLookup = productionIdentityTransport.slice(
+      productionIdentityTransport.indexOf('export function readWindowsProcessIdentity'),
+      productionIdentityTransport.indexOf('export function readWindowsIdentitySnapshot'),
+    );
+    expect(processLookup).toContain('inspectWindowsProcessIdentity');
+    expect(processLookup).not.toMatch(/Get-Process|spawnSync/u);
+    expect(pathInspector).toContain('WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS = 3_000');
+    expect(pathInspectorProgram).toContain('process-identity-v1');
     expect(testIdentityTransport).toContain('MAX_TEST_INVOCATIONS');
     expect(testIdentityTransport).not.toMatch(
       /powershell\.exe|Get-CimInstance|WINDOWS_IDENTITY_SNAPSHOT_SCRIPT|spawnSync/u,

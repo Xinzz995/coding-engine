@@ -217,6 +217,24 @@ windowsOnly(
   'real Windows crash and outer-Job behavior',
   { timeout: 120_000, concurrent: false },
   () => {
+    it('reads a live process identity through the fixed inspector and observes exact death', async () => {
+      const child = trackActiveChild(
+        spawn(process.execPath, ['-e', 'setInterval(() => undefined, 1000)'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        }),
+      );
+      expect(child.pid).toBeTypeOf('number');
+      const live = readWindowsProcessIdentity(child.pid!);
+      expect(live).toMatchObject({ status: 'found' });
+      if (live.status === 'found') expect(live.value).toMatch(/^[1-9]\d{0,19}$/u);
+
+      child.kill('SIGKILL');
+      await waitForChildExit(child, 5_000);
+
+      expect(readWindowsProcessIdentity(child.pid!)).toEqual({ status: 'missing' });
+    });
+
     it('keeps a valid receipt when the supervisor is hard-killed between DRAINED and ACK', async () => {
       const workspace = createWindowsWorkspace('ack-crash');
       const { launch, child, events } = createSupervisor();

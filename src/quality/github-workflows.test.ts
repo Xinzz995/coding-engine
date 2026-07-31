@@ -83,6 +83,10 @@ describe('coding-engine quality contract', () => {
       expect.arrayContaining([
         'src/workspace-safety/delegated-recovery.windows-crash.test.ts',
         'src/workspace-safety/windows-reparse-point.windows.test.ts',
+        'src/workspace-safety/windows-path-attributes-transport.test.ts',
+        'src/workspace-safety/windows-path-attributes-transport.ts',
+        'src/workspace-safety/windows-path-attributes.test.ts',
+        'src/workspace-safety/windows-path-attributes.ts',
         'src/workspace-safety/windows-supervisor.crash.test.ts',
         'src/workspace-safety/windows-supervisor-integration.test.ts',
         'src/workspace-safety/windows-supervisor.test.ts',

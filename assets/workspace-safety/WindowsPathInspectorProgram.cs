@@ -88,6 +88,12 @@ namespace CodingX.WorkspaceSafety
                     response = ReadPathsResponse(payload);
                 }
                 else if (
+                    String.Equals(mode, "process-identity-v1", StringComparison.Ordinal))
+                {
+                    stage = "process-identity-read";
+                    response = ReadProcessIdentityResponse(payload);
+                }
+                else if (
                     String.Equals(mode, "safety-tree-v1", StringComparison.Ordinal) ||
                     String.Equals(mode, "workspace-tree-v1", StringComparison.Ordinal))
                 {
@@ -140,6 +146,23 @@ namespace CodingX.WorkspaceSafety
             response.Add("schemaVersion", 1);
             response.Add("mode", "paths-v1");
             response.Add("records", records);
+            return response;
+        }
+
+        private static object ReadProcessIdentityResponse(
+            IDictionary<string, object> payload)
+        {
+            RequireExactKeys(payload, new string[] { "pid" });
+            uint pid = ReadUnsignedInteger(payload["pid"], 1, UInt32.MaxValue);
+            WindowsPathAttributes.ProcessIdentityRecord identity =
+                WindowsPathAttributes.ReadProcessIdentity(pid);
+
+            Dictionary<string, object> response = new Dictionary<string, object>();
+            response.Add("schemaVersion", 1);
+            response.Add("mode", "process-identity-v1");
+            response.Add("pid", pid);
+            response.Add("status", identity.Status);
+            response.Add("value", identity.Value);
             return response;
         }
 
@@ -463,6 +486,23 @@ namespace CodingX.WorkspaceSafety
             if (number < minimum || number > maximum)
                 throw new InvalidOperationException("integer is outside boundary");
             return (int)number;
+        }
+
+        private static uint ReadUnsignedInteger(
+            object value,
+            uint minimum,
+            uint maximum)
+        {
+            long number;
+            if (value is int)
+                number = (int)value;
+            else if (value is long)
+                number = (long)value;
+            else
+                throw new InvalidOperationException("JSON value is not an integer");
+            if (number < minimum || number > maximum)
+                throw new InvalidOperationException("integer is outside boundary");
+            return (uint)number;
         }
 
         private static void RequireExactKeys(

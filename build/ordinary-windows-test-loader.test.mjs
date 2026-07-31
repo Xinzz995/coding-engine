@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { resolve } from '../src/workspace-safety/__fixtures__/ordinary-windows-test-loader.mjs';
-import { resolve as resolvePathOnly } from '../src/workspace-safety/__fixtures__/ordinary-windows-path-test-loader.mjs';
 
 const fixturesRoot = new URL('../src/workspace-safety/__fixtures__/', import.meta.url);
 const sourceRoot = new URL('../src/workspace-safety/', import.meta.url);
@@ -43,31 +42,6 @@ describe('ordinary Windows child-process test resolver', () => {
 
     expect(result).toEqual({ url: new URL('windows-identity-test-transport.ts', sourceRoot).href });
     expect(capture.calls).toHaveLength(1);
-  });
-
-  it('keeps production identity while replacing paths for a native-supervisor fixture', async () => {
-    const identityCapture = captureResolution();
-    const identityParent = new URL('identity.ts', sourceRoot).href;
-    const identitySpecifier = './windows-identity-transport.ts';
-    await expect(
-      resolvePathOnly(
-        identitySpecifier,
-        { parentURL: identityParent },
-        identityCapture.nextResolve,
-      ),
-    ).resolves.toEqual({ url: identitySpecifier });
-
-    const pathCapture = captureResolution();
-    const pathParent = new URL('windows-path-attributes.ts', sourceRoot).href;
-    await expect(
-      resolvePathOnly(
-        './windows-path-attributes-transport.ts',
-        { parentURL: pathParent },
-        pathCapture.nextResolve,
-      ),
-    ).resolves.toEqual({
-      url: new URL('windows-path-attributes-test-transport.ts', sourceRoot).href,
-    });
   });
 
   it('leaves a same-named import from every other parent unchanged', async () => {

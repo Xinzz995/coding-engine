@@ -45,8 +45,9 @@ Issue #91 干净检出。
   CREATE_NO_WINDOW、KILL_ON_CLOSE 与
   ActiveProcesses；两个平台的 supervisor 都在 START 前缓存 owner/protocol/active/baseline 摘要，并在
   集合清空后写 owner-bound drained receipt；
-- Windows 路径属性检查使用另一份固定源码、确定性重建且逐字节核验的 C# EXE，直接调用原生属性与
-  目录枚举 API；运行时不依赖 PowerShell 或旧版 managed 路径枚举；
+- Windows 路径与 process-only 身份检查使用另一份固定源码、确定性重建且逐字节核验的 C# EXE，
+  直接调用原生属性、目录枚举与进程 creation FILETIME API；热路径不依赖 PowerShell 或旧版 managed
+  路径枚举，host/boot/current owner 的组合快照仍使用系统 PowerShell/CIM；
 - 实现新版 lock recovery、同机 reboot-proof、attempt lease 单赢家、recovery-of-recovery 和 exact
   mutation resume 的内部能力；legacy workspace 只阻断并引导新 workspace，不实现迁移；
 - 先跑 Linux、macOS、Windows 真实破坏性回归，再允许后续产品接线。

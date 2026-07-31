@@ -15,7 +15,7 @@ describe('cross-process fixture support', () => {
       platform: 'win32',
       windowsIdentity: 'production',
     });
-    expect(nativeIdentity[3]).toMatch(/^file:.*\/ordinary-windows-path-test-register\.mjs$/u);
+    expect(nativeIdentity).toEqual(['--import', 'tsx']);
     expect(typeScriptFixtureExecArgv({ platform: 'linux' })).toEqual(['--import', 'tsx']);
     expect(typeScriptFixtureNodeArgs('/fixture.ts', ['one'], { platform: 'darwin' })).toEqual([
       '--import',

@@ -7,6 +7,7 @@ import {
   WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
   WINDOWS_IDENTITY_SNAPSHOT_SCRIPT,
 } from './windows-identity-protocol.js';
+import { inspectWindowsProcessIdentity } from './windows-path-attributes.js';
 import { WorkspaceSafetyError } from './types.js';
 
 export interface WindowsIdentitySnapshot {
@@ -28,29 +29,14 @@ function probePidExistence(pid: number): 'present' | 'missing' | 'unknown' {
 
 /** Lightweight process-only lookup used by supervisor liveness checks. */
 export function readWindowsProcessIdentity(pid: number): ProcessIdentityLookup {
-  const launch = resolveWindowsIdentityPowerShellLaunch();
-  const script = [
-    `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
-    'if ($null -eq $p) { exit 3 }',
-    'try { [Console]::Out.Write($p.StartTime.ToUniversalTime().ToFileTimeUtc()) } catch { exit 4 }',
-  ].join('; ');
-  const result = spawnSync(
-    launch.command,
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    {
-      encoding: 'utf8',
-      env: launch.env,
-      timeout: WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
-      windowsHide: true,
-    },
-  );
-  if (result.status === 3) {
-    const existence = probePidExistence(pid);
-    return existence === 'missing' ? { status: 'missing' } : { status: 'unknown' };
+  try {
+    const identity = inspectWindowsProcessIdentity(pid);
+    return identity.status === 'found'
+      ? { status: 'found', value: identity.value }
+      : { status: identity.status };
+  } catch {
+    return { status: 'unknown' };
   }
-  if (result.error || result.status !== 0) return { status: 'unknown' };
-  const value = (result.stdout ?? '').trim();
-  return /^\d+$/u.test(value) ? { status: 'found', value } : { status: 'unknown' };
 }
 
 export function readWindowsIdentitySnapshot(pid: number): WindowsIdentitySnapshot {

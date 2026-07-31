@@ -255,8 +255,12 @@ describe('platform identity probe', () => {
     );
 
     expect(identitySource).toContain('readProcessIdentity: readWindowsProcessIdentity');
-    expect(processLookup).toContain('Get-Process -Id');
+    expect(processLookup).toContain('inspectWindowsProcessIdentity');
+    expect(processLookup).not.toContain('Get-Process -Id');
+    expect(processLookup).not.toContain('spawnSync');
     expect(processLookup).not.toContain('WINDOWS_IDENTITY_SNAPSHOT_SCRIPT');
+    expect(transportSource).toContain('WINDOWS_IDENTITY_SNAPSHOT_SCRIPT');
+    expect(transportSource).toContain('spawnSync');
   });
 
   it('re-reads the combined snapshot instead of caching identity across verification boundaries', () => {

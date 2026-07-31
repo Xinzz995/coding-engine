@@ -17,7 +17,9 @@ export const WINDOWS_PATH_ATTRIBUTES_EXECUTABLE = 'coding-x-windows-path-inspect
 export const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
 export const WINDOWS_PATH_ATTRIBUTES_EXECUTABLE_DIGEST =
   'sha256:2924e3c605017abdf9597fe0eefe05a4d51e81576e302f33ca85a2e3ce0af648';
+export const WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS = 3_000;
 const EXECUTABLE_DIGEST_DOMAIN = Buffer.from('coding-x-windows-path-inspector-exe-v1\0', 'utf8');
+const UNSIGNED_64_MAX = 18_446_744_073_709_551_615n;
 const MAX_HELPER_BYTES = 4 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -28,6 +30,11 @@ const MAX_SAFETY_TREE_ENTRIES = 100_000;
 const MAX_TREE_DEPTH = 256;
 
 type WindowsPathRequest =
+  | {
+      readonly schemaVersion: 1;
+      readonly mode: 'process-identity-v1';
+      readonly payload: { readonly pid: number };
+    }
   | {
       readonly schemaVersion: 1;
       readonly mode: 'paths-v1';
@@ -73,7 +80,24 @@ export interface WindowsWorkspaceTreeResponse {
   readonly complete: true;
 }
 
-type WindowsPathResponse = WindowsPathAttributeResponse | WindowsWorkspaceTreeResponse;
+export type WindowsProcessIdentityResponse =
+  | {
+      readonly schemaVersion: 1;
+      readonly mode: 'process-identity-v1';
+      readonly pid: number;
+      readonly status: 'found';
+      readonly value: string;
+    }
+  | {
+      readonly schemaVersion: 1;
+      readonly mode: 'process-identity-v1';
+      readonly pid: number;
+      readonly status: 'missing' | 'unknown';
+      readonly value: null;
+    };
+
+type WindowsPathResponse =
+  WindowsPathAttributeResponse | WindowsWorkspaceTreeResponse | WindowsProcessIdentityResponse;
 
 function invalid(message: string, cause?: unknown): WorkspaceSafetyError {
   const error = new WorkspaceSafetyError(
@@ -206,6 +230,45 @@ export function parseWindowsPathAttributeResponse(
     throw invalid('response is not valid JSON', error);
   }
   const response = record(parsed, 'response');
+  if (expected.mode === 'process-identity-v1') {
+    exactKeys(response, ['schemaVersion', 'mode', 'pid', 'status', 'value'], 'response');
+    if (
+      response.schemaVersion !== 1 ||
+      response.mode !== expected.mode ||
+      response.pid !== expected.payload.pid
+    ) {
+      throw invalid('process identity response binding is incomplete or mismatched');
+    }
+    if (response.status === 'found') {
+      if (
+        typeof response.value !== 'string' ||
+        !/^[1-9]\d{0,19}$/u.test(response.value) ||
+        BigInt(response.value) > UNSIGNED_64_MAX
+      ) {
+        throw invalid('process identity value is not a canonical unsigned 64-bit integer');
+      }
+      return {
+        schemaVersion: 1,
+        mode: expected.mode,
+        pid: expected.payload.pid,
+        status: 'found',
+        value: response.value,
+      };
+    }
+    if (
+      (response.status !== 'missing' && response.status !== 'unknown') ||
+      response.value !== null
+    ) {
+      throw invalid('process identity status and value are inconsistent');
+    }
+    return {
+      schemaVersion: 1,
+      mode: expected.mode,
+      pid: expected.payload.pid,
+      status: response.status,
+      value: null,
+    };
+  }
   if (expected.mode === 'safety-tree-v1' || expected.mode === 'workspace-tree-v1') {
     const responseKeys = [
       'schemaVersion',
@@ -310,8 +373,27 @@ function runWindowsPathAttributeProbe(request: WindowsPathRequest): WindowsPathR
     helperDigest,
     requestBytes,
     maxResponseBytes: MAX_RESPONSE_BYTES,
+    ...(request.mode === 'process-identity-v1'
+      ? { timeoutMs: WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS }
+      : {}),
   });
   return parseWindowsPathAttributeResponse(responseBytes, request);
+}
+
+export function inspectWindowsProcessIdentity(pid: number): WindowsProcessIdentityResponse {
+  if (process.platform !== 'win32') {
+    throw new WorkspaceSafetyError('unsupported', 'Windows process identity requires Windows');
+  }
+  const request: WindowsPathRequest = {
+    schemaVersion: 1,
+    mode: 'process-identity-v1',
+    payload: { pid: integer(pid, 1, 0xffffffff, 'pid') },
+  };
+  const response = runWindowsPathAttributeProbe(request);
+  if (response.mode !== 'process-identity-v1') {
+    throw invalid('process identity probe returned the wrong response mode');
+  }
+  return response;
 }
 
 export function inspectWindowsPathAttributes(

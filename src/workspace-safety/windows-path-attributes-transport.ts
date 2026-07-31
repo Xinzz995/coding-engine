@@ -7,14 +7,17 @@ export interface WindowsPathAttributeTransportOptions {
   readonly helperDigest: string;
   readonly requestBytes: Buffer;
   readonly maxResponseBytes: number;
+  readonly timeoutMs?: number;
 }
 
+const MAX_HELPER_TIMEOUT_MS = 60_000;
 const HELPER_FAILURE_STAGES = new Set([
   'startup',
   'executable-digest',
   'request-read',
   'request-parse',
   'paths-read',
+  'process-identity-read',
   'tree-root',
   'canonical-name-enumeration',
   'workspace-child-enumeration',
@@ -67,6 +70,10 @@ export function invokeWindowsPathAttributeHelper(
   const systemRoot = environmentValue('systemroot');
   const temp = environmentValue('temp');
   const tmp = environmentValue('tmp');
+  const timeoutMs = options.timeoutMs ?? MAX_HELPER_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_HELPER_TIMEOUT_MS) {
+    throw invalid('helper timeout is outside its supported boundary');
+  }
   const startedAt = Date.now();
   const result = spawnSync(
     options.executablePath,
@@ -77,7 +84,7 @@ export function invokeWindowsPathAttributeHelper(
       input: options.requestBytes,
       encoding: 'buffer',
       maxBuffer: options.maxResponseBytes,
-      timeout: 60_000,
+      timeout: timeoutMs,
       windowsHide: true,
       shell: false,
     },
