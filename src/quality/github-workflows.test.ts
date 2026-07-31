@@ -110,9 +110,16 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).toContain(
       "& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-supervisor.exe''",
     );
+    expect(yaml).toContain('build / windows-path-inspector-reproducibility');
+    expect(yaml).toContain(
+      "& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-Target'' ''PathInspector'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-path-inspector.exe''",
+    );
     expect(yaml).toContain('test / windows-native-proof');
     expect(yaml).toContain("& ''npm'' ''run'' ''test:windows-native-proof''");
     expect(yaml.indexOf('build / windows-supervisor-reproducibility')).toBeLessThan(
+      yaml.indexOf('build / windows-path-inspector-reproducibility'),
+    );
+    expect(yaml.indexOf('build / windows-path-inspector-reproducibility')).toBeLessThan(
       yaml.indexOf('test / windows-native-proof'),
     );
     expect(yaml).toContain('name: quality-gate');

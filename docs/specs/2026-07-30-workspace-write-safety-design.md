@@ -778,6 +778,11 @@ supervisor 存活至 receipt 落盘、目标 pgid 为空，而不是只调用 co
 12. supervisor 在仍持有 Job handle 时原子写、回读 drained receipt，再发送 DRAINED；
 13. parent 验证 receipt 并 ACK 后，supervisor 才关闭 Job handle 并退出。
 
+Windows 路径属性检查另带一份由固定源码确定性构建的 `.NET Framework 4.6` C# EXE。Node 直接启动
+并核对固定摘要；helper 通过 GetFileAttributesW 与 FindFirstFileW/FindNextFileW 流式读取系统属性、
+规范名称和有界目录树，不经过 PowerShell、运行时编译或旧版 managed 路径枚举。输入输出和失败阶段
+都采用有界协议，任何摘要、路径、重解析点、枚举完整性或关闭句柄无法确认都按不可验证阻断。
+
 parent IPC EOF 时 supervisor 主动 TerminateJobObject。canonical active-child 仍是 prepared-bound 时，
 它按 9-10 归零后直接退出且不写 receipt；若曾接受 START，按 9-11 使用缓存摘要写 receipt；若从未
 接受 START 但 canonical armed 严格有效，则安全重读并写 never-started receipt。随后退出，不等 ACK。
@@ -1079,11 +1084,12 @@ suite 不可用都让 job 失败。普通 `npm test` 中的条件 skip 不计入
 PATH 上的 `node` 和仓库相对 fixture，避免把 `Program Files` 绝对路径送入旧版按空格切分的 runner
 覆盖参数；不得因此替换冻结 tarball 或放宽摘要核验。
 
-普通 Windows 全量单测为避免每个 fixture 重复冷启动 PowerShell，可由仓库 Vitest 配置把 transport
+普通 Windows 全量单测为避免每个 fixture 重复启动原生检查器，可由仓库 Vitest 配置把 transport
 解析到严格、有计数上限的 test-only 实现；这份结果不计入原生证明。required native runner 必须显式
-使用另一份无 alias、setup 或环境旁路的固定配置，直接调用真实 PowerShell/GetFileAttributesW，并以
-WOF、junction 和普通用户断言证明没有走 test transport。production API 不接收 transport/probe，也不
-读取测试旁路环境变量；配置、runner、固定 suite 与 LF 属性规则都属于旧 policy 保护范围。
+使用另一份无 test-only alias、setup 或环境旁路的固定配置，将 import 固定回生产 transport，直接调用
+真实固定 EXE 与 Windows 原生属性 API，并以 WOF、junction 和普通用户断言证明没有走 test transport。
+production API 不接收 transport/probe，也不读取测试旁路环境变量；配置、runner、固定 suite、辅助
+EXE 的可复现构建与属性规则都属于旧 policy 保护范围。
 
 POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代码、launcher 提前退出、pgid
 仍有成员、group probe unknown 和 START 后 parent 立即 kill。真实测试只证明普通进程继承合同；
@@ -1115,7 +1121,7 @@ test-only fixture，并在发送信号前重核已记录 launcher 的进程身�
 2. **生成方不得自签**：Agent 只能在委托范围写候选；owner/coordinator/platform adapter 决定是否
    接受并释放。
 3. **自治扩张匹配防线**：后台服务不再逃逸；失败保持隔离；恢复保留原始字节并需精确摘要。
-4. **原生与中立**：POSIX process group、Windows Job Object、Node/PowerShell 固定 helper；不把
+4. **原生与中立**：POSIX process group、Windows Job Object、Node/固定原生 helper；不把
    Claude/Codex/Cursor 写进核心状态。
 5. **假绿与恢复**：先测正常 exit 的遗留孙进程、parent crash、双恢复和 mutation 中断；三平台真机
    证据是关闭条件。

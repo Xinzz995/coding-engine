@@ -10,7 +10,7 @@ export const nativeWindowsPathAttributesTransportAlias = {
   ),
 };
 
-// Required native proof: deliberately resolves the real PowerShell/GetFileAttributesW transport.
+// Required native proof: deliberately resolves the fixed native path-inspector transport.
 export default defineConfig({
   resolve: {
     alias: [nativeWindowsPathAttributesTransportAlias],

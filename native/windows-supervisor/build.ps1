@@ -4,6 +4,9 @@ param(
   [ValidateSet('Generate', 'Verify')]
   [string]$Mode,
 
+  [ValidateSet('Supervisor', 'PathInspector')]
+  [string]$Target = 'Supervisor',
+
   [string]$OutputDirectory,
 
   [string]$CommittedExecutable,
@@ -15,8 +18,31 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
 $ExpectedSdkVersion = '10.0.302'
-$ExecutableName = 'coding-x-windows-supervisor.exe'
-$ExecutableDigestDomain = "coding-x-windows-supervisor-exe-v1`0"
+$ExecutableName = if ($Target -eq 'PathInspector') {
+  'coding-x-windows-path-inspector.exe'
+} else {
+  'coding-x-windows-supervisor.exe'
+}
+$ProjectName = if ($Target -eq 'PathInspector') {
+  'CodingX.WindowsPathInspector.csproj'
+} else {
+  'CodingX.WindowsSupervisor.csproj'
+}
+$ExecutableDigestDomain = if ($Target -eq 'PathInspector') {
+  "coding-x-windows-path-inspector-exe-v1`0"
+} else {
+  "coding-x-windows-supervisor-exe-v1`0"
+}
+$SourceNames = if ($Target -eq 'PathInspector') {
+  @('WindowsPathInspectorProgram.cs', 'WindowsPathAttributes.cs')
+} else {
+  @(
+    'WindowsSupervisorProgram.cs',
+    'WindowsJobSupervisor.cs',
+    'WindowsJobProcess.cs',
+    'WindowsJobAuthority.cs'
+  )
+}
 $MaximumExecutableBytes = 4MB
 $InvocationDirectory = [System.IO.Directory]::GetCurrentDirectory()
 $ProjectDirectory = [System.IO.Path]::GetFullPath($PSScriptRoot)
@@ -25,7 +51,7 @@ $RepositoryRoot = [System.IO.Path]::GetFullPath(
 )
 $ProjectPath = [System.IO.Path]::Combine(
   $ProjectDirectory,
-  'CodingX.WindowsSupervisor.csproj'
+  $ProjectName
 )
 $NugetConfigPath = [System.IO.Path]::Combine($ProjectDirectory, 'nuget.config')
 
@@ -143,7 +169,7 @@ function Invoke-DeterministicBuild {
   [System.IO.Directory]::CreateDirectory($isolatedProjectDirectory) | Out-Null
   [System.IO.Directory]::CreateDirectory($isolatedAssetDirectory) | Out-Null
   foreach ($name in @(
-      'CodingX.WindowsSupervisor.csproj',
+      $ProjectName,
       'global.json',
       'nuget.config',
       'packages.lock.json'
@@ -154,12 +180,7 @@ function Invoke-DeterministicBuild {
       $false
     )
   }
-  foreach ($name in @(
-      'WindowsSupervisorProgram.cs',
-      'WindowsJobSupervisor.cs',
-      'WindowsJobProcess.cs',
-      'WindowsJobAuthority.cs'
-    )) {
+  foreach ($name in $SourceNames) {
     [System.IO.File]::Copy(
       [System.IO.Path]::Combine($RepositoryRoot, 'assets', 'workspace-safety', $name),
       [System.IO.Path]::Combine($isolatedAssetDirectory, $name),
@@ -168,7 +189,7 @@ function Invoke-DeterministicBuild {
   }
   $isolatedProjectPath = [System.IO.Path]::Combine(
     $isolatedProjectDirectory,
-    'CodingX.WindowsSupervisor.csproj'
+    $ProjectName
   )
   $isolatedNugetConfigPath = [System.IO.Path]::Combine(
     $isolatedProjectDirectory,
@@ -251,7 +272,8 @@ $dotnet = Get-Command dotnet -CommandType Application -ErrorAction Stop
 $DotnetCommand = $dotnet.Source
 $buildRoot = [System.IO.Path]::Combine(
   [System.IO.Path]::GetTempPath(),
-  'coding-x-windows-supervisor-build-' + [System.Guid]::NewGuid().ToString('N')
+  'coding-x-windows-' + $Target.ToLowerInvariant() + '-build-' +
+    [System.Guid]::NewGuid().ToString('N')
 )
 [System.IO.Directory]::CreateDirectory($buildRoot) | Out-Null
 
@@ -279,7 +301,7 @@ try {
     $firstBytes = Get-FileBytes -Path $firstExecutable
     $secondBytes = Get-FileBytes -Path $secondExecutable
     Assert-SameBytes -Expected $firstBytes -Actual $secondBytes `
-      -Label 'Independent supervisor builds'
+      -Label "Independent $Target builds"
 
     $rawDigest = Get-Sha256Hex -Bytes $firstBytes
     $helperDigest = Get-HelperDigest -ExecutableBytes $firstBytes
@@ -291,9 +313,10 @@ try {
         throw "Committed executable does not exist: $committedPath"
       }
       Assert-SameBytes -Expected $firstBytes -Actual (Get-FileBytes -Path $committedPath) `
-        -Label 'Committed supervisor executable'
+        -Label "Committed $Target executable"
       [ordered]@{
         mode = 'Verify'
+        target = $Target
         sourceCommit = $sourceCommitValue
         executable = $ExecutableName
         rawSha256 = $rawDigest
@@ -308,16 +331,18 @@ try {
     [System.IO.File]::WriteAllBytes($destination, $firstBytes)
 
     $inputPaths = @(
-      [ordered]@{ name = 'native/windows-supervisor/CodingX.WindowsSupervisor.csproj'; path = $ProjectPath },
+      [ordered]@{ name = "native/windows-supervisor/$ProjectName"; path = $ProjectPath },
       [ordered]@{ name = 'native/windows-supervisor/build.ps1'; path = $PSCommandPath },
       [ordered]@{ name = 'native/windows-supervisor/global.json'; path = [System.IO.Path]::Combine($ProjectDirectory, 'global.json') },
       [ordered]@{ name = 'native/windows-supervisor/nuget.config'; path = $NugetConfigPath },
-      [ordered]@{ name = 'native/windows-supervisor/packages.lock.json'; path = [System.IO.Path]::Combine($ProjectDirectory, 'packages.lock.json') },
-      [ordered]@{ name = 'assets/workspace-safety/WindowsSupervisorProgram.cs'; path = [System.IO.Path]::Combine($RepositoryRoot, 'assets', 'workspace-safety', 'WindowsSupervisorProgram.cs') },
-      [ordered]@{ name = 'assets/workspace-safety/WindowsJobSupervisor.cs'; path = [System.IO.Path]::Combine($RepositoryRoot, 'assets', 'workspace-safety', 'WindowsJobSupervisor.cs') },
-      [ordered]@{ name = 'assets/workspace-safety/WindowsJobProcess.cs'; path = [System.IO.Path]::Combine($RepositoryRoot, 'assets', 'workspace-safety', 'WindowsJobProcess.cs') },
-      [ordered]@{ name = 'assets/workspace-safety/WindowsJobAuthority.cs'; path = [System.IO.Path]::Combine($RepositoryRoot, 'assets', 'workspace-safety', 'WindowsJobAuthority.cs') }
+      [ordered]@{ name = 'native/windows-supervisor/packages.lock.json'; path = [System.IO.Path]::Combine($ProjectDirectory, 'packages.lock.json') }
     )
+    $inputPaths += @($SourceNames | ForEach-Object {
+      [ordered]@{
+        name = "assets/workspace-safety/$_"
+        path = [System.IO.Path]::Combine($RepositoryRoot, 'assets', 'workspace-safety', $_)
+      }
+    })
     $inputs = @($inputPaths | ForEach-Object {
       [ordered]@{
         path = $_.name
@@ -326,6 +351,7 @@ try {
     })
     $manifest = [ordered]@{
       schemaVersion = 1
+      target = $Target
       sourceCommit = $sourceCommitValue
       sdkVersion = $sdkVersion
       targetFramework = 'net46'

@@ -3,32 +3,51 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
-  WINDOWS_PATH_ATTRIBUTES_BUNDLE_DIGEST,
-  WINDOWS_PATH_ATTRIBUTES_HELPER,
-  WINDOWS_PATH_ATTRIBUTES_SOURCE,
+  WINDOWS_PATH_ATTRIBUTES_EXECUTABLE,
+  WINDOWS_PATH_ATTRIBUTES_EXECUTABLE_DIGEST,
   parseWindowsPathAttributeResponse,
-  windowsPathAttributeBundleDigest,
+  windowsPathAttributeExecutableDigest,
 } from './windows-path-attributes.js';
 
 const sourceRoot = fileURLToPath(new URL('.', import.meta.url));
 const assetRoot = fileURLToPath(new URL('../../assets/workspace-safety/', import.meta.url));
 
 describe('fixed Windows path attribute protocol', () => {
-  it('binds the exact LF-normalized reviewed helper bundle bytes', () => {
-    const helper = readFileSync(join(assetRoot, WINDOWS_PATH_ATTRIBUTES_HELPER));
-    const source = readFileSync(join(assetRoot, WINDOWS_PATH_ATTRIBUTES_SOURCE));
-    expect(windowsPathAttributeBundleDigest(helper, source)).toBe(
-      WINDOWS_PATH_ATTRIBUTES_BUNDLE_DIGEST,
+  it('binds the exact reproducible native inspector and reviewed source bytes', () => {
+    const executable = readFileSync(join(assetRoot, WINDOWS_PATH_ATTRIBUTES_EXECUTABLE));
+    const attributesSource = readFileSync(join(assetRoot, 'WindowsPathAttributes.cs'), 'utf8');
+    const programSource = readFileSync(join(assetRoot, 'WindowsPathInspectorProgram.cs'), 'utf8');
+    expect(windowsPathAttributeExecutableDigest(executable)).toBe(
+      WINDOWS_PATH_ATTRIBUTES_EXECUTABLE_DIGEST,
     );
-    expect(readFileSync(join(assetRoot, WINDOWS_PATH_ATTRIBUTES_HELPER), 'utf8')).not.toContain(
-      '\r\n',
-    );
-    expect(readFileSync(join(assetRoot, WINDOWS_PATH_ATTRIBUTES_SOURCE), 'utf8')).not.toContain(
-      '\r\n',
-    );
+    expect(executable.subarray(0, 2).toString('ascii')).toBe('MZ');
+    expect(attributesSource).not.toContain('\r\n');
+    expect(programSource).not.toContain('\r\n');
     const attributes = readFileSync(join(assetRoot, '..', '..', '.gitattributes'), 'utf8');
-    expect(attributes).toContain('assets/workspace-safety/windows-path-attributes.ps1 text eol=lf');
     expect(attributes).toContain('assets/workspace-safety/WindowsPathAttributes.cs text eol=lf');
+    expect(attributes).toContain(
+      'assets/workspace-safety/WindowsPathInspectorProgram.cs text eol=lf',
+    );
+    expect(attributes).toContain(
+      'assets/workspace-safety/coding-x-windows-path-inspector.exe binary -filter',
+    );
+
+    expect(attributesSource).toContain('FindFirstFileW');
+    expect(attributesSource).toContain('FindNextFileW');
+    expect(attributesSource).toContain('FindClose');
+    expect(attributesSource).toContain('StringComparison.OrdinalIgnoreCase');
+    expect(attributesSource).not.toContain('Directory.EnumerateFileSystemEntries');
+    expect(programSource).toContain('CXWPI_FAILURE_V1 stage=');
+
+    const transport = readFileSync(
+      join(sourceRoot, 'windows-path-attributes-transport.ts'),
+      'utf8',
+    );
+    expect(transport).toContain('HELPER_FAILURE_STAGES');
+    expect(transport).toContain('result.status');
+    expect(transport).toContain('result.signal');
+    expect(transport).not.toContain('String(result.stderr)');
+    expect(transport).not.toContain('PowerShell');
   });
 
   it('accepts only a complete path response bound to exact request order', () => {

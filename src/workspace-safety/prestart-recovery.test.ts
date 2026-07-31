@@ -26,7 +26,7 @@ import {
   typeScriptFixtureExecArgv,
 } from './cross-process-fixture.test-support.js';
 import { jsonBytes } from './filesystem.js';
-import { createIdentityProbe } from './identity.js';
+import { createIdentityProbe, WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS } from './identity.js';
 import { SETTLED_OPERATIONS_DIR } from './operation.js';
 import { runWorkspaceOperationWithAuthority as runWorkspaceOperation } from './operation-authority-test-seam.js';
 import {
@@ -48,6 +48,9 @@ const RECOVERY_ID = '00000000-0000-4000-8000-0000000000f1';
 const ATTEMPT_A = '00000000-0000-4000-8000-0000000000f2';
 const ATTEMPT_B = '00000000-0000-4000-8000-0000000000f3';
 const ATTEMPT_C = '00000000-0000-4000-8000-0000000000f5';
+// The real Windows supervisor validates the same PID identity both before and after BOUND.
+// Preserve both production command budgets plus handshake and hosted-runner startup allowance.
+const OWNER_READY_TIMEOUT_MS = 2 * WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS + 15_000;
 
 interface OwnerCrashMessage {
   readonly type: 'ready';
@@ -77,7 +80,7 @@ function waitForOwnerReady(child: ChildProcess): Promise<OwnerCrashMessage> {
             `owner crash worker ${String(child.pid)} timed out; stderr: ${stderr || '<empty>'}`,
           ),
         ),
-      10_000,
+      OWNER_READY_TIMEOUT_MS,
     );
     function cleanup(): void {
       clearTimeout(timer);
@@ -565,6 +568,6 @@ describe('real owner hard-crash recovery', () => {
       expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
       expect(existsSync(markerPath)).toBe(false);
     },
-    60_000,
+    OWNER_READY_TIMEOUT_MS + 45_000,
   );
 });

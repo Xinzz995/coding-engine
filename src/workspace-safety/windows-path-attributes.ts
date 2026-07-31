@@ -13,12 +13,12 @@ import { fileURLToPath } from 'node:url';
 import { WorkspaceSafetyError } from './types.js';
 import { invokeWindowsPathAttributeHelper } from './windows-path-attributes-transport.js';
 
-export const WINDOWS_PATH_ATTRIBUTES_HELPER = 'windows-path-attributes.ps1';
-export const WINDOWS_PATH_ATTRIBUTES_SOURCE = 'WindowsPathAttributes.cs';
+export const WINDOWS_PATH_ATTRIBUTES_EXECUTABLE = 'coding-x-windows-path-inspector.exe';
 export const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
-export const WINDOWS_PATH_ATTRIBUTES_BUNDLE_DIGEST =
-  'sha256:826bdac1b65d2f5be44e3972dfcb1c847e07364265325e1a433186ca2b4b779b';
-const MAX_HELPER_BYTES = 1024 * 1024;
+export const WINDOWS_PATH_ATTRIBUTES_EXECUTABLE_DIGEST =
+  'sha256:4f3ddd58f7570e7187970467484b0a24620777a95b20f28171fcc29ee5a9041d';
+const EXECUTABLE_DIGEST_DOMAIN = Buffer.from('coding-x-windows-path-inspector-exe-v1\0', 'utf8');
+const MAX_HELPER_BYTES = 4 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_PATHS = 4096;
@@ -126,10 +126,8 @@ function fixedAssetBundleRoot(): string {
     fileURLToPath(new URL('./workspace-safety/', import.meta.url)),
     fileURLToPath(new URL('../../assets/workspace-safety/', import.meta.url)),
   ];
-  const root = candidates.find(
-    (candidate) =>
-      existsSync(join(candidate, WINDOWS_PATH_ATTRIBUTES_HELPER)) &&
-      existsSync(join(candidate, WINDOWS_PATH_ATTRIBUTES_SOURCE)),
+  const root = candidates.find((candidate) =>
+    existsSync(join(candidate, WINDOWS_PATH_ATTRIBUTES_EXECUTABLE)),
   );
   if (!root) throw invalid('fixed Windows path attribute asset bundle is missing');
   return root;
@@ -179,15 +177,10 @@ function stableHelperBytes(path: string): Buffer {
   }
 }
 
-export function windowsPathAttributeBundleDigest(
-  helperBytes: Uint8Array,
-  sourceBytes: Uint8Array,
-): string {
+export function windowsPathAttributeExecutableDigest(executableBytes: Uint8Array): string {
   return `sha256:${createHash('sha256')
-    .update(Buffer.from('coding-x-windows-path-attributes-v1\0', 'utf8'))
-    .update(helperBytes)
-    .update(Buffer.from(`\0${WINDOWS_PATH_ATTRIBUTES_SOURCE}\0`, 'utf8'))
-    .update(sourceBytes)
+    .update(EXECUTABLE_DIGEST_DOMAIN)
+    .update(executableBytes)
     .digest('hex')}`;
 }
 
@@ -306,17 +299,14 @@ function runWindowsPathAttributeProbe(request: WindowsPathRequest): WindowsPathR
     throw invalid('request exceeds its size boundary');
   }
   const assetRoot = fixedAssetBundleRoot();
-  const helperPath = join(assetRoot, WINDOWS_PATH_ATTRIBUTES_HELPER);
-  const sourcePath = join(assetRoot, WINDOWS_PATH_ATTRIBUTES_SOURCE);
-  const helperBytes = stableHelperBytes(helperPath);
-  const sourceBytes = stableHelperBytes(sourcePath);
-  const helperDigest = windowsPathAttributeBundleDigest(helperBytes, sourceBytes);
-  if (helperDigest !== WINDOWS_PATH_ATTRIBUTES_BUNDLE_DIGEST) {
-    throw invalid('fixed helper bundle digest is not the reviewed digest');
+  const executablePath = join(assetRoot, WINDOWS_PATH_ATTRIBUTES_EXECUTABLE);
+  const executableBytes = stableHelperBytes(executablePath);
+  const helperDigest = windowsPathAttributeExecutableDigest(executableBytes);
+  if (helperDigest !== WINDOWS_PATH_ATTRIBUTES_EXECUTABLE_DIGEST) {
+    throw invalid('fixed helper executable digest is not the reviewed digest');
   }
   const responseBytes = invokeWindowsPathAttributeHelper({
-    helperPath,
-    sourcePath,
+    executablePath,
     helperDigest,
     requestBytes,
     maxResponseBytes: MAX_RESPONSE_BYTES,

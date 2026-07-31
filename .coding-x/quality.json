@@ -136,6 +136,38 @@
           }
         },
         {
+          "id": "windows-path-inspector-reproducibility",
+          "module": "root",
+          "paths": [
+            ".gitattributes",
+            "native/windows-supervisor/**",
+            "assets/workspace-safety/coding-x-windows-path-inspector.exe",
+            "assets/workspace-safety/WindowsPathInspectorProgram.cs",
+            "assets/workspace-safety/WindowsPathAttributes.cs"
+          ],
+          "command": {
+            "executable": "pwsh",
+            "args": [
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-File",
+              "native/windows-supervisor/build.ps1",
+              "-Mode",
+              "Verify",
+              "-Target",
+              "PathInspector",
+              "-CommittedExecutable",
+              "assets/workspace-safety/coding-x-windows-path-inspector.exe"
+            ],
+            "cwd": ".",
+            "platforms": ["windows"],
+            "timeoutMs": 600000
+          }
+        },
+        {
           "id": "cli-smoke",
           "module": "root",
           "command": {
@@ -478,7 +510,11 @@
             "timeoutMs": 600000
           }
         ],
-        "checkIds": ["windows-supervisor-reproducibility", "windows-native-proof"]
+        "checkIds": [
+          "windows-supervisor-reproducibility",
+          "windows-path-inspector-reproducibility",
+          "windows-native-proof"
+        ]
       }
     ],
     "requiredChecks": ["quality-gate", "policy-guard-source"],

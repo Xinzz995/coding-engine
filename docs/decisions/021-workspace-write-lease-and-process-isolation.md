@@ -435,10 +435,10 @@ Administrators SID；仅有普通跨平台测试 job 绿色不能代替这条证
 原生 suite 还必须用系统命令真实创建 WOF 压缩文件和父目录 junction，覆盖 Unicode 与空格路径，
 并证明 Node 未识别但系统属性检查会拒绝；fixture 创建失败、属性不成立或测试被跳过都使 required
 job 失败。非 Windows 只能验证检查器分发与摘要，不能宣称完成这项行为证明。
-普通 Windows 全量单测允许通过仅测试可见的模块解析替身避免重复 PowerShell 冷启动，但 required
-native runner 显式使用独立、无替身的固定配置；生产入口没有 transport/probe 或环境旁路。原生
-runner、独立配置、固定 suite、辅助资产和 LF 属性规则都由旧 policy guard 识别，不能在同一个 PR
-静默削弱后自行变绿。
+普通 Windows 全量单测允许通过仅测试可见的模块解析替身避免重复启动原生路径检查器，但 required
+native runner 显式使用独立、无替身的固定配置，直接调用摘要固定且可复现构建的 C# EXE 与 Windows
+原生属性 API；生产入口没有 transport/probe 或环境旁路。原生 runner、独立配置、固定 suite、辅助
+资产、可复现构建和属性规则都由旧 policy guard 识别，不能在同一个 PR 静默削弱后自行变绿。
 
 dark foundation 的新 POSIX 模块不公开 spawn 或 pid-only 的组终止接口；生产组信号只由摘要绑定的
 固定 launcher 对自己的 live group 发出。0.33.3 的 `src/engine/process-tree.ts` 仍是旧生产路径，必须
