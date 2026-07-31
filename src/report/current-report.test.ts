@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -242,6 +242,28 @@ function adapters(options: {
 }
 
 describe('managed manual report currentness', () => {
+  it('accepts an alias only after proving it names the session workspace', async () => {
+    const ws = workspace();
+    const aliasParent = workspace();
+    const alias = join(aliasParent, 'workspace-alias');
+    symlinkSync(ws, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const q = quality();
+    const ctx = context(q.contract, q.digest);
+    writeReview(ws, reviewState(ctx));
+
+    await expect(
+      writeCurrentReportWithSession({
+        session: session(ws),
+        workspace: alias,
+        projectRoot: process.cwd(),
+        refreshRemote: false,
+        adapters: adapters({ reviewContext: ctx }).value,
+      }),
+    ).resolves.toMatchObject({ status: 'written' });
+    expect(existsSync(join(ws, 'report.html'))).toBe(true);
+    expect(existsSync(join(aliasParent, 'report.html'))).toBe(false);
+  });
+
   it('writes a delivery-ready report only after two Runner observations and final context validation', async () => {
     const ws = workspace();
     const q = quality();

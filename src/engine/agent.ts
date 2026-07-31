@@ -1,5 +1,5 @@
 import { accessSync, constants, realpathSync } from 'node:fs';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, extname, isAbsolute, join, resolve } from 'node:path';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import type { OperationDelegationScope } from '../workspace-safety/operation.js';
@@ -26,10 +26,15 @@ export function permissionWarning(kind: AgentKind): string {
 }
 
 function executableOnPath(name: string): boolean {
-  const path = process.env.PATH ?? '';
+  const path = environmentValue(process.env, 'PATH', process.platform) ?? '';
   const extensions =
-    process.platform === 'win32' ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';') : [''];
-  for (const dir of path.split(delimiter).filter(Boolean)) {
+    process.platform === 'win32' && extname(name) === ''
+      ? (environmentValue(process.env, 'PATHEXT', process.platform) ?? '.COM;.EXE;.BAT;.CMD').split(
+          ';',
+        )
+      : [''];
+  const pathDelimiter = process.platform === 'win32' ? ';' : delimiter;
+  for (const dir of path.split(pathDelimiter).filter(Boolean)) {
     for (const extension of extensions) {
       try {
         accessSync(join(dir, `${name}${extension}`), constants.X_OK);
@@ -42,10 +47,26 @@ function executableOnPath(name: string): boolean {
   return false;
 }
 
+function environmentValue(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  platform: NodeJS.Platform,
+): string | undefined {
+  if (platform !== 'win32') return environment[name];
+
+  // Windows treats environment names as case-insensitive. Use the exact same
+  // normalization as the environment passed to the supervised child so binary
+  // resolution and execution can never observe different PATH values.
+  const expected = name.toUpperCase();
+  return environmentEntries(environment).find(({ name: key }) => key.toUpperCase() === expected)
+    ?.value;
+}
+
 export function resolveExecutablePath(
   name: string,
   cwd: string,
   environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): string {
   const candidates: string[] = [];
   if (isAbsolute(name)) {
@@ -54,17 +75,20 @@ export function resolveExecutablePath(
     candidates.push(resolve(cwd, name));
   } else {
     const extensions =
-      process.platform === 'win32'
-        ? (environment.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';')
+      platform === 'win32' && extname(name) === ''
+        ? (environmentValue(environment, 'PATHEXT', platform) ?? '.COM;.EXE;.BAT;.CMD').split(';')
         : [''];
-    for (const directory of (environment.PATH ?? '').split(delimiter).filter(Boolean)) {
+    const pathDelimiter = platform === 'win32' ? ';' : delimiter;
+    for (const directory of (environmentValue(environment, 'PATH', platform) ?? '')
+      .split(pathDelimiter)
+      .filter(Boolean)) {
       for (const extension of extensions) candidates.push(join(directory, `${name}${extension}`));
     }
   }
   for (const candidate of candidates) {
     try {
       accessSync(candidate, constants.X_OK);
-      return realpathSync(candidate);
+      return realpathSync.native(candidate);
     } catch {
       // Try the next candidate.
     }

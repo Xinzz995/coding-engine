@@ -29,6 +29,7 @@ import {
   WORKSPACE_PROTOCOL,
   WORKSPACE_SAFETY_VERSION,
 } from '../workspace-safety/types.js';
+import { workspaceDirectoryIdentity } from '../workspace-safety/filesystem.js';
 
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 
@@ -141,9 +142,7 @@ export function initializeReadyWorkspaceFixture(workspacePath: string): void {
   const info = statSync(canonicalPath, { bigint: true });
   const digestBytes = (bytes: string | Buffer) =>
     `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
-  const workspaceIdentity = digestBytes(
-    Buffer.from(`${canonicalPath}\0${info.dev.toString()}\0${info.ino.toString()}`, 'utf8'),
-  );
+  const workspaceIdentity = workspaceDirectoryIdentity(canonicalPath, info);
   const timestamp = '2026-07-30T00:00:00.000Z';
   const protocolBytes = `${JSON.stringify(
     {

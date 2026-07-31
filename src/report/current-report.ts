@@ -1,5 +1,3 @@
-import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { CODING_X_VERSION } from '../version.js';
 import { readQualityContract, type QualityContractReadResult } from '../quality/contract.js';
 import {
@@ -23,6 +21,7 @@ import {
 } from '../review/currentness.js';
 import type { ReviewRemoteState } from '../review/types.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { workspacePathsReferToSameDirectory } from '../workspace-safety/filesystem.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { writeReportWithWriter, type WriteReportResult } from './report.js';
 
@@ -95,14 +94,19 @@ export async function writeCurrentReportWithSession(options: {
   /** @internal Deterministic observation seams; production always uses the fixed adapters above. */
   adapters?: Partial<CurrentReportAdapters>;
 }): Promise<WriteReportResult> {
-  if (
-    realpathSync(resolve(options.workspace)) !==
-    realpathSync(resolve(options.session.writer.workspacePath))
-  ) {
+  const workspace = options.session.writer.workspacePath;
+  let matchesSession = false;
+  try {
+    matchesSession = await workspacePathsReferToSameDirectory(options.workspace, workspace);
+  } catch {
+    // A missing, replaced, or otherwise unverifiable alias is never allowed to select a second
+    // workspace. Keep the same fail-closed boundary as a proven different directory.
+  }
+  if (!matchesSession) {
     throw new Error('手动报告的 workspace 与受控会话不一致');
   }
   const adapters = { ...CURRENT_REPORT_ADAPTERS, ...options.adapters };
-  const read = adapters.readReview(options.workspace);
+  const read = adapters.readReview(workspace);
   let currentReview: CurrentReviewStatus;
 
   if (read.status !== 'ready') {
@@ -119,7 +123,7 @@ export async function writeCurrentReportWithSession(options: {
       });
       const preflight = await adapters.preflight({
         root: options.projectRoot,
-        workspace: options.workspace,
+        workspace,
         currentContract: contract.contract,
         observation,
       });
@@ -182,7 +186,7 @@ export async function writeCurrentReportWithSession(options: {
               message: error instanceof Error ? error.message : String(error),
             };
           }
-          const revalidated = await adapters.revalidate(context, options.workspace, observation);
+          const revalidated = await adapters.revalidate(context, workspace, observation);
           currentReview = evaluateCurrentReviewStatus({
             read,
             context,

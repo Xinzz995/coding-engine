@@ -19,6 +19,7 @@ import {
   readWindowsIdentitySnapshot as readWindowsIdentityTestSnapshot,
   readWindowsProcessIdentity as readWindowsTestProcessIdentity,
 } from './windows-identity-test-transport.js';
+import * as windowsPathAttributes from './windows-path-attributes.js';
 
 const digest = `sha256:${'a'.repeat(64)}`;
 
@@ -246,6 +247,52 @@ describe('platform identity probe', () => {
         processIdentity: { kind: 'windows-filetime', value: '100000002000000000' },
       }),
     ).toBe('dead');
+  });
+
+  it('re-reads native Windows process identity for the same live PID instead of accepting stale FILETIME', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const inspect = vi
+      .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentity')
+      .mockReturnValueOnce({
+        schemaVersion: 1,
+        mode: 'process-identity-v1',
+        pid: process.pid,
+        status: 'found',
+        value: '100000000000000001',
+      })
+      .mockReturnValueOnce({
+        schemaVersion: 1,
+        mode: 'process-identity-v1',
+        pid: process.pid,
+        status: 'found',
+        value: '100000000000000002',
+      })
+      .mockReturnValueOnce({
+        schemaVersion: 1,
+        mode: 'process-identity-v1',
+        pid: process.pid,
+        status: 'missing',
+        value: null,
+      });
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    try {
+      expect(readWindowsTestProcessIdentity(process.pid)).toEqual({
+        status: 'found',
+        value: '100000000000000001',
+      });
+      expect(readWindowsIdentityTestSnapshot(process.pid).processIdentity).toEqual({
+        status: 'found',
+        value: '100000000000000002',
+      });
+      expect(readWindowsTestProcessIdentity(process.pid)).toEqual({ status: 'missing' });
+      expect(inspect).toHaveBeenCalledTimes(3);
+      expect(inspect).toHaveBeenNthCalledWith(1, process.pid);
+      expect(inspect).toHaveBeenNthCalledWith(2, process.pid);
+      expect(inspect).toHaveBeenNthCalledWith(3, process.pid);
+    } finally {
+      inspect.mockRestore();
+      if (platform) Object.defineProperty(process, 'platform', platform);
+    }
   });
 
   it('keeps process-only Windows liveness checks separate from the combined system snapshot', () => {

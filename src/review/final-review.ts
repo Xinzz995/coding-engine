@@ -4,11 +4,11 @@ import {
   type ManagedGateContext,
 } from '../engine/gate.js';
 import type { AgentKind } from '../engine/agent.js';
-import { resolve } from 'node:path';
 import { CODING_X_VERSION } from '../version.js';
 import type { GitHubReviewReadClient } from '../quality/github.js';
 import type { QualityContract } from '../quality/contract.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { workspacePathsReferToSameDirectory } from '../workspace-safety/filesystem.js';
 import { createReviewBinding, digestReviewBinding } from './binding.js';
 import { digest, normalizeText } from './common.js';
 import { unresolvedBlockingFindings } from './decisions.js';
@@ -169,7 +169,14 @@ export async function runFinalReview(options: {
   termination?: ManagedGateContext['termination'];
 }): Promise<FinalReviewOutcome> {
   const startedAt = new Date().toISOString();
-  if (resolve(options.workspace) !== resolve(options.session.writer.workspacePath)) {
+  const workspace = options.session.writer.workspacePath;
+  let matchesSession = false;
+  try {
+    matchesSession = await workspacePathsReferToSameDirectory(options.workspace, workspace);
+  } catch {
+    // Unverifiable aliases must not select a second read/write root for a formal Review.
+  }
+  if (!matchesSession) {
     return {
       exitCode: 2,
       message: '最终 Review 的 workspace 与受控会话不一致；拒绝读取或写入状态',
@@ -198,7 +205,7 @@ export async function runFinalReview(options: {
   const preflight = await (options.preflight?.() ??
     runReviewPreflight({
       root: options.root,
-      workspace: options.workspace,
+      workspace,
       currentContract: options.currentContract,
       observation,
     }));
@@ -208,13 +215,13 @@ export async function runFinalReview(options: {
     return { exitCode, message: preflight.message };
   }
   const context = preflight.context;
-  const round = initialRound(options.workspace);
+  const round = initialRound(workspace);
   // 先使旧结果失效，再进入本轮任何可失败环节。否则同一 head 上的机械
   // 检查回归、裁决文件损坏或 Runner 中断可能让 status 继续读到旧的绿色结果。
   await invalidateFinalReviewState(options.session.writer);
   let decisions;
   try {
-    decisions = readReviewDecisions(options.workspace);
+    decisions = readReviewDecisions(workspace);
   } catch (error) {
     return {
       exitCode: 2,
@@ -275,8 +282,7 @@ export async function runFinalReview(options: {
       runnerVersion,
     });
   const revalidateContext = async () =>
-    await (options.revalidate?.() ??
-      revalidateReviewContext(context, options.workspace, observation));
+    await (options.revalidate?.() ?? revalidateReviewContext(context, workspace, observation));
   const verifyRunnerVersion = async (phase: string): Promise<string | null> => {
     if (options.runnerVersion !== undefined) return null;
     try {

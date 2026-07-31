@@ -1,9 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { buildAgentArgs, resolveBinary, runAgent } from './agent.js';
+import { buildAgentArgs, resolveBinary, resolveExecutablePath, runAgent } from './agent.js';
 import { createManagedProcessTestSession } from './managed-process-test-support.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -172,6 +180,54 @@ describe('resolveBinary', () => {
       else process.env.PATH = originalPath;
       if (originalOverride === undefined) delete process.env.CODING_X_CURSOR_BIN;
       else process.env.CODING_X_CURSOR_BIN = originalOverride;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resolveExecutablePath', () => {
+  it('uses Windows environment names case-insensitively without duplicating an existing suffix', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x-windows-bin-'));
+    const executable = join(dir, 'cmd.exe');
+    writeFileSync(executable, '');
+    chmodSync(executable, 0o755);
+    try {
+      expect(
+        resolveExecutablePath(
+          'cmd.exe',
+          dir,
+          {
+            Path: dir,
+            Pathext: '.COM;.EXE;.CMD',
+            PATH: join(dir, 'missing'),
+            PATHEXT: '.NOPE',
+          },
+          'win32',
+        ),
+      ).toBe(realpathSync.native(executable));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses Windows PATHEXT for an executable without a suffix', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x-windows-pathext-'));
+    const executable = join(dir, 'git.CMD');
+    writeFileSync(executable, '');
+    chmodSync(executable, 0o755);
+    try {
+      expect(
+        resolveExecutablePath(
+          'git',
+          dir,
+          {
+            Path: dir,
+            Pathext: '.CMD;.EXE',
+          },
+          'win32',
+        ),
+      ).toBe(realpathSync.native(executable));
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

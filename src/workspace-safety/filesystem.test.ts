@@ -24,6 +24,9 @@ import {
   jsonBytes,
   moveDirectoryNoReplace,
   readExactFile,
+  sameWorkspaceDirectoryEntry,
+  workspaceDirectoryIdentity,
+  workspacePathsReferToSameDirectory,
   writeNewFile,
 } from './filesystem.js';
 import { WorkspaceSafetyError } from './types.js';
@@ -49,6 +52,24 @@ describe('workspace safety filesystem primitives', () => {
     expect(bytes.toString('utf8')).toBe('{\n  "value": "中文",\n  "count": 2\n}\n');
     expect(digestBytes(bytes)).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(digestBytes(bytes)).toBe(digestBytes(Buffer.from(bytes)));
+  });
+
+  it('binds Windows directory identity to the file ID instead of an unstable 8.3 spelling', () => {
+    const entry = { dev: 11n, ino: 22n };
+    const shortPath = String.raw`C:\Users\RUNNER~1\AppData\Local\Temp\coding-x`;
+    const longPath = String.raw`C:\Users\runneradmin\AppData\Local\Temp\coding-x`;
+
+    expect(workspaceDirectoryIdentity(shortPath, entry, 'win32')).toBe(
+      workspaceDirectoryIdentity(longPath, entry, 'win32'),
+    );
+    expect(workspaceDirectoryIdentity(shortPath, entry, 'win32')).not.toBe(
+      workspaceDirectoryIdentity(longPath, { ...entry, ino: 23n }, 'win32'),
+    );
+    expect(workspaceDirectoryIdentity('/tmp/short', entry, 'linux')).not.toBe(
+      workspaceDirectoryIdentity('/tmp/long', entry, 'linux'),
+    );
+    expect(sameWorkspaceDirectoryEntry(entry, { ...entry })).toBe(true);
+    expect(sameWorkspaceDirectoryEntry(entry, { ...entry, ino: 23n })).toBe(false);
   });
 
   it('installs a complete non-empty staging directory without replacing a target', async () => {
@@ -389,5 +410,6 @@ describe('workspace safety filesystem primitives', () => {
     expect(aliased.path).toBe(direct.path);
     expect(aliased.identity).toBe(direct.identity);
     expect(aliased.requestedKind).toBe('symlink');
+    await expect(workspacePathsReferToSameDirectory(root, link)).resolves.toBe(true);
   });
 });

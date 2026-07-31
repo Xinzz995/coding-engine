@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -180,6 +180,21 @@ function options(ws: string, ctx: ReviewPreflightContext) {
 }
 
 describe('runFinalReview', () => {
+  it('accepts a proven alias for the session workspace before checking Review inputs', async () => {
+    const ws = workspace();
+    const aliasParent = workspace();
+    const alias = join(aliasParent, 'workspace-alias');
+    symlinkSync(ws, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const result = await runFinalReview({
+      ...options(alias, context()),
+      session: session(ws),
+      model: undefined,
+    });
+
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('明确模型');
+  });
+
   it('requires an explicit, bindable review model before any model call', async () => {
     const ctx = context();
     const result = await runFinalReview({

@@ -3,8 +3,9 @@
  *
  * It preserves deterministic host and boot comparisons without starting PowerShell for every
  * fixture. Live process identity still comes from the reviewed native inspector, so a real fixed
- * supervisor and the parent observe the same Windows creation FILETIME. The short live cache is
- * guarded by an OS liveness probe; PID-reuse behavior remains covered by the required native proof.
+ * supervisor and the parent observe the same Windows creation FILETIME. Every verification reads
+ * the native FILETIME again: PID liveness alone cannot prove that a PID still names the same
+ * process after reuse.
  */
 import type { ProcessIdentityLookup } from './identity.js';
 import type { WindowsIdentitySnapshot } from './windows-identity-transport.js';
@@ -14,7 +15,6 @@ const TEST_HOST_IDENTITY = 'coding-x-windows-test-host-v1';
 const TEST_BOOT_IDENTITY = 'coding-x-windows-test-boot-v1';
 const MAX_TEST_INVOCATIONS = 10_000;
 let invocationCount = 0;
-const liveIdentityCache = new Map<number, string>();
 
 function recordInvocation(): void {
   invocationCount += 1;
@@ -47,18 +47,8 @@ function processIdentity(pid: number): ProcessIdentityLookup {
       ? { status: 'found', value: fixtureProcessIdentity(pid) }
       : { status: presence };
   }
-  const cached = liveIdentityCache.get(pid);
-  if (cached !== undefined) {
-    const presence = pidPresence(pid);
-    if (presence === 'present') return { status: 'found', value: cached };
-    if (presence === 'missing') {
-      liveIdentityCache.delete(pid);
-      return { status: 'missing' };
-    }
-  }
   try {
     const observed = inspectWindowsProcessIdentity(pid);
-    if (observed.status === 'found') liveIdentityCache.set(pid, observed.value);
     return observed.status === 'found'
       ? { status: 'found', value: observed.value }
       : { status: observed.status };

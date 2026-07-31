@@ -192,7 +192,7 @@ describe('workspace recovery dispatch', () => {
       command: 'recover',
       mode: 'mechanical-empty',
       message: 'Workspace 恢复完成。',
-      workspacePath: realpathSync(root),
+      workspacePath: realpathSync.native(root),
     });
     expect(first.ok && existsSync(first.archivePath)).toBe(true);
     expect(await evaluateWorkspaceSafetyDisk({ workspacePath: root })).toMatchObject({
@@ -229,7 +229,7 @@ describe('workspace recovery dispatch', () => {
     expect(result).toMatchObject({
       ok: true,
       mode: 'mechanical-empty',
-      workspacePath: realpathSync(root),
+      workspacePath: realpathSync.native(root),
     });
     expect(await evaluateWorkspaceSafetyDisk({ workspacePath: root })).toMatchObject({
       classification: 'ready',
@@ -306,7 +306,7 @@ describe('workspace recovery dispatch', () => {
       exitCode: 0,
       command: 'resume-mutation',
       mode: 'mutation-resume',
-      workspacePath: realpathSync(root),
+      workspacePath: realpathSync.native(root),
     });
     expect(readFileSync(join(root, 'state.json'), 'utf8')).toBe('after');
     expect(existsSync(join(root, 'obsolete.txt'))).toBe(false);
