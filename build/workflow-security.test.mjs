@@ -37,4 +37,20 @@ describe('GitHub workflow trust boundary', () => {
     expect(combined).not.toMatch(/^\s*run:\s*.*\b(?:codex|claude|cursor)\b/im);
     expect(combined).not.toMatch(/model[-_ ]?shard|review[-_ ]?shard/i);
   });
+
+  it('does not leave a Git credential in workflows that execute pull request code', () => {
+    const offenders = [];
+    for (const { name, text } of workflowFiles()) {
+      if (!/^\s{2}pull_request:\s*$/m.test(text)) continue;
+      const checkoutSteps = [...text.matchAll(
+        /^\s{6}- uses: actions\/checkout@[^\n]+\n((?:\s{8}[^\n]*\n|\s{10}[^\n]*\n)*)/gm,
+      )];
+      for (const step of checkoutSteps) {
+        if (!/^\s{10}persist-credentials: false\s*$/m.test(step[1])) {
+          offenders.push(name);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
 });

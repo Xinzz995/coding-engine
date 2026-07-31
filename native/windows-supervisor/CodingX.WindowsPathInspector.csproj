@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net46</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>coding-x-windows-path-inspector</AssemblyName>
+    <StartupObject>CodingX.WorkspaceSafety.WindowsPathInspectorProgram</StartupObject>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>7.3</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Optimize>true</Optimize>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <UseSharedCompilation>false</UseSharedCompilation>
+    <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>
+    <ImportDirectoryBuildTargets>false</ImportDirectoryBuildTargets>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <DisableImplicitNuGetFallbackFolder>true</DisableImplicitNuGetFallbackFolder>
+    <AutomaticallyUseReferenceAssemblyPackages>false</AutomaticallyUseReferenceAssemblyPackages>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode>true</RestoreLockedMode>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <CodingXSourceRoot Condition="'$(CodingXSourceRoot)' == ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..'))</CodingXSourceRoot>
+    <CodingXBuildRoot Condition="'$(CodingXBuildRoot)' == ''">$(MSBuildProjectDirectory)</CodingXBuildRoot>
+    <CodingXPackageRoot Condition="'$(CodingXPackageRoot)' == ''">$(NuGetPackageRoot)</CodingXPackageRoot>
+    <PathMap>$(CodingXSourceRoot)=/_/repo,$(CodingXBuildRoot)=/_/build,$(CodingXPackageRoot)=/_/packages</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../assets/workspace-safety/WindowsPathInspectorProgram.cs"
+             Link="WindowsPathInspectorProgram.cs" />
+    <Compile Include="../../assets/workspace-safety/WindowsPathAttributes.cs"
+             Link="WindowsPathAttributes.cs" />
+    <Reference Include="System.Web.Extensions" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net46"
+                      Version="1.0.3"
+                      PrivateAssets="all" />
+  </ItemGroup>
+</Project>

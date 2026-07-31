@@ -25,7 +25,10 @@ const CATEGORIES: QualityCheckCategory[] = ['test', 'build', 'static', 'security
 const RUNNER: Record<QualityPlatform, string> = {
   linux: 'ubuntu-latest',
   macos: 'macos-latest',
-  windows: 'windows-latest',
+  // Windows Server 2022 is the oldest hosted image in the v1 support contract.
+  // Keep this mapping internal: adding a runner label to schema v1 would make
+  // the already-published strict 0.33.3 parser reject the repository contract.
+  windows: 'windows-2022',
 };
 
 function yamlString(value: string): string {
@@ -43,7 +46,12 @@ function powershellArg(value: string): string {
 function explicitShellArgs(shell: string, script: string): string[] {
   const name = basename(shell).toLowerCase();
   if (name === 'cmd' || name === 'cmd.exe') return ['/d', '/s', '/c', script];
-  if (name === 'powershell' || name === 'powershell.exe' || name === 'pwsh' || name === 'pwsh.exe') {
+  if (
+    name === 'powershell' ||
+    name === 'powershell.exe' ||
+    name === 'pwsh' ||
+    name === 'pwsh.exe'
+  ) {
     return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script];
   }
   return ['-c', script];
@@ -51,16 +59,17 @@ function explicitShellArgs(shell: string, script: string): string[] {
 
 function commandLine(command: QualityCommand, platform: QualityPlatform): string {
   const executable = 'executable' in command ? command.executable : command.shell;
-  const args = 'executable' in command
-    ? command.args
-    : explicitShellArgs(command.shell, command.script);
+  const args =
+    'executable' in command ? command.args : explicitShellArgs(command.shell, command.script);
   if (platform === 'windows') {
     return `& ${[executable, ...args].map(powershellArg).join(' ')}`;
   }
   return [executable, ...args].map(posixArg).join(' ');
 }
 
-function allChecks(contract: QualityContract): Array<QualityCheck & { category: QualityCheckCategory }> {
+function allChecks(
+  contract: QualityContract,
+): Array<QualityCheck & { category: QualityCheckCategory }> {
   const checks: Array<QualityCheck & { category: QualityCheckCategory }> = [];
   for (const category of CATEGORIES) {
     const group = contract.checks[category];
@@ -71,11 +80,7 @@ function allChecks(contract: QualityContract): Array<QualityCheck & { category: 
   return checks;
 }
 
-function commandStep(
-  name: string,
-  command: QualityCommand,
-  platform: QualityPlatform,
-): string[] {
+function commandStep(name: string, command: QualityCommand, platform: QualityPlatform): string[] {
   return [
     `      - name: ${yamlString(name)}`,
     `        working-directory: ${yamlString(command.cwd)}`,
@@ -86,14 +91,18 @@ function commandStep(
 }
 
 function toolchainStep(toolchain: QualityToolchain): string[] {
-  const action = toolchain.kind === 'node'
-    ? `actions/setup-node@${SETUP_NODE_ACTION_SHA}`
-    : toolchain.kind === 'go'
-      ? `actions/setup-go@${SETUP_GO_ACTION_SHA}`
-      : `actions/setup-python@${SETUP_PYTHON_ACTION_SHA}`;
-  const versionKey = toolchain.kind === 'node'
-    ? 'node-version'
-    : toolchain.kind === 'go' ? 'go-version' : 'python-version';
+  const action =
+    toolchain.kind === 'node'
+      ? `actions/setup-node@${SETUP_NODE_ACTION_SHA}`
+      : toolchain.kind === 'go'
+        ? `actions/setup-go@${SETUP_GO_ACTION_SHA}`
+        : `actions/setup-python@${SETUP_PYTHON_ACTION_SHA}`;
+  const versionKey =
+    toolchain.kind === 'node'
+      ? 'node-version'
+      : toolchain.kind === 'go'
+        ? 'go-version'
+        : 'python-version';
   const lines = [
     `      - name: ${yamlString(`toolchain / ${toolchain.kind} ${toolchain.version}`)}`,
     `        uses: ${action}`,
@@ -101,7 +110,9 @@ function toolchainStep(toolchain: QualityToolchain): string[] {
     `          ${versionKey}: ${yamlString(toolchain.version)}`,
   ];
   if (toolchain.cache !== undefined) {
-    lines.push(`          cache: ${typeof toolchain.cache === 'boolean' ? String(toolchain.cache) : yamlString(toolchain.cache)}`);
+    lines.push(
+      `          cache: ${typeof toolchain.cache === 'boolean' ? String(toolchain.cache) : yamlString(toolchain.cache)}`,
+    );
   }
   if (toolchain.cacheDependencyPath !== undefined) {
     lines.push(`          cache-dependency-path: ${yamlString(toolchain.cacheDependencyPath)}`);
@@ -145,6 +156,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
       `      - uses: actions/checkout@${CHECKOUT_ACTION_SHA}`,
       '        with:',
       '          fetch-depth: 0',
+      '          persist-credentials: false',
     );
     for (const toolchain of job.toolchains) lines.push(...toolchainStep(toolchain));
     job.setup.forEach((command, index) => {
@@ -172,9 +184,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     '        env:',
   );
   contract.github.jobs.forEach((job, index) => {
-    lines.push(
-      `          RESULT_${index + 1}: ` + '${{ needs.checks_' + job.id + '.result }}',
-    );
+    lines.push(`          RESULT_${index + 1}: ` + '${{ needs.checks_' + job.id + '.result }}');
   });
   lines.push(
     '        run: |',
@@ -419,12 +429,18 @@ export function renderManagedGitHubFiles(contract: QualityContract): Record<stri
     [POLICY_WORKFLOW_PATH]: renderPolicyGuardWorkflow(contract),
     [PULL_REQUEST_TEMPLATE_PATH]: renderPullRequestTemplate(),
     [P1_ISSUE_TEMPLATE_PATH]: issueTemplate(
-      'P1 延期', '登记一次有责任人和期限的 P1 延期', '[P1 延期]',
-      'quality-p1-deferral', contract.exceptions.p1.maxDays,
+      'P1 延期',
+      '登记一次有责任人和期限的 P1 延期',
+      '[P1 延期]',
+      'quality-p1-deferral',
+      contract.exceptions.p1.maxDays,
     ),
     [POLICY_ISSUE_TEMPLATE_PATH]: issueTemplate(
-      '质量政策例外', '登记一次有期限的质量政策变更例外', '[政策例外]',
-      'quality-policy-exception', contract.exceptions.policy.maxDays,
+      '质量政策例外',
+      '登记一次有期限的质量政策变更例外',
+      '[政策例外]',
+      'quality-policy-exception',
+      contract.exceptions.policy.maxDays,
     ),
   };
 }

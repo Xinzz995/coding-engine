@@ -1,0 +1,14 @@
+assets/workspace-safety/WindowsPathAttributes.cs text eol=lf
+assets/workspace-safety/WindowsPathInspectorProgram.cs text eol=lf
+assets/workspace-safety/WindowsJobAuthority.cs text eol=lf
+assets/workspace-safety/WindowsJobProcess.cs text eol=lf
+assets/workspace-safety/WindowsJobSupervisor.cs text eol=lf
+assets/workspace-safety/WindowsSupervisorProgram.cs text eol=lf
+assets/workspace-safety/coding-x-windows-supervisor.exe binary -filter
+assets/workspace-safety/coding-x-windows-path-inspector.exe binary -filter
+native/windows-supervisor/*.cs text eol=lf
+native/windows-supervisor/*.csproj text eol=lf
+native/windows-supervisor/*.config text eol=lf
+native/windows-supervisor/*.json text eol=lf
+native/windows-supervisor/*.ps1 text eol=lf
+build/compile-windows-test-fixture.ps1 text eol=lf

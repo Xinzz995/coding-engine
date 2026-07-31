@@ -3,35 +3,26 @@ import { writeFileAtomicSync } from './fs-atomic.js';
 import { join } from 'node:path';
 import type { Prd, Story } from './prd.js';
 import {
+  parseRunStateBytes,
+  type RunState,
+  type StoryState,
+} from '../contracts/run-state-contract.js';
+import {
   acceptanceHash,
+  isGitHead,
+  parseValidationReceipt,
+  VALIDATION_RECEIPT_SCHEMA_VERSION,
   VALIDATION_PROTOCOL_VERSION,
   type ValidationRequest,
-} from './validation-protocol.js';
+  type ValidationReceipt,
+} from '../contracts/validation-contract.js';
 
-export const VALIDATION_RECEIPT_SCHEMA_VERSION = 1 as const;
-
-export interface ValidationReceipt {
-  schemaVersion: typeof VALIDATION_RECEIPT_SCHEMA_VERSION;
-  requestId: string;
-  gitHead: string;
-  acceptanceHash: string;
-}
-
-export interface StoryState {
-  passes: boolean;
-  /** validator 已被引擎机械观察为正常完成；仅引擎可修改。 */
-  validated: boolean;
-  /** Validator 结论所绑定的精确提交与 Story/AC 身份；旧状态可缺省。 */
-  validationReceipt?: ValidationReceipt | null;
-  notes: string;
-  retryCount: number;
-  blocked: boolean;
-  /** 首次有效失败已触发专用升级路由；仅引擎可修改。 */
-  escalated: boolean;
-}
-
-/** key = story id */
-export type RunState = Record<string, StoryState>;
+export {
+  parseValidationReceipt,
+  VALIDATION_RECEIPT_SCHEMA_VERSION,
+} from '../contracts/validation-contract.js';
+export type { RunState, StoryState } from '../contracts/run-state-contract.js';
+export type { ValidationReceipt } from '../contracts/validation-contract.js';
 
 /** 仪表盘/展示用合并视图 */
 export type StoryView = Story & StoryState;
@@ -50,87 +41,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
-  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
-}
-
-function isGitHead(value: unknown): value is string {
-  return typeof value === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value);
-}
-
-function isAcceptanceHash(value: unknown): value is string {
-  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/.test(value);
-}
-
-/** 严格读取 v1 凭证；字段缺失、未知字段或任一非法值都拒绝。 */
-export function parseValidationReceipt(value: unknown): ValidationReceipt | null {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash'])
-  )
-    return null;
-  if (
-    value.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
-    typeof value.requestId !== 'string' ||
-    value.requestId.trim().length === 0 ||
-    !isGitHead(value.gitHead) ||
-    !isAcceptanceHash(value.acceptanceHash)
-  )
-    return null;
-  return {
-    schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
-    requestId: value.requestId,
-    gitHead: value.gitHead,
-    acceptanceHash: value.acceptanceHash,
-  };
-}
-
-function normalizeStoryState(v: unknown): StoryState | null {
-  if (!isRecord(v)) return null;
-  const s = v;
-  if (
-    typeof s.passes !== 'boolean' ||
-    typeof s.notes !== 'string' ||
-    typeof s.retryCount !== 'number' ||
-    typeof s.blocked !== 'boolean' ||
-    (s.validated !== undefined && typeof s.validated !== 'boolean') ||
-    (s.escalated !== undefined && typeof s.escalated !== 'boolean')
-  )
-    return null;
-  let validationReceipt: ValidationReceipt | null = null;
-  if (s.validationReceipt !== undefined && s.validationReceipt !== null) {
-    validationReceipt = parseValidationReceipt(s.validationReceipt);
-    if (!validationReceipt) return null;
-  }
-  const hasCurrentReceipt =
-    !s.blocked && s.passes && s.validated === true && validationReceipt !== null;
-  return {
-    passes: s.passes,
-    // 旧 state 缺少结构化凭证时只保留实现候选，绝不由 passes 反推已验收。
-    // validated 与 validationReceipt 是一个整体，任一缺失或脱离候选态都同时撤销。
-    validated: hasCurrentReceipt,
-    validationReceipt: hasCurrentReceipt ? validationReceipt : null,
-    notes: s.notes,
-    retryCount: s.retryCount,
-    blocked: s.blocked,
-    // v0.22.0 及更早 state 没有该字段：内存归一但不因读取立刻重写文件。
-    escalated: s.escalated ?? false,
-  };
-}
-
 export function tryReadState(path: string): RunState | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
-    const state: RunState = {};
-    for (const [id, raw] of Object.entries(parsed as Record<string, unknown>)) {
-      const normalized = normalizeStoryState(raw);
-      if (!normalized) return null;
-      state[id] = normalized;
-    }
-    return state;
+    const parsed = parseRunStateBytes(readFileSync(path));
+    return parsed.ok ? parsed.value : null;
   } catch {
     return null;
   }

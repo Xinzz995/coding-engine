@@ -40,6 +40,8 @@
     "lint": "eslint src",
     "repository-health": "vitest run src/doctor/repository-health.test.ts",
     "test": "vitest run",
+    "test:legacy-compat": "tsx src/workspace-safety/legacy-compatibility-ci.ts",
+    "test:windows-native-proof": "pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File build/run-windows-native-proof.ps1",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "version": "node build/sync-plugin-versions.mjs && git add .claude-plugin/plugin.json .cursor-plugin/plugin.json .codex-plugin/plugin.json src/version.ts",
