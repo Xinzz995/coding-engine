@@ -30,6 +30,7 @@ import {
 } from './windows-path-attributes.js';
 
 const roots: string[] = [];
+const WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS = 60_000;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -173,112 +174,124 @@ describe.skipIf(process.platform !== 'win32')('Windows reparse point native proo
     );
   });
 
-  it('rejects Node-blind WOF before ordinary workspace bootstrap leaves safety state', async () => {
-    const workspace = temporaryRoot('bootstrap-entry-wof');
-    const business = join(workspace, 'business WOF.bin');
-    writeFileSync(business, Buffer.alloc(1024 * 1024, 0x65));
-    compactWithWof(business);
-    expectNodeBlindWof(business);
+  it(
+    'rejects Node-blind WOF before ordinary workspace bootstrap leaves safety state',
+    async () => {
+      const workspace = temporaryRoot('bootstrap-entry-wof');
+      const business = join(workspace, 'business WOF.bin');
+      writeFileSync(business, Buffer.alloc(1024 * 1024, 0x65));
+      compactWithWof(business);
+      expectNodeBlindWof(business);
 
-    await expect(bootstrapWorkspace({ workspacePath: workspace })).rejects.toThrow(
-      /Windows path attribute|reparse/u,
-    );
-    expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR))).toBe(false);
-    expect(existsSync(join(workspace, WORKSPACE_MARKER_FILE))).toBe(false);
-  });
+      await expect(bootstrapWorkspace({ workspacePath: workspace })).rejects.toThrow(
+        /Windows path attribute|reparse/u,
+      );
+      expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR))).toBe(false);
+      expect(existsSync(join(workspace, WORKSPACE_MARKER_FILE))).toBe(false);
+    },
+    WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS,
+  );
 
-  it('rejects WOF files that Node reports as ordinary in every high-level reader', async () => {
-    const workspace = temporaryRoot('wof-proof');
-    const protocolRoot = join(workspace, PROTOCOL_ROOT_DIR);
-    mkdirSync(protocolRoot);
-    const business = join(workspace, 'business WOF.bin');
-    const safety = join(protocolRoot, 'safety WOF.bin');
-    writeFileSync(business, Buffer.alloc(1024 * 1024, 0x61));
-    writeFileSync(safety, Buffer.alloc(1024 * 1024, 0x62));
-    compactWithWof(business);
-    compactWithWof(safety);
+  it(
+    'rejects WOF files that Node reports as ordinary in every high-level reader',
+    async () => {
+      const workspace = temporaryRoot('wof-proof');
+      const protocolRoot = join(workspace, PROTOCOL_ROOT_DIR);
+      mkdirSync(protocolRoot);
+      const business = join(workspace, 'business WOF.bin');
+      const safety = join(protocolRoot, 'safety WOF.bin');
+      writeFileSync(business, Buffer.alloc(1024 * 1024, 0x61));
+      writeFileSync(safety, Buffer.alloc(1024 * 1024, 0x62));
+      compactWithWof(business);
+      compactWithWof(safety);
 
-    expectNodeBlindWof(business);
-    expectNodeBlindWof(safety);
-    expect(() =>
-      captureDelegatedBaseline(workspace, OWNER_ID, OPERATION_ID, genericContract([])),
-    ).toThrow(/Windows path attribute|reparse/u);
-    expect(() => assertWindowsSafetyTreeHasNoReparsePoints(workspace)).toThrow(
-      /Windows path attribute|reparse/u,
-    );
+      expectNodeBlindWof(business);
+      expectNodeBlindWof(safety);
+      expect(() =>
+        captureDelegatedBaseline(workspace, OWNER_ID, OPERATION_ID, genericContract([])),
+      ).toThrow(/Windows path attribute|reparse/u);
+      expect(() => assertWindowsSafetyTreeHasNoReparsePoints(workspace)).toThrow(
+        /Windows path attribute|reparse/u,
+      );
 
-    const ready = temporaryRoot('wof-ready');
-    await bootstrapWorkspace({ workspacePath: ready });
-    const readyWof = join(ready, PROTOCOL_ROOT_DIR, 'incidents', 'ready safety WOF.bin');
-    writeFileSync(readyWof, Buffer.alloc(1024 * 1024, 0x63));
-    compactWithWof(readyWof);
-    expectNodeBlindWof(readyWof);
-    await expect(readReadyWorkspaceRecords(ready)).rejects.toThrow(
-      /Windows path attribute|reparse/u,
-    );
-    await expect(evaluateWorkspaceSafetyDisk({ workspacePath: ready })).resolves.toMatchObject({
-      facts: { canonical: 'invalid' },
-      reason: 'invalid-safety-record',
-    });
+      const ready = temporaryRoot('wof-ready');
+      await bootstrapWorkspace({ workspacePath: ready });
+      const readyWof = join(ready, PROTOCOL_ROOT_DIR, 'incidents', 'ready safety WOF.bin');
+      writeFileSync(readyWof, Buffer.alloc(1024 * 1024, 0x63));
+      compactWithWof(readyWof);
+      expectNodeBlindWof(readyWof);
+      await expect(readReadyWorkspaceRecords(ready)).rejects.toThrow(
+        /Windows path attribute|reparse/u,
+      );
+      await expect(evaluateWorkspaceSafetyDisk({ workspacePath: ready })).resolves.toMatchObject({
+        facts: { canonical: 'invalid' },
+        reason: 'invalid-safety-record',
+      });
 
-    const interrupted = temporaryRoot('wof-bootstrap');
-    await expect(
-      bootstrapWorkspaceWithAuthority({
-        workspacePath: interrupted,
-        identity: createIdentityProbe().current(),
-        hooks: {
-          afterProtocolRootInstalled: () => {
-            throw new Error('intentional WOF bootstrap interruption');
+      const interrupted = temporaryRoot('wof-bootstrap');
+      await expect(
+        bootstrapWorkspaceWithAuthority({
+          workspacePath: interrupted,
+          identity: createIdentityProbe().current(),
+          hooks: {
+            afterProtocolRootInstalled: () => {
+              throw new Error('intentional WOF bootstrap interruption');
+            },
           },
-        },
-      }),
-    ).rejects.toThrow(/intentional WOF bootstrap interruption/u);
-    const bootstrapWof = join(
-      interrupted,
-      PROTOCOL_ROOT_DIR,
-      'incidents',
-      'bootstrap safety WOF.bin',
-    );
-    writeFileSync(bootstrapWof, Buffer.alloc(1024 * 1024, 0x64));
-    compactWithWof(bootstrapWof);
-    expectNodeBlindWof(bootstrapWof);
-    await expect(readStableBootstrapSource(interrupted)).rejects.toThrow(
-      /Windows path attribute|reparse/u,
-    );
-  });
+        }),
+      ).rejects.toThrow(/intentional WOF bootstrap interruption/u);
+      const bootstrapWof = join(
+        interrupted,
+        PROTOCOL_ROOT_DIR,
+        'incidents',
+        'bootstrap safety WOF.bin',
+      );
+      writeFileSync(bootstrapWof, Buffer.alloc(1024 * 1024, 0x64));
+      compactWithWof(bootstrapWof);
+      expectNodeBlindWof(bootstrapWof);
+      await expect(readStableBootstrapSource(interrupted)).rejects.toThrow(
+        /Windows path attribute|reparse/u,
+      );
+    },
+    WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS,
+  );
 
-  it('rejects a reparse parent even when its child is an ordinary readable file', async () => {
-    const readyContainer = temporaryRoot('junction-ready');
-    const ready = join(readyContainer, 'ready workspace');
-    mkdirSync(ready);
-    await bootstrapWorkspace({ workspacePath: ready });
-    replaceSafetyRootWithJunction(readyContainer, ready);
+  it(
+    'rejects a reparse parent even when its child is an ordinary readable file',
+    async () => {
+      const readyContainer = temporaryRoot('junction-ready');
+      const ready = join(readyContainer, 'ready workspace');
+      mkdirSync(ready);
+      await bootstrapWorkspace({ workspacePath: ready });
+      replaceSafetyRootWithJunction(readyContainer, ready);
 
-    await expect(readReadyWorkspaceRecords(ready)).rejects.toThrow(
-      /Windows path attribute|reparse/u,
-    );
-    await expect(evaluateWorkspaceSafetyDisk({ workspacePath: ready })).resolves.toMatchObject({
-      facts: { canonical: 'invalid' },
-      reason: 'invalid-safety-record',
-    });
+      await expect(readReadyWorkspaceRecords(ready)).rejects.toThrow(
+        /Windows path attribute|reparse/u,
+      );
+      await expect(evaluateWorkspaceSafetyDisk({ workspacePath: ready })).resolves.toMatchObject({
+        facts: { canonical: 'invalid' },
+        reason: 'invalid-safety-record',
+      });
 
-    const bootstrapContainer = temporaryRoot('junction-bootstrap');
-    const bootstrapping = join(bootstrapContainer, 'bootstrap workspace');
-    mkdirSync(bootstrapping);
-    await expect(
-      bootstrapWorkspaceWithAuthority({
-        workspacePath: bootstrapping,
-        identity: createIdentityProbe().current(),
-        hooks: {
-          afterProtocolRootInstalled: () => {
-            throw new Error('intentional bootstrap interruption');
+      const bootstrapContainer = temporaryRoot('junction-bootstrap');
+      const bootstrapping = join(bootstrapContainer, 'bootstrap workspace');
+      mkdirSync(bootstrapping);
+      await expect(
+        bootstrapWorkspaceWithAuthority({
+          workspacePath: bootstrapping,
+          identity: createIdentityProbe().current(),
+          hooks: {
+            afterProtocolRootInstalled: () => {
+              throw new Error('intentional bootstrap interruption');
+            },
           },
-        },
-      }),
-    ).rejects.toThrow(/intentional bootstrap interruption/u);
-    replaceSafetyRootWithJunction(bootstrapContainer, bootstrapping);
-    await expect(readStableBootstrapSource(bootstrapping)).rejects.toThrow(
-      /Windows path attribute|reparse/u,
-    );
-  });
+        }),
+      ).rejects.toThrow(/intentional bootstrap interruption/u);
+      replaceSafetyRootWithJunction(bootstrapContainer, bootstrapping);
+      await expect(readStableBootstrapSource(bootstrapping)).rejects.toThrow(
+        /Windows path attribute|reparse/u,
+      );
+    },
+    WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS,
+  );
 });

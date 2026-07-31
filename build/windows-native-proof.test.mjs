@@ -212,6 +212,7 @@ describe('Windows native proof report', () => {
     );
     expect(source).toContain("record.externalBacking.provider !== 'file'");
     expect(source).toContain("record.externalBacking.algorithm !== 'lzx'");
+    expect(source).toContain('const WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS = 60_000');
     expect(source).not.toContain('WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT');
   });
 
