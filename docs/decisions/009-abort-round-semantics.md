@@ -1,16 +1,16 @@
 ---
 title: 009-abort-round-semantics
 status: active
-updated: 2026-07-30
+updated: 2026-07-31
 scope: root
 ---
 
 # 009. 异常轮语义（agent 结局机械三分、回写待复核、stall 熔断、blocked 收敛出口）
 
-> 2026-07-30 事实修正：下文“进程树确认退出 + 工作区锁已关闭竞态”的结论只覆盖 timeout 调用
-> `terminateProcessTree` 成功的局部路径；completed/error、signal 先删锁、父进程崩溃、spawn 前后
-> 窗口和终止失败均未覆盖。ADR-021 / Issue #106 将统一子进程活动记录与写租约；完成前不能把该
-> 窗口描述为已经整体关闭。
+> 2026-07-31 当前状态：ADR-021 已用统一 session、workspace 写租约和 coordinator 取代本文旧的
+> pid-only 锁与局部 `terminateProcessTree` 收口边界。completed/error/timeout 只有在 containment
+> 确认清空且 delta 合法后才结算；父进程崩溃、终止失败或未完成 mutation 保留隔离并要求显式恢复。
+> 下文异常轮状态机仍有效，关于旧锁和旧进程树实现的段落只保留历史背景。
 
 ## 背景
 

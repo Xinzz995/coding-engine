@@ -200,6 +200,25 @@ namespace CodingX.WorkspaceSafety
                 command.Append('"');
                 return command;
             }
+            string executableName = Path.GetFileName(target.Executable);
+            if (String.Equals(executableName, "cmd", StringComparison.OrdinalIgnoreCase) ||
+                String.Equals(executableName, "cmd.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                string windows = Environment.GetEnvironmentVariable("SystemRoot");
+                string commandProcessor = Path.GetFullPath(
+                    Path.Combine(windows, "System32", "cmd.exe"));
+                if (!String.Equals(commandProcessor, Path.GetFullPath(target.Executable),
+                    StringComparison.OrdinalIgnoreCase))
+                    throw new SafetyException("only the fixed system cmd.exe target is supported");
+                if (target.Arguments.Length != 4 ||
+                    !String.Equals(target.Arguments[0], "/d", StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(target.Arguments[1], "/s", StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(target.Arguments[2], "/c", StringComparison.OrdinalIgnoreCase))
+                    throw new SafetyException("cmd.exe target must use the fixed /d /s /c shape");
+                application = commandProcessor;
+                return new StringBuilder(QuoteArgument(application))
+                    .Append(" /d /s /c \"").Append(target.Arguments[3]).Append('"');
+            }
             application = target.Executable;
             return new StringBuilder(String.Join(" ",
                 new string[] { application }.Concat(target.Arguments).Select(QuoteArgument).ToArray()));

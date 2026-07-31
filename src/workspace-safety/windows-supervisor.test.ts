@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   closeSync,
   existsSync,
@@ -36,6 +36,21 @@ import {
 } from './windows-supervisor.test-support.js';
 
 const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
+
+function sendEncodedData(
+  child: ChildProcessWithoutNullStreams,
+  workspacePath: string,
+  messageBase64: string,
+): void {
+  child.stdin.write(
+    `${JSON.stringify({
+      schemaVersion: 1,
+      type: 'DATA',
+      workspacePath,
+      messageBase64,
+    })}\n`,
+  );
+}
 
 windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false }, () => {
   it('fails before BOUND when the fixed helper digest is wrong', async () => {
@@ -134,6 +149,129 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       ],
     );
     await expect(events.next('ARMED')).rejects.toThrow(/environment/u);
+    await expect(events.exit).resolves.toEqual({ code: 2, signal: null });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('accepts canonical DATA base64 above 4096 chars while decoded DATA remains within 64 KiB', async () => {
+    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-windows-large-data-')));
+    created.push(workspace);
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    const environment = [
+      ...windowsTestTargetEnvironment(),
+      { name: 'CODING_X_PAD_A', value: 'a'.repeat(3000) },
+      { name: 'CODING_X_PAD_B', value: 'b'.repeat(3000) },
+    ];
+    const message = Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        type: 'DATA',
+        operationId: OPERATION_ID,
+        target: {
+          executable: realpathSync(process.execPath),
+          args: ['-e', 'process.exit(0)'],
+          cwd: workspace,
+          environment,
+        },
+      }),
+      'utf8',
+    );
+    expect(message.byteLength).toBeLessThanOrEqual(64 * 1024);
+    expect(message.toString('base64').length).toBeGreaterThan(4096);
+
+    sendData(
+      child,
+      workspace,
+      realpathSync(process.execPath),
+      ['-e', 'process.exit(0)'],
+      environment,
+    );
+    await events.next('ARMED');
+    sendEmbedded(child, 'ABORT_BEFORE_START', {
+      schemaVersion: 1,
+      type: 'ABORT_BEFORE_START',
+      operationId: OPERATION_ID,
+    });
+    await events.next('PRESTART_DRAINED');
+    await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it('rejects DATA decoded to exactly 64 KiB plus one byte before starting the target', async () => {
+    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-windows-data-limit-')));
+    created.push(workspace);
+    const marker = join(workspace, 'target-ran.txt');
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    const padding = Array.from({ length: 16 }, (_unused, index) => ({
+      name: `CODING_X_LIMIT_${String(index).padStart(2, '0')}`,
+      value: index < 15 ? 'x'.repeat(4096) : '',
+    }));
+    const message = {
+      schemaVersion: 1,
+      type: 'DATA',
+      operationId: OPERATION_ID,
+      target: {
+        executable: realpathSync(process.execPath),
+        args: [
+          '-e',
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+        ],
+        cwd: workspace,
+        environment: [...windowsTestTargetEnvironment(), ...padding],
+      },
+    };
+    let messageBytes = Buffer.from(JSON.stringify(message), 'utf8');
+    const remaining = 64 * 1024 + 1 - messageBytes.byteLength;
+    expect(remaining).toBeGreaterThan(0);
+    expect(remaining).toBeLessThanOrEqual(4096);
+    padding[15].value = 'y'.repeat(remaining);
+    messageBytes = Buffer.from(JSON.stringify(message), 'utf8');
+    expect(messageBytes.byteLength).toBe(64 * 1024 + 1);
+
+    sendEncodedData(child, workspace, messageBytes.toString('base64'));
+    await expect(events.next('ARMED')).rejects.toThrow(/too large/u);
+    await expect(events.exit).resolves.toEqual({ code: 2, signal: null });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('rejects non-canonical DATA base64 before starting the target', async () => {
+    const workspace = realpathSync(
+      mkdtempSync(join(tmpdir(), 'coding-x-windows-data-canonical-')),
+    );
+    created.push(workspace);
+    const marker = join(workspace, 'target-ran.txt');
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    const messageBytes = Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        type: 'DATA',
+        operationId: OPERATION_ID,
+        target: {
+          executable: realpathSync(process.execPath),
+          args: [
+            '-e',
+            `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+          ],
+          cwd: workspace,
+          environment: windowsTestTargetEnvironment(),
+        },
+      }),
+      'utf8',
+    );
+
+    sendEncodedData(child, workspace, `${messageBytes.toString('base64')}\n`);
+    await expect(events.next('ARMED')).rejects.toThrow(/non-canonical/u);
     await expect(events.exit).resolves.toEqual({ code: 2, signal: null });
     expect(existsSync(marker)).toBe(false);
   });
@@ -560,6 +698,118 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       receiptDigest: message.receiptDigest,
     });
     await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it('preserves nested quotes for the fixed cmd.exe /d /s /c target shape', async () => {
+    const workspace = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'coding-x windows cmd shell-')),
+    );
+    created.push(workspace);
+    const marker = join(workspace, 'cmd-shell-ran.txt');
+    const commandProcessor = realpathSync.native(
+      join(process.env.SystemRoot!, 'System32', 'cmd.exe'),
+    );
+    const node = realpathSync.native(process.execPath);
+    const script =
+      `"${node}" -e ` +
+      `"require('node:fs').writeFileSync(process.argv[1], 'quoted-ok')" ` +
+      `"${marker}"`;
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    sendData(
+      child,
+      workspace,
+      commandProcessor,
+      ['/d', '/s', '/c', script],
+      windowsTestTargetEnvironment(),
+    );
+    const armedEvent = await events.next('ARMED');
+    const containment = armedEvent.containment as Record<string, unknown>;
+    const armedBytes = installArmedAuthority(authority, containment);
+    sendEmbedded(child, 'START', {
+      schemaVersion: 1,
+      type: 'START',
+      operationId: OPERATION_ID,
+      activeChildDigest: DIGEST(armedBytes),
+    });
+    await events.next('STARTED');
+    const result = await events.next('RESULT');
+    expect(
+      result.code,
+      `target stdout: ${events.outputTail.stdout}\ntarget stderr: ${events.outputTail.stderr}\nmarker exists: ${existsSync(marker)}`,
+    ).toBe(0);
+    const drained = await events.next('DRAINED');
+    const message = JSON.parse(
+      Buffer.from(String(drained.messageBase64), 'base64').toString('utf8'),
+    ) as Record<string, unknown>;
+    expect(readFileSync(marker, 'utf8')).toBe('quoted-ok');
+    sendEmbedded(child, 'ACK', {
+      schemaVersion: 1,
+      type: 'ACK',
+      operationId: OPERATION_ID,
+      receiptDigest: message.receiptDigest,
+    });
+    await expect(events.exit).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it.each([
+    ['missing /s', ['/d', '/c']],
+    ['reordered /s and /c', ['/d', '/c', '/s']],
+    ['extra argument', ['/d', '/s', '/c', 'extra']],
+  ] as const)('rejects a system cmd.exe target with %s before ARMED', async (_label, prefix) => {
+    const workspace = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'coding-x-windows-cmd-shape-')),
+    );
+    created.push(workspace);
+    const marker = join(workspace, 'cmd-shape-ran.txt');
+    const commandProcessor = realpathSync.native(
+      join(process.env.SystemRoot!, 'System32', 'cmd.exe'),
+    );
+    const script = `echo rejected>${JSON.stringify(marker)}`;
+    const args = [...prefix, script];
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    sendData(
+      child,
+      workspace,
+      commandProcessor,
+      args,
+      windowsTestTargetEnvironment(),
+    );
+    await expect(events.next('ARMED')).rejects.toThrow(/fixed \/d \/s \/c shape/u);
+    await expect(events.exit).resolves.toEqual({ code: 2, signal: null });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('rejects a non-system executable named cmd.exe before ARMED', async () => {
+    const workspace = realpathSync.native(
+      mkdtempSync(join(tmpdir(), 'coding-x-windows-fake-cmd-')),
+    );
+    created.push(workspace);
+    const commandProcessor = join(workspace, 'cmd.exe');
+    const marker = join(workspace, 'fake-cmd-ran.txt');
+    writeFileSync(commandProcessor, '');
+    const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+    const child = spawnWindowsJobSupervisor(launch);
+    const events = new EventReader(child);
+    const bound = await events.next('BOUND');
+    installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
+    sendData(
+      child,
+      workspace,
+      commandProcessor,
+      ['/d', '/s', '/c', `echo rejected>${JSON.stringify(marker)}`],
+      windowsTestTargetEnvironment(),
+    );
+    await expect(events.next('ARMED')).rejects.toThrow(/fixed system cmd\.exe/u);
+    await expect(events.exit).resolves.toEqual({ code: 2, signal: null });
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('drains large stdout and stderr without hiding EOF behind a green root result', async () => {

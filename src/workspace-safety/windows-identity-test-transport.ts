@@ -1,18 +1,21 @@
 /**
  * TEST-ONLY transport selected by the ordinary Windows Vitest config.
  *
- * It preserves deterministic live/dead, platform-kind, host, and boot comparisons without
- * starting PowerShell for every fixture. It cannot prove PID reuse because its process identity is
- * derived from the PID; reuse-sensitive behavior remains covered by injected identity tests and
- * the required standard-user Windows proof, which always resolves the production transport.
+ * It preserves deterministic host and boot comparisons without starting PowerShell for every
+ * fixture. Live process identity still comes from the reviewed native inspector, so a real fixed
+ * supervisor and the parent observe the same Windows creation FILETIME. Only the still-executing
+ * Vitest process reuses its first exact FILETIME; every supervisor, target, missing, or unknown PID
+ * is re-read. The native proof bypasses this module and exercises every production recheck.
  */
 import type { ProcessIdentityLookup } from './identity.js';
 import type { WindowsIdentitySnapshot } from './windows-identity-transport.js';
+import { inspectWindowsProcessIdentity } from './windows-path-attributes.js';
 
 const TEST_HOST_IDENTITY = 'coding-x-windows-test-host-v1';
 const TEST_BOOT_IDENTITY = 'coding-x-windows-test-boot-v1';
 const MAX_TEST_INVOCATIONS = 10_000;
 let invocationCount = 0;
+let currentProcessIdentity: string | undefined;
 
 function recordInvocation(): void {
   invocationCount += 1;
@@ -21,17 +24,48 @@ function recordInvocation(): void {
   }
 }
 
+function pidPresence(pid: number): 'present' | 'missing' | 'unknown' {
+  try {
+    process.kill(pid, 0);
+    return 'present';
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ESRCH' ? 'missing' : 'unknown';
+  }
+}
+
 function fixtureProcessIdentity(pid: number): string {
   return (100_000_000_000_000_000n + BigInt(pid)).toString();
 }
 
+export function resetWindowsIdentityTestTransport(): void {
+  invocationCount = 0;
+  currentProcessIdentity = undefined;
+}
+
 function processIdentity(pid: number): ProcessIdentityLookup {
+  // Cross-platform unit tests import this Windows-only transport directly. They still need a
+  // deterministic fixture identity when no Windows inspector can run. Ordinary Windows Vitest,
+  // however, must use the native identity so it can supervise the real fixed executable.
+  if (process.platform !== 'win32') {
+    const presence = pidPresence(pid);
+    return presence === 'present'
+      ? { status: 'found', value: fixtureProcessIdentity(pid) }
+      : { status: presence };
+  }
+  if (pid === process.pid && currentProcessIdentity !== undefined) {
+    return { status: 'found', value: currentProcessIdentity };
+  }
   try {
-    process.kill(pid, 0);
-    return { status: 'found', value: fixtureProcessIdentity(pid) };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    return code === 'ESRCH' ? { status: 'missing' } : { status: 'unknown' };
+    const observed = inspectWindowsProcessIdentity(pid);
+    if (pid === process.pid && observed.status === 'found') {
+      currentProcessIdentity = observed.value;
+    }
+    return observed.status === 'found'
+      ? { status: 'found', value: observed.value }
+      : { status: observed.status };
+  } catch {
+    return { status: 'unknown' };
   }
 }
 

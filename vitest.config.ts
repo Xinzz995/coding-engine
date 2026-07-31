@@ -41,8 +41,9 @@ export default defineConfig({
         ? windowsNativeSuitePaths
         : ['src/workspace-safety/windows-reparse-point.windows.test.ts'],
     environment: 'node',
-    // Windows runner 上大量临时 Git 仓库和子进程并行会争抢文件与 CPU，产生级联超时。
-    // 保留完整测试集和原超时阈值，仅按文件顺序执行；其他平台继续并行。
-    fileParallelism: process.platform !== 'win32',
+    // 安全回归会启动大量真实进程树、临时 Git 仓库和本机检查器；按文件并行会争抢
+    // 进程与 CPU，并让原本用于判定隔离失败的短超时产生级联假失败。保留完整测试集
+    // 和原超时阈值，在所有平台按文件顺序执行。
+    fileParallelism: false,
   },
 });

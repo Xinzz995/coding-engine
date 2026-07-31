@@ -254,6 +254,9 @@ Reviewer 不在开发者工作目录执行。引擎从绑定的 Git 对象建立
 - Claude：安全模式、计划权限、无会话持久化、严格空 MCP，只开放所需读取工具；
 - Cursor：ask/plan 模式、启用沙箱，不自动批准 MCP；
 - 所有 runner 禁用项目 MCP、hooks、插件和浏览器能力，并使用最小环境变量；
+- Windows v1 的 AI Runner 必须解析为非 `.cmd/.bat` 的原生入口；无法提供时，Developer/Validator
+  执行失败，Final Review 返回 `unverifiable`。不得自动解包安装器脚本或回退 `shell:true`；
+  普通/TDD 项目检查的 `.cmd` 能力不受此限制；
 - 每个 runner 必须通过真实的写文件、危险命令、秘密读取和 MCP 调用反向测试后，才能标记
   为支持。
 

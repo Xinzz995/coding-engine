@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { collectReport, parseScreenshotEntry, writeReport } from './report.js';
 import { appendEvidence } from '../engine/evidence.js';
+import { previousFinalReview } from '../engine/loop-test-support.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
@@ -54,6 +55,41 @@ describe('collectReport 三态', () => {
 });
 
 describe('collectReport ok 收集', () => {
+  it('没有可信当前性观察时不把保存的 Review 当作当前结果，且拒绝观察后的状态替换', () => {
+    const dir = ws();
+    writePrd(dir, [story('US-001')]);
+    const first = previousFinalReview('b'.repeat(40));
+    writeFileSync(join(dir, 'final-review.json'), `${JSON.stringify(first)}\n`);
+
+    const unobserved = collectReport(dir, new Date());
+    if (unobserved.status !== 'ok') throw new Error('expected ok');
+    expect(unobserved.data.finalReview).toMatchObject({
+      current: false,
+      staleReasons: [expect.stringContaining('未重新核验')],
+    });
+
+    const observed = {
+      read: { status: 'ready' as const, state: first },
+      current: true,
+      staleReasons: [],
+      refreshedRemote: first.remote,
+    };
+    const current = collectReport(dir, new Date(), { currentReview: observed });
+    if (current.status !== 'ok') throw new Error('expected ok');
+    expect(current.data.finalReview.current).toBe(true);
+
+    writeFileSync(
+      join(dir, 'final-review.json'),
+      `${JSON.stringify(previousFinalReview('c'.repeat(40)))}\n`,
+    );
+    const replaced = collectReport(dir, new Date(), { currentReview: observed });
+    if (replaced.status !== 'ok') throw new Error('expected ok');
+    expect(replaced.data.finalReview).toMatchObject({
+      current: false,
+      staleReasons: [expect.stringContaining('状态已变化')],
+    });
+  });
+
   it('全量素材各就各位：state 合并、review 名序、tampered 名序、截图归属', () => {
     const dir = ws();
     writePrd(dir, [story('US-001'), story('US-002')]);

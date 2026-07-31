@@ -1,22 +1,33 @@
 import { describe, it, expect } from 'vitest';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
+import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from '../workspace-safety/types.js';
 import { readEvidence } from './evidence.js';
-import { setup, story, runLoop, fakeCounting } from './loop-test-support.js';
+import { runLoop as runProductionLoop } from './loop.js';
+import { setup, story, runLoop, fakeCounting, strictConfig } from './loop-test-support.js';
 
 describe('runLoop evidence records', () => {
   it('writes gate-run (pass) and iteration records for a completing run', async () => {
-    const { workspace, instructionsDir } = setup([story()], {
+    const { projectRoot, workspace, instructionsDir } = setup([story()], {
       qualityChecks: ['node -e "process.exit(0)"'],
     });
     const fake = join(workspace, 'fake.mjs');
+    const calls = join(projectRoot, 'completing-evidence-calls.txt');
     writeFileSync(
       fake,
       `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
+      import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+      const callsPath = ${JSON.stringify(calls)};
+      const call = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf8')) + 1 : 1;
+      writeFileSync(callsPath, String(call));
+      if (call !== 1) process.exit(0);
+      const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      state['US-001'].notes = '';
+      state['US-001'].blocked = false;
+      writeFileSync(statePath, JSON.stringify(state));
       process.exit(0);
     `,
     );
@@ -59,7 +70,7 @@ describe('runLoop evidence records', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, 20_000);
 
   it('writes a failing gate-run and a gateRejected iteration record for the rolled-back round', async () => {
     const { workspace, instructionsDir } = setup([story()], {
@@ -105,9 +116,11 @@ describe('runLoop evidence records', () => {
   });
 
   it('保留 validator 打回 notes，即使成功重试已清空当前 state', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { projectRoot, workspace, instructionsDir } = setup([
+      story({ acceptanceCriteria: ['返回 401'] }),
+    ]);
     const fake = join(workspace, 'fake-validator-diagnostic.mjs');
-    const calls = join(workspace, 'diagnostic-calls.txt');
+    const calls = join(projectRoot, 'diagnostic-calls.txt');
     const statePath = join(workspace, 'state.json');
     writeFileSync(
       fake,
@@ -117,41 +130,58 @@ describe('runLoop evidence records', () => {
       const count = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf-8')) + 1 : 1;
       writeFileSync(callsPath, String(count));
       const statePath = ${JSON.stringify(statePath)};
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
       if (count === 1 || count === 3) {
+        const state = JSON.parse(readFileSync(statePath, 'utf-8'));
         state['US-001'].passes = true;
         state['US-001'].notes = '';
         appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder progress ' + count + '\\n');
-      } else if (count === 2) {
-        state['US-001'].passes = false;
-        state['US-001'].retryCount += 1;
-        state['US-001'].notes = '首轮失败：test_signature\\nexpected 401 <script>alert(1)</script>';
+        writeFileSync(statePath, JSON.stringify(state));
+      } else {
+        const prompt = process.argv.at(-1) ?? '';
+        const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+        const jsonAt = prompt.indexOf('{', markerAt);
+        const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);
+        if (markerAt < 0 || jsonAt < 0 || fenceAt < 0) process.exit(9);
+        const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+        const passed = count === 4;
+        writeFileSync(request.resultPath, JSON.stringify({
+          version: 1,
+          requestId: request.requestId,
+          storyId: request.storyId,
+          acceptanceHash: request.acceptanceHash,
+          gitHead: request.gitHead,
+          verdict: passed ? 'passed' : 'failed',
+          checks: request.acceptanceCriteria.map((_, index) => ({
+            acIndex: index + 1,
+            passed,
+            evidence: passed
+              ? 'fixture verified'
+              : '首轮失败：test_signature\\nexpected 401 <script>alert(1)</script>',
+          })),
+          summary: passed ? 'passed' : '首轮失败：test_signature',
+        }));
       }
-      writeFileSync(statePath, JSON.stringify(state));
       process.exit(0);
     `,
     );
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       expect(
-        await runLoop({
-          kind: 'claude',
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
           maxIterations: 2,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
         }),
       ).toBe(0);
       expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001'].notes).toBe('');
       const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
       expect(iterations).toHaveLength(2);
-      expect(iterations[0]).toMatchObject({
-        validatorOutcome: 'completed',
-        validatorDiagnostic: '首轮失败：test_signature\nexpected 401 <script>alert(1)</script>',
-      });
+      expect(iterations[0]).toMatchObject({ validatorOutcome: 'completed' });
+      expect((iterations[0] as { validatorDiagnostic?: string }).validatorDiagnostic).toContain(
+        '首轮失败：test_signature',
+      );
+      expect((iterations[0] as { validatorDiagnostic?: string }).validatorDiagnostic).toContain(
+        'expected 401 <script>alert(1)</script>',
+      );
       expect(iterations[1]).not.toHaveProperty('validatorDiagnostic');
       const report = readFileSync(join(workspace, 'report.html'), 'utf-8');
       expect(report).toContain('首轮失败：test_signature');
@@ -160,9 +190,9 @@ describe('runLoop evidence records', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, 20_000);
 
-  it('writes a tamper record with the archive filename when builder tampers prd.json', async () => {
+  it('isolates builder PRD tampering instead of writing ordinary tamper evidence', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const prdPath = join(workspace, 'prd.json');
     const fake = join(workspace, 'fake-tamper-ev.mjs');
@@ -186,24 +216,19 @@ describe('runLoop evidence records', () => {
     const origWarn = console.warn;
     console.warn = () => {};
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 2,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      });
-      expect(code).toBe(0);
+      const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
+      expect(code).toBe(2);
       const { records } = readEvidence(workspace);
       const tampers = records.filter((r) => r.type === 'tamper');
-      expect(tampers).toHaveLength(1); // 同内容去重：只记新事件
-      expect(tampers[0].archive).toMatch(/^prd\.tampered-.*\.json$/); // 文件名而非路径
+      expect(tampers).toHaveLength(0);
+      expect(records.some((record) => record.type === 'iteration')).toBe(false);
+      const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+      expect(existsSync(join(operation, QUARANTINE_FILE))).toBe(true);
+      expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(true);
+      expect(existsSync(join(workspace, 'report.html'))).toBe(false);
     } finally {
       console.warn = origWarn;
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, 20_000);
 });

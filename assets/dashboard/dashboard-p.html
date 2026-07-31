@@ -273,7 +273,8 @@ const FALLBACK = {
   - 类型定义放在 app/types.ts，示例数据放在 app/sample-data.ts`,
   runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus", route_source: "difficulty", story_difficulty: "medium", runner: "claude" },
   stateCorrupted: false,
-  modelRouting: { status: "disabled", config: null, errors: [] }
+  modelRouting: { status: "disabled", config: null, errors: [] },
+  workspaceSafety: null
 };
 
 const POLL_MS = 2000;
@@ -599,9 +600,14 @@ function render() {
   html += '</div></div></div>';
 
   // Status bar
+  const workspaceSafety = dashboardData.workspaceSafety;
+  const workspaceSafetyText = workspaceSafety
+    ? `🧱 ${workspaceSafety.display.label}（${workspaceSafety.status}） · ${workspaceSafety.display.summary}${workspaceSafety.display.guidance ? ' · '+workspaceSafety.display.guidance : ''}`
+    : 'workspace 安全状态未读取';
   html += `<div class="game-status-bar">
     <span>🏢 ${dashboardData.project || ''}</span>
     <span>⎇ ${dashboardData.branchName || ''}</span>
+    <span>${workspaceSafetyText}</span>
     <span>${new Date().toLocaleTimeString('zh-CN')}</span>
   </div>`;
 

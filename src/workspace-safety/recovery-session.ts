@@ -1,10 +1,33 @@
+import type { BootstrapRecoveryAttemptHandle } from './bootstrap-recovery.js';
+import {
+  finalizeBootstrapRecoveryControlled,
+  type BootstrapRecoveryCompletion,
+} from './bootstrap-recovery-finalize.js';
+import {
+  finalizeDelegatedRecoveryControlled,
+  type DelegatedRecoveryCompletion,
+} from './delegated-recovery-finalize.js';
+import { readFixedPlatformHelperBundle } from './fixed-platform-helper.js';
+import { captureExactCurrentIdentityAuthority } from './identity.js';
+import {
+  resumeMutationRecoveryControlled,
+  type MutationRecoveryCompletion,
+} from './mutation-recovery.js';
+import {
+  finalizePrestartRecoveryControlled,
+  type PrestartRecoveryCompletion,
+} from './prestart-recovery-finalize.js';
+import type { RecoveryAttemptHandle } from './recovery-attempt.js';
 import {
   finalizeMechanicalEmptyRecoveryControlled,
   type ControlledFinalizeMechanicalEmptyRecoveryOptions,
   type MechanicalEmptyRecoveryCompletion,
 } from './recovery-finalize.js';
-import { captureExactCurrentIdentityAuthority } from './identity.js';
-import type { RecoveryAttemptHandle } from './recovery-attempt.js';
+import {
+  finalizeSameHostRebootRecoveryControlled,
+  type SameHostRebootRecoveryCompletion,
+  type SameHostRebootRecoveryHandle,
+} from './reboot-recovery.js';
 import { WorkspaceSafetyError } from './types.js';
 
 export type RecoverySessionState =
@@ -12,7 +35,15 @@ export type RecoverySessionState =
 
 export type RecoveryInterruptReason = 'user-interrupt';
 
-export type RecoveryInterruptResult =
+export interface RecoverySessionCompletion {
+  readonly workspacePath: string;
+  readonly targetArchive: string;
+  readonly archivePath: string;
+}
+
+export type RecoveryInterruptResult<
+  Completion extends RecoverySessionCompletion = MechanicalEmptyRecoveryCompletion,
+> =
   | {
       readonly status: 'preserved';
       readonly reason: RecoveryInterruptReason;
@@ -20,7 +51,7 @@ export type RecoveryInterruptResult =
   | {
       readonly status: 'ready';
       readonly reason: RecoveryInterruptReason;
-      readonly completion: MechanicalEmptyRecoveryCompletion;
+      readonly completion: Completion;
     };
 
 export type ControlledRecoverySessionOptions = Omit<
@@ -31,36 +62,65 @@ export type ControlledRecoverySessionOptions = Omit<
   | 'finalRenameCommitCheck'
 >;
 
+type RecoveryFinalizer<Completion extends RecoverySessionCompletion> = (
+  finalRenameCommitCheck: () => void,
+) => Promise<Completion>;
+
 const RECOVERY_SESSION_AUTHORITY = Symbol('recovery-session-authority');
 
+function mechanicalFinalizer(
+  attempt: RecoveryAttemptHandle,
+  options: ControlledRecoverySessionOptions,
+): RecoveryFinalizer<MechanicalEmptyRecoveryCompletion> {
+  return async (finalRenameCommitCheck) => {
+    const system = captureExactCurrentIdentityAuthority();
+    return await finalizeMechanicalEmptyRecoveryControlled(attempt, {
+      ...options,
+      attemptIdentity: system.identity,
+      probeSourceOwner: system.probeOwner,
+      verifySystemAuthority: system.verifyCurrent,
+      finalRenameCommitCheck,
+    });
+  };
+}
+
 /**
- * Dark-only recovery coordinator. It is intentionally not connected to the CLI until the full
- * recovery activation PR can route signals and every recovery writer through this one owner.
+ * The one recovery coordinator that serializes the first supported user interrupt with the final
+ * active-lease rename. Mode-specific factories below supply the only trusted finalizer callback.
  */
-export class RecoverySession {
+export class RecoverySession<
+  Completion extends RecoverySessionCompletion = MechanicalEmptyRecoveryCompletion,
+  Attempt = RecoveryAttemptHandle,
+> {
   #state: RecoverySessionState = 'open';
   #interruptReason: RecoveryInterruptReason | undefined;
-  #interruptPromise: Promise<RecoveryInterruptResult> | undefined;
-  #finalizePromise: Promise<MechanicalEmptyRecoveryCompletion> | undefined;
-  #completion: MechanicalEmptyRecoveryCompletion | undefined;
-  readonly #options: ControlledRecoverySessionOptions;
+  #interruptPromise: Promise<RecoveryInterruptResult<Completion>> | undefined;
+  #finalizePromise: Promise<Completion> | undefined;
+  #completion: Completion | undefined;
+  readonly #finalizer: RecoveryFinalizer<Completion>;
 
   constructor(
     token: typeof RECOVERY_SESSION_AUTHORITY,
-    readonly attempt: RecoveryAttemptHandle,
+    readonly attempt: Attempt,
     options: ControlledRecoverySessionOptions,
+    finalizer?: RecoveryFinalizer<Completion>,
   ) {
     if (token !== RECOVERY_SESSION_AUTHORITY) {
       throw new WorkspaceSafetyError('invalid', 'recovery session authority token is invalid');
     }
-    this.#options = options;
+    this.#finalizer =
+      finalizer ??
+      (mechanicalFinalizer(
+        attempt as unknown as RecoveryAttemptHandle,
+        options,
+      ) as unknown as RecoveryFinalizer<Completion>);
   }
 
   get state(): RecoverySessionState {
     return this.#state;
   }
 
-  finalize(): Promise<MechanicalEmptyRecoveryCompletion> {
+  finalize(): Promise<Completion> {
     if (this.#finalizePromise) return this.#finalizePromise;
     if (this.#state !== 'open') {
       return Promise.reject(
@@ -69,21 +129,15 @@ export class RecoverySession {
     }
 
     this.#state = 'finalizing';
-    const system = captureExactCurrentIdentityAuthority();
-    const running = finalizeMechanicalEmptyRecoveryControlled(this.attempt, {
-      ...this.#options,
-      probeSourceOwner: system.probeOwner,
-      verifySystemAuthority: system.verifyCurrent,
-      finalRenameCommitCheck: () => {
-        if (this.#interruptReason) {
-          this.#state = 'preserved';
-          throw new WorkspaceSafetyError(
-            'closed',
-            'recovery finalization 在最终 rename 前收到用户中断',
-          );
-        }
-        this.#state = 'committing';
-      },
+    const running = this.#finalizer(() => {
+      if (this.#interruptReason) {
+        this.#state = 'preserved';
+        throw new WorkspaceSafetyError(
+          'closed',
+          'recovery finalization 在最终 rename 前收到用户中断',
+        );
+      }
+      this.#state = 'committing';
     });
     this.#finalizePromise = running.then(
       (completion) => {
@@ -101,7 +155,7 @@ export class RecoverySession {
 
   requestInterrupt(
     reason: RecoveryInterruptReason = 'user-interrupt',
-  ): Promise<RecoveryInterruptResult> {
+  ): Promise<RecoveryInterruptResult<Completion>> {
     if (this.#interruptPromise) return this.#interruptPromise;
     this.#interruptReason = reason;
 
@@ -128,21 +182,98 @@ export class RecoverySession {
       throw new WorkspaceSafetyError('invalid', 'recovery session finalization 状态不完整');
     }
     this.#interruptPromise = finalization.then(
-      (completion): RecoveryInterruptResult => ({ status: 'ready', reason, completion }),
-      (): RecoveryInterruptResult => ({ status: 'preserved', reason }),
+      (completion): RecoveryInterruptResult<Completion> => ({
+        status: 'ready',
+        reason,
+        completion,
+      }),
+      (): RecoveryInterruptResult<Completion> => ({ status: 'preserved', reason }),
     );
     return this.#interruptPromise;
   }
 }
 
-export function createRecoverySession(attempt: RecoveryAttemptHandle): RecoverySession {
+export function createRecoverySession(
+  attempt: RecoveryAttemptHandle,
+): RecoverySession<MechanicalEmptyRecoveryCompletion> {
   return new RecoverySession(RECOVERY_SESSION_AUTHORITY, attempt, {});
+}
+
+export function createBootstrapRecoverySession(
+  attempt: BootstrapRecoveryAttemptHandle,
+): RecoverySession<BootstrapRecoveryCompletion, BootstrapRecoveryAttemptHandle> {
+  return new RecoverySession(RECOVERY_SESSION_AUTHORITY, attempt, {}, async (commitCheck) => {
+    const system = captureExactCurrentIdentityAuthority();
+    return await finalizeBootstrapRecoveryControlled(attempt, {
+      attemptIdentity: system.identity,
+      probeSourceOwner: system.probeOwner,
+      verifySystemAuthority: system.verifyCurrent,
+      finalRenameCommitCheck: commitCheck,
+    });
+  });
+}
+
+export function createDelegatedRecoverySession(
+  attempt: RecoveryAttemptHandle,
+): RecoverySession<DelegatedRecoveryCompletion> {
+  return new RecoverySession(RECOVERY_SESSION_AUTHORITY, attempt, {}, async (commitCheck) => {
+    const system = captureExactCurrentIdentityAuthority();
+    return await finalizeDelegatedRecoveryControlled(attempt, {
+      attemptIdentity: system.identity,
+      probeSourceOwner: system.probeOwner,
+      verifySystemAuthority: system.verifyCurrent,
+      finalRenameCommitCheck: commitCheck,
+    });
+  });
+}
+
+export function createPrestartRecoverySession(
+  attempt: RecoveryAttemptHandle,
+): RecoverySession<PrestartRecoveryCompletion> {
+  return new RecoverySession(RECOVERY_SESSION_AUTHORITY, attempt, {}, async (commitCheck) => {
+    const system = captureExactCurrentIdentityAuthority();
+    return await finalizePrestartRecoveryControlled(attempt, {
+      attemptIdentity: system.identity,
+      helperBytes: readFixedPlatformHelperBundle(),
+      probeSourceOwner: system.probeOwner,
+      verifySystemAuthority: system.verifyCurrent,
+      finalRenameCommitCheck: commitCheck,
+    });
+  });
+}
+
+export function createSameHostRebootRecoverySession(
+  attempt: SameHostRebootRecoveryHandle,
+): RecoverySession<SameHostRebootRecoveryCompletion, SameHostRebootRecoveryHandle> {
+  return new RecoverySession(
+    RECOVERY_SESSION_AUTHORITY,
+    attempt,
+    {},
+    async (commitCheck) =>
+      await finalizeSameHostRebootRecoveryControlled(attempt, {
+        finalRenameCommitCheck: commitCheck,
+      }),
+  );
+}
+
+export function createMutationRecoverySession(
+  attempt: RecoveryAttemptHandle,
+): RecoverySession<MutationRecoveryCompletion> {
+  return new RecoverySession(RECOVERY_SESSION_AUTHORITY, attempt, {}, async (commitCheck) => {
+    const system = captureExactCurrentIdentityAuthority();
+    return await resumeMutationRecoveryControlled(attempt, {
+      attemptIdentity: system.identity,
+      probeSourceOwner: system.probeOwner,
+      verifySystemAuthority: system.verifyCurrent,
+      finalRenameCommitCheck: commitCheck,
+    });
+  });
 }
 
 /** @internal Deterministic coordinator seam. */
 export function createRecoverySessionControlled(
   attempt: RecoveryAttemptHandle,
   options: ControlledRecoverySessionOptions = {},
-): RecoverySession {
+): RecoverySession<MechanicalEmptyRecoveryCompletion> {
   return new RecoverySession(RECOVERY_SESSION_AUTHORITY, attempt, options);
 }

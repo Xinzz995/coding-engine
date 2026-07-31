@@ -18,7 +18,9 @@ import { MAX_SAFETY_STRING_LENGTH } from './schema.js';
 import {
   readWindowsIdentitySnapshot as readWindowsIdentityTestSnapshot,
   readWindowsProcessIdentity as readWindowsTestProcessIdentity,
+  resetWindowsIdentityTestTransport,
 } from './windows-identity-test-transport.js';
+import * as windowsPathAttributes from './windows-path-attributes.js';
 
 const digest = `sha256:${'a'.repeat(64)}`;
 
@@ -246,6 +248,90 @@ describe('platform identity probe', () => {
         processIdentity: { kind: 'windows-filetime', value: '100000002000000000' },
       }),
     ).toBe('dead');
+  });
+
+  it('caches only the still-executing test process identity in the ordinary Windows transport', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const otherPid = process.pid + 1;
+    const inspect = vi
+      .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentity')
+      .mockImplementation((pid) =>
+        pid === process.pid
+          ? {
+              schemaVersion: 1,
+              mode: 'process-identity-v1',
+              pid,
+              status: 'found',
+              value: '100000000000000001',
+            }
+          : {
+              schemaVersion: 1,
+              mode: 'process-identity-v1',
+              pid,
+              status: 'missing',
+              value: null,
+            },
+      );
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    resetWindowsIdentityTestTransport();
+    try {
+      const expected = {
+        status: 'found' as const,
+        value: '100000000000000001',
+      };
+      expect(readWindowsTestProcessIdentity(process.pid)).toEqual(expected);
+      expect(readWindowsIdentityTestSnapshot(process.pid).processIdentity).toEqual(expected);
+      expect(readWindowsTestProcessIdentity(otherPid)).toEqual({ status: 'missing' });
+      expect(readWindowsTestProcessIdentity(otherPid)).toEqual({ status: 'missing' });
+      expect(inspect).toHaveBeenCalledTimes(3);
+      expect(inspect).toHaveBeenNthCalledWith(1, process.pid);
+      expect(inspect).toHaveBeenNthCalledWith(2, otherPid);
+      expect(inspect).toHaveBeenNthCalledWith(3, otherPid);
+    } finally {
+      resetWindowsIdentityTestTransport();
+      inspect.mockRestore();
+      if (platform) Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
+  it('never caches an unavailable current-process identity in the ordinary Windows transport', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const inspect = vi
+      .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentity')
+      .mockReturnValueOnce({
+        schemaVersion: 1,
+        mode: 'process-identity-v1',
+        pid: process.pid,
+        status: 'unknown',
+        value: null,
+      })
+      .mockReturnValueOnce({
+        schemaVersion: 1,
+        mode: 'process-identity-v1',
+        pid: process.pid,
+        status: 'found',
+        value: '100000000000000002',
+      });
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    resetWindowsIdentityTestTransport();
+    try {
+      expect(readWindowsTestProcessIdentity(process.pid)).toEqual({ status: 'unknown' });
+      expect(readWindowsIdentityTestSnapshot(process.pid).processIdentity).toEqual({
+        status: 'found',
+        value: '100000000000000002',
+      });
+      expect(readWindowsTestProcessIdentity(process.pid)).toEqual({
+        status: 'found',
+        value: '100000000000000002',
+      });
+      expect(inspect).toHaveBeenCalledTimes(2);
+      expect(inspect).toHaveBeenNthCalledWith(1, process.pid);
+      expect(inspect).toHaveBeenNthCalledWith(2, process.pid);
+    } finally {
+      resetWindowsIdentityTestTransport();
+      inspect.mockRestore();
+      if (platform) Object.defineProperty(process, 'platform', platform);
+    }
   });
 
   it('keeps process-only Windows liveness checks separate from the combined system snapshot', () => {

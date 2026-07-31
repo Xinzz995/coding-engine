@@ -51,6 +51,7 @@ import {
   type ScanSnapshot,
   type StatSignature,
 } from './baseline-contract.js';
+import { workspaceDirectoryIdentity } from './filesystem.js';
 import { assertWindowsWorkspaceTreeHasNoReparsePoints } from './windows-path-attributes.js';
 
 export {
@@ -380,12 +381,7 @@ export function captureDelegatedBaseline(
   const canonicalWorkspace = realpathSync(workspace);
   const workspaceInfo = statSync(canonicalWorkspace, { bigint: true });
   if (!workspaceInfo.isDirectory()) invalid('workspace canonical path 必须是 directory');
-  const workspaceIdentity = digestBytes(
-    Buffer.from(
-      `${canonicalWorkspace}\0${workspaceInfo.dev.toString()}\0${workspaceInfo.ino.toString()}`,
-      'utf8',
-    ),
-  );
+  const workspaceIdentity = workspaceDirectoryIdentity(canonicalWorkspace, workspaceInfo);
   const contract = validateContract(requestedContract);
   const snapshot = scanWorkspaceStable(canonicalWorkspace, contract, 'baseline', hooks);
   validateRuleTargets(contract, snapshot.entries);

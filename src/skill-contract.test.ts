@@ -44,25 +44,28 @@ describe('prd-to-json 模型路由 prompt 合同', () => {
     ]) expect(skill).toContain(anchor);
   });
 
-  it('写入前机械检查 workspace Git 隔离且不擅改用户仓库', () => {
+  it('用同一显式 workspace 做只读 Git 隔离且不擅改用户仓库', () => {
     for (const anchor of [
       'git rev-parse --is-inside-work-tree',
-      'git ls-files -- .workspace',
-      'git check-ignore -q --no-index .workspace/',
+      '同一个 `<workspace-dir>`',
+      '是否已有文件被跟踪',
+      '是否被 Git 忽略',
       '不得自动修改 `.gitignore`',
       '不得自动执行 `git rm --cached`',
       '用户明确选择',
     ]) expect(skill).toContain(anchor);
+    expect(skill).not.toContain('git ls-files -- .workspace');
+    expect(skill).not.toContain('git check-ignore -q --no-index .workspace/');
   });
 
-  it('归档或再派生前检查活跃工作区锁且不擅自删锁', () => {
+  it('把租约和业务写入完全交给固定 CLI 入口', () => {
     for (const anchor of [
-      'npx coding-x doctor --workspace .workspace',
-      '`engine.lock`',
-      '引擎运行中',
-      '停止派生',
-      '不得删除 `engine.lock`',
-      '真正写入前再次运行',
+      'npx coding-x doctor --json --workspace <workspace-dir>',
+      '不预检、删除、修复或接管 workspace 租约',
+      'workspace apply-prd',
+      '原子获取结果',
+      '保持零业务写入',
+      '不得改成直接写 workspace',
     ]) expect(skill).toContain(anchor);
   });
 

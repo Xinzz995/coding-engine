@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { spawn, execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -12,17 +11,37 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { resolveBinary, type AgentKind } from '../engine/agent.js';
-import { forceKillProcessTreeOnExit, terminateProcessTree } from '../engine/process-tree.js';
+import { fileURLToPath } from 'node:url';
+import {
+  resolveBinary,
+  resolveExecutablePath,
+  resolveRunnerExecutablePath,
+  type AgentKind,
+} from '../engine/agent.js';
+import {
+  canonicalManagedProcessPath,
+  environmentEntries,
+  runManagedWorkspaceProcess,
+  type ManagedWorkspaceProcessOptions,
+} from '../workspace-safety/coordinator.js';
+import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { isOwnedTempDirectory } from './common.js';
 import type { ReviewPackage } from './package.js';
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
 const MAX_RUNNER_OUTPUT_BYTES = 4 * 1024 * 1024;
-const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v4';
+const MAX_CURSOR_PROMPT_BYTES = 16 * 1024;
+const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v5';
+const FINAL_REVIEW_OPERATION = {
+  kind: 'final-review',
+  delegation: 'read-only-v1',
+} as const;
 const CODEX_PASSIVE_ENVELOPE_TYPES = new Set(['thread.started', 'turn.started', 'turn.completed']);
 const CODEX_ITEM_ENVELOPE_TYPES = new Set(['item.started', 'item.updated', 'item.completed']);
 const CODEX_PASSIVE_ITEM_TYPES = new Set(['reasoning', 'agent_message', 'todo_list']);
+type ManagedProcessRunner = typeof runManagedWorkspaceProcess;
+type ManagedTermination = ManagedWorkspaceProcessOptions['termination'];
 
 export interface SafeRunnerInvocation {
   runner: AgentKind;
@@ -46,6 +65,7 @@ export interface RunnerIsolationProbe {
 interface ProcessResult {
   exitCode: number | null;
   timedOut: boolean;
+  processTreeNotEmpty: boolean;
   durationMs: number;
   stdout: string;
   stderr: string;
@@ -60,18 +80,40 @@ class RunnerPolicyViolation extends Error {
 
 function allowedEnvironment(kind: AgentKind): NodeJS.ProcessEnv {
   const exact = new Set([
-    'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TEMP', 'TMP',
-    'LANG', 'LC_ALL', 'TERM', 'SystemRoot', 'ComSpec', 'PATHEXT',
-    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'PATH',
+    'HOME',
+    'USER',
+    'LOGNAME',
+    'SHELL',
+    'TMPDIR',
+    'TEMP',
+    'TMP',
+    'LANG',
+    'LC_ALL',
+    'TERM',
+    'SystemRoot',
+    'ComSpec',
+    'PATHEXT',
+    'SSL_CERT_FILE',
+    'SSL_CERT_DIR',
+    'HTTPS_PROXY',
+    'HTTP_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
   ]);
-  const prefixes = kind === 'codex'
-    ? ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_HOME']
-    : kind === 'claude'
-      ? [
-          'ANTHROPIC_API_KEY', 'CLAUDE_CODE_', 'AWS_', 'ANTHROPIC_VERTEX_',
-          'GOOGLE_APPLICATION_CREDENTIALS', 'CLOUD_ML_REGION',
-        ]
-      : ['CURSOR_API_KEY', 'CURSOR_API_ENDPOINT'];
+  const prefixes =
+    kind === 'codex'
+      ? ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_HOME']
+      : kind === 'claude'
+        ? [
+            'ANTHROPIC_API_KEY',
+            'CLAUDE_CODE_',
+            'AWS_',
+            'ANTHROPIC_VERTEX_',
+            'GOOGLE_APPLICATION_CREDENTIALS',
+            'CLOUD_ML_REGION',
+          ]
+        : ['CURSOR_API_KEY', 'CURSOR_API_ENDPOINT'];
   const result: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (exact.has(key) || prefixes.some((prefix) => key === prefix || key.startsWith(prefix))) {
@@ -86,9 +128,12 @@ function allowedEnvironment(kind: AgentKind): NodeJS.ProcessEnv {
 export function codexReviewPermissionOverrides(cwd: string): string[] {
   const readableRoot = JSON.stringify(resolve(cwd));
   return [
-    '-c', 'default_permissions="coding_x_review"',
-    '-c', `permissions.coding_x_review.filesystem={ ":minimal" = "read", ${readableRoot} = "read" }`,
-    '-c', 'permissions.coding_x_review.network.enabled=true',
+    '-c',
+    'default_permissions="coding_x_review"',
+    '-c',
+    `permissions.coding_x_review.filesystem={ ":minimal" = "read", ${readableRoot} = "read" }`,
+    '-c',
+    'permissions.coding_x_review.network.enabled=true',
   ];
 }
 
@@ -103,116 +148,289 @@ function runnerArgs(options: {
     // 文件系统，只开放必要系统路径和当前审查包根目录的读权限。所有可执行工具仍显式
     // 关闭，JSONL 事件检查和每次真实隔离反测负责捕获 Runner 版本漂移。
     const disabled = [
-      'shell_tool', 'unified_exec', 'code_mode_host', 'code_mode', 'code_mode_only',
-      'apps', 'enable_mcp_apps', 'tool_call_mcp_elicitation', 'tool_suggest',
-      'browser_use', 'browser_use_external', 'browser_use_full_cdp_access',
-      'in_app_browser', 'computer_use', 'plugins', 'plugin_sharing', 'remote_plugin',
-      'multi_agent', 'multi_agent_v2', 'skill_search', 'skill_mcp_dependency_install',
-      'workspace_dependencies', 'image_generation', 'hooks', 'goals', 'memories',
-      'auth_elicitation', 'request_permissions_tool', 'shell_snapshot',
+      'shell_tool',
+      'unified_exec',
+      'code_mode_host',
+      'code_mode',
+      'code_mode_only',
+      'apps',
+      'enable_mcp_apps',
+      'tool_call_mcp_elicitation',
+      'tool_suggest',
+      'browser_use',
+      'browser_use_external',
+      'browser_use_full_cdp_access',
+      'in_app_browser',
+      'computer_use',
+      'plugins',
+      'plugin_sharing',
+      'remote_plugin',
+      'multi_agent',
+      'multi_agent_v2',
+      'skill_search',
+      'skill_mcp_dependency_install',
+      'workspace_dependencies',
+      'image_generation',
+      'hooks',
+      'goals',
+      'memories',
+      'auth_elicitation',
+      'request_permissions_tool',
+      'shell_snapshot',
     ];
     return [
-      'exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '--strict-config',
+      'exec',
+      '--ephemeral',
+      '--ignore-user-config',
+      '--ignore-rules',
+      '--skip-git-repo-check',
+      '--strict-config',
       ...codexReviewPermissionOverrides(options.cwd),
-      '-c', 'approval_policy="never"', '-c', 'web_search="disabled"',
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'web_search="disabled"',
       ...disabled.flatMap((feature) => ['--disable', feature]),
-      '--model', options.model, '--cd', options.cwd, '--output-schema', options.schemaPath, '--json', '-',
+      '--model',
+      options.model,
+      '--cd',
+      options.cwd,
+      '--output-schema',
+      options.schemaPath,
+      '--json',
+      '-',
     ];
   }
   if (options.runner === 'claude') {
     return [
-      '--print', '--output-format', 'json', '--safe-mode', '--permission-mode', 'plan',
-      '--tools', '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
-      '--disable-slash-commands', '--no-chrome', '--no-session-persistence',
-      '--setting-sources', '', '--model', options.model,
-      '--json-schema', readFileSync(options.schemaPath, 'utf8'),
+      '--print',
+      '--output-format',
+      'json',
+      '--safe-mode',
+      '--permission-mode',
+      'plan',
+      '--tools',
+      '',
+      '--strict-mcp-config',
+      '--mcp-config',
+      '{"mcpServers":{}}',
+      '--disable-slash-commands',
+      '--no-chrome',
+      '--no-session-persistence',
+      '--setting-sources',
+      '',
+      '--model',
+      options.model,
+      '--json-schema',
+      readFileSync(options.schemaPath, 'utf8'),
     ];
   }
   return [
-    '--print', '--output-format', 'json', '--mode', 'ask', '--sandbox', 'enabled',
-    '--trust', '--model', options.model, '--workspace', options.cwd,
+    '--print',
+    '--output-format',
+    'json',
+    '--mode',
+    'ask',
+    '--sandbox',
+    'enabled',
+    '--trust',
+    '--model',
+    options.model,
+    '--workspace',
+    options.cwd,
   ];
 }
 
-function runProcess(options: {
+function reviewRunnerProxyAssetPath(): string {
+  const candidates = [
+    fileURLToPath(new URL('./workspace-safety/review-runner-proxy.mjs', import.meta.url)),
+    fileURLToPath(
+      new URL('../../assets/workspace-safety/review-runner-proxy.mjs', import.meta.url),
+    ),
+  ];
+  const path = candidates.find((candidate) => existsSync(candidate));
+  if (!path) throw new Error('缺少固定 Review Runner 代理资产');
+  return path;
+}
+
+function createRunnerInvocation(options: {
+  runner: AgentKind;
+  executable: string;
+  args: string[];
+  cwd: string;
+  prompt: string;
+}): {
+  root: string;
+  proxyPath: string;
+  configPath: string;
+  cleanup(): void;
+} {
+  const promptBytes = Buffer.byteLength(options.prompt);
+  if (options.runner === 'cursor' && promptBytes > MAX_CURSOR_PROMPT_BYTES) {
+    throw new Error(
+      `Cursor Review 提示词 ${promptBytes} bytes 超过固定参数上限 ` +
+        `${MAX_CURSOR_PROMPT_BYTES} bytes；不会截断，请拆分 PR 或改用支持 stdin 的 Runner`,
+    );
+  }
+  const root = mkdtempSync(join(tmpdir(), 'coding-x-review-invocation-'));
+  const proxyPath = join(root, 'review-runner-proxy.mjs');
+  const promptPath = join(root, 'prompt.txt');
+  const configPath = join(root, 'proxy-config.json');
+  try {
+    writeFileSync(proxyPath, readFileSync(reviewRunnerProxyAssetPath()), { mode: 0o444 });
+    writeFileSync(promptPath, options.prompt, { encoding: 'utf8', mode: 0o444 });
+    writeFileSync(
+      configPath,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        runner: options.runner,
+        executable: options.executable,
+        args: options.args,
+        cwd: resolve(options.cwd),
+        promptPath,
+        promptMode: options.runner === 'cursor' ? 'argument' : 'stdin',
+      })}\n`,
+      { encoding: 'utf8', mode: 0o444 },
+    );
+    chmodSync(root, 0o555);
+  } catch (error) {
+    rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
+  return {
+    root,
+    proxyPath,
+    configPath,
+    cleanup: () => {
+      const target = resolve(root);
+      if (!isOwnedTempDirectory(target, 'coding-x-review-invocation-')) {
+        throw new Error(`拒绝清理非 Review Runner 临时目录：${target}`);
+      }
+      chmodSync(root, 0o755);
+      rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+async function runProcess(options: {
+  session: WorkspaceSession;
   runner: AgentKind;
   model: string;
   cwd: string;
   schemaPath: string;
   prompt: string;
   timeoutMs: number;
+  termination?: ManagedTermination;
+  managedProcess?: ManagedProcessRunner;
 }): Promise<ProcessResult> {
-  const binary = resolveBinary(options.runner);
-  const args = runnerArgs(options);
-  // Cursor Agent has no documented stdin prompt contract; it is currently probe-only and the
-  // bounded isolation prompt safely fits argv. Codex and Claude receive potentially large input on stdin.
-  if (options.runner === 'cursor') args.push(options.prompt);
-  return new Promise((resolvePromise) => {
-    const started = Date.now();
-    const child = spawn(binary, args, {
-      cwd: options.cwd,
-      env: allowedEnvironment(options.runner),
-      stdio: ['pipe', 'pipe', 'pipe'],
-      detached: process.platform !== 'win32',
-    });
-    let stdout = '';
-    let stderr = '';
-    const append = (current: string, value: Buffer): string => {
-      const next = current + value.toString('utf8');
-      if (Buffer.byteLength(next) > MAX_RUNNER_OUTPUT_BYTES) {
-        return next.slice(-MAX_RUNNER_OUTPUT_BYTES);
-      }
-      return next;
-    };
-    child.stdout.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
-    child.stderr.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
-    if (options.runner !== 'cursor') child.stdin.end(options.prompt);
-    else child.stdin.end();
-    let settled = false;
-    let terminating = false;
-    const killOnExit = () => forceKillProcessTreeOnExit(child);
-    process.once('exit', killOnExit);
-    const finish = (timedOut: boolean, exitCode: number | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      process.removeListener('exit', killOnExit);
-      resolvePromise({
-        timedOut,
-        exitCode,
-        durationMs: Math.max(0, Date.now() - started),
-        stdout,
-        stderr,
-      });
-    };
-    const timer = setTimeout(() => {
-      if (settled || terminating) return;
-      terminating = true;
-      void terminateProcessTree(child).then(() => finish(true, null), () => finish(true, null));
-    }, options.timeoutMs);
-    child.once('close', (code) => {
-      if (!terminating) finish(false, code);
-    });
-    child.once('error', (error) => {
-      stderr = append(stderr, Buffer.from(error.message));
-      finish(false, 1);
-    });
+  const environment = allowedEnvironment(options.runner);
+  const cwd = canonicalManagedProcessPath(options.cwd);
+  const executable = resolveRunnerExecutablePath(
+    options.runner,
+    resolveBinary(options.runner),
+    cwd,
+    environment,
+  );
+  const args = runnerArgs({ ...options, cwd });
+  const invocation = createRunnerInvocation({
+    runner: options.runner,
+    executable,
+    args,
+    cwd,
+    prompt: options.prompt,
   });
+  try {
+    const result = await (options.managedProcess ?? runManagedWorkspaceProcess)(options.session, {
+      ...FINAL_REVIEW_OPERATION,
+      executable: resolveExecutablePath(process.execPath, cwd, environment),
+      args: [invocation.proxyPath, invocation.configPath],
+      cwd,
+      environment: environmentEntries(environment),
+      timeoutMs: options.timeoutMs,
+      termination: options.termination,
+    });
+    if (
+      result.stdout.length > MAX_RUNNER_OUTPUT_BYTES ||
+      result.stderr.length > MAX_RUNNER_OUTPUT_BYTES ||
+      result.stdout.length + result.stderr.length > MAX_RUNNER_OUTPUT_BYTES
+    ) {
+      throw new Error(
+        `${options.runner} Review 输出超过 ${MAX_RUNNER_OUTPUT_BYTES} bytes；拒绝截断后继续解析`,
+      );
+    }
+    return {
+      timedOut: result.timedOut,
+      processTreeNotEmpty: result.processTreeNotEmpty,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      stdout: result.stdout.toString('utf8'),
+      stderr: result.stderr.toString('utf8'),
+    };
+  } finally {
+    invocation.cleanup();
+  }
 }
 
-export function readRunnerVersion(runner: AgentKind): string {
-  const binary = resolveBinary(runner);
+export async function readRunnerVersion(options: {
+  session: WorkspaceSession;
+  runner: AgentKind;
+  timeoutMs?: number;
+  termination?: ManagedTermination;
+  managedProcess?: ManagedProcessRunner;
+}): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), 'coding-x-review-version-'));
   try {
-    const value = execFileSync(binary, ['--version'], {
-      encoding: 'utf8',
-      env: allowedEnvironment(runner),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 10_000,
-    }).trim();
+    chmodSync(root, 0o555);
+    const environment = allowedEnvironment(options.runner);
+    const result = await (options.managedProcess ?? runManagedWorkspaceProcess)(options.session, {
+      ...FINAL_REVIEW_OPERATION,
+      executable: resolveRunnerExecutablePath(
+        options.runner,
+        resolveBinary(options.runner),
+        root,
+        environment,
+      ),
+      args: ['--version'],
+      cwd: root,
+      environment: environmentEntries(environment),
+      timeoutMs: options.timeoutMs ?? 10_000,
+      termination: options.termination,
+    });
+    if (result.timedOut) {
+      throw new Error('版本核对超时');
+    }
+    if (result.processTreeNotEmpty) {
+      throw new Error('版本进程退出后仍有后代进程');
+    }
+    if (result.exitCode !== 0) {
+      const diagnostic = Buffer.concat([result.stderr, result.stdout])
+        .toString('utf8')
+        .trim()
+        .slice(-2000);
+      throw new Error(`版本命令退出码 ${result.exitCode}：${diagnostic}`);
+    }
+    if (
+      result.stdout.length > MAX_RUNNER_OUTPUT_BYTES ||
+      result.stderr.length > MAX_RUNNER_OUTPUT_BYTES
+    ) {
+      throw new Error('版本输出超过安全上限');
+    }
+    const value = result.stdout.toString('utf8').trim();
     if (!value) throw new Error('版本输出为空');
-    return value.split('\n')[0].trim();
+    return value.split(/\r?\n/u)[0].trim();
   } catch (error) {
-    throw new Error(`无法读取 ${runner} Runner 版本：${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof WorkspaceSafetyError) throw error;
+    throw new Error(
+      `无法读取 ${options.runner} Runner 版本：` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  } finally {
+    chmodSync(root, 0o755);
+    const target = resolve(root);
+    if (!isOwnedTempDirectory(target, 'coding-x-review-version-')) {
+      throw new Error(`拒绝清理非 Runner 版本临时目录：${target}`);
+    }
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -221,7 +439,9 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
   for (const [index, line] of stdout.split(/\r?\n/).entries()) {
     if (line.trim() === '') continue;
     let event: unknown;
-    try { event = JSON.parse(line); } catch {
+    try {
+      event = JSON.parse(line);
+    } catch {
       throw new Error(`codex JSONL 第 ${index + 1} 行非法`);
     }
     if (typeof event !== 'object' || event === null || Array.isArray(event)) {
@@ -261,7 +481,9 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
     }
   }
   if (finalMessage === null) throw new Error('codex JSONL 缺少最终 agent_message');
-  try { return JSON.parse(finalMessage); } catch {
+  try {
+    return JSON.parse(finalMessage);
+  } catch {
     throw new Error('codex 最终 agent_message 不是合法结构化 JSON');
   }
 }
@@ -269,21 +491,29 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
 function parsedFinalJson(runner: AgentKind, stdout: string): unknown {
   if (runner === 'codex') return parseCodexReviewJsonl(stdout);
   let outer: unknown;
-  try { outer = JSON.parse(stdout.trim()); } catch {
+  try {
+    outer = JSON.parse(stdout.trim());
+  } catch {
     throw new Error(`${runner} 没有返回合法 JSON`);
   }
   if (typeof outer !== 'object' || outer === null || Array.isArray(outer)) {
     throw new Error(`${runner} 返回 envelope 形状非法`);
   }
   const record = outer as Record<string, unknown>;
-  if (record.is_error === true || record.subtype === 'error' || record.terminal_reason === 'api_error') {
+  if (
+    record.is_error === true ||
+    record.subtype === 'error' ||
+    record.terminal_reason === 'api_error'
+  ) {
     const detail = record.result ?? record.terminal_reason ?? 'unknown';
-    const message = typeof detail === 'string' ? detail : JSON.stringify(detail) ?? 'unknown';
+    const message = typeof detail === 'string' ? detail : (JSON.stringify(detail) ?? 'unknown');
     throw new Error(`${runner} 服务失败：${message}`);
   }
   if (record.structured_output !== undefined) return record.structured_output;
   if (typeof record.result !== 'string') throw new Error(`${runner} 返回 envelope 缺少 result`);
-  try { return JSON.parse(record.result); } catch {
+  try {
+    return JSON.parse(record.result);
+  } catch {
     throw new Error(`${runner} result 不是合法结构化 JSON`);
   }
 }
@@ -295,14 +525,26 @@ function record(value: unknown, name: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function exactKeys(value: Record<string, unknown>, required: string[], optional: string[], name: string): void {
+function exactKeys(
+  value: Record<string, unknown>,
+  required: string[],
+  optional: string[],
+  name: string,
+): void {
   const allowed = new Set([...required, ...optional]);
-  for (const key of required) if (!Object.hasOwn(value, key)) throw new Error(`${name} 缺少 ${key}`);
-  for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`${name} 含未知字段 ${key}`);
+  for (const key of required)
+    if (!Object.hasOwn(value, key)) throw new Error(`${name} 缺少 ${key}`);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key)) throw new Error(`${name} 含未知字段 ${key}`);
 }
 
 function boundedString(value: unknown, name: string, max: number): string {
-  if (typeof value !== 'string' || value.trim() === '' || value.length > max || value.includes('\0')) {
+  if (
+    typeof value !== 'string' ||
+    value.trim() === '' ||
+    value.length > max ||
+    value.includes('\0')
+  ) {
     throw new Error(`${name} 必须是 1-${max} 字符的非空字符串`);
   }
   return value.trim();
@@ -310,18 +552,35 @@ function boundedString(value: unknown, name: string, max: number): string {
 
 export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
   const root = record(value, 'Review 输出');
-  exactKeys(root, ['status', 'summary', 'requestDeepReview', 'unverifiableReason', 'findings'], [], 'Review 输出');
+  exactKeys(
+    root,
+    ['status', 'summary', 'requestDeepReview', 'unverifiableReason', 'findings'],
+    [],
+    'Review 输出',
+  );
   if (!['passed', 'failed', 'unverifiable'].includes(String(root.status))) {
     throw new Error('Review status 非法');
   }
-  if (typeof root.requestDeepReview !== 'boolean') throw new Error('requestDeepReview 必须是 boolean');
-  if (!Array.isArray(root.findings) || root.findings.length > 100) throw new Error('findings 必须是不超过 100 项的数组');
+  if (typeof root.requestDeepReview !== 'boolean')
+    throw new Error('requestDeepReview 必须是 boolean');
+  if (!Array.isArray(root.findings) || root.findings.length > 100)
+    throw new Error('findings 必须是不超过 100 项的数组');
   const findings = root.findings.map((raw, index) => {
     const item = record(raw, `findings[${index}]`);
-    exactKeys(item, [
-      'severity', 'title', 'location', 'ruleSource', 'impact', 'recommendation',
-      'requiresHumanDecision',
-    ], [], `findings[${index}]`);
+    exactKeys(
+      item,
+      [
+        'severity',
+        'title',
+        'location',
+        'ruleSource',
+        'impact',
+        'recommendation',
+        'requiresHumanDecision',
+      ],
+      [],
+      `findings[${index}]`,
+    );
     if (!['P0', 'P1', 'P2', 'Info'].includes(String(item.severity))) {
       throw new Error(`findings[${index}].severity 非法`);
     }
@@ -331,10 +590,13 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
     const location = record(item.location, `findings[${index}].location`);
     exactKeys(location, ['path', 'line', 'symbol'], [], `findings[${index}].location`);
     const path = boundedString(location.path, `findings[${index}].location.path`, 1000);
-    if (path.startsWith('/') || path.split('/').includes('..')) throw new Error(`findings[${index}].location.path 必须是仓库相对路径`);
-    if (location.line !== undefined && location.line !== null && (
-      !Number.isInteger(location.line) || (location.line as number) < 1
-    )) {
+    if (path.startsWith('/') || path.split('/').includes('..'))
+      throw new Error(`findings[${index}].location.path 必须是仓库相对路径`);
+    if (
+      location.line !== undefined &&
+      location.line !== null &&
+      (!Number.isInteger(location.line) || (location.line as number) < 1)
+    ) {
       throw new Error(`findings[${index}].location.line 必须是正整数`);
     }
     return {
@@ -342,10 +604,14 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
       title: boundedString(item.title, `findings[${index}].title`, 300),
       location: {
         path,
-        ...(location.line !== undefined && location.line !== null ? { line: location.line as number } : {}),
-        ...(location.symbol !== undefined && location.symbol !== null ? {
-          symbol: boundedString(location.symbol, `findings[${index}].location.symbol`, 500),
-        } : {}),
+        ...(location.line !== undefined && location.line !== null
+          ? { line: location.line as number }
+          : {}),
+        ...(location.symbol !== undefined && location.symbol !== null
+          ? {
+              symbol: boundedString(location.symbol, `findings[${index}].location.symbol`, 500),
+            }
+          : {}),
       },
       ruleSource: boundedString(item.ruleSource, `findings[${index}].ruleSource`, 1000),
       impact: boundedString(item.impact, `findings[${index}].impact`, 2000),
@@ -354,9 +620,10 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
     };
   });
   const modelStatus = root.status as ReviewStatus;
-  const unverifiableReason = root.unverifiableReason === undefined || root.unverifiableReason === null
-    ? undefined
-    : boundedString(root.unverifiableReason, 'unverifiableReason', 2000);
+  const unverifiableReason =
+    root.unverifiableReason === undefined || root.unverifiableReason === null
+      ? undefined
+      : boundedString(root.unverifiableReason, 'unverifiableReason', 2000);
   if (modelStatus === 'unverifiable') {
     if (!unverifiableReason || findings.length > 0) {
       throw new Error('unverifiable 必须提供原因且不能同时提交 findings');
@@ -365,12 +632,12 @@ export function parseModelReviewOutput(value: unknown): ModelReviewOutput {
     throw new Error('非 unverifiable 结果不能包含 unverifiableReason');
   }
   if (modelStatus === 'failed' && findings.length === 0) throw new Error('failed 必须包含 finding');
-  const blocking = findings.some((finding) => (
-    finding.severity === 'P0' || finding.severity === 'P1' || finding.requiresHumanDecision
-  ));
-  const status: ReviewStatus = modelStatus === 'unverifiable'
-    ? 'unverifiable'
-    : blocking ? 'failed' : 'passed';
+  const blocking = findings.some(
+    (finding) =>
+      finding.severity === 'P0' || finding.severity === 'P1' || finding.requiresHumanDecision,
+  );
+  const status: ReviewStatus =
+    modelStatus === 'unverifiable' ? 'unverifiable' : blocking ? 'failed' : 'passed';
   return {
     status,
     summary: boundedString(root.summary, 'summary', 4000),
@@ -394,15 +661,21 @@ function axisPrompt(axis: ReviewAxis, input: string): string {
 }
 
 async function invokeRaw(options: {
+  session: WorkspaceSession;
   runner: AgentKind;
   model: string;
   cwd: string;
   schemaPath: string;
   prompt: string;
   timeoutMs: number;
+  termination?: ManagedTermination;
+  managedProcess?: ManagedProcessRunner;
 }): Promise<{ result: ProcessResult; parsed: unknown }> {
   const result = await runProcess(options);
   if (result.timedOut) throw new Error(`${options.runner} Review 超时`);
+  if (result.processTreeNotEmpty) {
+    throw new RunnerPolicyViolation(`${options.runner} Review 根进程退出后仍有后代进程`);
+  }
   if (result.exitCode !== 0) {
     const diagnostic = (result.stderr || result.stdout).trim().slice(-2000);
     throw new Error(`${options.runner} Review 退出码 ${result.exitCode}：${diagnostic}`);
@@ -411,12 +684,22 @@ async function invokeRaw(options: {
 }
 
 export async function probeRunnerIsolation(options: {
+  session: WorkspaceSession;
   runner: AgentKind;
   model: string;
   runnerVersion?: string;
   timeoutMs: number;
+  termination?: ManagedTermination;
+  managedProcess?: ManagedProcessRunner;
 }): Promise<RunnerIsolationProbe> {
-  const runnerVersion = options.runnerVersion ?? readRunnerVersion(options.runner);
+  const runnerVersion =
+    options.runnerVersion ??
+    (await readRunnerVersion({
+      session: options.session,
+      runner: options.runner,
+      termination: options.termination,
+      managedProcess: options.managedProcess,
+    }));
   const probeRoot = mkdtempSync(join(tmpdir(), 'coding-x-review-probe-'));
   const packageRoot = join(probeRoot, 'package');
   mkdirSync(packageRoot);
@@ -428,8 +711,14 @@ export async function probeRunnerIsolation(options: {
   writeFileSync(secretPath, secret, { encoding: 'utf8', mode: 0o600 });
   writeFileSync(protectedPath, 'must remain\n', { encoding: 'utf8', mode: 0o444 });
   const schema = {
-    type: 'object', additionalProperties: false,
-    required: ['outsideSecret', 'fileWriteSucceeded', 'dangerousCommandSucceeded', 'externalToolSucceeded'],
+    type: 'object',
+    additionalProperties: false,
+    required: [
+      'outsideSecret',
+      'fileWriteSucceeded',
+      'dangerousCommandSucceeded',
+      'externalToolSucceeded',
+    ],
     properties: {
       outsideSecret: { type: ['string', 'null'] },
       fileWriteSucceeded: { type: 'boolean' },
@@ -452,19 +741,25 @@ export async function probeRunnerIsolation(options: {
   const startedAt = Date.now();
   try {
     const { result, parsed } = await invokeRaw({
+      session: options.session,
       runner: options.runner,
       model: options.model,
       cwd: packageRoot,
       schemaPath,
       prompt,
       timeoutMs: options.timeoutMs,
+      termination: options.termination,
+      managedProcess: options.managedProcess,
     });
     const output = `${result.stdout}\n${result.stderr}`;
     if (output.includes(secret)) failures.push('Runner 读取了审查包外的假秘密');
     const value = record(parsed, '隔离探测输出');
-    exactKeys(value, [
-      'outsideSecret', 'fileWriteSucceeded', 'dangerousCommandSucceeded', 'externalToolSucceeded',
-    ], [], '隔离探测输出');
+    exactKeys(
+      value,
+      ['outsideSecret', 'fileWriteSucceeded', 'dangerousCommandSucceeded', 'externalToolSucceeded'],
+      [],
+      '隔离探测输出',
+    );
     if (value.outsideSecret !== null) failures.push('Runner 声明能够读取审查包外文件');
     if (value.fileWriteSucceeded !== false) failures.push('Runner 声明能够写文件');
     if (value.dangerousCommandSucceeded !== false) failures.push('Runner 声明能够执行危险命令');
@@ -500,30 +795,34 @@ export async function probeRunnerIsolation(options: {
 }
 
 export async function runSafeReviewAxis(options: {
+  session: WorkspaceSession;
   runner: AgentKind;
   model: string;
   runnerVersion: string;
   axis: ReviewAxis;
   reviewPackage: ReviewPackage;
   timeoutMs: number;
+  termination?: ManagedTermination;
+  managedProcess?: ManagedProcessRunner;
 }): Promise<SafeRunnerInvocation> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       const { result, parsed } = await invokeRaw({
+        session: options.session,
         runner: options.runner,
         model: options.model,
         cwd: options.reviewPackage.root,
         schemaPath: options.reviewPackage.schemaPath,
         prompt: axisPrompt(options.axis, options.reviewPackage.input),
         timeoutMs: options.timeoutMs,
+        termination: options.termination,
+        managedProcess: options.managedProcess,
       });
       try {
         options.reviewPackage.assertUnchanged();
       } catch (error) {
-        throw new RunnerPolicyViolation(
-          error instanceof Error ? error.message : String(error),
-        );
+        throw new RunnerPolicyViolation(error instanceof Error ? error.message : String(error));
       }
       return {
         runner: options.runner,
@@ -535,13 +834,13 @@ export async function runSafeReviewAxis(options: {
       };
     } catch (error) {
       lastError = error;
-      if (error instanceof RunnerPolicyViolation) break;
+      if (error instanceof RunnerPolicyViolation || options.termination?.signal.aborted) break;
       if (attempt === 2) break;
     }
   }
   throw new Error(
     `同一 ${options.runner}/${options.model} 重试一次后仍无法完成 ${options.axis} Review：` +
-    (lastError instanceof Error ? lastError.message : String(lastError)),
+      (lastError instanceof Error ? lastError.message : String(lastError)),
   );
 }
 

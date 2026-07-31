@@ -11,31 +11,34 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 ## 工作流程
 
-获取 PRD（markdown 文件或文本；PRD 通常位于 `docs/prds/`，monorepo 中也可能在 `<子项目>/docs/prds/`——但对来源路径无硬依赖，任何路径或直接粘贴的文本都可以）并将其转换为 `prd.json`（保存到当前项目根路径下 `.workspace/prd.json`）。
+获取 PRD（markdown 文件或文本；PRD 通常位于 `docs/prds/`，monorepo 中也可能在 `<子项目>/docs/prds/`——但对来源路径无硬依赖，任何路径或直接粘贴的文本都可以）并派生 `prd.json` 候选。skill **不得直接写入 workspace**；候选和严格请求只放在系统临时目录，最终统一调用：
 
-## 写入前：活跃运行检查
+```bash
+npx coding-x workspace apply-prd --input <request-file> --workspace <workspace-dir>
+```
 
-在创建、改写、归档或删除 `.workspace/` 中的任何文件之前，先运行 `npx coding-x doctor --workspace .workspace`，读取其中的 workspace 锁结论：
+由 coding-x 在一个受保护的短会话中核对输入、重跑需要的 TDD 基线、归档旧运行并原子应用候选。
 
-1. 若 doctor 报告 `engine.lock` 对应“引擎运行中”，立即停止派生；本次必须保持零写入，不得归档、覆盖、删除或修复任何 workspace 文件。
-2. 若锁被判定为陈旧或损坏，只能请用户确认对应进程确实不再运行；不得删除 `engine.lock`，也不得由 skill 擅自接管或清锁。用户确认后仍由后续引擎命令按自身锁协议处理。
-3. 若 doctor 无法启动、输出中断，或输出不含可判定的 workspace 锁结论，停止派生并说明无法建立单写者前提，不能把“检查失败”当作“没有活跃运行”。doctor 的整体退出码可能受其他体检项影响；只要完整输出中有明确锁结论，本节不把无关项的非零退出误判成锁检查失败。
-4. 完成需求澄清、模型选择、对照表等只读准备后，在真正写入前再次运行同一 doctor 命令；只要结论变为活跃、无法判定或与首次检查不一致，就停止派生并保持零写入。
+## 首先固定 workspace 参数
 
-这是协作层的尽力防护，不能消除检查与首次写入之间的 TOCTOU 窗口；因此不得绕过引擎自己的 `engine.lock` 协议，也不得把本检查描述成强事务锁。
+1. 用户已经给出 `--workspace` 时，保留其原始参数值；不得改写、规范化、拼接或换成 `.workspace`。
+2. 用户未给出时，先询问并推荐 CLI 默认值 `.workspace`；用户确认后把原回答记作本次唯一的 `<workspace-dir>`，不能由 skill 静默硬编码。
+3. 后续 doctor、只读检查和最终 apply 命令都原样使用同一个 `<workspace-dir>`；不要根据当前目录再次推导另一个路径。
+
+skill 不预检、删除、修复或接管 workspace 租约。能否写入只由最终 `workspace apply-prd` 的原子获取结果决定；获取失败、输入失效或基线失败时，命令必须让 workspace 保持零业务写入。不要在只读检查和最终 apply 之间自行操作 workspace。
 
 ---
 
-## 写入前：workspace Git 隔离
+## 候选生成前：workspace Git 隔离
 
-在创建、改写或归档 `.workspace/` 中的任何文件之前，先机械检查它不会混入 story commit：
+候选生成前，用同一个 `<workspace-dir>` 做只读 Git 隔离检查，确认运行产物不会混入 story commit：
 
 1. 运行 `git rev-parse --is-inside-work-tree`。若当前目录不是 Git worktree，说明已跳过本项并继续。
-2. 在 Git worktree 中运行 `git ls-files -- .workspace`。只要有输出，就停止写入并列出已跟踪文件；说明 ignore 规则不会自动移除既有索引项，且不得自动执行 `git rm --cached`。
-3. 若没有已跟踪文件，运行 `git check-ignore -q --no-index .workspace/`。退出码为 0 才表示已隔离；未命中时停止写入，建议用户添加适合其仓库的 ignore 规则，但不得自动修改 `.gitignore`。
+2. 在 Git worktree 中检查 `<workspace-dir>` 是否已有文件被跟踪。只要有输出，就停止并列出文件；说明 ignore 规则不会自动移除既有索引项，且不得自动执行 `git rm --cached`。
+3. 若没有已跟踪文件，再检查 `<workspace-dir>` 是否被 Git 忽略。未命中时停止，建议用户添加适合其仓库的 ignore 规则，但不得自动修改 `.gitignore`。
 4. 遇到已跟踪或未忽略的 workspace 时，必须等用户明确选择如何处理并重新检查；用户也可以明确选择知情继续，不能由 skill 静默代替用户决策。
 
-这些检查只读 Git 状态。不要自动改 Git 索引或仓库忽略策略。
+这些检查只读 Git 状态。不要自动改 Git 索引、仓库忽略策略或 workspace 内容；也可以直接消费同一 `<workspace-dir>` 对应的 doctor Git 隔离结论，不能换路径重查。
 
 ---
 
@@ -96,7 +99,7 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 
 ## 质量契约绑定（必填）
 
-转换前运行 `npx coding-x doctor --json --workspace .workspace`，读取
+转换前运行 `npx coding-x doctor --json --workspace <workspace-dir>`，读取
 `.coding-x/quality.json` 的状态和规范化摘要：
 
 1. 契约缺失、非法、schema 过新或固定 coding-x 版本不匹配时立即停止，引导用户先运行
@@ -104,7 +107,7 @@ description: "将 PRD 转换为 prd.json 格式供 Ralph 引擎执行，并把�
 2. 把 doctor 返回的 `quality.digest` 原样写入顶层 `qualityContractDigest`。
 3. 把 doctor 返回的 `quality.derivedChecks` 原样写入顶层 `qualityChecks`。这是机器派生快照，
    不能让用户或模型重新输入、改写、删减，也不能从旧 PRD 复用。
-4. 真正写入前再次运行 doctor；若摘要与首次读取不同，停止并重新派生，不能把旧摘要写入。
+4. 候选定稿时再读取一次当前摘要并放入严格请求；最终 apply 会在受保护会话内核对候选绑定。摘要变化时命令拒绝且 workspace 零业务写入，skill 必须重新派生，不能只改摘要。
 
 质量契约是唯一人工维护来源；PRD 同时绑定摘要和不可手改的派生快照。引擎会逐字段核对，
 任何差异都按配置错误停止。
@@ -133,11 +136,13 @@ stories 定稿且质量契约绑定后，必须明确询问用户是否启用 TD
      字面量列出。
 4. 把项目类型、完整命令、生产路径、受保护文件、完整基线和禁止标记合成一张表，请用户
    **一次确认**。不能把阈值、排除或零测试策略拆给 agent 在运行时自行决定。
-5. 用户确认后、写入前，在项目根真实运行原样的 `coverageCheck`。同时核对输出和产物，
-   确认真正执行了至少一个测试、统计了分支覆盖率、阈值和排除符合已批准政策。命令仅返回
-   0 但没有测试，不能视为有效基线。
+5. 用户确认后，把完整政策写入候选；不要在租约外把一次本地运行结果当作可应用证明。
+   `workspace apply-prd` 会在受保护会话内重核 Git 基线、政策文件摘要和新增禁止标记，再真实运行
+   `coverageCheck`。`coverageCheck` 必须用退出状态自行保证至少执行一个测试、统计分支覆盖率，且
+   阈值、排除和零测试政策都满足已批准规则；引擎不会通用解析任意测试工具的输出或产物来替命令
+   补做这些判断。基线失败时 workspace 必须保持零业务写入。
 6. 对每个 `policyFiles.path` 解析真实路径，确认仍在 Git 根内，再计算文件字节的 `sha256`；
-   摘要必须是 64 位小写十六进制。最后再次运行写入前的锁与 Git 隔离检查，再写入。
+   摘要必须是 64 位小写十六进制。最后完成只读 Git 隔离检查，把候选交给 apply 命令。
 
 默认政策：
 
@@ -153,7 +158,7 @@ stories 定稿且质量契约绑定后，必须明确询问用户是否启用 TD
 确认；不要在 PRD 中静默删改项目检查。TDD 是附加的测试先行门禁，不替代契约检查或每个
 story 的行为 AC。
 
-若项目将使用 Cursor Agent，写入 TDD 配置后只提醒用户在项目根运行
+若项目将使用 Cursor Agent，应用含 TDD 的候选后只提醒用户在项目根运行
 `npx coding-x hooks cursor install` 和 `npx coding-x hooks cursor status`。本 skill 不自动安装；
 升级 coding-x 后需重新运行 install 刷新，撤销时运行 `npx coding-x hooks cursor remove`。
 这些命令不修改 Git hooks，也不暂存或提交 `.cursor/` 文件。
@@ -230,8 +235,8 @@ story 的行为 AC。
 4. 目录错误时不得请用户在当前会话临时粘贴 ID 绕过；只能修好全局配置后重试，或明确选择不启用路由。
 5. 模型列表只展示一次，然后**批量提出五道选择题**：`builder.low`、`builder.medium`、`builder.high`、`validator`、`escalation`。每项由用户从目录选择，不能替用户拍板，也不能选择目录外 ID。
 6. `label` 只用于帮助识别，不构成能力或实时可用性证据。没有其他可靠资料时，不按名称、别名或自定义 ID 猜强弱，不自动推荐或判断倒挂；用户确认后允许任意组合。
-7. 按下方固定规则自动评估每个 story，直接写入 `difficulty` 与 `difficultyReason`；不在写入前逐 story 设置审批门槛。
-8. 写入后展示完整对照表：story、档位、理由、对应初始 builder 模型。用户提出异议时修正派生结果，不把策略写回源 PRD。
+7. 按下方固定规则自动评估每个 story，写入候选的 `difficulty` 与 `difficultyReason`；不在写入前逐 story 设置审批门槛。
+8. 候选定稿后展示完整对照表：story、档位、理由、对应初始 builder 模型。用户提出异议时修正派生结果，不把策略写回源 PRD。
 
 ### difficulty：所需模型推理能力
 
@@ -583,31 +588,34 @@ Add ability to mark tasks with different statuses.
 
 ---
 
-## 归档之前的运行
+## 切换到另一个功能
 
-**在编写新的 prd.json 之前，检查是否存在来自不同功能的现有文件：**
+只读检查现有 `prd.json` 的 `branchName`。不存在旧 PRD，或新旧 `branchName` 不同时，使用
+`replace-feature` 模式，并在系统临时目录生成：
 
-1. 如果存在，读取当前的 `prd.json`
-2. 检查 `branchName` 是否与新功能的 branch name 不同
-3. 如果不同且 `progress.md` 在 header 之外有内容：
-   - 创建归档文件夹：`.workspace/archive/YYYY-MM-DD-feature-name/`
-   - 将当前的 `prd.json`、`state.json`、`progress.md`、`review-*.md` 留痕、`evidence.jsonl`、`report.html`、`screenshots/` 目录与 `prd.tampered-*.json`（均为如存在）复制到归档；`validation-result.json` 是单轮瞬时 IPC，完整 claim 已进入 evidence，**不复制**
-   - **删除工作区中的旧 `state.json`**——story id 惯例都从 US-001 起编，新旧几乎必然撞车；引擎信任既存 state.json，残留会把旧轮的 `passes: true` 误判为新 story 已完成、循环空转结束
-   - **同时删除工作区中的旧 `evidence.jsonl`**——记录按轮次追加且不含轮次归属标识以外的运行标记，残留旧轮记录会污染新轮验证报告的门禁历史与时间线
-   - **同时删除工作区中的旧 `prd.tampered-*.json`**——取证已随归档保留，残留会污染新轮报告红旗区
-   - **同时删除工作区中的旧 `validation-result.json`**——它只能由当前引擎 request 消费；崩溃残留既不归档，也不得带入新 PRD
-   - 使用新的 header 重置 `progress.md`
+- 新 `prd.json` 的完整候选字节；
+- 新一轮 `progress.md` 的 header 候选；
+- `state` 固定为 `null`，不能把旧状态带进新功能。
 
-如果你在运行之间手动更新 prd.json，请先按上述步骤归档旧运行，再写入新的 prd.json。
+skill 不创建归档目录，也不复制、覆盖或删除 workspace 文件。`workspace apply-prd` 的固定产品策略
+会归档旧 `prd.json`、`state.json`、`progress.md`、Review、evidence、报告、截图和篡改副本，再原子
+应用新候选；瞬时 `validation-result.json` 只删除、不归档。路径清单由 coding-x 决定，请求中不得
+加入路径或自定义归档动作。
+
+不要在运行之间手动更新 workspace 中的 `prd.json`；始终修改源 PRD、重新派生候选并调用 apply。
 
 ---
 
 ## 再派生：需求中途变更
 
-源 PRD 修改后重新执行本 skill，若 `.workspace/prd.json` 已存在且 `branchName` 与新转换结果**相同**（同一功能），进入再派生模式（branchName 不同则走上方「归档之前的运行」流程）：
+源 PRD 修改后重新执行本 skill，若现有 `prd.json` 与新转换结果的 `branchName` **相同**，使用
+`rederive-feature` 模式（不同则走上方“切换到另一个功能”）：
 
-1. 先把现有 `prd.json`（以及 `state.json`、`review-*.md` 留痕文件、`evidence.jsonl`，如存在）复制到 `.workspace/archive/YYYY-MM-DD-HHmm-rederive-[feature-name]/`（带时分，避免同日多次再派生互相覆盖；`progress.md` 不动）；**同时删除工作区中的旧 `evidence.jsonl` 与 `validation-result.json`**——需求变更后旧登记按 acIndex 位置匹配会错挂，瞬时 result 也不再属于新 request，一律作废重验
-2. 先处理模型再派生，再用新结果**整体重写** `prd.json`：
+1. 只读现有 `state.json`，在系统临时目录生成调整后的 state 候选；不存在时保持 `null`。
+   `progress` 固定为 `null`，表示保留当前进度。skill 不归档或删除任何 workspace 文件；apply 命令
+   会归档会失效的 PRD、state、Review 和 evidence，清除旧 Review、evidence、瞬时结果与旧报告，
+   同时保留 progress、截图和篡改副本。
+2. 先处理模型再派生，再用新结果生成完整 `prd.json` 候选：
    - runner 相同，且原五个模型在本次 `coding-x models <runner> --json` 返回的全局目录中仍有声明 → 保留原选择，不重复提问
    - runner 变化、任一模型被移出目录、目录读取失败，或用户明确要求重配 → 停止保留，重新走目录选择与五道选择题；目录失败时不得退回历史列表或会话内临时列表
    - story 内容无实质变化 → 保留原 `difficulty` 与 `difficultyReason`，包括用户事后修正
@@ -631,13 +639,70 @@ Add ability to mark tasks with different statuses.
 
 ---
 
-## 保存前检查清单
+## 生成临时请求并原子应用
 
-在编写 prd.json 之前，验证：
+候选、调整后的 state 和请求文件都必须位于**系统临时目录**，并且不在项目目录或
+`<workspace-dir>` 内。可以使用宿主的安全临时目录能力（POSIX 可用 `mktemp -d`，Windows 使用
+平台等价机制）；不要为了方便把 `candidate.json` 或 `request.json` 写进 workspace。
 
-- [ ] 已运行 `npx coding-x doctor --workspace .workspace`；未发现“引擎运行中”，且真正写入前再次运行的结论仍可判定、未变化；未删除 `engine.lock`
-- [ ] `.workspace/` 已通过 Git 隔离检查；若已跟踪或未忽略，已取得用户明确选择，且未自动修改 `.gitignore` 或执行 `git rm --cached`
-- [ ] **之前的运行已归档**（如果 prd.json 存在且 branchName 不同，请先归档，并删除工作区残留的旧 state.json、evidence.jsonl、validation-result.json、prd.tampered-*.json）
+严格请求只包含下面这些数据，不包含目标路径、归档路径、时间或租约字段：
+
+```json
+{
+  "schemaVersion": 1,
+  "mode": "replace-feature",
+  "source": {
+    "bytes": "源 PRD 定稿后的完整 UTF-8 文本",
+    "digest": "sha256:<源文本字节摘要>"
+  },
+  "git": {
+    "expectedHead": "派生开始时的完整 Git HEAD",
+    "currentHead": "生成请求前重新读取的完整 Git HEAD"
+  },
+  "quality": {
+    "expectedDigest": "派生时 doctor 返回的质量契约摘要",
+    "currentDigest": "生成请求前 doctor 重新读取的质量契约摘要"
+  },
+  "candidate": {
+    "prd": "完整 prd.json UTF-8 文本",
+    "state": null,
+    "progress": "# Ralph Progress\n\n",
+    "digest": "sha256:<完整候选绑定摘要>"
+  }
+}
+```
+
+`replace-feature` 要求 `state=null` 且 `progress` 为新 header；`rederive-feature` 要求 `progress=null`，
+`state` 则严格对应当前文件是否存在。实际请求还必须给 `candidate` 增加 `digest`：先分别计算
+prd/state/progress 的 `sha256:<hex>`，再按 `schemaVersion`、固定 domain
+`coding-x-apply-prd-candidate-v1`、mode、`prdDigest`、`stateDigest`、`progressDigest` 的顺序生成
+两空格缩进且末尾带换行的 JSON，最后对这段 UTF-8 字节计算 SHA-256；不存在的 state/progress
+摘要必须是 JSON `null`，不是字符串或 `null` 自身的摘要。不能让模型凭记忆填写摘要；必须对最终
+字节机械计算。请求也必须由 JSON serializer 生成，不能用字符串替换或 shell 插值拼接多行内容。
+
+源是仓库内文件时，先完成并确认源 PRD 的 User Stories 回写，再读取其最终字节；源是粘贴文本或
+仓库外文件时，`source.bytes` 保存本次确认过的原始来源文本。若两次 Git HEAD 或质量摘要不同，
+不要调用 apply，回到派生步骤重新生成请求。
+
+最后只执行一次：
+
+```bash
+npx coding-x workspace apply-prd --input <request-file> --workspace <workspace-dir>
+```
+
+`<workspace-dir>` 必须与最初选定值逐字相同。命令失败时不得改成直接写 workspace、手动归档或删
+租约；根据错误修正源输入并重新生成完整请求。命令完成后删除系统临时目录，不把请求当作长期
+状态或交付证据。临时目录和文件应使用仅当前用户可读写的权限。
+
+---
+
+## 应用前检查清单
+
+在调用 apply 命令之前，验证：
+
+- [ ] `<workspace-dir>` 已固定，所有命令原样透传同一个值；skill 未预检、删除或接管租约
+- [ ] workspace 已通过只读 Git 隔离检查；若已跟踪或未忽略，已取得用户明确选择，且未自动修改 `.gitignore` 或执行 `git rm --cached`
+- [ ] 候选和请求都在 workspace 与项目之外的系统临时目录；skill 没有归档、覆盖或删除 workspace 文件
 - [ ] 每个 story 可以在一次迭代中完成（足够小）
 - [ ] Stories 按依赖顺序排序（schema 到 backend 到 UI）
 - [ ] 每个 story 都有 "Typecheck passes" 作为标准
@@ -649,16 +714,19 @@ Add ability to mark tasks with different statuses.
 - [ ] 没有 story 依赖于后面的 story
 - [ ] story 不含任何状态字段（passes/validated/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
-- [ ] `npx coding-x doctor --json` 确认质量契约有效且固定版本匹配；顶层
+- [ ] `npx coding-x doctor --json --workspace <workspace-dir>` 确认质量契约有效且固定版本匹配；顶层
   `qualityContractDigest` 等于 doctor 当前摘要；结构化 `qualityChecks` 与
   `doctor.quality.derivedChecks` 逐字段一致，没有旧 shell 字符串数组
-- [ ] tdd 已配置时：用户明确选择启用并确认新项目或存量项目；`coverageCheck` 已真实运行且至少执行一个测试、统计分支覆盖率、按批准阈值返回；`sourcePathspecs` 与覆盖范围一致；完整 `baselineRef` 可达；每个政策文件在 Git 根内且 `sha256` 与当前字节匹配；禁止标记已按目标工具确认
+- [ ] tdd 已配置时：用户明确选择启用并确认新项目或存量项目；`coverageCheck`、阈值和零测试政策已确认；`sourcePathspecs` 与覆盖范围一致；完整 `baselineRef` 可达；每个政策文件在 Git 根内且 `sha256` 与当前字节匹配；禁止标记已按目标工具确认；真实基线留给 apply 在租约内重跑
 - [ ] tdd 已配置且将使用 Cursor Agent 时：已提醒用户显式运行 `npx coding-x hooks cursor install` 与 `npx coding-x hooks cursor status`；转换过程未自动安装
 - [ ] tdd 未配置时：整个字段已省略；没有留下半套或未经基线验证的配置
 - [ ] models 已配置时：runner 已确认；五个模型 ID 全部由用户从该 runner 的全局模型目录选择；每个 story 都有 low/medium/high 与含规则编号、仓库路径的非空理由
 - [ ] models 未配置时：所有 story 都没有 difficulty/difficultyReason，避免半套配置
 - [ ] 增强/拆分结果已回写源 md（仅仓库内文件源），frontmatter `updated` 已更新
 - [ ] 已在会话中输出转换对照表
-- [ ] 同功能再派生时已先归档副本（含 state.json、evidence.jsonl），已删除工作区中的旧 evidence.jsonl 与瞬时 validation-result.json，并按 id、难度与初始路由精确调整 state.json；blocked 路由重试已由用户选择
+- [ ] 同功能再派生时，state 候选已按 id、难度与初始路由精确调整，blocked 路由重试已由用户选择；progress 候选为 null
+- [ ] 请求绑定最终源字节、两次一致的 Git HEAD、两次一致的质量摘要和完整候选摘要，且不含调用方选择的 workspace 路径或归档动作
+- [ ] 最终只通过 `workspace apply-prd` 应用；失败时没有直接写 workspace 或降低校验
 
-写入后运行：`npx coding-x repair`（用 jsonrepair 修复并二次校验 prd.json 与 state.json，后者不存在则跳过）。
+apply 成功即表示候选已经过严格解析并原子应用，不再追加 `coding-x repair` 作为常规步骤。只有以后
+文件确实损坏、且 workspace 状态允许时，才按 CLI 错误提示单独运行 repair。

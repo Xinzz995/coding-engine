@@ -42,7 +42,7 @@ export interface CreateWindowsSupervisorLaunchOptions {
 }
 
 export const DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS: WindowsSupervisorTimeouts = Object.freeze({
-  handshakeMs: 5000,
+  handshakeMs: 120_000,
   naturalDrainMs: 5000,
   terminateMs: 5000,
   ackMs: 5000,
@@ -124,7 +124,7 @@ export function resolveWindowsSupervisorTimeouts(
       input.handshakeMs ?? DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS.handshakeMs,
       'handshakeMs',
       10,
-      60_000,
+      300_000,
     ),
     naturalDrainMs: boundedInteger(
       input.naturalDrainMs ?? DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS.naturalDrainMs,

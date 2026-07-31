@@ -6,14 +6,40 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { buildAgentArgs, resolveBinary, runAgent } from './agent.js';
+import {
+  buildAgentArgs,
+  resolveBinary,
+  resolveExecutablePath,
+  resolveRunnerExecutablePath,
+  resolveRunnerInvocation,
+  runAgent,
+} from './agent.js';
+import { createManagedProcessTestSession } from './managed-process-test-support.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fake = join(here, '__fixtures__', 'fake-agent.mjs');
+
+async function runManagedAgent(
+  options: Omit<Parameters<typeof runAgent>[0], 'managed'>,
+): ReturnType<typeof runAgent> {
+  const fixture = await createManagedProcessTestSession();
+  try {
+    return await runAgent({
+      ...options,
+      managed: {
+        session: fixture.session,
+        operation: { kind: 'final-review', delegation: 'read-only-v1' },
+      },
+    });
+  } finally {
+    await fixture.close();
+  }
+}
 
 async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise<void> {
   const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-tree-'));
@@ -24,7 +50,7 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
   let childConfirmedGone = false;
   process.env.CODING_X_CLAUDE_BIN = `node ${fake} ${mode}`;
   try {
-    const r = await runAgent({ kind: 'claude', prompt: '', cwd, timeoutMs: 1000 });
+    const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd, timeoutMs: 1000 });
     expect(r).toMatchObject({ timedOut: true, exitCode: null });
     expect(r.durationMs).toBeGreaterThanOrEqual(1000);
     expect(r.outputTail).toBe('');
@@ -32,7 +58,9 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
     expect(Number.isSafeInteger(childPid) && childPid > 0).toBe(true);
 
     let probeError: string | undefined;
-    try { process.kill(childPid, 0); } catch (err) {
+    try {
+      process.kill(childPid, 0);
+    } catch (err) {
       probeError = (err as NodeJS.ErrnoException).code;
     }
     childConfirmedGone = probeError === 'ESRCH';
@@ -47,7 +75,9 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
         try {
           process.kill(childPid, 0);
           process.kill(childPid, 'SIGKILL');
-        } catch { /* 已退出 */ }
+        } catch {
+          /* 已退出 */
+        }
       }
     }
     rmSync(cwd, { recursive: true, force: true });
@@ -57,21 +87,25 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
 describe('buildAgentArgs', () => {
   it('builds claude print command by default', () => {
     expect(buildAgentArgs('claude', 'P')).toEqual([
-      'claude', '--print', '--dangerously-skip-permissions', 'P',
+      'claude',
+      '--print',
+      '--dangerously-skip-permissions',
+      'P',
     ]);
   });
   it('builds codex exec command', () => {
     expect(buildAgentArgs('codex', 'P')).toEqual([
-      'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', 'P',
+      'codex',
+      'exec',
+      '--dangerously-bypass-approvals-and-sandbox',
+      'P',
     ]);
   });
   it('builds cursor headless force command', () => {
     const original = process.env.CODING_X_CURSOR_BIN;
     process.env.CODING_X_CURSOR_BIN = 'agent';
     try {
-      expect(buildAgentArgs('cursor', 'P')).toEqual([
-        'agent', '-p', '--force', 'P',
-      ]);
+      expect(buildAgentArgs('cursor', 'P')).toEqual(['agent', '-p', '--force', 'P']);
     } finally {
       if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
       else process.env.CODING_X_CURSOR_BIN = original;
@@ -79,12 +113,22 @@ describe('buildAgentArgs', () => {
   });
   it('appends --model before the prompt for claude when a model is given', () => {
     expect(buildAgentArgs('claude', 'P', 'opus')).toEqual([
-      'claude', '--print', '--dangerously-skip-permissions', '--model', 'opus', 'P',
+      'claude',
+      '--print',
+      '--dangerously-skip-permissions',
+      '--model',
+      'opus',
+      'P',
     ]);
   });
   it('appends --model before the prompt for codex when a model is given', () => {
     expect(buildAgentArgs('codex', 'P', 'gpt-5')).toEqual([
-      'codex', 'exec', '--dangerously-bypass-approvals-and-sandbox', '--model', 'gpt-5', 'P',
+      'codex',
+      'exec',
+      '--dangerously-bypass-approvals-and-sandbox',
+      '--model',
+      'gpt-5',
+      'P',
     ]);
   });
   it('appends --model before the prompt for cursor when a model is given', () => {
@@ -92,7 +136,12 @@ describe('buildAgentArgs', () => {
     process.env.CODING_X_CURSOR_BIN = 'agent';
     try {
       expect(buildAgentArgs('cursor', 'P', 'composer-1')).toEqual([
-        'agent', '-p', '--force', '--model', 'composer-1', 'P',
+        'agent',
+        '-p',
+        '--force',
+        '--model',
+        'composer-1',
+        'P',
       ]);
     } finally {
       if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
@@ -143,22 +192,188 @@ describe('resolveBinary', () => {
   });
 });
 
+describe('resolveExecutablePath', () => {
+  it('uses Windows environment names case-insensitively without duplicating an existing suffix', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x-windows-bin-'));
+    const executable = join(dir, 'cmd.exe');
+    writeFileSync(executable, '');
+    chmodSync(executable, 0o755);
+    try {
+      expect(
+        resolveExecutablePath(
+          'cmd.exe',
+          dir,
+          {
+            Path: dir,
+            Pathext: '.COM;.EXE;.CMD',
+            PATH: join(dir, 'missing'),
+            PATHEXT: '.NOPE',
+          },
+          'win32',
+        ),
+      ).toBe(realpathSync.native(executable));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses Windows PATHEXT for an executable without a suffix', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x-windows-pathext-'));
+    const executable = join(dir, 'git.CMD');
+    writeFileSync(executable, '');
+    chmodSync(executable, 0o755);
+    try {
+      expect(
+        resolveExecutablePath(
+          'git',
+          dir,
+          {
+            Path: dir,
+            Pathext: '.CMD;.EXE',
+          },
+          'win32',
+        ),
+      ).toBe(realpathSync.native(executable));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('resolveRunnerExecutablePath', () => {
+  it.each(['runner.CMD', 'runner.bat'])(
+    'rejects the Windows AI Runner script wrapper %s',
+    (name) => {
+      const dir = mkdtempSync(join(tmpdir(), 'coding-x-windows-runner-shim-'));
+      const executable = join(dir, name);
+      writeFileSync(executable, '@echo off\r\n');
+      chmodSync(executable, 0o755);
+      try {
+        expect(() =>
+          resolveRunnerExecutablePath('codex', executable, dir, process.env, 'win32'),
+        ).toThrow(/原生可执行文件/u);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('allows a Windows native runner and does not apply the restriction to POSIX', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x-runner-native-'));
+    const native = join(dir, 'runner.EXE');
+    const script = join(dir, 'runner.cmd');
+    writeFileSync(native, '');
+    writeFileSync(script, '');
+    chmodSync(native, 0o755);
+    chmodSync(script, 0o755);
+    try {
+      expect(resolveRunnerExecutablePath('claude', native, dir, process.env, 'win32')).toBe(
+        realpathSync.native(native),
+      );
+      expect(resolveRunnerExecutablePath('claude', script, dir, process.env, 'linux')).toBe(
+        realpathSync.native(script),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('prefers an exact native executable path containing spaces before legacy test splitting', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'coding-x runner native-'));
+    const executable = join(dir, 'native runner.exe');
+    writeFileSync(executable, '');
+    chmodSync(executable, 0o755);
+    try {
+      expect(
+        resolveRunnerInvocation(
+          'codex',
+          executable,
+          ['exec', 'prompt'],
+          dir,
+          process.env,
+          'win32',
+        ),
+      ).toEqual({
+        executable: realpathSync.native(executable),
+        args: ['exec', 'prompt'],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('runAgent', () => {
+  it.runIf(process.platform === 'win32')(
+    'rejects an AI Runner script wrapper before managed execution',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'coding-x-agent-shim-'));
+      const executable = join(dir, 'claude.cmd');
+      const marker = join(dir, 'runner-started.txt');
+      const originalBin = process.env.CODING_X_CLAUDE_BIN;
+      const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      writeFileSync(
+        executable,
+        `@echo off\r\n> ${JSON.stringify(marker)} echo started\r\nexit /b 0\r\n`,
+      );
+      process.env.CODING_X_CLAUDE_BIN = executable;
+      try {
+        const result = await runManagedAgent({
+          kind: 'claude',
+          prompt: '不可进入 shell 的提示词 & "quoted"',
+          cwd: dir,
+          timeoutMs: 5_000,
+        });
+        expect(result).toMatchObject({ timedOut: false, exitCode: 1, durationMs: 0 });
+        expect(result.outputTail).toContain('原生可执行文件');
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        stderr.mockRestore();
+        if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+        else process.env.CODING_X_CLAUDE_BIN = originalBin;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('returns a deterministic failed result when the runner executable is missing', async () => {
+    const originalBin = process.env.CODING_X_CLAUDE_BIN;
+    process.env.CODING_X_CLAUDE_BIN = 'coding-x-definitely-missing-runner';
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const result = await runManagedAgent({
+        kind: 'claude',
+        prompt: '',
+        cwd: here,
+        timeoutMs: 5_000,
+      });
+      expect(result).toMatchObject({ timedOut: false, exitCode: 1 });
+      expect(result.outputTail).toContain('找不到可执行文件');
+    } finally {
+      stderr.mockRestore();
+      if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+      else process.env.CODING_X_CLAUDE_BIN = originalBin;
+    }
+  });
+
   it('merges explicit coding-x context into the child environment', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-env-'));
     const script = join(cwd, 'capture-env.mjs');
     const output = join(cwd, 'env.json');
     const originalBin = process.env.CODING_X_CLAUDE_BIN;
-    writeFileSync(script, `
+    writeFileSync(
+      script,
+      `
       import { writeFileSync } from 'node:fs';
       writeFileSync(${JSON.stringify(output)}, JSON.stringify({
         workspace: process.env.CODING_X_WORKSPACE,
         projectRoot: process.env.CODING_X_PROJECT_ROOT,
       }));
-    `);
+    `,
+    );
     process.env.CODING_X_CLAUDE_BIN = `node ${script}`;
     try {
-      const result = await runAgent({
+      const result = await runManagedAgent({
         kind: 'claude',
         prompt: '',
         cwd,
@@ -182,7 +397,7 @@ describe('runAgent', () => {
 
   it('resolves timedOut=false when the process exits in time', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} ok`;
-    const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
+    const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
     expect(r.timedOut).toBe(false);
     expect(r.exitCode).toBe(0);
     expect(r.durationMs).toBeGreaterThanOrEqual(0);
@@ -195,7 +410,7 @@ describe('runAgent', () => {
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
+      const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
       expect(r).toMatchObject({ timedOut: false, exitCode: 1 });
       expect(r.durationMs).toBeGreaterThanOrEqual(0);
       expect(r.outputTail).toContain('runner started');
@@ -213,7 +428,7 @@ describe('runAgent', () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} long-diagnostic`;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
+      const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
       expect(r.exitCode).toBe(1);
       expect(r.outputTail.length).toBeLessThanOrEqual(2000);
       expect(r.outputTail).toContain('TAIL-END');
@@ -225,17 +440,24 @@ describe('runAgent', () => {
 
   it('resolves timedOut=true and kills a hanging process', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} hang`;
-    const r = await runAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 300 });
+    const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 300 });
     expect(r.timedOut).toBe(true);
     expect(r.durationMs).toBeGreaterThanOrEqual(300);
     delete process.env.CODING_X_CLAUDE_BIN;
   });
 
-  it.runIf(process.platform !== 'win32')('does not resolve a timeout until the whole agent process tree has exited', async () => {
-    await expectTimedOutTreeExited('tree');
-  });
+  it.runIf(process.platform !== 'win32')(
+    'does not resolve a timeout until the whole agent process tree has exited',
+    async () => {
+      await expectTimedOutTreeExited('tree');
+    },
+  );
 
-  it.runIf(process.platform !== 'win32')('escalates to SIGKILL before resolving when an agent descendant traps SIGTERM', async () => {
-    await expectTimedOutTreeExited('stubborn-tree');
-  }, 12_000);
+  it.runIf(process.platform !== 'win32')(
+    'escalates to SIGKILL before resolving when an agent descendant traps SIGTERM',
+    async () => {
+      await expectTimedOutTreeExited('stubborn-tree');
+    },
+    12_000,
+  );
 });

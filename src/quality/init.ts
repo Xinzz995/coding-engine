@@ -12,13 +12,13 @@ import {
   type QualityContract,
 } from './contract.js';
 import {
-  GhGitHubQualityClient,
   GitHubQualityError,
   type GitHubQualityClient,
   type GitHubRepositoryInfo,
   type GitHubRuleset,
   type RequiredStatusCheck,
 } from './github.js';
+import { GhGitHubQualityClient } from './github-unmanaged.js';
 import {
   discoverQualityContract,
   resolveNotApplicableReasons,
@@ -71,6 +71,11 @@ export interface QualityInitOptions {
   /** 自动发现缺少某类检查时，必须取得具体不适用理由。 */
   ask: (question: string) => string | Promise<string>;
   emit?: (message: string) => void;
+  /**
+   * 在本地/远端任何质量配置写入前建立运行时 workspace 安全根。
+   * discovery 与工作树检查仍在它之前，避免新建 workspace 反过来污染初始化预检。
+   */
+  prepareWorkspace?: () => void | Promise<void>;
 }
 
 const MANAGED_MARKER = 'Generated from';
@@ -391,6 +396,7 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
     throw new Error(`当前位于默认分支 ${branch}；请先创建 Bootstrap 或 Policy 功能分支`);
   }
   const { contract, needsWrite } = await resolveContract(options, repository);
+  await options.prepareWorkspace?.();
   const initialRulesets = options.client.listRulesets(repository.fullName);
   const initialRuleset = findManagedRuleset(initialRulesets);
   const initialReleaseRuleset = findManagedReleaseRuleset(initialRulesets);
@@ -411,7 +417,8 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
   if (!ruleset) {
     return result('cancelled', 6, repository, branch, initialRuleset, contract, {
       releaseRulesetId: initialReleaseRuleset?.id ?? null,
-      message: '用户取消 GitHub 最小规则配置；没有写本地初始化文件。',
+      message:
+        '用户取消 GitHub 最小规则配置；未写质量契约、CI 或模板，已完成的 workspace 安全初始化保留。',
     });
   }
   const releaseProtection = await ensureReleaseProtection(

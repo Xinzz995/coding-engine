@@ -3,11 +3,16 @@ import { linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createSystemIdentityAdapter } from './identity.js';
 import {
+  DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS,
   createWindowsSupervisorLaunch,
   readWindowsSupervisorAssets,
+  spawnWindowsJobSupervisor,
   WINDOWS_SUPERVISOR_EXECUTABLE,
 } from './windows-supervisor.js';
+import { WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS } from './windows-path-attributes.js';
+import { WindowsSupervisorProcess } from './windows-supervisor-protocol.js';
 import {
   ASSET_ROOT,
   BREAKAWAY_SOURCE,
@@ -59,7 +64,7 @@ describe('fixed Windows Job supervisor assets', () => {
       expect.any(String),
     ]);
     expect(JSON.parse(Buffer.from(launch.args[3], 'base64').toString('utf8'))).toEqual({
-      handshakeMs: 5000,
+      handshakeMs: 120_000,
       naturalDrainMs: 5000,
       terminateMs: 5000,
       ackMs: 5000,
@@ -72,6 +77,12 @@ describe('fixed Windows Job supervisor assets', () => {
       TEMP: 'C:\\Windows\\Temp',
       TMP: 'C:\\Windows\\Temp',
     });
+    // BOUND→DATA and ARMED→START each contain repeated exact owner/target identity
+    // checks plus bounded workspace scans. Keep a full minute beyond the currently
+    // longest eleven sequential identity probes instead of racing the fixed helper.
+    expect(DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS.handshakeMs).toBeGreaterThanOrEqual(
+      11 * WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS + 60_000,
+    );
     expect(launch.detached).toBe(true);
     expect(launch.windowsHide).toBe(true);
     expect(launch.stdio).toEqual(['pipe', 'pipe', 'pipe']);
@@ -116,6 +127,24 @@ describe('fixed Windows Job supervisor assets', () => {
     ).toThrow(/ambiguous/u);
   });
 
+  it.runIf(process.platform === 'win32')(
+    'observes the same native creation identity emitted by the fixed supervisor',
+    async () => {
+      const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
+      const supervisor = new WindowsSupervisorProcess(spawnWindowsJobSupervisor(launch), 5000);
+      try {
+        const bound = await supervisor.next('BOUND');
+        expect(bound.supervisorPid).toBe(supervisor.pid);
+        expect(createSystemIdentityAdapter().readProcessIdentity(supervisor.pid)).toEqual({
+          status: 'found',
+          value: bound.supervisorIdentity,
+        });
+      } finally {
+        await supervisor.abort();
+      }
+    },
+  );
+
   it('keeps each native source reviewable and preserves the fail-closed Windows sequence', () => {
     const sources = REVIEWED_WINDOWS_SOURCES.map((name) =>
       readFileSync(join(ASSET_ROOT, name), 'utf8'),
@@ -134,9 +163,24 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(program).toContain('--timeouts-base64');
     expect(program).toContain('arguments.Length != 4');
     expect(program).toContain('Assembly.Location');
+    expect(core).toContain('private const int MaximumDecodedObjectBytes = 64 * 1024');
+    expect(core).toContain(
+      '4 * ((MaximumDecodedObjectBytes + 2) / 3)',
+    );
+    expect(core).toContain(
+      'StrictJson.Base64ObjectString(envelope, "messageBase64", "DATA messageBase64")',
+    );
+    expect(core).not.toContain('encoded.Length > 96 * 1024');
+    expect(authority).toContain(
+      'StrictJson.String(envelope, "messageBase64", "messageBase64", false)',
+    );
+    expect(authority).not.toContain('StrictJson.Base64ObjectString(');
     expect(core).not.toContain('Console.InputEncoding');
     expect(core).not.toContain('Console.OutputEncoding');
     expect(core).not.toContain('SetConsoleCtrlHandler');
+    expect(core).toContain(
+      'Range(StrictJson.Integer(record, "handshakeMs", "handshakeMs"), 10, 300000)',
+    );
     expect(processSource.indexOf('CreateJobObjectW')).toBeLessThan(
       processSource.indexOf('CreateProcessW'),
     );
@@ -150,6 +194,15 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(processSource).toContain('CREATE_UNICODE_ENVIRONMENT');
     expect(processSource).toContain('CREATE_SUSPENDED');
     expect(processSource).toContain('CREATE_NO_WINDOW');
+    expect(processSource).toContain(
+      'cmd.exe target must use the fixed /d /s /c shape',
+    );
+    expect(processSource).toContain('only the fixed system cmd.exe target is supported');
+    expect(processSource).toContain('Path.Combine(windows, "System32", "cmd.exe")');
+    expect(processSource).not.toContain('Environment.GetEnvironmentVariable("ComSpec")');
+    expect(processSource).toContain(
+      '.Append(" /d /s /c \\"").Append(target.Arguments[3]).Append(\'"\')',
+    );
     expect(processSource.indexOf('Native.ResumeThread(thread)')).toBeLessThan(
       processSource.indexOf('Native.Close(ref thread)'),
     );

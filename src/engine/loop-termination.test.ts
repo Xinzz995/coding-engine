@@ -4,11 +4,11 @@ import { join } from 'node:path';
 import { readEvidence } from './evidence.js';
 import { setup, story, runLoop, validationReceiptFor } from './loop-test-support.js';
 
-describe('no-op 检测与 stall 熔断', () => {
+describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false }, () => {
   it('builder 空转（双无变化）：跳过验收只跑 builder，连续 3 轮熔断 exit 1', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
-    const calls = join(workspace, 'calls.txt');
+    const calls = join(projectRoot, 'calls.txt');
     // fake：只计数，什么都不写，正常退出（completed 但零产出 = no-op）
     writeFileSync(
       fake,
@@ -40,17 +40,20 @@ describe('no-op 检测与 stall 熔断', () => {
 
   it('门禁打回轮不计 stall 且清零：打回多于 stallLimit 也不熔断', async () => {
     // qualityChecks 必败（false 命令）+ builder 每轮置 true → 每轮门禁打回（有 state 写入=有活动）
-    const { workspace, instructionsDir } = setup([story()], { qualityChecks: ['false'] });
+    const { projectRoot, workspace, instructionsDir } = setup([story()], {
+      qualityChecks: ['false'],
+    });
     const fake = join(workspace, 'fake.mjs');
-    const calls = join(workspace, 'calls.txt');
+    const calls = join(projectRoot, 'calls.txt');
     writeFileSync(
       fake,
       `
-      import { writeFileSync, appendFileSync } from 'node:fs';
+      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
       appendFileSync(${JSON.stringify(calls)}, 'x');
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
+      const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      writeFileSync(statePath, JSON.stringify(state));
       process.exit(0);
     `,
     );
@@ -75,12 +78,12 @@ describe('no-op 检测与 stall 熔断', () => {
       iters.every((r) => (r as { validatorOutcome?: string }).validatorOutcome === 'skipped'),
     ).toBe(true);
     expect(code).toBe(1);
-  });
+  }, 20_000);
 
   it('stallLimit 可经配置调整', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
-    const calls = join(workspace, 'calls.txt');
+    const calls = join(projectRoot, 'calls.txt');
     writeFileSync(
       fake,
       `
@@ -134,7 +137,7 @@ describe('no-op 检测与 stall 熔断', () => {
 
   it('已完工 workspace 启动即收敛：不调 agent，也不伪造 iteration', async () => {
     const target = story();
-    const { workspace, instructionsDir, head } = setup([target]);
+    const { projectRoot, workspace, instructionsDir, head } = setup([target]);
     // 预置已完工 state；fake 不写任何文件（空转）
     writeFileSync(
       join(workspace, 'state.json'),
@@ -150,7 +153,7 @@ describe('no-op 检测与 stall 熔断', () => {
       }),
     );
     const fake = join(workspace, 'fake.mjs');
-    const called = join(workspace, 'called.txt');
+    const called = join(projectRoot, 'called.txt');
     writeFileSync(
       fake,
       `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(called)}, 'x');`,
@@ -221,19 +224,51 @@ describe('no-op 检测与 stall 熔断', () => {
   });
 });
 
-describe('blocked 收敛出口', () => {
+describe('blocked 收敛出口', { timeout: 30_000, concurrent: false }, () => {
   it('全部 resolved 但存在 blocked：文案列出 story 号，exit 3', async () => {
-    const { workspace, instructionsDir } = setup([story(), story({ id: 'US-002', priority: 2 })]);
+    const { projectRoot, workspace, instructionsDir } = setup([
+      story(),
+      story({ id: 'US-002', priority: 2 }),
+    ]);
+    writeFileSync(
+      join(workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: false,
+          validated: false,
+          validationReceipt: null,
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+        'US-002': {
+          passes: false,
+          validated: false,
+          validationReceipt: null,
+          notes: '[需要人工核实] 环境缺失',
+          retryCount: 0,
+          blocked: true,
+          escalated: false,
+        },
+      }),
+    );
     const fake = join(workspace, 'fake.mjs');
-    // fake：US-001 通过、US-002 置 blocked（agent 仲裁上报形态）
+    const calls = join(projectRoot, 'blocked-convergence-calls.txt');
+    // US-002 的人工 blocked 状态由引擎启动前已有数据提供；Builder 只获准更新当前 US-001。
     writeFileSync(
       fake,
       `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        'US-002': { passes: false, notes: '[需要人工核实] 环境缺失', retryCount: 0, blocked: true },
-      }));
+      import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+      const callsPath = ${JSON.stringify(calls)};
+      const call = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf8')) + 1 : 1;
+      writeFileSync(callsPath, String(call));
+      if (call === 1) {
+        const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        state['US-001'].passes = true;
+        writeFileSync(statePath, JSON.stringify(state));
+      }
       process.exit(0);
     `,
     );
@@ -265,15 +300,22 @@ describe('blocked 收敛出口', () => {
   });
 
   it('全部通过无 blocked：维持 exit 0 与既有文案', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
+    const calls = join(projectRoot, 'all-passed-calls.txt');
     writeFileSync(
       fake,
       `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
+      import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+      const callsPath = ${JSON.stringify(calls)};
+      const call = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf8')) + 1 : 1;
+      writeFileSync(callsPath, String(call));
+      if (call === 1) {
+        const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        state['US-001'].passes = true;
+        writeFileSync(statePath, JSON.stringify(state));
+      }
       process.exit(0);
     `,
     );

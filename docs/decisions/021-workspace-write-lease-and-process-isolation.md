@@ -1,9 +1,8 @@
 ---
 title: 021-workspace-write-lease-and-process-isolation
 status: active
-updated: 2026-07-30
+updated: 2026-07-31
 scope: root
-implementation: planned
 ---
 
 # 021. 工作区写租约与子进程隔离
@@ -118,6 +117,11 @@ lease 的当前 owner 在 creator exact dead 时尽力清理。任何前置步�
 
 Developer、Validator、普通/TDD 检查和三个 Final Review Runner 共用 coordinator 与打包在 coding-x
 中的短生命周期 supervisor。协议严格按以下顺序执行：
+
+Windows 上的普通/TDD 项目命令可以使用固定 supervisor 的 `.cmd/.bat` 安全子集；AI Runner 不使用
+shell 脚本包装器，因为提示词和 Review 输入不能交给命令解释器再次解析。v1 对这类 Runner 在建立
+受管 operation 前返回 unsupported，并要求 `CODING_X_CLAUDE_BIN`、`CODING_X_CODEX_BIN` 或
+`CODING_X_CURSOR_BIN` 指向原生可执行文件。
 
 1. 父进程暂停普通写，冻结并回读调用前业务文件 manifest、委托范围和语义校验版本，再原子写
    `prepared` 绑定其摘要；
@@ -455,12 +459,14 @@ C# EXE 与 Windows 原生进程/路径 API；生产入口没有 transport/probe 
 独立配置、固定 suite、辅助资产、可复现构建、进程身份和属性规则都由旧 policy guard 识别，不能
 在同一个 PR 静默削弱后自行变绿。
 
-dark foundation 的新 POSIX 模块不公开 spawn 或 pid-only 的组终止接口；生产组信号只由摘要绑定的
-固定 launcher 对自己的 live group 发出。0.33.3 的 `src/engine/process-tree.ts` 仍是旧生产路径，必须
-留到 atomic activation PR 随全部 spawn 一次迁移，不能把它计入本 PR 的新安全证明。新模块不得导入
-该旧路径；破坏性测试清理只允许对已记录且重新核验身份与 placement 的 test fixture 执行。
+dark foundation 阶段的新 POSIX 模块不公开 spawn 或 pid-only 的组终止接口；生产组信号只由摘要绑定
+的固定 launcher 对自己的 live group 发出。启用前，0.33.3 的 `src/engine/process-tree.ts` 曾作为旧
+生产路径保留，直到 atomic activation PR 将全部 spawn 一次迁移；它未被计入新安全证明，也未被新模块
+导入。当前启用阶段已经删除该旧路径；破坏性测试清理仍只允许对已记录且重新核验身份与 placement 的
+test fixture 执行。
 
-启用前 architecture/README 继续诚实描述 0.33.3，不能用已合并但未接线的模块宣称 P1 已关闭。
+启用前 architecture/README 曾继续描述 0.33.3，避免用尚未接线的模块宣称 P1 已关闭；当前文档改为
+描述已经接线的启用状态。
 
 ## 退出语义
 
@@ -495,8 +501,9 @@ Windows Job Object 和 POSIX process group 都不覆盖项目代码主动使用�
 先删锁，也修正 ADR-009/016 对 completed/error 与根进程返回的过宽表述。ADR-014 中 report 不
 持锁、`prd-to-json` 双 doctor 尽力避让同时被取代；报告信任来源和损坏 state 语义不变。
 
-在实施完成前，ADR-008/014 仍描述 0.33.3 的真实运行行为；本文件是已批准但尚未启用的 0.34.0
-目标合同。
+原子启用 PR 已把本合同接入所有公开正式写入口；ADR-008 和 ADR-014 中旧的写排他规则只保留为
+历史。安全保证从 workspace 由本协议明确初始化、且所有 0.33.x writer 已停止后开始；旧 workspace
+必须显式初始化或改用新 workspace，不能追溯 fencing 已经运行的 0.33.x 进程。
 
 ## 明确不做
 

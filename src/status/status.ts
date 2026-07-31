@@ -2,18 +2,38 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
 import {
-  readDisplayState, mergedStories, getCurrentStoryId, type StoryView,
+  readDisplayState,
+  mergedStories,
+  getCurrentStoryId,
+  type StoryView,
   isStoryPassed,
 } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
 import {
-  readEvidence, type AgentInvocationEvidence, type EvidenceRecord, type ValidationTargetEvidence,
+  readEvidence,
+  type AgentInvocationEvidence,
+  type EvidenceRecord,
+  type ValidationTargetEvidence,
   type LoopValidationProtocolErrorCode,
 } from '../engine/evidence.js';
-import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
-import { collectCurrentReviewStatus, type CurrentReviewStatus } from '../review/status.js';
+import {
+  readModelRouting,
+  type ModelRouteSource,
+  type ModelRoutingReadResult,
+} from '../engine/models.js';
+import {
+  collectCurrentReviewStatus,
+  type CurrentReviewStatus,
+  type RunnerVersionObservation,
+} from '../review/status.js';
 import type { GitHubQualityClient } from '../quality/github.js';
+import {
+  inspectWorkspaceSafetyStatus,
+  renderWorkspaceSafetyStatusLines,
+  type WorkspaceSafetyStatusSnapshot,
+} from '../workspace-safety/status.js';
+import { observeStatusRunnerVersion } from './runner-version-observation.js';
 
 export interface RecentModelRoute {
   model: string | null;
@@ -36,7 +56,7 @@ export interface StoryRecentValidation {
   stateMutation: boolean;
 }
 
-export type StatusReport =
+export type StatusReport = (
   | { status: 'missing'; workspace: string }
   | { status: 'unparsable'; workspace: string }
   | {
@@ -53,7 +73,38 @@ export type StatusReport =
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
       stateCorrupted: boolean;
       finalReview: CurrentReviewStatus;
-    };
+    }
+) & {
+  /** 只读诊断快照；不存在时保持旧同步收集入口的兼容输出。 */
+  workspaceSafety?: WorkspaceSafetyStatusSnapshot;
+};
+
+export type StatusReportWithWorkspaceSafety = StatusReport & {
+  workspaceSafety: WorkspaceSafetyStatusSnapshot;
+};
+
+interface StatusWorkspaceSafetyReadAdapter {
+  readonly collect: () => StatusReport | Promise<StatusReport>;
+  readonly inspect: () => Promise<WorkspaceSafetyStatusSnapshot>;
+}
+
+interface StableStatusRead {
+  readonly report: StatusReport;
+  readonly before: WorkspaceSafetyStatusSnapshot;
+  readonly after: WorkspaceSafetyStatusSnapshot;
+}
+
+const STATUS_STABILITY_ATTEMPTS = 2;
+
+interface StatusCollectionOptions {
+  readonly projectRoot?: string;
+  readonly client?: GitHubQualityClient;
+  readonly refreshRemote?: boolean;
+}
+
+interface ControlledStatusCollectionOptions extends StatusCollectionOptions {
+  readonly runnerVersionObservation?: RunnerVersionObservation;
+}
 
 // progress.md 是追加式日志，迭代记录标题固定以日期开头（`## yyyy-mm-dd HH:mm - Story ID`），
 // 按日期前缀匹配以排除 `## Codebase Patterns` 等非记录标题；最后一条即最近一次迭代
@@ -83,7 +134,8 @@ function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentAc
         source: record.validatorRouteSource ?? null,
         iteration: record.iteration,
         ...(record.validatorOutcome && record.validatorOutcome !== 'skipped'
-          ? { outcome: record.validatorOutcome } : {}),
+          ? { outcome: record.validatorOutcome }
+          : {}),
         ...(record.validatorInvocation ? { invocation: record.validatorInvocation } : {}),
       };
     }
@@ -95,7 +147,8 @@ function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentAc
 function recentValidationOf(records: EvidenceRecord[]): Record<string, StoryRecentValidation> {
   const recent: Record<string, StoryRecentValidation> = {};
   for (const record of records) {
-    if (record.type !== 'iteration' || record.storyId === null || !record.validationProtocol) continue;
+    if (record.type !== 'iteration' || record.storyId === null || !record.validationProtocol)
+      continue;
     recent[record.storyId] = {
       protocol: record.validationProtocol,
       iteration: record.iteration,
@@ -108,11 +161,10 @@ function recentValidationOf(records: EvidenceRecord[]): Record<string, StoryRece
 }
 
 /** 只读收集 workspace 执行状态；state.json 缺失兼容 legacy，存在但损坏则 fail-closed。 */
-export function collectStatus(workspace: string, options: {
-  projectRoot?: string;
-  client?: GitHubQualityClient;
-  refreshRemote?: boolean;
-} = {}): StatusReport {
+function collectStatusControlled(
+  workspace: string,
+  options: ControlledStatusCollectionOptions = {},
+): StatusReport {
   const prdPath = join(workspace, 'prd.json');
   if (!existsSync(prdPath)) return { status: 'missing', workspace };
   const prd = tryReadPrd(prdPath);
@@ -144,8 +196,82 @@ export function collectStatus(workspace: string, options: {
       ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
       ...(options.client ? { client: options.client } : {}),
       refreshRemote: options.refreshRemote ?? false,
+      ...(options.runnerVersionObservation
+        ? { runnerVersionObservation: options.runnerVersionObservation }
+        : {}),
     }),
   };
+}
+
+export function collectStatus(
+  workspace: string,
+  options: StatusCollectionOptions = {},
+): StatusReport {
+  return collectStatusControlled(workspace, options);
+}
+
+/**
+ * Production display entrypoint. The legacy synchronous collector remains available to callers
+ * that have not migrated yet, while every activated CLI/UI path should await this function.
+ */
+function isStableStatusRead(value: StableStatusRead): boolean {
+  // The fingerprint covers the complete safety tree, including append-only released lease
+  // incidents. A formal writer that both starts and finishes inside this window therefore still
+  // changes the fingerprint instead of disappearing between the two observations.
+  if (JSON.stringify(value.before) !== JSON.stringify(value.after)) return false;
+  return value.after.status !== 'ready' || value.after.safetyFingerprint !== null;
+}
+
+function unstableStatusSnapshot(
+  after: WorkspaceSafetyStatusSnapshot,
+): WorkspaceSafetyStatusSnapshot {
+  return {
+    ...after,
+    status: 'invalid',
+    observedClassification: 'invalid',
+    reason: 'unstable-probe',
+    diagnostic:
+      'workspace safety state changed while status data was collected and did not stabilize after one retry',
+    display: {
+      label: '状态不稳定',
+      summary: '状态读取期间发生了 workspace 写入，无法证明当前结果来自同一个稳定时刻。',
+      guidance: '等待当前操作结束后重新查询。',
+    },
+  };
+}
+
+/** @internal Deterministic status-read race seam; production fixes both readers below. */
+export async function collectStatusWithWorkspaceSafetyControlled(
+  adapter: StatusWorkspaceSafetyReadAdapter,
+): Promise<StatusReportWithWorkspaceSafety> {
+  let last: StableStatusRead | undefined;
+  for (let attempt = 0; attempt < STATUS_STABILITY_ATTEMPTS; attempt += 1) {
+    const before = await adapter.inspect();
+    const report = await adapter.collect();
+    const after = await adapter.inspect();
+    last = { report, before, after };
+    if (isStableStatusRead(last)) return { ...report, workspaceSafety: after };
+  }
+  if (last === undefined) throw new Error('status stability read did not run');
+  return { ...last.report, workspaceSafety: unstableStatusSnapshot(last.after) };
+}
+
+export async function collectStatusWithWorkspaceSafety(
+  workspace: string,
+  options: StatusCollectionOptions = {},
+): Promise<StatusReportWithWorkspaceSafety> {
+  return await collectStatusWithWorkspaceSafetyControlled({
+    collect: async () => {
+      const runnerVersionObservation = options.projectRoot
+        ? await observeStatusRunnerVersion({ workspace, projectRoot: options.projectRoot })
+        : undefined;
+      return collectStatusControlled(workspace, {
+        ...options,
+        ...(runnerVersionObservation === undefined ? {} : { runnerVersionObservation }),
+      });
+    },
+    inspect: async () => await inspectWorkspaceSafetyStatus(workspace),
+  });
 }
 
 function summarize(stories: StoryView[]): { total: number; passed: number; blocked: number } {
@@ -167,14 +293,28 @@ function diagnosticSummary(value: string): string {
 
 export function renderStatusReport(report: StatusReport): { text: string; exitCode: number } {
   if (report.status === 'missing') {
+    const safetyLines =
+      report.workspaceSafety === undefined
+        ? []
+        : ['', ...renderWorkspaceSafetyStatusLines(report.workspaceSafety)];
     return {
-      text: `❌ 未找到工作区：${join(report.workspace, 'prd.json')} 不存在。建议先用 prd-to-json 从源 PRD 生成工作区。`,
+      text: [
+        `❌ 未找到工作区：${join(report.workspace, 'prd.json')} 不存在。建议先用 prd-to-json 从源 PRD 生成工作区。`,
+        ...safetyLines,
+      ].join('\n'),
       exitCode: 2,
     };
   }
   if (report.status === 'unparsable') {
+    const safetyLines =
+      report.workspaceSafety === undefined
+        ? []
+        : ['', ...renderWorkspaceSafetyStatusLines(report.workspaceSafety)];
     return {
-      text: `❌ 无法解析 ${join(report.workspace, 'prd.json')}。建议运行 npx coding-x repair 修复后重试。`,
+      text: [
+        `❌ 无法解析 ${join(report.workspace, 'prd.json')}。建议运行 npx coding-x repair 修复后重试。`,
+        ...safetyLines,
+      ].join('\n'),
       exitCode: 2,
     };
   }
@@ -185,6 +325,13 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     `   story 通过 ${passed}/${total}${blocked > 0 ? `，阻塞 ${blocked}` : ''}`,
     '',
   ];
+  if (report.workspaceSafety !== undefined) {
+    lines.push(...renderWorkspaceSafetyStatusLines(report.workspaceSafety), '');
+  }
+  if (report.workspaceSafety !== undefined && report.workspaceSafety.status !== 'ready') {
+    lines.push('❌ workspace 安全状态未就绪，不能表示可交付');
+    return { text: lines.join('\n'), exitCode: 2 };
+  }
   const review = report.finalReview;
   if (review.read.status === 'missing') {
     lines.push('🔎 本地最终 Review：尚未运行', '');
@@ -220,23 +367,35 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     const difficulty = s.difficulty ? ` [${s.difficulty}]` : '';
     const escalated = s.escalated ? ' ⬆️ 已升级' : '';
     const pendingValidationLabel = !s.blocked && s.passes && !s.validated ? ' ⏳ 待引擎验收' : '';
-    lines.push(`  ${markOf(s)} ${s.id} ${s.title}${difficulty}${escalated}${pendingValidationLabel}${retry}`);
+    lines.push(
+      `  ${markOf(s)} ${s.id} ${s.title}${difficulty}${escalated}${pendingValidationLabel}${retry}`,
+    );
     if (s.difficultyReason) lines.push(`      · 难度依据：${s.difficultyReason}`);
     const actual = report.recentActual[s.id];
     if (actual?.builder || actual?.validator) {
-      const route = (side: RecentModelRoute | undefined) => side
-        ? `${side.model ?? '默认'} [${side.source ?? '来源未知'}]@第${side.iteration}轮` +
-          `${side.outcome ? ` · ${side.outcome}` : ''}` +
-          `${side.invocation ? ` · ${(side.invocation.durationMs / 1000).toFixed(1)}s` : ''}` +
-          `${side.invocation?.exitCode !== undefined
-            ? ` · exit=${side.invocation.exitCode ?? 'unavailable'}` : ''}`
-        : '无';
-      lines.push(`      · 最近实际：builder=${route(actual.builder)} · validator=${route(actual.validator)}`);
+      const route = (side: RecentModelRoute | undefined) =>
+        side
+          ? `${side.model ?? '默认'} [${side.source ?? '来源未知'}]@第${side.iteration}轮` +
+            `${side.outcome ? ` · ${side.outcome}` : ''}` +
+            `${side.invocation ? ` · ${(side.invocation.durationMs / 1000).toFixed(1)}s` : ''}` +
+            `${
+              side.invocation?.exitCode !== undefined
+                ? ` · exit=${side.invocation.exitCode ?? 'unavailable'}`
+                : ''
+            }`
+          : '无';
+      lines.push(
+        `      · 最近实际：builder=${route(actual.builder)} · validator=${route(actual.validator)}`,
+      );
       if (actual.builder?.invocation?.diagnosticTail) {
-        lines.push(`      ⚠️ builder 诊断：${diagnosticSummary(actual.builder.invocation.diagnosticTail)}`);
+        lines.push(
+          `      ⚠️ builder 诊断：${diagnosticSummary(actual.builder.invocation.diagnosticTail)}`,
+        );
       }
       if (actual.validator?.invocation?.diagnosticTail) {
-        lines.push(`      ⚠️ validator 诊断：${diagnosticSummary(actual.validator.invocation.diagnosticTail)}`);
+        lines.push(
+          `      ⚠️ validator 诊断：${diagnosticSummary(actual.validator.invocation.diagnosticTail)}`,
+        );
       }
     }
     const recentValidation = report.recentValidation[s.id];
@@ -248,9 +407,13 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
         const reason = recentValidation.error
           ? `${recentValidation.error.code}：${recentValidation.error.diagnostic}`
           : '原因未记录';
-        lines.push(`      ⚠️ 最近验收协议：invalid@第${recentValidation.iteration}轮（${reason}）${target}`);
+        lines.push(
+          `      ⚠️ 最近验收协议：invalid@第${recentValidation.iteration}轮（${reason}）${target}`,
+        );
       } else {
-        lines.push(`      · 最近验收协议：${recentValidation.protocol}@第${recentValidation.iteration}轮${target}`);
+        lines.push(
+          `      · 最近验收协议：${recentValidation.protocol}@第${recentValidation.iteration}轮${target}`,
+        );
       }
     }
     for (const raw of s.notes.split('\n')) {
@@ -267,7 +430,8 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   if (report.evidenceSkippedLines > 0) {
     lines.push(`⚠️ evidence.jsonl 有 ${report.evidenceSkippedLines} 行无法解析已跳过`);
   }
-  if (report.evidenceUnavailable) lines.push('⚠️ evidence.jsonl 当前不可读，最近实际路由可能不完整');
+  if (report.evidenceUnavailable)
+    lines.push('⚠️ evidence.jsonl 当前不可读，最近实际路由可能不完整');
   // 空 story 列表不算全绿：status 的退出码用作 CI 门禁，对退化的 prd.json 必须保守
   if (total === 0) {
     lines.push('', '⚠️ prd.json 中没有任何 story');
@@ -275,7 +439,10 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   }
   const allPassed = !report.stateCorrupted && passed === total;
   if (!allPassed) {
-    lines.push('', blocked > 0 ? '⏸️ 存在 blocked story' : `⏳ 还有 ${total - passed} 个 story 未完成`);
+    lines.push(
+      '',
+      blocked > 0 ? '⏸️ 存在 blocked story' : `⏳ 还有 ${total - passed} 个 story 未完成`,
+    );
     return { text: lines.join('\n'), exitCode: blocked > 0 ? 3 : 1 };
   }
   const finalReview = report.finalReview;
@@ -288,19 +455,27 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     return { text: lines.join('\n'), exitCode: 6 };
   }
   const reviewState = finalReview.read.state;
-  if (reviewState.status === 'unverifiable') return {
-    text: [...lines, '', '❌ 本地最终 Review 无法验证'].join('\n'), exitCode: 5,
-  };
-  if (reviewState.status === 'failed') return {
-    text: [...lines, '', '⏸️ 本地最终 Review 存在待人工处理 finding'].join('\n'), exitCode: 4,
-  };
-  if (reviewState.shadow) return {
-    text: [...lines, '', '🧪 Shadow 已完成，但不能表示可交付'].join('\n'), exitCode: 7,
-  };
+  if (reviewState.status === 'unverifiable')
+    return {
+      text: [...lines, '', '❌ 本地最终 Review 无法验证'].join('\n'),
+      exitCode: 5,
+    };
+  if (reviewState.status === 'failed')
+    return {
+      text: [...lines, '', '⏸️ 本地最终 Review 存在待人工处理 finding'].join('\n'),
+      exitCode: 4,
+    };
+  if (reviewState.shadow)
+    return {
+      text: [...lines, '', '🧪 Shadow 已完成，但不能表示可交付'].join('\n'),
+      exitCode: 7,
+    };
   const remote = finalReview.refreshedRemote ?? reviewState.remote;
-  if (remote.status !== 'ready') return {
-    text: [...lines, '', '⏳ 本地已完成，GitHub CI 或 Ruleset 尚未就绪'].join('\n'), exitCode: 6,
-  };
+  if (remote.status !== 'ready')
+    return {
+      text: [...lines, '', '⏳ 本地已完成，GitHub CI 或 Ruleset 尚未就绪'].join('\n'),
+      exitCode: 6,
+    };
   lines.push('', '✅ 实现验证、本地 Review 与 GitHub 交付条件均已就绪');
   return { text: lines.join('\n'), exitCode: 0 };
 }
@@ -314,7 +489,17 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
 export function renderStatusJson(report: StatusReport): { text: string; exitCode: number } {
   if (report.status !== 'ok') {
     return {
-      text: JSON.stringify({ error: report.status, workspace: report.workspace }, null, 2),
+      text: JSON.stringify(
+        {
+          error: report.status,
+          workspace: report.workspace,
+          ...(report.workspaceSafety === undefined
+            ? {}
+            : { workspaceSafety: report.workspaceSafety }),
+        },
+        null,
+        2,
+      ),
       exitCode: 2,
     };
   }
@@ -345,16 +530,24 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
       unavailable: report.evidenceUnavailable,
     },
     finalReview: report.finalReview,
+    ...(report.workspaceSafety === undefined ? {} : { workspaceSafety: report.workspaceSafety }),
     summary,
   };
+  if (report.workspaceSafety !== undefined && report.workspaceSafety.status !== 'ready') {
+    return { text: JSON.stringify(view, null, 2), exitCode: 2 };
+  }
   // 与人类可读模式同一保守语义：空 story 列表不算全绿
   const allPassed = !report.stateCorrupted && summary.total > 0 && summary.passed === summary.total;
-  if (!allPassed) return { text: JSON.stringify(view, null, 2), exitCode: summary.blocked > 0 ? 3 : 1 };
+  if (!allPassed)
+    return { text: JSON.stringify(view, null, 2), exitCode: summary.blocked > 0 ? 3 : 1 };
   const review = report.finalReview;
   if (review.read.status === 'invalid') return { text: JSON.stringify(view, null, 2), exitCode: 2 };
-  if (review.read.status === 'missing' || !review.current) return { text: JSON.stringify(view, null, 2), exitCode: 6 };
-  if (review.read.state.status === 'unverifiable') return { text: JSON.stringify(view, null, 2), exitCode: 5 };
-  if (review.read.state.status === 'failed') return { text: JSON.stringify(view, null, 2), exitCode: 4 };
+  if (review.read.status === 'missing' || !review.current)
+    return { text: JSON.stringify(view, null, 2), exitCode: 6 };
+  if (review.read.state.status === 'unverifiable')
+    return { text: JSON.stringify(view, null, 2), exitCode: 5 };
+  if (review.read.state.status === 'failed')
+    return { text: JSON.stringify(view, null, 2), exitCode: 4 };
   if (review.read.state.shadow) return { text: JSON.stringify(view, null, 2), exitCode: 7 };
   const remote = review.refreshedRemote ?? review.read.state.remote;
   return { text: JSON.stringify(view, null, 2), exitCode: remote.status === 'ready' ? 0 : 6 };

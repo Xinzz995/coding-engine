@@ -62,6 +62,8 @@ export interface WorkspaceMutationPlanControlled {
   readonly mutationId?: string;
   readonly now?: () => Date;
   readonly hooks?: MutationAdvanceHooks & {
+    /** Commit-time policy check after the complete input is prepared, before mutation is installed. */
+    readonly beforeMutationInstalled?: () => void | Promise<void>;
     readonly afterMutationInstalled?: (domain: MutationDomain) => void | Promise<void>;
   };
 }
@@ -324,6 +326,8 @@ export async function runWorkspaceMutationControlled(
       ...input,
     });
     await verifyMutationBaseBeforeInstall(prepared.domain);
+    await session.lease.verify();
+    await plan.hooks?.beforeMutationInstalled?.();
     await session.lease.verify();
     const installed = await installMutationStagingControlled(
       prepared.staging,

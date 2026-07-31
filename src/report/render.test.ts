@@ -34,7 +34,7 @@ function data(over: Partial<ReportData> = {}): ReportData {
     tamperedArchives: [],
     screenshots: [],
     evidence: { records: [], skippedLines: 0 },
-    finalReview: { status: 'missing' },
+    finalReview: { read: { status: 'missing' }, current: false, staleReasons: [] },
     ...over,
   };
 }
@@ -44,9 +44,19 @@ function ev(records: EvidenceRecord[], skippedLines = 0) {
 }
 
 function readyReview(shadow = false): ReportData['finalReview'] {
+  const remote = {
+    status: 'ready' as const,
+    checks: [],
+    rulesetErrors: [],
+    checkedAt: '2026-07-08T12:34:00Z',
+  };
   return {
-    status: 'ready',
-    state: {
+    current: true,
+    staleReasons: [],
+    refreshedRemote: remote,
+    read: {
+      status: 'ready',
+      state: {
       schemaVersion: 1,
       status: 'passed',
       deliveryStatus: shadow ? 'shadow' : 'ready',
@@ -65,8 +75,9 @@ function readyReview(shadow = false): ReportData['finalReview'] {
         axis: 'spec', status: 'passed', summary: 'ok', findings: [],
         requestDeepReview: false, durationMs: 1, attempts: 1,
       }],
-      remote: { status: 'ready', checks: [], rulesetErrors: [], checkedAt: '2026-07-08T12:34:00Z' },
+      remote,
       round: 1, shadow, startedAt: '2026-07-08T12:33:00Z', completedAt: '2026-07-08T12:34:00Z',
+      },
     },
   };
 }
@@ -149,6 +160,20 @@ describe('renderReportHtml', () => {
     const ready = renderReportHtml(data({ finalReview: readyReview() }));
     expect(ready).toContain('本地 Review 与 GitHub 交付条件已就绪');
     expect(ready).toContain('PR #9');
+
+    const staleReview = readyReview();
+    staleReview.current = false;
+    staleReview.staleReasons = ['Runner 版本已变化'];
+    const stale = renderReportHtml(data({ finalReview: staleReview }));
+    expect(stale).toContain('本地最终 Review 已过期或未完成当前性核验');
+    expect(stale).toContain('Runner 版本已变化');
+    expect(stale).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
+
+    const localOnlyReview = readyReview();
+    delete localOnlyReview.refreshedRemote;
+    const localOnly = renderReportHtml(data({ finalReview: localOnlyReview }));
+    expect(localOnly).toContain('GitHub 交付条件尚未重新核验');
+    expect(localOnly).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
 
     const shadow = renderReportHtml(data({ finalReview: readyReview(true) }));
     expect(shadow).toContain('Shadow 结果不能表示可交付');

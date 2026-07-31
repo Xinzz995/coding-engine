@@ -1,12 +1,24 @@
 import { describe, it, expect } from 'vitest';
 import {
-  mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, symlinkSync, realpathSync,
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  readFileSync,
+  mkdirSync,
+  symlinkSync,
+  realpathSync,
+  writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
-  readQualityChecks, applyGateFailure, runQualityChecks, MAX_RETRIES,
-  applyAbortRollback, ABORT_LINE_PREFIX, applyValidatorFailure,
+  readQualityChecks,
+  applyGateFailure,
+  runQualityChecks,
+  MAX_RETRIES,
+  applyAbortRollback,
+  ABORT_LINE_PREFIX,
+  applyValidatorFailure,
   applyValidatorSuccess,
   classifyValidationOnlyGateFailure,
   runContractQualityChecks,
@@ -19,6 +31,39 @@ import type {
   QualityContract,
   QualityCheckPolicy,
 } from '../quality/contract.js';
+import { createManagedProcessTestSession } from './managed-process-test-support.js';
+
+async function runManagedQualityChecks(
+  checks: string[],
+  cwd: string,
+  timeoutMs?: number,
+): ReturnType<typeof runQualityChecks> {
+  const fixture = await createManagedProcessTestSession();
+  try {
+    return await runQualityChecks(checks, cwd, timeoutMs, {
+      session: fixture.session,
+      kind: 'quality-check',
+    });
+  } finally {
+    await fixture.close();
+  }
+}
+
+async function runManagedContractQualityChecks(
+  checks: FrozenQualityChecks,
+  projectRoot: string,
+  platform?: 'linux' | 'macos' | 'windows' | null,
+): ReturnType<typeof runContractQualityChecks> {
+  const fixture = await createManagedProcessTestSession();
+  try {
+    return await runContractQualityChecks(checks, projectRoot, platform, {
+      session: fixture.session,
+      kind: 'quality-check',
+    });
+  } finally {
+    await fixture.close();
+  }
+}
 
 function contractWith(
   test: QualityCheckPolicy,
@@ -34,12 +79,19 @@ function contractWith(
 }
 
 const prdWith = (qualityChecks?: unknown): Prd => ({
-  project: 'p', branchName: 'b', description: 'd', userStories: [],
+  project: 'p',
+  branchName: 'b',
+  description: 'd',
+  userStories: [],
   ...(qualityChecks === undefined ? {} : { qualityChecks: qualityChecks as string[] }),
 });
 
 const failure = (over: Partial<GateFailure> = {}): GateFailure => ({
-  command: 'npm test', exitCode: 1, timedOut: false, outputTail: '2 failed', ...over,
+  command: 'npm test',
+  exitCode: 1,
+  timedOut: false,
+  outputTail: '2 failed',
+  ...over,
 });
 
 const validationReceipt = {
@@ -60,8 +112,10 @@ describe('readQualityChecks', () => {
   });
 
   it('returns the commands for a valid string array', () => {
-    expect(readQualityChecks(prdWith(['npm run typecheck', 'npm test'])))
-      .toEqual(['npm run typecheck', 'npm test']);
+    expect(readQualityChecks(prdWith(['npm run typecheck', 'npm test']))).toEqual([
+      'npm run typecheck',
+      'npm test',
+    ]);
   });
 
   it('returns "invalid" for non-array or non-string members', () => {
@@ -73,8 +127,9 @@ describe('readQualityChecks', () => {
 
 describe('classifyValidationOnlyGateFailure', () => {
   it('只把正常结束的门禁非零退出分类为明确失败', () => {
-    expect(classifyValidationOnlyGateFailure(failure({ exitCode: 7, timedOut: false })))
-      .toBe('failed');
+    expect(classifyValidationOnlyGateFailure(failure({ exitCode: 7, timedOut: false }))).toBe(
+      'failed',
+    );
   });
 
   it.each([
@@ -82,8 +137,7 @@ describe('classifyValidationOnlyGateFailure', () => {
     ['spawn 错误或信号终止', { exitCode: null, timedOut: false }],
     ['超时优先于异常的数值退出码', { exitCode: 143, timedOut: true }],
   ])('把%s分类为不可验证，不把候选实现误判为失败', (_label, overrides) => {
-    expect(classifyValidationOnlyGateFailure(failure(overrides)))
-      .toBe('unverifiable');
+    expect(classifyValidationOnlyGateFailure(failure(overrides))).toBe('unverifiable');
   });
 });
 
@@ -128,22 +182,32 @@ describe('applyGateFailure', () => {
       'US-001': {
         passes: true,
         validated: false,
-        notes: '[需求冲突] 2026-07-01 10:00 冲突点（源说 X，AC 说 Y，已按 Y 实现）\n[验证失败 - 第1次] 旧失败详情',
+        notes:
+          '[需求冲突] 2026-07-01 10:00 冲突点（源说 X，AC 说 Y，已按 Y 实现）\n[验证失败 - 第1次] 旧失败详情',
         retryCount: 1,
         blocked: false,
         escalated: false,
       },
     };
     const next = applyGateFailure(state, 'US-001', failure(), now);
-    expect(next['US-001'].notes.startsWith(
-      '[需求冲突] 2026-07-01 10:00 冲突点（源说 X，AC 说 Y，已按 Y 实现）\n[门禁失败 - 第2次]',
-    )).toBe(true);
+    expect(
+      next['US-001'].notes.startsWith(
+        '[需求冲突] 2026-07-01 10:00 冲突点（源说 X，AC 说 Y，已按 Y 实现）\n[门禁失败 - 第2次]',
+      ),
+    ).toBe(true);
     expect(next['US-001'].notes).not.toContain('[验证失败');
   });
 
   it('marks blocked and appends BLOCKED note when retryCount reaches MAX_RETRIES', () => {
     const state: RunState = {
-      'US-001': { passes: true, validated: false, notes: '', retryCount: MAX_RETRIES - 1, blocked: false, escalated: false },
+      'US-001': {
+        passes: true,
+        validated: false,
+        notes: '',
+        retryCount: MAX_RETRIES - 1,
+        blocked: false,
+        escalated: false,
+      },
     };
     const next = applyGateFailure(state, 'US-001', failure(), now);
     expect(next['US-001'].retryCount).toBe(MAX_RETRIES);
@@ -170,9 +234,11 @@ describe('applyGateFailure', () => {
       },
     };
     const next = applyGateFailure(state, 'US-001', failure(), now);
-    expect(next['US-001'].notes.startsWith(
-      '[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已附调查过程\n[门禁失败 - 第1次]',
-    )).toBe(true);
+    expect(
+      next['US-001'].notes.startsWith(
+        '[需要人工核实] 2026-07-07 19:00 门禁配置来源存疑，已附调查过程\n[门禁失败 - 第1次]',
+      ),
+    ).toBe(true);
     expect(next['US-001'].notes).not.toContain('普通旧失败行');
   });
 
@@ -188,7 +254,11 @@ describe('applyGateFailure', () => {
       },
     };
     const next = applyGateFailure(state, 'US-001', failure(), now);
-    expect(next['US-001'].notes.startsWith('[需求冲突] 冲突点 A\n[需要人工核实] 疑点 B\n[门禁失败 - 第1次]')).toBe(true);
+    expect(
+      next['US-001'].notes.startsWith(
+        '[需求冲突] 冲突点 A\n[需要人工核实] 疑点 B\n[门禁失败 - 第1次]',
+      ),
+    ).toBe(true);
   });
 
   it('preserves an explicit blocked=true set by the agent and skips the max-retries banner', () => {
@@ -239,21 +309,28 @@ describe('engine-owned Validator verdict state', () => {
   });
 
   it('applies failed AC claims, increments retry and preserves arbitration', () => {
-    const next = applyValidatorFailure(base, 'US-001', {
-      checks: [
-        { acIndex: 1, passed: false, evidence: 'expected 401, received 200' },
-        { acIndex: 2, passed: true, evidence: 'audit assertion passed' },
-        { acIndex: 3, passed: false, evidence: 'missing request id' },
-      ],
-      summary: '鉴权和审计字段未达标',
-    }, now);
+    const next = applyValidatorFailure(
+      base,
+      'US-001',
+      {
+        checks: [
+          { acIndex: 1, passed: false, evidence: 'expected 401, received 200' },
+          { acIndex: 2, passed: true, evidence: 'audit assertion passed' },
+          { acIndex: 3, passed: false, evidence: 'missing request id' },
+        ],
+        summary: '鉴权和审计字段未达标',
+      },
+      now,
+    );
 
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
     expect(next['US-001']).toHaveProperty('validationReceipt', null);
     expect(next['US-001'].retryCount).toBe(3);
     expect(next['US-001'].blocked).toBe(false);
-    expect(next['US-001'].notes).toContain('[需求冲突] 保留这条仲裁\n[验证失败 - 第3次] 2026-07-22 18:30');
+    expect(next['US-001'].notes).toContain(
+      '[需求冲突] 保留这条仲裁\n[验证失败 - 第3次] 2026-07-22 18:30',
+    );
     expect(next['US-001'].notes).toContain('- AC 1：expected 401, received 200');
     expect(next['US-001'].notes).toContain('- AC 3：missing request id');
     expect(next['US-001'].notes).not.toContain('audit assertion passed');
@@ -264,10 +341,15 @@ describe('engine-owned Validator verdict state', () => {
     const state: RunState = {
       'US-001': { ...base['US-001'], retryCount: MAX_RETRIES - 1 },
     };
-    const next = applyValidatorFailure(state, 'US-001', {
-      checks: [{ acIndex: 1, passed: false, evidence: 'still failing' }],
-      summary: '未通过',
-    }, now);
+    const next = applyValidatorFailure(
+      state,
+      'US-001',
+      {
+        checks: [{ acIndex: 1, passed: false, evidence: 'still failing' }],
+        summary: '未通过',
+      },
+      now,
+    );
 
     expect(next['US-001'].retryCount).toBe(MAX_RETRIES);
     expect(next['US-001'].blocked).toBe(true);
@@ -275,15 +357,15 @@ describe('engine-owned Validator verdict state', () => {
   });
 });
 
-describe('runQualityChecks', () => {
+describe('runQualityChecks', { timeout: 30_000, concurrent: false }, () => {
   it('passes when every command exits 0', async () => {
-    const r = await runQualityChecks(['node -e "process.exit(0)"'], process.cwd());
+    const r = await runManagedQualityChecks(['node -e "process.exit(0)"'], process.cwd());
     expect(r.ok).toBe(true);
     expect(r.failure).toBeNull();
   });
 
   it('fails with the exit code and captured output tail', async () => {
-    const r = await runQualityChecks(
+    const r = await runManagedQualityChecks(
       ['node -e "console.error(\'boom-marker\'); process.exit(3)"'],
       process.cwd(),
     );
@@ -300,7 +382,7 @@ describe('runQualityChecks', () => {
     try {
       // 外层双引号内用单引号包路径：tmpdir 路径无空格与单引号，shell 下字面保留
       const second = `node -e "require('node:fs').writeFileSync('${marker}', 'x')"`;
-      const r = await runQualityChecks(['node -e "process.exit(1)"', second], process.cwd());
+      const r = await runManagedQualityChecks(['node -e "process.exit(1)"', second], process.cwd());
       expect(r.ok).toBe(false);
       expect(r.failure!.command).toBe('node -e "process.exit(1)"');
       expect(existsSync(marker)).toBe(false);
@@ -310,7 +392,7 @@ describe('runQualityChecks', () => {
   });
 
   it('keeps only the tail of long output', async () => {
-    const r = await runQualityChecks(
+    const r = await runManagedQualityChecks(
       [`node -e "console.log('x'.repeat(5000) + 'TAIL-END'); process.exit(1)"`],
       process.cwd(),
     );
@@ -320,7 +402,7 @@ describe('runQualityChecks', () => {
   });
 
   it('times out a hanging command and reports timedOut', async () => {
-    const r = await runQualityChecks(
+    const r = await runManagedQualityChecks(
       ['node -e "setTimeout(() => {}, 30000)"'],
       process.cwd(),
       500,
@@ -330,77 +412,164 @@ describe('runQualityChecks', () => {
     expect(r.failure!.exitCode).toBeNull();
   });
 
-  it.runIf(process.platform !== 'win32')('does not resolve a timeout until the whole gate process tree has exited', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'gate-'));
-    const marker = join(dir, 'orphan-pid.txt');
-    try {
-      // 复合命令迫使 shell 保留自身进程：node 是孙进程，写下自己的 pid 后挂起
-      const hang = `node -e "require('node:fs').writeFileSync('${marker}', String(process.pid)); setInterval(() => {}, 1000)"`;
-      const r = await runQualityChecks([`${hang} && echo done`], process.cwd(), 500);
-      expect(r.ok).toBe(false);
-      expect(r.failure!.timedOut).toBe(true);
-      const pid = Number(readFileSync(marker, 'utf-8'));
-      // timeout Promise 返回即代表进程树已经退出，引擎此后才可继续读写 workspace。
-      expect(() => process.kill(pid, 0)).toThrow(); // signal 0 探活：已死则 ESRCH
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+  it.runIf(process.platform !== 'win32')(
+    'does not resolve a timeout until the whole gate process tree has exited',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'gate-'));
+      const marker = join(dir, 'orphan-pid.txt');
+      try {
+        // 复合命令迫使 shell 保留自身进程：node 是孙进程，写下自己的 pid 后挂起
+        const hang = `node -e "require('node:fs').writeFileSync('${marker}', String(process.pid)); setInterval(() => {}, 1000)"`;
+        const r = await runManagedQualityChecks([`${hang} && echo done`], process.cwd(), 500);
+        expect(r.ok).toBe(false);
+        expect(r.failure!.timedOut).toBe(true);
+        const pid = Number(readFileSync(marker, 'utf-8'));
+        // timeout Promise 返回即代表进程树已经退出，引擎此后才可继续读写 workspace。
+        expect(() => process.kill(pid, 0)).toThrow(); // signal 0 探活：已死则 ESRCH
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
-  it.runIf(process.platform !== 'win32')('escalates to SIGKILL before resolving when a gate descendant traps SIGTERM', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'gate-'));
-    const marker = join(dir, 'trap-pid.txt');
-    try {
-      // 孙进程陷住 SIGTERM 模拟优雅退出挂死：只有组 SIGKILL 能终结它
-      const trap = `node -e "process.on('SIGTERM', () => {}); require('node:fs').writeFileSync('${marker}', String(process.pid)); setInterval(() => {}, 1000)" && echo done`;
-      const r = await runQualityChecks([trap], process.cwd(), 500);
-      expect(r.ok).toBe(false);
-      expect(r.failure!.timedOut).toBe(true);
-      const pid = Number(readFileSync(marker, 'utf-8'));
-      expect(() => process.kill(pid, 0)).toThrow();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }, 10_000);
+  it.runIf(process.platform !== 'win32')(
+    'escalates to SIGKILL before resolving when a gate descendant traps SIGTERM',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'gate-'));
+      const marker = join(dir, 'trap-pid.txt');
+      try {
+        // 孙进程陷住 SIGTERM 模拟优雅退出挂死：只有组 SIGKILL 能终结它
+        const trap = `node -e "process.on('SIGTERM', () => {}); require('node:fs').writeFileSync('${marker}', String(process.pid)); setInterval(() => {}, 1000)" && echo done`;
+        const r = await runManagedQualityChecks([trap], process.cwd(), 500);
+        expect(r.ok).toBe(false);
+        expect(r.failure!.timedOut).toBe(true);
+        const pid = Number(readFileSync(marker, 'utf-8'));
+        expect(() => process.kill(pid, 0)).toThrow();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
 
   it('returns total/ran/ms — pass runs all, fail-fast stops at the failing check', async () => {
-    const pass = await runQualityChecks(['node -e "process.exit(0)"', 'node -e "process.exit(0)"'], process.cwd());
+    const pass = await runManagedQualityChecks(
+      ['node -e "process.exit(0)"', 'node -e "process.exit(0)"'],
+      process.cwd(),
+    );
     expect(pass.ok).toBe(true);
     expect(pass.total).toBe(2);
     expect(pass.ran).toBe(2);
     expect(pass.ms).toBeGreaterThanOrEqual(0);
 
-    const fail = await runQualityChecks(
-      ['node -e "process.exit(1)"', 'node -e "process.exit(0)"'], process.cwd());
+    const fail = await runManagedQualityChecks(
+      ['node -e "process.exit(1)"', 'node -e "process.exit(0)"'],
+      process.cwd(),
+    );
     expect(fail.ok).toBe(false);
     expect(fail.total).toBe(2);
     expect(fail.ran).toBe(1); // fail-fast：第 1 条失败，第 2 条未执行
   });
 });
 
-describe('runContractQualityChecks', () => {
+describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () => {
+  it('returns a deterministic gate failure when the executable cannot be resolved', async () => {
+    const result = await runManagedContractQualityChecks(
+      contractWith({
+        checks: [
+          {
+            id: 'missing-bin',
+            module: 'root',
+            command: {
+              executable: 'coding-x-definitely-missing-executable',
+              args: [],
+              cwd: '.',
+              platforms: ['linux', 'macos', 'windows'],
+              timeoutMs: 5_000,
+            },
+          },
+        ],
+      }),
+      process.cwd(),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      total: 1,
+      ran: 1,
+      failure: { command: '[missing-bin]', exitCode: null, timedOut: false },
+    });
+    expect(result.failure?.outputTail).toContain('找不到可执行文件');
+  });
+
   it('executes structured commands without a shell and honors the declared cwd', async () => {
     const root = mkdtempSync(join(tmpdir(), 'contract-gate-'));
     const moduleDir = join(root, 'module');
     const marker = join(moduleDir, 'structured.txt');
     mkdirSync(moduleDir);
     try {
-      const result = await runContractQualityChecks(contractWith({
-        checks: [{
-          id: 'structured', module: 'root',
-          command: {
-            executable: process.execPath,
-            args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.cwd())`],
-            cwd: 'module', platforms: ['linux', 'macos', 'windows'], timeoutMs: 5_000,
-          },
-        }],
-      }), root);
+      const result = await runManagedContractQualityChecks(
+        contractWith({
+          checks: [
+            {
+              id: 'structured',
+              module: 'root',
+              command: {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.cwd())`,
+                ],
+                cwd: 'module',
+                platforms: ['linux', 'macos', 'windows'],
+                timeoutMs: 5_000,
+              },
+            },
+          ],
+        }),
+        root,
+      );
       expect(result).toMatchObject({ ok: true, total: 1, ran: 1, skipped: [] });
-      expect(readFileSync(marker, 'utf8')).toBe(realpathSync(moduleDir));
+      expect(readFileSync(marker, 'utf8')).toBe(realpathSync.native(moduleDir));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform === 'win32')(
+    'keeps project .cmd quality checks available outside the AI Runner boundary',
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'contract-windows-cmd-')));
+      const command = join(root, 'project-check.cmd');
+      const marker = join(root, 'project-check.txt');
+      writeFileSync(command, '@echo off\r\n> "%~1" echo project-cmd-ok\r\nexit /b 0\r\n');
+      try {
+        const result = await runManagedContractQualityChecks(
+          contractWith({
+            checks: [
+              {
+                id: 'project-cmd',
+                module: 'root',
+                command: {
+                  executable: command,
+                  args: [marker],
+                  cwd: '.',
+                  platforms: ['windows'],
+                  timeoutMs: 5_000,
+                },
+              },
+            ],
+          }),
+          root,
+          'windows',
+        );
+        expect(result).toMatchObject({ ok: true, total: 1, ran: 1, skipped: [] });
+        expect(readFileSync(marker, 'utf8').trim()).toBe('project-cmd-ok');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'runs an explicitly declared POSIX shell script and never infers shell from executable args',
@@ -408,16 +577,25 @@ describe('runContractQualityChecks', () => {
       const root = mkdtempSync(join(tmpdir(), 'contract-shell-'));
       const marker = join(root, 'shell.txt');
       try {
-        const result = await runContractQualityChecks(contractWith({
-          checks: [{
-            id: 'shell', module: 'root',
-            command: {
-              shell: '/bin/sh',
-              script: `printf shell-ok > ${JSON.stringify(marker)}`,
-              cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
-            },
-          }],
-        }), root, 'macos');
+        const result = await runManagedContractQualityChecks(
+          contractWith({
+            checks: [
+              {
+                id: 'shell',
+                module: 'root',
+                command: {
+                  shell: '/bin/sh',
+                  script: `printf shell-ok > ${JSON.stringify(marker)}`,
+                  cwd: '.',
+                  platforms: ['macos'],
+                  timeoutMs: 5_000,
+                },
+              },
+            ],
+          }),
+          root,
+          'macos',
+        );
         expect(result.ok).toBe(true);
         expect(readFileSync(marker, 'utf8')).toBe('shell-ok');
       } finally {
@@ -427,15 +605,25 @@ describe('runContractQualityChecks', () => {
   );
 
   it('skips checks that do not apply to the current platform and records their ids', async () => {
-    const result = await runContractQualityChecks(contractWith({
-      checks: [{
-        id: 'windows-only', module: 'root',
-        command: {
-          executable: process.execPath, args: ['-e', 'process.exit(9)'], cwd: '.',
-          platforms: ['windows'], timeoutMs: 5_000,
-        },
-      }],
-    }), process.cwd(), 'linux');
+    const result = await runManagedContractQualityChecks(
+      contractWith({
+        checks: [
+          {
+            id: 'windows-only',
+            module: 'root',
+            command: {
+              executable: process.execPath,
+              args: ['-e', 'process.exit(9)'],
+              cwd: '.',
+              platforms: ['windows'],
+              timeoutMs: 5_000,
+            },
+          },
+        ],
+      }),
+      process.cwd(),
+      'linux',
+    );
     expect(result).toMatchObject({ ok: true, total: 0, ran: 0, skipped: ['windows-only'] });
   });
 
@@ -443,28 +631,42 @@ describe('runContractQualityChecks', () => {
     const root = mkdtempSync(join(tmpdir(), 'contract-fail-'));
     const marker = join(root, 'must-not-run.txt');
     try {
-      const result = await runContractQualityChecks(contractWith({
-        checks: [
-          {
-            id: 'first-fails', module: 'root',
-            command: {
-              executable: process.execPath,
-              args: ['-e', 'console.error("contract-boom"); process.exit(3)'],
-              cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
+      const result = await runManagedContractQualityChecks(
+        contractWith({
+          checks: [
+            {
+              id: 'first-fails',
+              module: 'root',
+              command: {
+                executable: process.execPath,
+                args: ['-e', 'console.error("contract-boom"); process.exit(3)'],
+                cwd: '.',
+                platforms: ['macos'],
+                timeoutMs: 5_000,
+              },
             },
-          },
-          {
-            id: 'second', module: 'root',
-            command: {
-              executable: process.execPath,
-              args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
-              cwd: '.', platforms: ['macos'], timeoutMs: 5_000,
+            {
+              id: 'second',
+              module: 'root',
+              command: {
+                executable: process.execPath,
+                args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`],
+                cwd: '.',
+                platforms: ['macos'],
+                timeoutMs: 5_000,
+              },
             },
-          },
-        ],
-      }), root, 'macos');
+          ],
+        }),
+        root,
+        'macos',
+      );
       expect(result.ok).toBe(false);
-      expect(result.failure).toMatchObject({ command: '[first-fails]', exitCode: 3, timedOut: false });
+      expect(result.failure).toMatchObject({
+        command: '[first-fails]',
+        exitCode: 3,
+        timedOut: false,
+      });
       expect(result.failure?.outputTail).toContain('contract-boom');
       expect(existsSync(marker)).toBe(false);
     } finally {
@@ -477,17 +679,31 @@ describe('runContractQualityChecks', () => {
     const outside = mkdtempSync(join(tmpdir(), 'contract-outside-'));
     symlinkSync(outside, join(root, 'escape'));
     try {
-      const result = await runContractQualityChecks(contractWith({
-        checks: [{
-          id: 'escape', module: 'root',
-          command: {
-            executable: process.execPath, args: ['-e', 'process.exit(0)'], cwd: 'escape',
-            platforms: ['macos'], timeoutMs: 5_000,
-          },
-        }],
-      }), root, 'macos');
+      const result = await runManagedContractQualityChecks(
+        contractWith({
+          checks: [
+            {
+              id: 'escape',
+              module: 'root',
+              command: {
+                executable: process.execPath,
+                args: ['-e', 'process.exit(0)'],
+                cwd: 'escape',
+                platforms: ['macos'],
+                timeoutMs: 5_000,
+              },
+            },
+          ],
+        }),
+        root,
+        'macos',
+      );
       expect(result.ok).toBe(false);
-      expect(result.failure).toMatchObject({ command: '[escape]', exitCode: null, timedOut: false });
+      expect(result.failure).toMatchObject({
+        command: '[escape]',
+        exitCode: null,
+        timedOut: false,
+      });
       expect(result.failure?.outputTail).toContain('项目根之外');
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -511,7 +727,12 @@ describe('applyAbortRollback', () => {
         escalated: false,
       },
     };
-    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
+    const next = applyAbortRollback(
+      state,
+      'US-001',
+      { side: 'builder', timedOut: true, exitCode: null },
+      at,
+    );
     expect(next['US-001'].passes).toBe(false);
     expect(next['US-001'].validated).toBe(false);
     expect(next['US-001']).toHaveProperty('validationReceipt', null);
@@ -527,23 +748,65 @@ describe('applyAbortRollback', () => {
   });
 
   it('error 结局的标记行含退出码', () => {
-    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false } };
-    const next = applyAbortRollback(state, 'US-001', { side: 'validator', timedOut: false, exitCode: 143 }, at);
+    const state = {
+      'US-001': {
+        passes: true,
+        validated: false,
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    const next = applyAbortRollback(
+      state,
+      'US-001',
+      { side: 'validator', timedOut: false, exitCode: 143 },
+      at,
+    );
     expect(next['US-001'].notes).toContain('validator');
     expect(next['US-001'].notes).toContain('退出码 143');
   });
 
   it('外部信号终止（timedOut=false 且 exitCode=null）渲染「被信号终止」而非「退出码 null」', () => {
     // runAgent 的 exit 事件 code 为 null 仅发生在进程被信号终止且非引擎超时路径
-    const state = { 'US-001': { passes: true, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false } };
-    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: false, exitCode: null }, at);
+    const state = {
+      'US-001': {
+        passes: true,
+        validated: false,
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    const next = applyAbortRollback(
+      state,
+      'US-001',
+      { side: 'builder', timedOut: false, exitCode: null },
+      at,
+    );
     expect(next['US-001'].notes).toContain('被信号终止');
     expect(next['US-001'].notes).not.toContain('退出码 null');
   });
 
   it('保全既有仲裁标签行在标记行之前', () => {
-    const state = { 'US-001': { passes: true, validated: false, notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录', retryCount: 0, blocked: false, escalated: false } };
-    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
+    const state = {
+      'US-001': {
+        passes: true,
+        validated: false,
+        notes: '[需求冲突] AC2 与源 PRD 矛盾\n其他记录',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    const next = applyAbortRollback(
+      state,
+      'US-001',
+      { side: 'builder', timedOut: true, exitCode: null },
+      at,
+    );
     const lines = next['US-001'].notes.split('\n');
     expect(lines[0]).toBe('[需求冲突] AC2 与源 PRD 矛盾');
     expect(lines[1].startsWith(ABORT_LINE_PREFIX)).toBe(true);
@@ -551,8 +814,22 @@ describe('applyAbortRollback', () => {
   });
 
   it('prev.blocked 时原样返回不回写（停下等人信号优先）', () => {
-    const state = { 'US-001': { passes: true, validated: false, notes: '[需要人工核实] x', retryCount: 1, blocked: true, escalated: false } };
-    const next = applyAbortRollback(state, 'US-001', { side: 'builder', timedOut: true, exitCode: null }, at);
+    const state = {
+      'US-001': {
+        passes: true,
+        validated: false,
+        notes: '[需要人工核实] x',
+        retryCount: 1,
+        blocked: true,
+        escalated: false,
+      },
+    };
+    const next = applyAbortRollback(
+      state,
+      'US-001',
+      { side: 'builder', timedOut: true, exitCode: null },
+      at,
+    );
     expect(next).toBe(state);
   });
 });

@@ -1,8 +1,17 @@
 import { afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { runLoop as runProductionLoop, type LoopConfig } from './loop.js';
 import type { QualityContract, QualityContractReadResult } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
@@ -10,6 +19,17 @@ import { digest } from '../review/common.js';
 import type { FinalReviewState } from '../review/types.js';
 import { acceptanceHash } from './validation-protocol.js';
 import type { ValidationReceipt } from './state.js';
+import {
+  INCIDENTS_DIR,
+  PROTOCOL_FILE,
+  PROTOCOL_ROOT_DIR,
+  PROTOCOL_SCHEMA_VERSION,
+  WORKSPACE_MARKER_FILE,
+  WORKSPACE_MARKER_SCHEMA_VERSION,
+  WORKSPACE_PROTOCOL,
+  WORKSPACE_SAFETY_VERSION,
+} from '../workspace-safety/types.js';
+import { workspaceDirectoryIdentity } from '../workspace-safety/filesystem.js';
 
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 
@@ -70,12 +90,16 @@ export function setupGitProject(
   cleanup.push(() => rmSync(instructionsDir, { recursive: true, force: true }));
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: projectRoot });
   execFileSync('git', ['config', 'user.name', 'coding-x test'], { cwd: projectRoot });
-  execFileSync('git', ['config', 'user.email', 'coding-x-test@example.invalid'], { cwd: projectRoot });
+  execFileSync('git', ['config', 'user.email', 'coding-x-test@example.invalid'], {
+    cwd: projectRoot,
+  });
   execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: projectRoot });
   writeFileSync(join(projectRoot, '.gitignore'), '.workspace/\n');
   writeFileSync(join(projectRoot, 'source.txt'), 'H1\n');
   execFileSync('git', ['add', '.gitignore', 'source.txt'], { cwd: projectRoot });
   execFileSync('git', ['commit', '-q', '-m', 'test: H1'], { cwd: projectRoot });
+  initializeReadyWorkspaceFixture(workspace);
+  mkdirSync(join(workspace, 'screenshots'));
   writeFileSync(
     join(workspace, 'prd.json'),
     JSON.stringify({
@@ -90,10 +114,13 @@ export function setupGitProject(
   );
   writeFileSync(join(instructionsDir, 'builder.md'), 'build it');
   writeFileSync(join(instructionsDir, 'validator.md'), 'validate it');
-  const head = () => execFileSync('git', ['rev-parse', 'HEAD'], {
-    cwd: projectRoot,
-    encoding: 'utf8',
-  }).trim().toLowerCase();
+  const head = () =>
+    execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+    })
+      .trim()
+      .toLowerCase();
   const commitFile = (contents: string, message = 'test: H2') => {
     writeFileSync(join(projectRoot, 'source.txt'), contents);
     execFileSync('git', ['add', 'source.txt'], { cwd: projectRoot });
@@ -101,6 +128,51 @@ export function setupGitProject(
     return head();
   };
   return { projectRoot, workspace, instructionsDir, head, commitFile };
+}
+
+/**
+ * 为同步的 loop 测试夹具建立与正式 bootstrap 完全相同的静态 ready 记录。
+ *
+ * 正式 bootstrap 是异步且会短暂持有 lease；这里仅用于测试准备阶段，并且必须在
+ * 写入任何业务文件前调用。身份与摘要都从真实目录重新计算，避免用伪标记绕过
+ * 运行时校验。
+ */
+export function initializeReadyWorkspaceFixture(workspacePath: string): void {
+  const canonicalPath = realpathSync.native(workspacePath);
+  const info = statSync(canonicalPath, { bigint: true });
+  const digestBytes = (bytes: string | Buffer) =>
+    `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const workspaceIdentity = workspaceDirectoryIdentity(canonicalPath, info);
+  const timestamp = '2026-07-30T00:00:00.000Z';
+  const protocolBytes = `${JSON.stringify(
+    {
+      schemaVersion: PROTOCOL_SCHEMA_VERSION,
+      protocol: WORKSPACE_PROTOCOL,
+      workspaceIdentity,
+      createdBy: WORKSPACE_SAFETY_VERSION,
+      createdAt: timestamp,
+    },
+    null,
+    2,
+  )}\n`;
+  const protocolRoot = join(canonicalPath, PROTOCOL_ROOT_DIR);
+  mkdirSync(join(protocolRoot, INCIDENTS_DIR), { recursive: true, mode: 0o700 });
+  writeFileSync(join(protocolRoot, PROTOCOL_FILE), protocolBytes, { mode: 0o600 });
+  writeFileSync(
+    join(canonicalPath, WORKSPACE_MARKER_FILE),
+    `${JSON.stringify(
+      {
+        schemaVersion: WORKSPACE_MARKER_SCHEMA_VERSION,
+        initializedBy: WORKSPACE_SAFETY_VERSION,
+        workspaceIdentity,
+        protocolDigest: digestBytes(protocolBytes),
+        initializedAt: timestamp,
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
 }
 
 export const story = (over: Record<string, unknown> = {}) => ({
@@ -235,15 +307,18 @@ export const runLoop = (cfg: LoopConfig): Promise<number> =>
 // builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
 export function fakeCounting(workspace: string): { fake: string; calls: string } {
   const fake = join(workspace, 'fake.mjs');
-  const calls = join(workspace, 'calls.txt');
+  const calls = join(resolve(workspace, '..'), 'calls.txt');
   writeFileSync(
     fake,
     `
-    import { writeFileSync, appendFileSync } from 'node:fs';
+    import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
     appendFileSync(${JSON.stringify(calls)}, 'call\\n');
-    writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-      'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-    }));
+    const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+    const state = JSON.parse(readFileSync(statePath, 'utf8'));
+    state['US-001'].passes = true;
+    state['US-001'].notes = '';
+    state['US-001'].blocked = false;
+    writeFileSync(statePath, JSON.stringify(state));
     process.exit(0);
   `,
   );
@@ -253,9 +328,19 @@ export function fakeCounting(workspace: string): { fake: string; calls: string }
 export type BoundValidatorMode =
   'passed' | 'failed' | 'missing' | 'wrong-story' | 'state-mutation' | 'aborted-after-result';
 
-export function fakeBoundValidator(workspace: string, mode: BoundValidatorMode): string {
+export interface FakeBoundValidatorOptions {
+  readonly builderCwdMarker?: string;
+  readonly builderPromptMarker?: string;
+  readonly environmentMarker?: string;
+}
+
+export function fakeBoundValidator(
+  workspace: string,
+  mode: BoundValidatorMode,
+  options: FakeBoundValidatorOptions = {},
+): string {
   const fake = join(workspace, `fake-bound-${mode}.mjs`);
-  const calls = join(workspace, 'bound-calls.txt');
+  const calls = join(resolve(workspace, '..'), 'bound-calls.txt');
   const statePath = join(workspace, 'state.json');
   const progressPath = join(workspace, 'progress.md');
   writeFileSync(
@@ -266,7 +351,18 @@ export function fakeBoundValidator(workspace: string, mode: BoundValidatorMode):
     let call = 1;
     try { call = Number(readFileSync(${JSON.stringify(calls)}, 'utf8')) + 1; } catch {}
     writeFileSync(${JSON.stringify(calls)}, String(call));
+    const environmentMarker = ${JSON.stringify(options.environmentMarker ?? null)};
+    if (environmentMarker !== null) {
+      appendFileSync(environmentMarker, JSON.stringify({
+        workspace: process.env.CODING_X_WORKSPACE,
+        projectRoot: process.env.CODING_X_PROJECT_ROOT,
+      }) + '\n');
+    }
     if (call === 1) {
+      const cwdMarker = ${JSON.stringify(options.builderCwdMarker ?? null)};
+      const promptMarker = ${JSON.stringify(options.builderPromptMarker ?? null)};
+      if (cwdMarker !== null) writeFileSync(cwdMarker, process.cwd());
+      if (promptMarker !== null) writeFileSync(promptMarker, process.argv.at(-1) ?? '');
       const state = JSON.parse(readFileSync(statePath, 'utf8'));
       state['US-001'].passes = true;
       state['US-001'].validated = false;

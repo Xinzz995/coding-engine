@@ -11,6 +11,7 @@ import {
   runLoop,
   fakeCounting,
   currentRepoTdd,
+  fakeBoundValidator,
   readyQualityContract,
   strictConfig,
   TEST_QUALITY_CONTRACT,
@@ -21,32 +22,38 @@ describe('runLoop quality gate', () => {
     const { workspace, instructionsDir } = setup([story()], {
       qualityChecks: ['node -e "process.exit(7)"'],
     });
-    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
-      'US-001': {
-        passes: true,
-        validated: false,
-        validationReceipt: null,
-        notes: 'candidate',
-        retryCount: 2,
-        blocked: false,
-        escalated: false,
-      },
-    }));
+    writeFileSync(
+      join(workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          notes: 'candidate',
+          retryCount: 2,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
     const { fake, calls } = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
-      expect(await runLoop({
-        kind: 'claude',
-        maxIterations: 3,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      })).toBe(1);
-      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
-        .toMatchObject({ passes: false, validated: false, validationReceipt: null, retryCount: 3 });
+      expect(
+        await runLoop({
+          kind: 'claude',
+          maxIterations: 3,
+          devTimeoutMs: 5000,
+          valTimeoutMs: 5000,
+          workspace,
+          instructionsDir,
+          port: 0,
+          openBrowser: false,
+        }),
+      ).toBe(1);
+      expect(
+        JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({ passes: false, validated: false, validationReceipt: null, retryCount: 3 });
       expect(existsSync(calls)).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
@@ -57,32 +64,38 @@ describe('runLoop quality gate', () => {
     const { workspace, instructionsDir } = setup([story()], {
       qualityChecks: ['node -e "process.exit(7)"'],
     });
-    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
-      'US-001': {
-        passes: true,
-        validated: false,
-        validationReceipt: null,
-        notes: 'candidate',
-        retryCount: 4,
-        blocked: false,
-        escalated: false,
-      },
-    }));
+    writeFileSync(
+      join(workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          notes: 'candidate',
+          retryCount: 4,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
     const { fake, calls } = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
-      expect(await runLoop({
-        kind: 'claude',
-        maxIterations: 3,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      })).toBe(3);
-      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
-        .toMatchObject({ passes: false, retryCount: 5, blocked: true });
+      expect(
+        await runLoop({
+          kind: 'claude',
+          maxIterations: 3,
+          devTimeoutMs: 5000,
+          valTimeoutMs: 5000,
+          workspace,
+          instructionsDir,
+          port: 0,
+          openBrowser: false,
+        }),
+      ).toBe(3);
+      expect(
+        JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({ passes: false, retryCount: 5, blocked: true });
       expect(existsSync(calls)).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
@@ -95,17 +108,19 @@ describe('runLoop quality gate', () => {
       ...TEST_QUALITY_CONTRACT,
       checks: {
         test: {
-          checks: [{
-            id: 'missing-executable',
-            module: 'root',
-            command: {
-              executable: 'coding-x-command-that-does-not-exist',
-              args: [],
-              cwd: '.',
-              platforms: ['linux', 'macos', 'windows'],
-              timeoutMs: 1000,
+          checks: [
+            {
+              id: 'missing-executable',
+              module: 'root',
+              command: {
+                executable: 'coding-x-command-that-does-not-exist',
+                args: [],
+                cwd: '.',
+                platforms: ['linux', 'macos', 'windows'],
+                timeoutMs: 1000,
+              },
             },
-          }],
+          ],
         },
         build: { notApplicable: 'fixture' },
         static: { notApplicable: 'fixture' },
@@ -116,32 +131,38 @@ describe('runLoop quality gate', () => {
       qualityContractDigest: digest,
       qualityChecks: contract.checks,
     });
-    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
-      'US-001': {
-        passes: true,
-        validated: false,
-        validationReceipt: null,
-        notes: 'candidate',
-        retryCount: 2,
-        blocked: false,
-        escalated: false,
-      },
-    }));
-    const { fake, calls } = fakeCounting(workspace);
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    try {
-      expect(await runProductionLoop({
-        ...strictConfig(workspace, instructionsDir),
-        qualityContractReader: () => readyQualityContract(contract, digest),
-      })).toBe(1);
-      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
-        .toMatchObject({
+    writeFileSync(
+      join(workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
           passes: true,
           validated: false,
           validationReceipt: null,
           notes: 'candidate',
           retryCount: 2,
-        });
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
+          qualityContractReader: () => readyQualityContract(contract, digest),
+        }),
+      ).toBe(1);
+      expect(
+        JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        notes: 'candidate',
+        retryCount: 2,
+      });
       expect(existsSync(calls)).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
@@ -241,15 +262,18 @@ describe('runLoop quality gate', () => {
     });
     // stub agent：不置 passes，而是显式置 blocked（模拟 dogfood US-009 的仲裁上报）
     const fake = join(workspace, 'fake-blocking.mjs');
-    const calls = join(workspace, 'calls.txt');
+    const calls = join(resolve(workspace, '..'), 'calls.txt');
     writeFileSync(
       fake,
       `
-      import { writeFileSync, appendFileSync } from 'node:fs';
+      import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
       appendFileSync(${JSON.stringify(calls)}, 'call\\n');
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: false, notes: '[需要人工核实] 疑似配置异常，已附调查', retryCount: 0, blocked: true },
-      }));
+      const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = false;
+      state['US-001'].notes = '[需要人工核实] 疑似配置异常，已附调查';
+      state['US-001'].blocked = true;
+      writeFileSync(statePath, JSON.stringify(state));
       process.exit(0);
     `,
     );
@@ -288,7 +312,7 @@ describe('runLoop quality gate', () => {
   });
 });
 
-describe('runLoop TDD gate', () => {
+describe('runLoop TDD gate', { timeout: 30_000, concurrent: false }, () => {
   it('fails closed before any agent starts when tdd config is malformed', async () => {
     const { workspace, instructionsDir } = setup([story()], {
       tdd: { coverageCheck: '' },
@@ -372,32 +396,38 @@ describe('runLoop TDD gate', () => {
     const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
     prd.tdd = currentRepoTdd('node -e "process.exit(7)"', fixture.head());
     writeFileSync(prdPath, JSON.stringify(prd));
-    writeFileSync(join(workspace, 'state.json'), JSON.stringify({
-      'US-001': {
-        passes: true,
-        validated: false,
-        validationReceipt: null,
-        notes: 'candidate',
-        retryCount: 4,
-        blocked: false,
-        escalated: false,
-      },
-    }));
+    writeFileSync(
+      join(workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          notes: 'candidate',
+          retryCount: 4,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
     const { fake, calls } = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
-      expect(await runLoop({
-        kind: 'claude',
-        maxIterations: 3,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-      })).toBe(3);
-      expect(JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'])
-        .toMatchObject({ passes: false, retryCount: 5, blocked: true });
+      expect(
+        await runLoop({
+          kind: 'claude',
+          maxIterations: 3,
+          devTimeoutMs: 5000,
+          valTimeoutMs: 5000,
+          workspace,
+          instructionsDir,
+          port: 0,
+          openBrowser: false,
+        }),
+      ).toBe(3);
+      expect(
+        JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({ passes: false, retryCount: 5, blocked: true });
       expect(existsSync(calls)).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
@@ -411,35 +441,11 @@ describe('runLoop TDD gate', () => {
     const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
     prd.tdd = currentRepoTdd('node -e "process.exit(0)"', fixture.head());
     writeFileSync(prdPath, JSON.stringify(prd));
-    const fake = join(workspace, 'fake-env.mjs');
-    const calls = join(workspace, 'env-calls.jsonl');
-    writeFileSync(
-      fake,
-      `
-      import { appendFileSync, writeFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(calls)}, JSON.stringify({
-        workspace: process.env.CODING_X_WORKSPACE,
-        projectRoot: process.env.CODING_X_PROJECT_ROOT,
-      }) + '\\n');
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
-    `,
-    );
+    const calls = join(resolve(workspace, '..'), 'env-calls.jsonl');
+    const fake = fakeBoundValidator(workspace, 'passed', { environmentMarker: calls });
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 2,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(0);
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(0);
       const envs = readFileSync(calls, 'utf8')
         .trim()
         .split('\n')

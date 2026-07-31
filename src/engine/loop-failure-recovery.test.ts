@@ -57,10 +57,11 @@ describe('异常轮回写（builder 侧）', () => {
     writeFileSync(
       fake,
       `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
+      import { readFileSync, writeFileSync } from 'node:fs';
+      const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      writeFileSync(statePath, JSON.stringify(state));
       process.exit(1);
     `,
     );
@@ -131,10 +132,13 @@ describe('异常轮回写（builder 侧）', () => {
     writeFileSync(
       fake,
       `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '[需要人工核实] 环境异常', retryCount: 0, blocked: true },
-      }));
+      import { readFileSync, writeFileSync } from 'node:fs';
+      const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      state['US-001'].notes = '[需要人工核实] 环境异常';
+      state['US-001'].blocked = true;
+      writeFileSync(statePath, JSON.stringify(state));
       process.exit(1);
     `,
     );
@@ -170,9 +174,9 @@ describe('异常轮回写（builder 侧）', () => {
 
 describe('异常轮回写（validator 侧）', () => {
   it('builder 置 true 后 validator 非零退出：回写 false，iteration 记 validator error 与回写', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
-    const calls = join(workspace, 'calls.txt');
+    const calls = join(projectRoot, 'calls.txt');
     // 同一 stub 以调用次数区分：第 1 次（builder）置 true 正常退出；第 2 次（validator）非零退出
     writeFileSync(
       fake,
@@ -181,9 +185,10 @@ describe('异常轮回写（validator 侧）', () => {
       appendFileSync(${JSON.stringify(calls)}, 'x');
       const n = readFileSync(${JSON.stringify(calls)}, 'utf-8').length;
       if (n === 1) {
-        writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-          'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-        }));
+        const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        state['US-001'].passes = true;
+        writeFileSync(statePath, JSON.stringify(state));
         process.exit(0);
       }
       process.exit(1);
@@ -216,9 +221,9 @@ describe('异常轮回写（validator 侧）', () => {
   });
 
   it('builder 置 true 后 validator 超时：回写 false 且不会从完成出口假绿', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake-validator-timeout.mjs');
-    const calls = join(workspace, 'calls.txt');
+    const calls = join(projectRoot, 'calls.txt');
     const statePath = join(workspace, 'state.json');
     writeFileSync(
       fake,
@@ -266,15 +271,22 @@ describe('异常轮回写（validator 侧）', () => {
   });
 
   it('validator 正常完成：iteration 记 validatorOutcome completed，无回写', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
+    const calls = join(projectRoot, 'validator-completed-calls.txt');
     writeFileSync(
       fake,
       `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
-      }));
+      import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+      const callsPath = ${JSON.stringify(calls)};
+      const call = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf8')) + 1 : 1;
+      writeFileSync(callsPath, String(call));
+      if (call === 1) {
+        const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        state['US-001'].passes = true;
+        writeFileSync(statePath, JSON.stringify(state));
+      }
       process.exit(0);
     `,
     );

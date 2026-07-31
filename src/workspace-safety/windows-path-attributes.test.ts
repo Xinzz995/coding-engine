@@ -52,6 +52,7 @@ describe('fixed Windows path attribute protocol', () => {
     expect(programSource).toContain('CXWPI_FAILURE_V1 stage=');
     expect(programSource).toContain('process-identity-v1');
     expect(programSource).toContain('process-identity-read');
+    expect(WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS).toBe(4_000);
     expect(WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS).toBeLessThan(5_000);
 
     const transport = readFileSync(
@@ -375,6 +376,7 @@ describe('fixed Windows path attribute protocol', () => {
       'lease.ts',
       'mutation.ts',
       'mutation-recovery.ts',
+      'product-mutations.ts',
       'windows-identity-transport.ts',
       'windows-path-attributes.ts',
     ]);

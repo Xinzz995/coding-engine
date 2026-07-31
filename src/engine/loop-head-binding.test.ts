@@ -61,7 +61,7 @@ function writeHeadAdvancingValidator(
   mode: 'valid' | 'missing' | 'invalid' | 'state-mutation',
 ): { fake: string; marker: string } {
   const fake = join(fixture.workspace, `validator-advances-head-${mode}.mjs`);
-  const marker = join(fixture.workspace, `validator-advances-head-${mode}.txt`);
+  const marker = join(fixture.projectRoot, `validator-advances-head-${mode}.txt`);
   writeFileSync(
     fake,
     String.raw`
@@ -111,7 +111,7 @@ function writeBuilderThenHeadAdvancingValidator(fixture: ReturnType<typeof setup
   calls: string;
 } {
   const fake = join(fixture.workspace, 'builder-then-validator-head-drift.mjs');
-  const calls = join(fixture.workspace, 'builder-then-validator-head-drift.txt');
+  const calls = join(fixture.projectRoot, 'builder-then-validator-head-drift.txt');
   writeFileSync(
     fake,
     String.raw`
@@ -258,35 +258,203 @@ describe('runLoop Git HEAD validation chain', () => {
     HEAD_BINDING_TEST_TIMEOUT_MS,
   );
 
-  it('rolls back a new unvalidated candidate when a gate changes HEAD', async () => {
-    const fixture = setup([story()]);
-    writeHeadAdvanceScript(
-      fixture,
-      'commit-during-builder-gate.mjs',
-      'H2 after Builder\n',
-      'test: Builder gate advanced HEAD',
-    );
-    const prdPath = join(fixture.workspace, 'prd.json');
-    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
-    prd.qualityChecks = ['node commit-during-builder-gate.mjs'];
-    writeFileSync(prdPath, JSON.stringify(prd));
-    const { fake, calls } = fakeCounting(fixture.workspace);
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+  it(
+    'rolls back a new unvalidated candidate when a gate changes HEAD',
+    async () => {
+      const fixture = setup([story()]);
+      writeHeadAdvanceScript(
+        fixture,
+        'commit-during-builder-gate.mjs',
+        'H2 after Builder\n',
+        'test: Builder gate advanced HEAD',
+      );
+      const prdPath = join(fixture.workspace, 'prd.json');
+      const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+      prd.qualityChecks = ['node commit-during-builder-gate.mjs'];
+      writeFileSync(prdPath, JSON.stringify(prd));
+      const { fake, calls } = fakeCounting(fixture.workspace);
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
 
-    try {
-      expect(
-        await runLegacyLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace: fixture.workspace,
-          instructionsDir: fixture.instructionsDir,
-          port: 0,
-          openBrowser: false,
+      try {
+        expect(
+          await runLegacyLoop({
+            kind: 'claude',
+            maxIterations: 1,
+            devTimeoutMs: 5000,
+            valTimeoutMs: 5000,
+            workspace: fixture.workspace,
+            instructionsDir: fixture.instructionsDir,
+            port: 0,
+            openBrowser: false,
+          }),
+        ).toBe(1);
+        expect(readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(1);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: false,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+        });
+        const iteration = readEvidence(fixture.workspace).records.find(
+          (record) => record.type === 'iteration',
+        );
+        expect(iteration).toMatchObject({
+          builderRan: true,
+          validatorRan: false,
+          validatorOutcome: 'skipped',
+          validationRollback: true,
+        });
+        expect(iteration).not.toHaveProperty('validationProtocol');
+        expect(iteration).not.toHaveProperty('validationProtocolError');
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'rechecks HEAD at the exact Validator request boundary',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const marker = join(fixture.projectRoot, 'validator-called.txt');
+      const fake = join(fixture.workspace, 'unexpected-validator.mjs');
+      writeFileSync(
+        fake,
+        `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(marker)}, 'called');
+    `,
+      );
+      writeFileSync(
+        join(fixture.workspace, 'state.json'),
+        JSON.stringify({
+          'US-001': candidate(),
         }),
-      ).toBe(1);
-      expect(readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(1);
+      );
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            beforeValidatorRequestForTests: () => {
+              fixture.commitFile(
+                'H2 before Validator request\n',
+                'test: advance before Validator request',
+              );
+            },
+          }),
+        ).toBe(1);
+        expect(existsSync(marker)).toBe(false);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject(candidate());
+        const iteration = readEvidence(fixture.workspace).records.find(
+          (record) => record.type === 'iteration',
+        );
+        expect(iteration).toMatchObject({
+          builderRan: false,
+          validatorRan: false,
+          validatorOutcome: 'skipped',
+        });
+        expect(iteration).not.toHaveProperty('validationProtocol');
+        expect(iteration).not.toHaveProperty('validationProtocolError');
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'rolls back an ordinary Builder candidate at the exact Validator request boundary',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      const calls = join(fixture.projectRoot, 'bound-calls.txt');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            beforeValidatorRequestForTests: () => {
+              fixture.commitFile(
+                'H2 after ordinary Builder\n',
+                'test: advance at ordinary Validator request boundary',
+              );
+            },
+          }),
+        ).toBe(1);
+        expect(readFileSync(calls, 'utf8')).toBe('1');
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: false,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        });
+        const iteration = readEvidence(fixture.workspace).records.find(
+          (record) => record.type === 'iteration',
+        );
+        expect(iteration).toMatchObject({
+          builderRan: true,
+          validatorRan: false,
+          validatorOutcome: 'skipped',
+          validationRollback: true,
+        });
+        expect(iteration).not.toHaveProperty('validationProtocol');
+        expect(iteration).not.toHaveProperty('validationProtocolError');
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'rolls back a Builder candidate when HEAD becomes unreadable after Developer returns',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const headPath = join(fixture.projectRoot, '.git', 'HEAD');
+      const headContents = readFileSync(headPath, 'utf8');
+      const calls = join(fixture.projectRoot, 'builder-removes-head.txt');
+      const fake = join(fixture.workspace, 'builder-removes-head.mjs');
+      writeFileSync(
+        fake,
+        `
+      import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+      import { join } from 'node:path';
+      appendFileSync(${JSON.stringify(calls)}, 'builder\\n');
+      const statePath = join(process.env.CODING_X_WORKSPACE, 'state.json');
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      state['US-001'].notes = 'candidate before HEAD failure';
+      writeFileSync(statePath, JSON.stringify(state));
+      appendFileSync(join(process.env.CODING_X_WORKSPACE, 'progress.md'), 'builder done\\n');
+      unlinkSync(join(process.cwd(), '.git', 'HEAD'));
+    `,
+      );
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      let exitCode: number | undefined;
+
+      try {
+        exitCode = await runProductionLoop(
+          strictConfig(fixture.workspace, fixture.instructionsDir),
+        );
+      } finally {
+        writeFileSync(headPath, headContents);
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+
+      expect(exitCode).toBe(2);
+      expect(readFileSync(calls, 'utf8')).toBe('builder\n');
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
       ).toMatchObject({
@@ -294,54 +462,56 @@ describe('runLoop Git HEAD validation chain', () => {
         validated: false,
         validationReceipt: null,
         retryCount: 0,
+        blocked: false,
+        escalated: false,
       });
-      const iteration = readEvidence(fixture.workspace).records.find(
-        (record) => record.type === 'iteration',
-      );
-      expect(iteration).toMatchObject({
+      expect(
+        readEvidence(fixture.workspace).records.find((record) => record.type === 'iteration'),
+      ).toMatchObject({
         builderRan: true,
         validatorRan: false,
-        validatorOutcome: 'skipped',
+        builderOutcome: 'completed',
         validationRollback: true,
       });
-      expect(iteration).not.toHaveProperty('validationProtocol');
-      expect(iteration).not.toHaveProperty('validationProtocolError');
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  }, HEAD_BINDING_TEST_TIMEOUT_MS);
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
 
-  it('rechecks HEAD at the exact Validator request boundary', async () => {
-    const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
-    const marker = join(fixture.workspace, 'validator-called.txt');
-    const fake = join(fixture.workspace, 'unexpected-validator.mjs');
-    writeFileSync(
-      fake,
-      `
+  it(
+    'fails closed when HEAD becomes unreadable at the Validator request boundary',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const marker = join(fixture.projectRoot, 'validator-called-without-head.txt');
+      const fake = join(fixture.workspace, 'unexpected-validator-without-head.mjs');
+      const headPath = join(fixture.projectRoot, '.git', 'HEAD');
+      const headContents = readFileSync(headPath, 'utf8');
+      writeFileSync(
+        fake,
+        `
       import { writeFileSync } from 'node:fs';
       writeFileSync(${JSON.stringify(marker)}, 'called');
     `,
-    );
-    writeFileSync(
-      join(fixture.workspace, 'state.json'),
-      JSON.stringify({
-        'US-001': candidate(),
-      }),
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-
-    try {
-      expect(
-        await runProductionLoop({
-          ...strictConfig(fixture.workspace, fixture.instructionsDir),
-          beforeValidatorRequestForTests: () => {
-            fixture.commitFile(
-              'H2 before Validator request\n',
-              'test: advance before Validator request',
-            );
-          },
+      );
+      writeFileSync(
+        join(fixture.workspace, 'state.json'),
+        JSON.stringify({
+          'US-001': candidate(),
         }),
-      ).toBe(1);
+      );
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      let exitCode: number | undefined;
+
+      try {
+        exitCode = await runProductionLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          beforeValidatorRequestForTests: () => unlinkSync(headPath),
+        });
+      } finally {
+        writeFileSync(headPath, headContents);
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+
+      expect(exitCode).toBe(1);
       expect(existsSync(marker)).toBe(false);
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
@@ -356,159 +526,13 @@ describe('runLoop Git HEAD validation chain', () => {
       });
       expect(iteration).not.toHaveProperty('validationProtocol');
       expect(iteration).not.toHaveProperty('validationProtocolError');
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  }, HEAD_BINDING_TEST_TIMEOUT_MS);
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
 
-  it('rolls back an ordinary Builder candidate at the exact Validator request boundary', async () => {
-    const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
-    const fake = fakeBoundValidator(fixture.workspace, 'passed');
-    const calls = join(fixture.workspace, 'bound-calls.txt');
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-
-    try {
-      expect(
-        await runProductionLoop({
-          ...strictConfig(fixture.workspace, fixture.instructionsDir),
-          beforeValidatorRequestForTests: () => {
-            fixture.commitFile(
-              'H2 after ordinary Builder\n',
-              'test: advance at ordinary Validator request boundary',
-            );
-          },
-        }),
-      ).toBe(1);
-      expect(readFileSync(calls, 'utf8')).toBe('1');
-      expect(
-        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-      ).toMatchObject({
-        passes: false,
-        validated: false,
-        validationReceipt: null,
-        retryCount: 0,
-        blocked: false,
-        escalated: false,
-      });
-      const iteration = readEvidence(fixture.workspace).records.find(
-        (record) => record.type === 'iteration',
-      );
-      expect(iteration).toMatchObject({
-        builderRan: true,
-        validatorRan: false,
-        validatorOutcome: 'skipped',
-        validationRollback: true,
-      });
-      expect(iteration).not.toHaveProperty('validationProtocol');
-      expect(iteration).not.toHaveProperty('validationProtocolError');
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  }, HEAD_BINDING_TEST_TIMEOUT_MS);
-
-  it('rolls back a Builder candidate when HEAD becomes unreadable after Developer returns', async () => {
-    const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
-    const headPath = join(fixture.projectRoot, '.git', 'HEAD');
-    const headContents = readFileSync(headPath, 'utf8');
-    const calls = join(fixture.workspace, 'builder-removes-head.txt');
-    const fake = join(fixture.workspace, 'builder-removes-head.mjs');
-    writeFileSync(
-      fake,
-      `
-      import { appendFileSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-      import { join } from 'node:path';
-      appendFileSync(${JSON.stringify(calls)}, 'builder\\n');
-      const statePath = join(process.env.CODING_X_WORKSPACE, 'state.json');
-      const state = JSON.parse(readFileSync(statePath, 'utf8'));
-      state['US-001'].passes = true;
-      state['US-001'].notes = 'candidate before HEAD failure';
-      writeFileSync(statePath, JSON.stringify(state));
-      appendFileSync(join(process.env.CODING_X_WORKSPACE, 'progress.md'), 'builder done\\n');
-      unlinkSync(join(process.cwd(), '.git', 'HEAD'));
-    `,
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    let exitCode: number | undefined;
-
-    try {
-      exitCode = await runProductionLoop(strictConfig(fixture.workspace, fixture.instructionsDir));
-    } finally {
-      writeFileSync(headPath, headContents);
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-
-    expect(exitCode).toBe(2);
-    expect(readFileSync(calls, 'utf8')).toBe('builder\n');
-    expect(
-      JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-    ).toMatchObject({
-      passes: false,
-      validated: false,
-      validationReceipt: null,
-      retryCount: 0,
-      blocked: false,
-      escalated: false,
-    });
-    expect(
-      readEvidence(fixture.workspace).records.find((record) => record.type === 'iteration'),
-    ).toMatchObject({
-      builderRan: true,
-      validatorRan: false,
-      builderOutcome: 'completed',
-      validationRollback: true,
-    });
-  }, HEAD_BINDING_TEST_TIMEOUT_MS);
-
-  it('fails closed when HEAD becomes unreadable at the Validator request boundary', async () => {
-    const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
-    const marker = join(fixture.workspace, 'validator-called-without-head.txt');
-    const fake = join(fixture.workspace, 'unexpected-validator-without-head.mjs');
-    const headPath = join(fixture.projectRoot, '.git', 'HEAD');
-    const headContents = readFileSync(headPath, 'utf8');
-    writeFileSync(
-      fake,
-      `
-      import { writeFileSync } from 'node:fs';
-      writeFileSync(${JSON.stringify(marker)}, 'called');
-    `,
-    );
-    writeFileSync(
-      join(fixture.workspace, 'state.json'),
-      JSON.stringify({
-        'US-001': candidate(),
-      }),
-    );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    let exitCode: number | undefined;
-
-    try {
-      exitCode = await runProductionLoop({
-        ...strictConfig(fixture.workspace, fixture.instructionsDir),
-        beforeValidatorRequestForTests: () => unlinkSync(headPath),
-      });
-    } finally {
-      writeFileSync(headPath, headContents);
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-
-    expect(exitCode).toBe(1);
-    expect(existsSync(marker)).toBe(false);
-    expect(
-      JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-    ).toMatchObject(candidate());
-    const iteration = readEvidence(fixture.workspace).records.find(
-      (record) => record.type === 'iteration',
-    );
-    expect(iteration).toMatchObject({
-      builderRan: false,
-      validatorRan: false,
-      validatorOutcome: 'skipped',
-    });
-    expect(iteration).not.toHaveProperty('validationProtocol');
-    expect(iteration).not.toHaveProperty('validationProtocolError');
-  }, HEAD_BINDING_TEST_TIMEOUT_MS);
-
-  it.each(['valid', 'missing', 'invalid', 'state-mutation'] as const)(
+  // 格式损坏与越权改 state 现在会在 delegated operation 层先被隔离；
+  // 此处只保留能正常完成 operation、因而确实到达 loop HEAD 优先级判断的两类结果。
+  it.each(['valid', 'missing'] as const)(
     'prioritizes Validator-time HEAD drift over a %s result',
     async (mode) => {
       const first = story({ acceptanceCriteria: ['first'] });
@@ -573,130 +597,80 @@ describe('runLoop Git HEAD validation chain', () => {
     HEAD_BINDING_TEST_TIMEOUT_MS,
   );
 
-  it('rolls back an ordinary Builder candidate when Validator changes HEAD', async () => {
-    const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
-    const initialHead = fixture.head();
-    const { fake, calls } = writeBuilderThenHeadAdvancingValidator(fixture);
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    let finalReviewCalls = 0;
+  it(
+    'rolls back an ordinary Builder candidate when Validator changes HEAD',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const initialHead = fixture.head();
+      const { fake, calls } = writeBuilderThenHeadAdvancingValidator(fixture);
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      let finalReviewCalls = 0;
 
-    try {
-      expect(
-        await runProductionLoop({
-          ...strictConfig(fixture.workspace, fixture.instructionsDir),
-          finalReviewRunner: async () => {
-            finalReviewCalls += 1;
-            return { exitCode: 0, message: 'unexpected review' };
-          },
-        }),
-      ).toBe(1);
-      expect(readFileSync(calls, 'utf8')).toBe('builder\nvalidator\n');
-      expect(fixture.head()).not.toBe(initialHead);
-      expect(
-        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-      ).toMatchObject({
-        passes: false,
-        validated: false,
-        validationReceipt: null,
-        retryCount: 0,
-        blocked: false,
-        escalated: false,
-      });
-      expect(finalReviewCalls).toBe(0);
-      expect(existsSync(join(fixture.workspace, 'validation-result.json'))).toBe(false);
-      const evidence = readEvidence(fixture.workspace).records;
-      expect(evidence.some((record) => record.type === 'validation-claim')).toBe(false);
-      expect(evidence.find((record) => record.type === 'iteration')).toMatchObject({
-        builderRan: true,
-        validatorRan: true,
-        validatorOutcome: 'completed',
-        validationRollback: true,
-        validationProtocol: 'invalid',
-        validationProtocolError: { code: 'artifact-changed' },
-      });
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  }, HEAD_BINDING_TEST_TIMEOUT_MS);
-
-  it('reruns the full validation chain on the new HEAD and converges after drift', async () => {
-    const target = story({ acceptanceCriteria: ['works'] });
-    const fixture = setup([target]);
-    const initialHead = fixture.head();
-    const gateScript = writeHeadAdvanceScript(
-      fixture,
-      'commit-once-during-gate.mjs',
-      'H2 from first gate\n',
-      'test: first gate advanced HEAD',
-    );
-    const digest = `sha256:${'e'.repeat(64)}`;
-    const changingContract = {
-      ...TEST_QUALITY_CONTRACT,
-      checks: {
-        test: {
-          checks: [
-            {
-              id: 'advance-head-once',
-              module: 'root',
-              command: {
-                executable: process.execPath,
-                args: [gateScript],
-                cwd: '.',
-                platforms: ['linux', 'macos', 'windows'],
-                timeoutMs: 5000,
-              },
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            finalReviewRunner: async () => {
+              finalReviewCalls += 1;
+              return { exitCode: 0, message: 'unexpected review' };
             },
-          ],
-        },
-        build: { notApplicable: 'fixture' },
-        static: { notApplicable: 'fixture' },
-        security: { notApplicable: 'fixture' },
-      },
-    } as QualityContract;
-    const prdPath = join(fixture.workspace, 'prd.json');
-    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
-    prd.qualityContractDigest = digest;
-    prd.qualityChecks = changingContract.checks;
-    writeFileSync(prdPath, JSON.stringify(prd));
-    writeFileSync(
-      join(fixture.workspace, 'state.json'),
-      JSON.stringify({
-        'US-001': candidate(),
-      }),
-    );
-    const firstRunner = fakeCounting(fixture.workspace);
-    process.env.CODING_X_CLAUDE_BIN = `node ${firstRunner.fake}`;
+          }),
+        ).toBe(1);
+        expect(readFileSync(calls, 'utf8')).toBe('builder\nvalidator\n');
+        expect(fixture.head()).not.toBe(initialHead);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: false,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        });
+        expect(finalReviewCalls).toBe(0);
+        expect(existsSync(join(fixture.workspace, 'validation-result.json'))).toBe(false);
+        const evidence = readEvidence(fixture.workspace).records;
+        expect(evidence.some((record) => record.type === 'validation-claim')).toBe(false);
+        expect(evidence.find((record) => record.type === 'iteration')).toMatchObject({
+          builderRan: true,
+          validatorRan: true,
+          validatorOutcome: 'completed',
+          validationRollback: true,
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
+        });
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
 
-    try {
-      expect(
-        await runProductionLoop({
-          ...strictConfig(fixture.workspace, fixture.instructionsDir),
-          qualityContractReader: () => readyQualityContract(changingContract, digest),
-        }),
-      ).toBe(1);
-      expect(fixture.head()).not.toBe(initialHead);
-      expect(existsSync(firstRunner.calls)).toBe(false);
-
-      const recoveryMarker = join(fixture.workspace, 'recovery-gate-calls.txt');
-      const recoveryGate = join(fixture.projectRoot, 'recovery-gate.mjs');
-      writeFileSync(
-        recoveryGate,
-        `
-        import { appendFileSync } from 'node:fs';
-        appendFileSync(${JSON.stringify(recoveryMarker)}, 'checked\\n');
-      `,
+  it(
+    'reruns the full validation chain on the new HEAD and converges after drift',
+    async () => {
+      const target = story({ acceptanceCriteria: ['works'] });
+      const fixture = setup([target]);
+      const initialHead = fixture.head();
+      const gateScript = writeHeadAdvanceScript(
+        fixture,
+        'commit-once-during-gate.mjs',
+        'H2 from first gate\n',
+        'test: first gate advanced HEAD',
       );
-      const stableContract = {
+      const digest = `sha256:${'e'.repeat(64)}`;
+      const changingContract = {
         ...TEST_QUALITY_CONTRACT,
         checks: {
           test: {
             checks: [
               {
-                id: 'recovery-check',
+                id: 'advance-head-once',
                 module: 'root',
                 command: {
                   executable: process.execPath,
-                  args: [recoveryGate],
+                  args: [gateScript],
                   cwd: '.',
                   platforms: ['linux', 'macos', 'windows'],
                   timeoutMs: 5000,
@@ -709,42 +683,100 @@ describe('runLoop Git HEAD validation chain', () => {
           security: { notApplicable: 'fixture' },
         },
       } as QualityContract;
-      const stablePrd = JSON.parse(readFileSync(prdPath, 'utf8'));
-      stablePrd.qualityChecks = stableContract.checks;
-      writeFileSync(prdPath, JSON.stringify(stablePrd));
-      const validator = fakeBoundValidator(fixture.workspace, 'passed');
-      const validatorCalls = join(fixture.workspace, 'bound-calls.txt');
-      writeFileSync(validatorCalls, '1');
-      process.env.CODING_X_CLAUDE_BIN = `node ${validator}`;
-
-      expect(
-        await runProductionLoop({
-          ...strictConfig(fixture.workspace, fixture.instructionsDir),
-          qualityContractReader: () => readyQualityContract(stableContract, digest),
+      const prdPath = join(fixture.workspace, 'prd.json');
+      const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+      prd.qualityContractDigest = digest;
+      prd.qualityChecks = changingContract.checks;
+      writeFileSync(prdPath, JSON.stringify(prd));
+      writeFileSync(
+        join(fixture.workspace, 'state.json'),
+        JSON.stringify({
+          'US-001': candidate(),
         }),
-      ).toBe(0);
-      expect(readFileSync(recoveryMarker, 'utf8')).toBe('checked\n');
-      expect(readFileSync(validatorCalls, 'utf8')).toBe('2');
-      expect(
-        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-      ).toMatchObject({
-        passes: true,
-        validated: true,
-        validationReceipt: { gitHead: fixture.head() },
-      });
-      const evidence = readEvidence(fixture.workspace).records;
-      expect(evidence.filter((record) => record.type === 'iteration')).toHaveLength(2);
-      const gateRuns = evidence.filter((record) => record.type === 'gate-run');
-      expect(gateRuns).toHaveLength(1);
-      expect(gateRuns[0]).toMatchObject({ ok: true, ran: 1 });
-      expect(evidence.find((record) => record.type === 'validation-claim')).toMatchObject({
-        verdict: 'passed',
-        gitHead: fixture.head(),
-      });
-    } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
-    }
-  }, HEAD_BINDING_TEST_TIMEOUT_MS);
+      );
+      const firstRunner = fakeCounting(fixture.workspace);
+      process.env.CODING_X_CLAUDE_BIN = `node ${firstRunner.fake}`;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            qualityContractReader: () => readyQualityContract(changingContract, digest),
+          }),
+        ).toBe(1);
+        expect(fixture.head()).not.toBe(initialHead);
+        expect(existsSync(firstRunner.calls)).toBe(false);
+
+        const recoveryMarker = join(fixture.projectRoot, 'recovery-gate-calls.txt');
+        const recoveryGate = join(fixture.projectRoot, 'recovery-gate.mjs');
+        writeFileSync(
+          recoveryGate,
+          `
+        import { appendFileSync } from 'node:fs';
+        appendFileSync(${JSON.stringify(recoveryMarker)}, 'checked\\n');
+      `,
+        );
+        const stableContract = {
+          ...TEST_QUALITY_CONTRACT,
+          checks: {
+            test: {
+              checks: [
+                {
+                  id: 'recovery-check',
+                  module: 'root',
+                  command: {
+                    executable: process.execPath,
+                    args: [recoveryGate],
+                    cwd: '.',
+                    platforms: ['linux', 'macos', 'windows'],
+                    timeoutMs: 5000,
+                  },
+                },
+              ],
+            },
+            build: { notApplicable: 'fixture' },
+            static: { notApplicable: 'fixture' },
+            security: { notApplicable: 'fixture' },
+          },
+        } as QualityContract;
+        const stablePrd = JSON.parse(readFileSync(prdPath, 'utf8'));
+        stablePrd.qualityChecks = stableContract.checks;
+        writeFileSync(prdPath, JSON.stringify(stablePrd));
+        const validator = fakeBoundValidator(fixture.workspace, 'passed');
+        const validatorCalls = join(fixture.projectRoot, 'bound-calls.txt');
+        writeFileSync(validatorCalls, '1');
+        process.env.CODING_X_CLAUDE_BIN = `node ${validator}`;
+
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            qualityContractReader: () => readyQualityContract(stableContract, digest),
+          }),
+        ).toBe(0);
+        expect(readFileSync(recoveryMarker, 'utf8')).toBe('checked\n');
+        expect(readFileSync(validatorCalls, 'utf8')).toBe('2');
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: true,
+          validationReceipt: { gitHead: fixture.head() },
+        });
+        const evidence = readEvidence(fixture.workspace).records;
+        expect(evidence.filter((record) => record.type === 'iteration')).toHaveLength(2);
+        const gateRuns = evidence.filter((record) => record.type === 'gate-run');
+        expect(gateRuns).toHaveLength(1);
+        expect(gateRuns[0]).toMatchObject({ ok: true, ran: 1 });
+        expect(evidence.find((record) => record.type === 'validation-claim')).toMatchObject({
+          verdict: 'passed',
+          gitHead: fixture.head(),
+        });
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
 
   it.each([
     ['successful', 0],

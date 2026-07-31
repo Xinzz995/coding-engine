@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-26
+updated: 2026-07-31
 scope: root
 ---
 
@@ -79,7 +79,7 @@ validation request → Validator claim → engine protocol verdict/receipt 的 r
 禁用：review 建议、审查意见（用于正式状态时）
 
 **Review 裁决**
-用户通过 `/review-loop` 针对当前 head 上具体 finding 作出的结构化决定：授权修复、提交反证、登记 P1 延期或知悉 P2/Info。记录写入 `.workspace/review-decisions.json`；Markdown 和 PR 文本不能代替它，修复提交会让旧裁决失效。
+用户通过 `/review-loop` 针对当前 head 上具体 finding 作出的结构化决定：授权修复、提交反证、登记 P1 延期或知悉 P2/Info。`/review-loop` 只提交最小临时请求，由 `workspace record-review-decision` 重核事实、绑定提交和时间后写入 `review-decisions.json`；Markdown 和 PR 文本不能代替它，修复提交会让旧裁决失效。
 禁用：Markdown resolution、人工自由放行
 
 **收口**
@@ -119,19 +119,23 @@ builder 有意识选择带已知上限的简单实现时就地留下的 `// 取�
 禁用：插件副本
 
 **workspace**
-引擎运行时状态与证据目录（默认 `.workspace/`），容纳 prd/state/progress、证据、报告、截图与运行锁等产物；不要与编辑器工作区或 `docs/archive/` 历史冷档案混称。
+引擎运行时状态与证据目录（默认 `.workspace/`），容纳 prd/state/progress、证据、报告、截图，以及独立的安全标记和写租约协议根；不要与编辑器工作区或 `docs/archive/` 历史冷档案混称。
 禁用：工作区（泛指编辑器工作区时易混淆，指本概念时统一用「workspace」）
 
-**工作区锁（engine.lock）**
-引擎在 workspace 根以 O_EXCL 原子创建的单写者互斥文件（pid/startedAt/command）；run 与 repair 持锁互斥、只读子命令不锁，持锁进程死亡遗留的 stale 锁下次启动自动接管，运行中每轮自愈核对。
-禁用：进程锁、文件锁、互斥文件、单实例锁（统一用「工作区锁」，文件本体称 engine.lock）
+**workspace 安全标记（workspace-safety.json）**
+把一个 canonical workspace 身份与新版安全协议绑定的永久标记。它不是当前运行状态，也不能由后来者在普通启动中自动补写或替换。
+禁用：锁文件、安全缓存
+
+**workspace 写租约**
+正式写入口在同一 canonical workspace 上取得的 owner-bound 单写者资格。永久 `engine.lock/` 只是协议根，当前 owner 只存在于 `engine.lock/lease/`；ready 表示没有活动 lease。异常退出、身份不明或未完成 mutation 必须显式恢复，不能按 pid stale 自动接管。
+禁用：工作区锁、进程锁、文件锁、互斥文件、单实例锁（统一用「workspace 写租约」；`engine.lock/` 称为「协议根」）
 
 **仲裁标签**
 notes 中请求人工裁决的行前缀族：`[需求冲突]`（源文档与验收标准冲突，按验收标准实现后留待人工）与 `[需要人工核实]`（其他必须人工介入的异常，配合 blocked 使用）。所有机械路径（打回、清理、再派生）必须原样保全这些行。
 禁用：冲突标记、人工核实标记（统一用「仲裁标签」）
 
 **验证报告**
-一次运行的验证证据静态存档（`<workspace>/report.html`）：Story 状态与验收标准、门禁配置、截图工件、本地最终 Review、所记录的 GitHub 交付状态和篡改红旗区汇总为零依赖单页。循环结束从引擎冻结的 PRD 快照自动生成，`coding-x report` 可从磁盘重生成；state 损坏时只生成“全部未验证”的红色诊断报告。它是阅读视图，不是共享凭证，也不能用 Story 绿色代替可交付结论。
+一次运行的验证证据静态存档（`<workspace>/report.html`）：Story 状态与验收标准、门禁配置、截图工件、本地最终 Review、所记录的 GitHub 交付状态和篡改红旗区汇总为零依赖单页。循环结束从引擎冻结的 PRD 快照自动生成，`coding-x report` 可从磁盘重生成；生成时必须核对最终 Review 当前性，无法核对、Runner 或绑定输入已变化、GitHub 状态未刷新时不得显示交付就绪。state 损坏时只生成“全部未验证”的红色诊断报告。它是阅读视图，不是共享凭证，也不能用 Story 绿色代替可交付结论。
 禁用：HTML 报告、静态报告（统一用「验证报告」）
 
 **异常轮**

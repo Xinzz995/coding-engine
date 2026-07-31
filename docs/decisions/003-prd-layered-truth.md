@@ -1,7 +1,7 @@
 ---
 title: 003-prd-layered-truth
 status: active
-updated: 2026-07-22
+updated: 2026-07-31
 scope: root
 ---
 
@@ -23,7 +23,7 @@ scope: root
 实施分两阶段：
 
 - **第一阶段（v0.4.0，随附计划 docs/archive/plans/2026-07-03-prd-layered-truth.md）**：溯源（sourcePrd 字段 + 【溯源】仲裁段）、转换闭环（增强结果回写源 md + 对照表）、稳定 story id、再派生模式（按 id 合并保状态）、builder/validator 提示词对齐。全部为 skills/提示词/轻引擎改动。
-- **第二阶段（v0.5.0 已落地，实施计划 docs/archive/plans/2026-07-03-prd-state-separation.md）**：内容与状态分离——passes/notes/retryCount/blocked 迁出到 `.workspace/state.json`（按 story id 键控），prd.json 运行期只读；引擎 join 两文件做 story 选取与完成判定，仪表盘输出合并视图，repair 兼容双文件，旧格式自动迁移。收益：agent 回写不再可能损坏需求内容，再派生天然不丢状态。
+- **第二阶段（v0.5.0 已落地，实施计划 docs/archive/plans/2026-07-03-prd-state-separation.md）**：内容与状态分离——passes/notes/retryCount/blocked 迁出到 `.workspace/state.json`（按 story id 键控），prd.json 运行期只读；引擎 join 两文件做 story 选取与完成判定，仪表盘输出合并视图，repair 兼容双文件。当时的旧格式会自动迁移；从 0.34 起，ADR-021 改为正式写入拒绝旧版非空 workspace，只读展示仍可回看旧格式。
 
 ## 理由与备选
 
@@ -37,4 +37,4 @@ scope: root
 - prd-to-json 从「只读转换」变为「转换 + 回写 + 对照表」，会修改用户的 `docs/prds/` 文件（仅 User Stories 章节与 frontmatter updated）——面向用户的行为变更，升 v0.4.0 并同步 README。
 - story id 成为 md ↔ json 对齐键：一旦分配永不重排/复用（prd-generate、prd-to-json 双侧约束）。
 - `Prd` 类型新增可选 `sourcePrd` 字段，旧 prd.json 不受影响（向后兼容）。
-- 第二阶段已于 v0.5.0 落地：状态迁出至 `.workspace/state.json`，prd.json 运行期只读，旧格式由引擎启动时自动抽取迁移；agent 写坏需求内容的通道就此关闭（state.json 仍由 `npx coding-x repair` 兜底）。
+- 第二阶段已于 v0.5.0 落地：状态迁出至 `.workspace/state.json`，prd.json 运行期只读；0.5 至 0.33 的旧格式启动迁移已被 ADR-021 的 0.34 安全初始化规则取代，正式写入不再迁移旧版非空 workspace。agent 写坏需求内容的通道就此关闭（当前已初始化 workspace 的 state.json 仍由 `npx coding-x repair` 兜底）。

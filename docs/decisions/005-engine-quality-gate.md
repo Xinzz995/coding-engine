@@ -1,7 +1,7 @@
 ---
 title: 005-engine-quality-gate
 status: active
-updated: 2026-07-22
+updated: 2026-07-31
 scope: root
 ---
 
@@ -14,6 +14,19 @@ scope: root
 ## 决策
 
 prd.json 顶层可选 `qualityChecks`（完整 shell 命令数组）；引擎在每轮 builder 之后、validator 之前逐条执行（fail-fast，单条超时 10 分钟），任一非零退出码即机械打回（passes=false、retryCount+1、notes 写 `[门禁失败]`、达 MAX_RETRIES 转 blocked）并跳过该轮 validator。打回上限 MAX_RETRIES=5 以引擎为单一真相源，validator.md 经 `{{MAX_RETRIES}}` 渲染共享。配置错误在派生环节拦截：prd-to-json 写入前试跑并确认基线全绿。
+
+## 当前状态（2026-07-31）
+
+上述段落保留最初决策的历史原文。ADR-018 与 ADR-021 已替代其中的配置和执行细节：
+
+- `qualityChecks` 不再是可选 shell 字符串数组，而是从受 Git 管理的质量契约冻结派生的必需结构化快照；
+- 每条检查使用契约自己的执行文件、参数、工作目录、平台和超时；只有契约明确声明时才启用 shell；
+- `prd-to-json` 只准备候选并交用户确认，不在 skill 外围试跑任意项目命令；正式 `workspace apply-prd`
+  只在已确认的 TDD 政策要求时，于受管 session 内运行基线；
+- 子进程由 ADR-021 的隔离与结算协议统一管理。
+
+本 ADR 仍然有效的核心是不变量：Developer 之后、Validator 之前由引擎独立运行机械检查；失败时
+fail-fast、跳过该轮 Validator，并由引擎掌握打回与阻断状态。
 
 ## 理由与备选
 
@@ -28,5 +41,5 @@ prd.json 顶层可选 `qualityChecks`（完整 shell 命令数组）；引擎在
 - `MAX_RETRIES` 成为 gate.ts 与 validator.md 的共享耦合点（经 `{{MAX_RETRIES}}` 渲染共享）：改上限只动引擎一处；新增渲染键时须同步 renderInstruction 测试。
 - 配置错的命令（不存在/写错）在循环内与真实失败不可区分（127 不特判）：拦截完全依赖 prd-to-json 派生环节的试跑检查项——绕过派生链手写 prd.json 的用户失去这层保护，门禁失败会烧满 5 轮到 blocked。
 - validator 的 token 成本有意不减：门禁通过后「Typecheck passes」类 AC 仍被 validator 重验（接受的冗余防线）。
-- 门禁命令超时后必须复用 `process-tree.ts` 等待整棵树退出再打回；POSIX 陷 SIGTERM 的孙进程会升级 SIGKILL，Windows 等待 `taskkill /T /F`，不能让下一轮与旧门禁重叠。detached 进程组使 Ctrl+C 不再天然传播给运行中的门禁命令：本次只收紧超时路径，人工中断仍保留既有的有限孤儿风险。
+- 门禁命令由 ADR-021 的平台隔离器统一启动和收口；根进程结束、超时或中断都必须等到整组后代已确认退出。仍有后代或无法确认时保留隔离状态，不能让下一轮与旧门禁重叠，也不能把单个 kill 命令成功当成完成证明。
 - 「不可绕过、不可共谋」的论证隐含依赖 prd.json 运行期不可变——该前提当时无机械保证（builder 改写 qualityChecks 可延迟一轮静默架空门禁），由 ADR-007 运行期冻结闭环。

@@ -101,14 +101,12 @@ export interface FinalReviewState {
 }
 
 export type ReviewDecisionAction =
-  | 'counterevidence'
-  | 'p1-deferred'
-  | 'acknowledged'
-  | 'fix-requested';
+  'counterevidence' | 'p1-deferred' | 'acknowledged' | 'fix-requested';
 
 export interface ReviewDecision {
   findingId: string;
   headSha: string;
+  reviewBindingDigest: string;
   action: ReviewDecisionAction;
   operator: string;
   at: string;

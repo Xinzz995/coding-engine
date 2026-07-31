@@ -241,6 +241,51 @@ describe('internal workspace safety disk evaluator', () => {
     ).toMatchObject({ classification: 'ready', operationState: 'none' });
   });
 
+  it('classifies an ordinary legacy lock file before requiring the new permanent directory', async () => {
+    const path = workspace();
+    const legacyBytes = JSON.stringify({
+      pid: 123,
+      startedAt: '2026-07-16T00:00:00.000Z',
+      command: 'run',
+    });
+    writeFileSync(join(path, PROTOCOL_ROOT_DIR), legacyBytes);
+
+    await expect(
+      evaluateWorkspaceSafetyDisk({ workspacePath: path, probe: fixtureProbe() }),
+    ).resolves.toMatchObject({
+      classification: 'legacy',
+      reason: 'legacy-runtime-artifacts',
+      diagnostic: expect.stringContaining('永久协议根'),
+      safetyFingerprint: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+    });
+    expect(readFileSync(join(path, PROTOCOL_ROOT_DIR), 'utf8')).toBe(legacyBytes);
+  });
+
+  it('fails closed when a legacy lock changes after its initial bound snapshot', async () => {
+    const path = workspace();
+    const lockPath = join(path, PROTOCOL_ROOT_DIR);
+    writeFileSync(lockPath, JSON.stringify({ pid: 123 }));
+    let changed = false;
+
+    const result = await evaluateWorkspaceSafetyDisk({
+      workspacePath: path,
+      probe: fixtureProbe(),
+      hooks: {
+        afterInitialSafetySnapshot: () => {
+          if (changed) return;
+          changed = true;
+          writeFileSync(lockPath, JSON.stringify({ pid: 456, changed: true }));
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      classification: 'invalid',
+      reason: 'invalid-safety-record',
+      diagnostic: expect.stringMatching(/safety (?:records|root structure) changed/u),
+    });
+  });
+
   it.each(['linux', 'darwin', 'win32'] as const)(
     'uses an injected %s adapter fixture without claiming a host platform proof',
     async (platform) => {

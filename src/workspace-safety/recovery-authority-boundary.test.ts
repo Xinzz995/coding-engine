@@ -275,11 +275,18 @@ describe('workspace authority boundary', () => {
       'workspace-safety/reboot-recovery.ts|./prestart-recovery.js',
       'workspace-safety/reboot-recovery.ts|./prestart-recovery-finalize.js',
       'workspace-safety/recovery-session.ts|./recovery-finalize.js',
+      'workspace-safety/recovery-session.ts|./bootstrap-recovery-finalize.js',
+      'workspace-safety/recovery-session.ts|./delegated-recovery-finalize.js',
+      'workspace-safety/recovery-session.ts|./prestart-recovery-finalize.js',
+      'workspace-safety/recovery-session.ts|./mutation-recovery.js',
+      'workspace-safety/recovery-session.ts|./reboot-recovery.js',
       'workspace-safety/bootstrap.ts|./lease.js',
       'workspace-safety/mutation-recovery.ts|./mutation-domain.js',
       'workspace-safety/mutation.ts|./mutation-domain.js',
+      'workspace-safety/coordinator.ts|./operation.js',
       'workspace-safety/operation.ts|./operation-records.js',
       'workspace-safety/posix-supervisor.ts|./operation.js',
+      'workspace-safety/product-mutations.ts|./mutation.js',
       'workspace-safety/windows-supervisor-integration.ts|./operation.js',
     ]);
     const offenders: string[] = [];

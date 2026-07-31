@@ -1,14 +1,21 @@
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
-import { join, dirname } from 'node:path';
-import { existsSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
-import { repairWorkspaceFiles } from './engine/repair.js';
-import { acquireLock, LockConflictError } from './engine/lock.js';
-import { runDoctor, renderDoctorJson, renderDoctorReport } from './doctor/doctor.js';
-import { collectStatus, renderStatusReport, renderStatusJson } from './status/status.js';
-import { writeReport } from './report/report.js';
+import { repairJsonString } from './engine/repair.js';
+import {
+  runDoctorWithWorkspaceSafety,
+  renderDoctorJson,
+  renderDoctorReport,
+} from './doctor/doctor.js';
+import {
+  collectStatusWithWorkspaceSafety,
+  renderStatusReport,
+  renderStatusJson,
+} from './status/status.js';
+import { writeCurrentReportWithSession } from './report/current-report.js';
 import { permissionWarning as agentPermissionWarning, type AgentKind } from './engine/agent.js';
 import { tryReadPrd } from './engine/prd.js';
 import { readModelRouting } from './engine/models.js';
@@ -20,20 +27,56 @@ import {
   renderModelCatalogText,
   resolveGlobalConfigPath,
 } from './engine/model-catalog.js';
-import {
-  runCursorHookAction,
-  type CursorHookAction,
-} from './cursor-hooks.js';
+import { runCursorHookAction, type CursorHookAction } from './cursor-hooks.js';
 import * as dashboard from './dashboard/server.js';
+import { openBrowserBestEffort } from './dashboard/browser-opener.js';
 import { CODING_X_VERSION } from './version.js';
 import { runQualityInit } from './quality/init.js';
+import { bootstrapWorkspace } from './workspace-safety/bootstrap.js';
+import { digestBytes } from './workspace-safety/filesystem.js';
+import { acquireWorkspaceLease } from './workspace-safety/lease.js';
+import {
+  runApplyPrdV1Mutation,
+  runRepairV1Mutation,
+  type ApplyPrdV1Request,
+  type RepairV1Request,
+} from './workspace-safety/product-mutations.js';
+import {
+  runWorkspaceRecover,
+  runWorkspaceResumeMutation,
+} from './workspace-safety/recovery-dispatch.js';
+import { createWorkspaceSession, type WorkspaceSession } from './workspace-safety/session.js';
+import { WorkspaceSafetyError, type OwnerCommand } from './workspace-safety/types.js';
+import {
+  installCommandSignals,
+  type CommandSignalController,
+} from './workspace-safety/command-signals.js';
+import {
+  parseReviewDecisionRequest,
+  readBoundReviewDecisionContract,
+  recordReviewDecision,
+} from './review/decision-command.js';
+import { createManagedReviewObservation } from './review/managed-observation.js';
 
 export interface CliConfig {
-  command: 'run' | 'init' | 'repair' | 'dashboard' | 'doctor' | 'status' | 'report' | 'models' | 'config' | 'hooks';
+  command:
+    | 'run'
+    | 'init'
+    | 'repair'
+    | 'dashboard'
+    | 'doctor'
+    | 'status'
+    | 'report'
+    | 'models'
+    | 'config'
+    | 'hooks'
+    | 'workspace';
   /** 全局帮助请求；先于任何子命令校验与副作用处理。 */
   help: boolean;
   configAction: 'path' | 'init' | 'validate' | null;
   hooksAction: CursorHookAction | null;
+  workspaceAction:
+    'init' | 'apply-prd' | 'record-review-decision' | 'recover' | 'resume-mutation' | null;
   kind: AgentKind;
   /** 用户是否通过位置参数显式选择 runner；models.runner 自动选择依赖此信息。 */
   kindExplicit: boolean;
@@ -59,6 +102,8 @@ export interface CliConfig {
   yes: boolean;
   /** doctor 只检查本地状态，不查询 GitHub。 */
   local: boolean;
+  /** workspace apply-prd / record-review-decision 的严格 JSON 请求。 */
+  inputFile: string | undefined;
 }
 
 export const CLI_HELP = `coding-x — Ralph 自动化编码 harness
@@ -74,7 +119,13 @@ runner:
   cursor                         使用 Cursor Agent
 
 命令:
-  init                           初始化质量契约与 GitHub 交付门禁
+  init                           初始化安全 workspace、质量契约与 GitHub 交付门禁
+  workspace init                只初始化一个新的空 workspace
+  workspace apply-prd           原子应用已确认的 PRD 候选（需要 --input）
+  workspace record-review-decision
+                                 记录当前提交上的 Review 裁决（需要 --input）
+  workspace recover             恢复已证明安全的中断运行
+  workspace resume-mutation     继续已验证的 apply-prd / repair 原子操作
   repair                         修复 workspace 中的 prd.json/state.json
   dashboard                      启动只读离线仪表盘
   doctor                         检查文档、门禁、模型与 workspace 健康度
@@ -95,14 +146,15 @@ runner:
   --review-model <id>            临时固定最终三层 Review 模型（缺省复用 Validator）
   --escalation-model <id>        临时覆盖升级 Builder 模型
   --workspace <dir>              workspace 路径（默认 .workspace）
-  --no-open                      不自动打开仪表盘
+  --no-open                      standalone dashboard 不自动打开浏览器
   --keep-open                    循环结束后保留仪表盘
   --port <n>                     仪表盘端口（仅接受 0–65535 的十进制整数；0 由系统选择可用端口；默认 7331）
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
-  --json                         JSON 输出（doctor/status/models）
+  --json                         JSON 输出（init/workspace/doctor/status/models）
   --shadow                       候选版本 Dogfood；永远不产生可交付结论
   --contract <file>              init 使用已确认的质量契约文件
+  --input <file>                 workspace 写命令的严格 JSON 请求文件
   --yes                          init 接受已展示的远端和文件变更
   --local                        doctor 只检查本地状态，不查询 GitHub
   -h, --help                     显示本帮助并退出
@@ -110,7 +162,7 @@ runner:
 status 退出码:
   0                              实现验证、本地 Review 与 GitHub 交付条件均已就绪
   1                              Story 未完成、state 损坏或 PRD 没有 Story
-  2                              workspace 不可读或最终 Review 状态损坏
+  2                              workspace 安全状态未就绪/不可读，或最终 Review 状态损坏
   3                              存在 blocked Story
   4                              最终 Review 有待人工处理的 finding
   5                              最终 Review 无法可靠验证
@@ -120,6 +172,12 @@ status 退出码:
 更多说明: https://github.com/Xinzz995/coding-engine#readme`;
 
 export function parseCliArgs(argv: string[]): CliConfig {
+  const workspaceOptionCount = argv.filter(
+    (arg) => arg === '--workspace' || arg.startsWith('--workspace='),
+  ).length;
+  const inputOptionCount = argv.filter(
+    (arg) => arg === '--input' || arg.startsWith('--input='),
+  ).length;
   const normalizedArgs: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -128,7 +186,13 @@ export function parseCliArgs(argv: string[]): CliConfig {
       continue;
     }
     const raw = argv[i + 1];
-    if (raw === undefined || raw === '--help' || raw === '-h' || raw === 'help' || raw.startsWith('--')) {
+    if (
+      raw === undefined ||
+      raw === '--help' ||
+      raw === '-h' ||
+      raw === 'help' ||
+      raw.startsWith('--')
+    ) {
       normalizedArgs.push('--port=');
       continue;
     }
@@ -162,6 +226,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       contract: { type: 'string' },
       yes: { type: 'boolean' },
       local: { type: 'boolean' },
+      input: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -169,16 +234,27 @@ export function parseCliArgs(argv: string[]): CliConfig {
   const first = positionals[0];
   const help = values.help === true || positionals.includes('help');
   const command: CliConfig['command'] =
-    first === 'init' ? 'init'
-    : first === 'repair' ? 'repair'
-    : first === 'dashboard' ? 'dashboard'
-    : first === 'doctor' ? 'doctor'
-    : first === 'status' ? 'status'
-    : first === 'report' ? 'report'
-    : first === 'models' ? 'models'
-    : first === 'config' ? 'config'
-    : first === 'hooks' ? 'hooks'
-    : 'run';
+    first === 'init'
+      ? 'init'
+      : first === 'repair'
+        ? 'repair'
+        : first === 'dashboard'
+          ? 'dashboard'
+          : first === 'doctor'
+            ? 'doctor'
+            : first === 'status'
+              ? 'status'
+              : first === 'report'
+                ? 'report'
+                : first === 'models'
+                  ? 'models'
+                  : first === 'config'
+                    ? 'config'
+                    : first === 'hooks'
+                      ? 'hooks'
+                      : first === 'workspace'
+                        ? 'workspace'
+                        : 'run';
   if (!help && command === 'init' && positionals.length > 1) {
     throw new Error('❌ init 不接受额外位置参数');
   }
@@ -190,6 +266,12 @@ export function parseCliArgs(argv: string[]): CliConfig {
   }
   if (!help && values.local === true && command !== 'doctor') {
     throw new Error('❌ --local 只能用于 doctor');
+  }
+  if (!help && workspaceOptionCount > 1) {
+    throw new Error('❌ --workspace 只能指定一次');
+  }
+  if (!help && inputOptionCount > 1) {
+    throw new Error('❌ --input 只能指定一次');
   }
   let configAction: CliConfig['configAction'] = null;
   if (command === 'config') {
@@ -207,8 +289,10 @@ export function parseCliArgs(argv: string[]): CliConfig {
   if (command === 'hooks') {
     const host = positionals[1];
     const rawAction = positionals[2];
-    if (host === 'cursor'
-        && (rawAction === 'install' || rawAction === 'status' || rawAction === 'remove')) {
+    if (
+      host === 'cursor' &&
+      (rawAction === 'install' || rawAction === 'status' || rawAction === 'remove')
+    ) {
       hooksAction = rawAction;
     } else if (!help) {
       throw new Error('❌ hooks 子命令必须是 cursor install、cursor status 或 cursor remove');
@@ -217,16 +301,60 @@ export function parseCliArgs(argv: string[]): CliConfig {
   if (!help && command === 'hooks' && positionals.length > 3) {
     throw new Error(`❌ hooks cursor ${hooksAction} 不接受额外位置参数`);
   }
+  let workspaceAction: CliConfig['workspaceAction'] = null;
+  if (command === 'workspace') {
+    const rawAction = positionals[1];
+    if (
+      rawAction === 'init' ||
+      rawAction === 'apply-prd' ||
+      rawAction === 'record-review-decision' ||
+      rawAction === 'recover' ||
+      rawAction === 'resume-mutation'
+    ) {
+      workspaceAction = rawAction;
+    } else if (!help) {
+      throw new Error(
+        '❌ workspace 子命令必须是 init、apply-prd、record-review-decision、recover 或 resume-mutation',
+      );
+    }
+  }
+  if (!help && command === 'workspace' && positionals.length > 2) {
+    throw new Error(`❌ workspace ${workspaceAction} 不接受额外位置参数`);
+  }
+  if (
+    !help &&
+    values.input !== undefined &&
+    (command !== 'workspace' ||
+      (workspaceAction !== 'apply-prd' && workspaceAction !== 'record-review-decision'))
+  ) {
+    throw new Error('❌ --input 只能用于 workspace apply-prd 或 record-review-decision');
+  }
+  if (
+    !help &&
+    command === 'workspace' &&
+    (workspaceAction === 'apply-prd' || workspaceAction === 'record-review-decision') &&
+    (values.input === undefined || values.input.trim() === '')
+  ) {
+    throw new Error(`❌ workspace ${workspaceAction} 必须指定 --input <file>`);
+  }
   const runnerPositional = command === 'models' ? positionals[1] : first;
-  if (!help && command === 'models' && runnerPositional !== undefined
-    && runnerPositional !== 'claude' && runnerPositional !== 'codex' && runnerPositional !== 'cursor') {
+  if (
+    !help &&
+    command === 'models' &&
+    runnerPositional !== undefined &&
+    runnerPositional !== 'claude' &&
+    runnerPositional !== 'codex' &&
+    runnerPositional !== 'cursor'
+  ) {
     throw new Error(`❌ models runner 必须是 claude、codex 或 cursor，收到「${runnerPositional}」`);
   }
   if (!help && command === 'models' && positionals.length > 2) {
     throw new Error('❌ models 不接受 runner 以外的额外位置参数');
   }
-  const kind: AgentKind = runnerPositional === 'codex' ? 'codex' : runnerPositional === 'cursor' ? 'cursor' : 'claude';
-  const kindExplicit = runnerPositional === 'claude' || runnerPositional === 'codex' || runnerPositional === 'cursor';
+  const kind: AgentKind =
+    runnerPositional === 'codex' ? 'codex' : runnerPositional === 'cursor' ? 'cursor' : 'claude';
+  const kindExplicit =
+    runnerPositional === 'claude' || runnerPositional === 'codex' || runnerPositional === 'cursor';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
 
   let staleDays = 30;
@@ -264,6 +392,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     help,
     configAction,
     hooksAction,
+    workspaceAction,
     kind,
     kindExplicit,
     maxIterations: values['max-iter'] ? Number(values['max-iter']) : 50,
@@ -284,6 +413,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     contractFile: values.contract,
     yes: values.yes ?? false,
     local: values.local ?? false,
+    inputFile: values.input,
   };
 }
 
@@ -298,14 +428,15 @@ export function permissionWarning(kind: AgentKind): string {
 export async function runDashboard(
   opts: { workspace: string; port: number; openBrowser: boolean },
   interrupt?: Promise<void>,
+  browserOpener: (url: string) => void = openBrowserBestEffort,
 ): Promise<number> {
   const server = dashboard.start({
     workspace: opts.workspace,
     maxIterations: 0,
     port: opts.port,
-    openBrowser: opts.openBrowser,
   });
-  await server.ready;
+  const address = await server.ready;
+  if (opts.openBrowser) browserOpener(`http://localhost:${address.port}`);
   console.log('📊 离线查看模式（未在运行循环），按 Ctrl+C 退出。');
   try {
     await (interrupt ?? new Promise<void>((r) => process.once('SIGINT', () => r())));
@@ -313,6 +444,121 @@ export async function runDashboard(
   } finally {
     server.close();
   }
+}
+
+function inputPathOutsideWorkspace(inputFile: string, workspace: string): string {
+  const inputPath = realpathSync(resolve(inputFile));
+  let workspacePath: string;
+  try {
+    workspacePath = realpathSync(resolve(workspace));
+  } catch {
+    workspacePath = resolve(workspace);
+  }
+  const relation = relative(workspacePath, inputPath);
+  if (
+    relation === '' ||
+    (!relation.startsWith(`..${sep}`) && relation !== '..' && !isAbsolute(relation))
+  ) {
+    throw new Error('--input 必须位于 workspace 之外，避免候选输入与目标状态互相覆盖');
+  }
+  return inputPath;
+}
+
+function readJsonInput(inputFile: string, workspace: string): unknown {
+  const path = inputPathOutsideWorkspace(inputFile, workspace);
+  const bytes = readFileSync(path);
+  if (bytes.byteLength === 0 || bytes.byteLength > 64 * 1024 * 1024) {
+    throw new Error(`请求文件大小非法：${path}`);
+  }
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`请求文件不是严格 UTF-8：${path}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `请求文件不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+async function withWorkspaceSession<T>(
+  workspace: string,
+  command: Exclude<OwnerCommand, 'workspace-init'>,
+  action: (session: WorkspaceSession) => Promise<T>,
+): Promise<T> {
+  const lease = await acquireWorkspaceLease({ workspacePath: workspace, command });
+  const session = createWorkspaceSession(lease);
+  try {
+    const result = await action(session);
+    await session.close();
+    return result;
+  } catch (error) {
+    if (session.state === 'open') {
+      try {
+        await session.close();
+      } catch (closeError) {
+        throw new Error(
+          `${error instanceof Error ? error.message : String(error)}；` +
+            'workspace 操作未能安全收口，已保留恢复记录。请先运行 workspace resume-mutation 或 recover。' +
+            `（${closeError instanceof Error ? closeError.message : String(closeError)}）`,
+        );
+      }
+    }
+    throw error;
+  }
+}
+
+function repairRequest(workspace: string): RepairV1Request {
+  const prdBytes = readFileSync(join(workspace, 'prd.json'));
+  const statePath = join(workspace, 'state.json');
+  const stateBytes = existsSync(statePath) ? readFileSync(statePath) : null;
+  const decode = (bytes: Buffer, name: string): string => {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      throw new Error(`${name} 不是严格 UTF-8，不能自动修复`);
+    }
+  };
+  return {
+    schemaVersion: 1,
+    source: {
+      prdDigest: digestBytes(prdBytes),
+      stateDigest: stateBytes === null ? null : digestBytes(stateBytes),
+    },
+    candidate: {
+      prd: repairJsonString(decode(prdBytes, 'prd.json')),
+      state: stateBytes === null ? null : repairJsonString(decode(stateBytes, 'state.json')),
+    },
+  };
+}
+
+function workspaceErrorMessage(error: unknown): string {
+  if (error instanceof WorkspaceSafetyError) {
+    return `${error.message}（${error.code}）`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function commandInterrupted(
+  cfg: Pick<CliConfig, 'json'>,
+  label: string,
+  signals: CommandSignalController,
+): 130 | 143 {
+  const exitCode = signals.exitCode;
+  if (exitCode === null) {
+    throw new Error('commandInterrupted 只能在收到用户中断后调用');
+  }
+  const message = `${label}已按安全边界停止；请先运行 status 或 doctor 确认后续动作`;
+  if (cfg.json) {
+    console.log(JSON.stringify({ status: 'interrupted', exitCode, message }, null, 2));
+  } else {
+    console.error(`⏸️  ${message}`);
+  }
+  return exitCode;
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -335,8 +581,8 @@ export async function main(argv: string[]): Promise<number> {
       join(here, 'hooks', 'tdd-commit-check.mjs'),
       join(here, '..', 'hooks', 'tdd-commit-check.mjs'),
     ];
-    const bundle = bundledCandidates.find((candidate) => existsSync(candidate))
-      ?? bundledCandidates[0];
+    const bundle =
+      bundledCandidates.find((candidate) => existsSync(candidate)) ?? bundledCandidates[0];
     const hookResult = runCursorHookAction(cfg.hooksAction!, {
       root: process.cwd(),
       bundle,
@@ -344,6 +590,123 @@ export async function main(argv: string[]): Promise<number> {
     if (hookResult.exitCode === 0) console.log(hookResult.message);
     else console.error(hookResult.message);
     return hookResult.exitCode;
+  }
+
+  if (cfg.command === 'workspace') {
+    const commandSignals = installCommandSignals();
+    try {
+      if (cfg.workspaceAction === 'init') {
+        const result = await bootstrapWorkspace({ workspacePath: cfg.workspace });
+        if (commandSignals.exitCode !== null) {
+          return commandInterrupted(cfg, 'Workspace 初始化', commandSignals);
+        }
+        const output = {
+          status: result.created ? 'created' : 'ready',
+          exitCode: 0,
+          workspace: result.workspacePath,
+          workspaceIdentity: result.workspaceIdentity,
+          protocolDigest: result.protocolDigest,
+        };
+        if (cfg.json) console.log(JSON.stringify(output, null, 2));
+        else {
+          console.log(
+            result.created
+              ? `✅ Workspace 安全协议已初始化：${result.workspacePath}`
+              : `✅ Workspace 已初始化且可以使用：${result.workspacePath}`,
+          );
+        }
+        return 0;
+      }
+      if (cfg.workspaceAction === 'recover' || cfg.workspaceAction === 'resume-mutation') {
+        const result =
+          cfg.workspaceAction === 'recover'
+            ? await runWorkspaceRecover({
+                workspacePath: cfg.workspace,
+                termination: commandSignals.termination,
+              })
+            : await runWorkspaceResumeMutation({
+                workspacePath: cfg.workspace,
+                termination: commandSignals.termination,
+              });
+        if (commandSignals.exitCode !== null) {
+          return commandInterrupted(cfg, 'Workspace 恢复', commandSignals);
+        }
+        if (cfg.json) console.log(JSON.stringify(result, null, 2));
+        else if (result.ok) {
+          console.log(`✅ ${result.message} 归档：${result.archivePath}`);
+        } else {
+          console.error(`❌ ${result.message}${result.detail ? ` ${result.detail}` : ''}`);
+        }
+        return result.exitCode;
+      }
+      if (cfg.workspaceAction === 'apply-prd') {
+        const request = readJsonInput(cfg.inputFile!, cfg.workspace) as ApplyPrdV1Request;
+        const mutation = await withWorkspaceSession(cfg.workspace, 'apply-prd', async (session) =>
+          runApplyPrdV1Mutation(session, request, {
+            projectRoot: process.cwd(),
+            termination: commandSignals.termination,
+          }),
+        );
+        if (commandSignals.exitCode !== null) {
+          return commandInterrupted(cfg, 'PRD 应用', commandSignals);
+        }
+        const output = {
+          status: 'applied',
+          exitCode: 0,
+          mutationId: mutation.state.mutationId,
+          kind: mutation.state.kind,
+          phase: mutation.state.phase,
+        };
+        if (cfg.json) console.log(JSON.stringify(output, null, 2));
+        else console.log(`✅ PRD 候选已原子应用：${mutation.state.mutationId}`);
+        return 0;
+      }
+      const request = parseReviewDecisionRequest(readJsonInput(cfg.inputFile!, cfg.workspace));
+      const decision = await withWorkspaceSession(
+        cfg.workspace,
+        'review-decision',
+        async (session) => {
+          const observation = createManagedReviewObservation({
+            session,
+            root: process.cwd(),
+            termination: commandSignals.termination,
+          });
+          const contract = await readBoundReviewDecisionContract(
+            session,
+            process.cwd(),
+            observation,
+          );
+          return recordReviewDecision({
+            session,
+            root: process.cwd(),
+            request,
+            contract,
+            observation,
+            termination: commandSignals.termination,
+          });
+        },
+      );
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, 'Review 裁决记录', commandSignals);
+      }
+      const output = { status: 'recorded', exitCode: 0, decision };
+      if (cfg.json) console.log(JSON.stringify(output, null, 2));
+      else console.log(`✅ 已记录 ${decision.findingId} 的裁决；请重新运行 coding-x`);
+      return 0;
+    } catch (error) {
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, 'Workspace 命令', commandSignals);
+      }
+      const message = workspaceErrorMessage(error);
+      if (cfg.json) {
+        console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
+      } else {
+        console.error(`❌ Workspace 命令失败：${message}`);
+      }
+      return 2;
+    } finally {
+      commandSignals.dispose();
+    }
   }
 
   if (cfg.command === 'init') {
@@ -378,6 +741,14 @@ export async function main(argv: string[]): Promise<number> {
           }
           return prompt!.question(`${question} `);
         },
+        prepareWorkspace: async () => {
+          const result = await bootstrapWorkspace({ workspacePath: cfg.workspace });
+          emit(
+            result.created
+              ? `Workspace 安全协议已初始化：${result.workspacePath}`
+              : `Workspace 安全协议已就绪：${result.workspacePath}`,
+          );
+        },
       });
       if (cfg.json) console.log(JSON.stringify(initResult, null, 2));
       else if (initResult.exitCode === 0) console.log(`✅ ${initResult.message}`);
@@ -394,28 +765,32 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'repair') {
-    // repair 重写 prd.json/state.json，与运行中的引擎互踩——与 run 同锁互斥（ADR-008）
-    let lock;
+    const commandSignals = installCommandSignals();
     try {
-      lock = acquireLock(cfg.workspace, 'repair');
-    } catch (err) {
-      if (err instanceof LockConflictError) {
-        console.error(err.message);
-        return 2;
+      const request = repairRequest(cfg.workspace);
+      await withWorkspaceSession(cfg.workspace, 'repair', async (session) =>
+        runRepairV1Mutation(session, request, {
+          termination: commandSignals.termination,
+        }),
+      );
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, 'Workspace 修复', commandSignals);
       }
-      throw err;
-    }
-    try {
-      const repaired = repairWorkspaceFiles(cfg.workspace);
-      console.log(`✅ 已修复: ${repaired.join('、')}`);
+      console.log(`✅ 已修复: prd.json${request.candidate.state === null ? '' : '、state.json'}`);
       return 0;
+    } catch (error) {
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, 'Workspace 修复', commandSignals);
+      }
+      console.error(`❌ 修复失败：${workspaceErrorMessage(error)}`);
+      return 2;
     } finally {
-      lock.release();
+      commandSignals.dispose();
     }
   }
 
   if (cfg.command === 'doctor') {
-    const report = runDoctor(process.cwd(), {
+    const report = await runDoctorWithWorkspaceSafety(process.cwd(), {
       staleDays: cfg.staleDays,
       workspace: cfg.workspace,
       local: cfg.local,
@@ -426,13 +801,15 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'status') {
-    const report = collectStatus(cfg.workspace, {
+    const report = await collectStatusWithWorkspaceSafety(cfg.workspace, {
       projectRoot: process.cwd(),
       refreshRemote: !cfg.local,
     });
     // 警告走 stderr：--json 模式下不污染 stdout，人类可读模式同样适用
     if (report.status === 'ok' && report.stateCorrupted) {
-      console.error('⚠️  state.json 已损坏，所有 story 已按未验证状态保守显示。建议运行 npx coding-x repair。');
+      console.error(
+        '⚠️  state.json 已损坏，所有 story 已按未验证状态保守显示。建议运行 npx coding-x repair。',
+      );
     }
     const { text, exitCode } = cfg.json ? renderStatusJson(report) : renderStatusReport(report);
     console.log(text);
@@ -440,25 +817,48 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'report') {
+    const commandSignals = installCommandSignals();
     try {
-      const result = writeReport(cfg.workspace, new Date());
+      const result = await withWorkspaceSession(cfg.workspace, 'report', async (session) =>
+        writeCurrentReportWithSession({
+          session,
+          workspace: cfg.workspace,
+          projectRoot: process.cwd(),
+          refreshRemote: !cfg.local,
+          termination: commandSignals.termination,
+        }),
+      );
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, '验证报告生成', commandSignals);
+      }
       if (result.status === 'missing') {
-        console.error(`❌ 未找到工作区：${join(cfg.workspace, 'prd.json')} 不存在。建议先用 prd-to-json 从源 PRD 生成工作区。`);
+        console.error(
+          `❌ 未找到工作区：${join(cfg.workspace, 'prd.json')} 不存在。建议先用 prd-to-json 从源 PRD 生成工作区。`,
+        );
         return 2;
       }
       if (result.status === 'unparsable') {
-        console.error(`❌ 无法解析 ${join(cfg.workspace, 'prd.json')}。建议运行 npx coding-x repair 修复后重试。`);
+        console.error(
+          `❌ 无法解析 ${join(cfg.workspace, 'prd.json')}。建议运行 npx coding-x repair 修复后重试。`,
+        );
         return 2;
       }
       console.log(`📄 验证报告: ${result.path}`);
       if (result.stateCorrupted) {
-        console.error('❌ state.json 已损坏：已生成保守诊断报告，所有 story 按未验证处理。请运行 npx coding-x repair 后重新生成。');
+        console.error(
+          '❌ state.json 已损坏：已生成保守诊断报告，所有 story 按未验证处理。请运行 npx coding-x repair 后重新生成。',
+        );
         return 1;
       }
       return 0;
     } catch (err) {
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, '验证报告生成', commandSignals);
+      }
       console.error(`❌ 验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);
       return 1;
+    } finally {
+      commandSignals.dispose();
     }
   }
 
@@ -502,14 +902,20 @@ export async function main(argv: string[]): Promise<number> {
       const invalidRoot = prd !== null && (typeof prd !== 'object' || Array.isArray(prd));
       if ((prd === null || invalidRoot) && existsSync(prdPath)) {
         const message = `❌ 无法从现有 prd.json 推断 runner：${prdPath} 无法解析`;
-        if (cfg.json) console.log(JSON.stringify({ status: 'error', runner, configPath, error: message }, null, 2));
+        if (cfg.json)
+          console.log(
+            JSON.stringify({ status: 'error', runner, configPath, error: message }, null, 2),
+          );
         else console.error(message);
         return 1;
       }
       const routing = readModelRouting(prd);
       if (routing.status === 'invalid') {
         const message = `❌ 无法从现有 prd.json 推断 runner：${routing.errors.join('；')}`;
-        if (cfg.json) console.log(JSON.stringify({ status: 'error', runner, configPath, error: message }, null, 2));
+        if (cfg.json)
+          console.log(
+            JSON.stringify({ status: 'error', runner, configPath, error: message }, null, 2),
+          );
         else console.error(message);
         return 1;
       }
@@ -540,7 +946,6 @@ export async function main(argv: string[]): Promise<number> {
     workspace: cfg.workspace,
     instructionsDir,
     port: cfg.port,
-    openBrowser: cfg.openBrowser,
     keepOpen: cfg.keepOpen,
     stallLimit: cfg.stallLimit,
     shadow: cfg.shadow,

@@ -45,7 +45,7 @@ describe('新功能黄金原则合同', () => {
     for (const anchor of [
       '黄金原则不是自述',
       '不得降级为普通 diff Review',
-      '.workspace/review-decisions.json',
+      '<workspace-dir>/review-decisions.json',
       'fix-requested',
       '新提交会让旧 Validator 和最终 Review 失效',
       '模型不能替人选择产品行为',

@@ -1,17 +1,15 @@
 import type { Prd } from './prd.js';
 import type { RunState } from './state.js';
 import { INITIAL_STORY_STATE } from './state.js';
-import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
-import { terminateProcessTree } from './process-tree.js';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
+import { resolveExecutablePath } from './agent.js';
 import type { ValidationCheck } from './validation-protocol.js';
-import type {
-  FrozenQualityChecks,
-  QualityCheck,
-  QualityPlatform,
-} from '../quality/contract.js';
+import type { FrozenQualityChecks, QualityCheck, QualityPlatform } from '../quality/contract.js';
+import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
+import type { WorkspaceSession } from '../workspace-safety/session.js';
+import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
 
 /** 打回上限的单一真相源：门禁与结构化 Validator failed claim 都由引擎应用。 */
 export const MAX_RETRIES = 5;
@@ -112,82 +110,116 @@ interface SpawnedGateSpec {
   shell: boolean;
 }
 
-/** legacy shell 命令和结构化契约命令共用超时、进程树终止、tee 与有界诊断语义。 */
-function runSpawnedGate(spec: SpawnedGateSpec): Promise<GateFailure | null> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(spec.executable, spec.args, {
-      cwd: spec.cwd, shell: spec.shell, stdio: ['ignore', 'pipe', 'pipe'],
-      // detached: 命令自成进程组——shell:true 下 child.kill 只达 shell 本身，
-      // 超时必须对整组发信号，否则挂起的孙进程（npm 包裹的测试进程等）会泄漏
-      detached: process.platform !== 'win32',
+export interface ManagedGateContext {
+  readonly session: WorkspaceSession;
+  readonly kind: 'quality-check' | 'tdd-check' | 'final-review';
+  readonly termination?: {
+    readonly signal: AbortSignal;
+    readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+  };
+}
+
+/** legacy shell 命令和结构化契约命令共用受控超时、整树收口与有界诊断语义。 */
+function runSpawnedGate(
+  spec: SpawnedGateSpec,
+  managed: ManagedGateContext,
+): Promise<GateFailure | null> {
+  const environment = { ...process.env };
+  let executable = spec.executable;
+  let args = spec.args;
+  if (spec.shell) {
+    if (process.platform === 'win32') {
+      executable = environment.ComSpec ?? 'cmd.exe';
+      args = ['/d', '/s', '/c', spec.executable];
+    } else {
+      executable = '/bin/sh';
+      args = ['-c', spec.executable];
+    }
+  }
+  let resolvedExecutable: string;
+  let resolvedCwd: string;
+  try {
+    resolvedExecutable = resolveExecutablePath(executable, spec.cwd, environment);
+    resolvedCwd = realpathSync(spec.cwd);
+  } catch (error) {
+    return Promise.resolve({
+      command: spec.label,
+      exitCode: null,
+      timedOut: false,
+      outputTail: error instanceof Error ? error.message : String(error),
     });
-    let tail = '';
-    const keep = (chunk: Buffer) => {
-      tail = (tail + String(chunk)).slice(-EVIDENCE_DIAGNOSTIC_CHARS);
-    };
-    // tee：实时转发保证无人值守时进度可见，同时滚动缓冲尾部供打回 notes 用
-    child.stdout.on('data', (c: Buffer) => { process.stdout.write(c); keep(c); });
-    child.stderr.on('data', (c: Buffer) => { process.stderr.write(c); keep(c); });
-    let settled = false;
-    let terminating = false;
-    const timer = setTimeout(() => {
-      if (settled || terminating) return;
-      terminating = true;
-      void terminateProcessTree(child).then(() => {
-        if (settled) return;
-        settled = true;
-        resolve({ command: spec.label, exitCode: null, timedOut: true, outputTail: tail });
-      }, (err) => {
-        if (settled) return;
-        settled = true;
-        reject(err instanceof Error ? err : new Error(String(err)));
-      });
-    }, spec.timeoutMs);
-    child.once('exit', (code) => {
-      if (settled || terminating) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(code === 0 ? null : {
-        command: spec.label, exitCode: code, timedOut: false, outputTail: tail,
-      });
-    });
-    child.once('error', (err) => {
-      if (settled || terminating) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ command: spec.label, exitCode: null, timedOut: false, outputTail: err.message });
-    });
+  }
+  return runManagedWorkspaceProcess(managed.session, {
+    kind: managed.kind,
+    delegation: 'read-only-v1',
+    executable: resolvedExecutable,
+    args,
+    cwd: resolvedCwd,
+    environment: environmentEntries(environment),
+    timeoutMs: spec.timeoutMs,
+    termination: managed.termination,
+  }).then((result) => {
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    const tail = Buffer.concat([result.stdout, result.stderr])
+      .toString('utf8')
+      .slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+    if (result.timedOut) {
+      return { command: spec.label, exitCode: null, timedOut: true, outputTail: tail };
+    }
+    if (result.processTreeNotEmpty) {
+      return {
+        command: spec.label,
+        exitCode: result.exitCode,
+        timedOut: false,
+        outputTail: `${tail}\n检测到命令根进程退出后仍有后代进程；本次结果已拒绝`.trim(),
+      };
+    }
+    return result.exitCode === 0
+      ? null
+      : {
+          command: spec.label,
+          exitCode: result.exitCode,
+          timedOut: false,
+          outputTail: tail,
+        };
   });
 }
 
 export function runGateCommand(
   command: string,
   cwd: string,
-  timeoutMs: number = GATE_TIMEOUT_MS,
+  timeoutMs: number | undefined,
+  managed: ManagedGateContext,
 ): Promise<GateFailure | null> {
   // 仅保留给历史 PRD fixture 与 TDD coverageCheck；正式质量契约默认不经 shell。
-  return runSpawnedGate({
-    label: command,
-    executable: command,
-    args: [],
-    cwd,
-    timeoutMs,
-    shell: true,
-  });
+  return runSpawnedGate(
+    {
+      label: command,
+      executable: command,
+      args: [],
+      cwd,
+      timeoutMs: timeoutMs ?? GATE_TIMEOUT_MS,
+      shell: true,
+    },
+    managed,
+  );
 }
 
 /** 逐条 shell 执行质量检查，fail-fast：第一条失败即返回，不跑后续。 */
 export async function runQualityChecks(
   checks: string[],
   cwd: string,
-  timeoutMs: number = GATE_TIMEOUT_MS,
+  timeoutMs: number | undefined,
+  managed: ManagedGateContext,
 ): Promise<GateResult> {
   const started = Date.now();
   let ran = 0;
   for (const command of checks) {
     ran++;
-    const failed = await runGateCommand(command, cwd, timeoutMs);
-    if (failed) return { ok: false, failure: failed, total: checks.length, ran, ms: Date.now() - started };
+    const failed = await runGateCommand(command, cwd, timeoutMs, managed);
+    if (failed)
+      return { ok: false, failure: failed, total: checks.length, ran, ms: Date.now() - started };
   }
   return { ok: true, failure: null, total: checks.length, ran, ms: Date.now() - started };
 }
@@ -221,7 +253,12 @@ function resolveContractCwd(projectRoot: string, cwd: string): string {
 function shellArgs(shell: string, script: string): string[] {
   const name = basename(shell).toLowerCase();
   if (name === 'cmd' || name === 'cmd.exe') return ['/d', '/s', '/c', script];
-  if (name === 'powershell' || name === 'powershell.exe' || name === 'pwsh' || name === 'pwsh.exe') {
+  if (
+    name === 'powershell' ||
+    name === 'powershell.exe' ||
+    name === 'pwsh' ||
+    name === 'pwsh.exe'
+  ) {
     return ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script];
   }
   return ['-c', script];
@@ -234,14 +271,18 @@ function shellArgs(shell: string, script: string): string[] {
 export async function runContractQualityChecks(
   checks: FrozenQualityChecks,
   projectRoot: string,
-  platform: QualityPlatform | null = nodeQualityPlatform(process.platform),
+  platform: QualityPlatform | null | undefined,
+  managed: ManagedGateContext,
 ): Promise<ContractGateResult> {
   const started = Date.now();
+  platform ??= nodeQualityPlatform(process.platform);
   if (platform === null) {
     return {
       ok: false,
       failure: {
-        command: '[platform]', exitCode: null, timedOut: false,
+        command: '[platform]',
+        exitCode: null,
+        timedOut: false,
         outputTail: `当前 Node 平台 ${process.platform} 未被质量契约支持`,
       },
       total: 0,
@@ -265,7 +306,9 @@ export async function runContractQualityChecks(
       return {
         ok: false,
         failure: {
-          command: `[${check.id}]`, exitCode: null, timedOut: false,
+          command: `[${check.id}]`,
+          exitCode: null,
+          timedOut: false,
           outputTail: error instanceof Error ? error.message : String(error),
         },
         total: applicable.length,
@@ -274,24 +317,25 @@ export async function runContractQualityChecks(
         skipped,
       };
     }
-    const spec: SpawnedGateSpec = 'executable' in check.command
-      ? {
-          label: `[${check.id}]`,
-          executable: check.command.executable,
-          args: check.command.args,
-          cwd,
-          timeoutMs: check.command.timeoutMs,
-          shell: false,
-        }
-      : {
-          label: `[${check.id}]`,
-          executable: check.command.shell,
-          args: shellArgs(check.command.shell, check.command.script),
-          cwd,
-          timeoutMs: check.command.timeoutMs,
-          shell: false,
-        };
-    const failure = await runSpawnedGate(spec);
+    const spec: SpawnedGateSpec =
+      'executable' in check.command
+        ? {
+            label: `[${check.id}]`,
+            executable: check.command.executable,
+            args: check.command.args,
+            cwd,
+            timeoutMs: check.command.timeoutMs,
+            shell: false,
+          }
+        : {
+            label: `[${check.id}]`,
+            executable: check.command.shell,
+            args: shellArgs(check.command.shell, check.command.script),
+            cwd,
+            timeoutMs: check.command.timeoutMs,
+            shell: false,
+          };
+    const failure = await runSpawnedGate(spec, managed);
     if (failure) {
       return {
         ok: false,
@@ -347,7 +391,8 @@ export function applyGateFailure(
     failure.outputTail,
   ];
   // 上限文案只描述「本次打回达到上限」——agent 预先置的 blocked 不适用该归因
-  if (blocked && !prev.blocked) lines.push(`${BLOCKED_LINE_PREFIX}: 已达到最大重试次数，跳过此 story]`);
+  if (blocked && !prev.blocked)
+    lines.push(`${BLOCKED_LINE_PREFIX}: 已达到最大重试次数，跳过此 story]`);
   return {
     ...state,
     [storyId]: {

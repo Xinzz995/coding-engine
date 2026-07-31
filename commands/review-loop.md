@@ -6,10 +6,14 @@ description: 处理 coding-x 针对当前 PR 最新提交产生的结构化 Revi
 
 `/review-loop` 不再自行生成第二份 Review，也不把 Markdown 当成正式状态。三层 Review 已由 `coding-x` 在全部 Story 验证后、针对当前 PR 最新提交独立执行；本命令只帮助用户理解 finding 并作出决定。
 
+开始时先固定本次 `<workspace-dir>`：用户已经给出路径时原样保留；未给出时询问并推荐 CLI 默认值
+`.workspace`。所有读取和最终命令都使用同一个原始值，不自行规范化、拼接或换回默认目录。
+
 ## 不可突破的边界
 
-1. 只读取 `.workspace/final-review.json`。文件缺失、格式损坏或 `binding.headSha` 不等于当前 `git rev-parse HEAD` 时，立即停止并提示重新运行 `coding-x`；不得降级为普通 diff Review。
-2. 不修改 `final-review.json`，不以编辑 Markdown、PR 文本或标签代替裁决。正式决定只追加到 `.workspace/review-decisions.json`。
+1. 只读取 `<workspace-dir>/final-review.json`。文件缺失、格式损坏或 `binding.headSha` 不等于当前 `git rev-parse HEAD` 时，立即停止并提示重新运行 `coding-x`；不得降级为普通 diff Review。
+2. 不修改 `final-review.json`，不以编辑 Markdown、PR 文本或标签代替裁决。本命令也不得直接创建、覆盖或追加 `review-decisions.json`；正式决定只能交给 `coding-x workspace record-review-decision` 写入。
+   默认 workspace 下的最终位置是 `.workspace/review-decisions.json`，但用户选择其他 workspace 时必须使用对应目录，不能硬编码默认路径。
 3. 未经用户针对具体 finding 明确授权，不修改业务代码、规格、测试或配置。`fix-requested` 仍是阻断态，不等于已经修复。
 4. 不自动推送、合并、创建标签或发布。创建延期 Issue 也要先取得用户明确同意。
 5. 不采信 Developer、Validator、计划或 PRD 的自述作为反证。黄金原则不是自述；涉及原则的 finding 必须逐条独立复核代码、测试或可观察证据。
@@ -17,12 +21,13 @@ description: 处理 coding-x 针对当前 PR 最新提交产生的结构化 Revi
 
 ## 第一步：验证输入
 
-- 读取 `.workspace/final-review.json` 并确认：
+- 读取 `<workspace-dir>/final-review.json` 并确认：
   - `schemaVersion` 受当前 coding-x 支持；
   - Review 绑定的 PR、base SHA、head SHA、模型、规则版本均存在；
   - 当前 HEAD 与 `binding.headSha` 完全相同；
   - `axes` 中每个 finding 都有稳定 ID、评审轴、严重度、位置、规则来源、影响和建议。
-- 读取已有 `.workspace/review-decisions.json`。格式非法时停止，不得覆盖；旧提交上的决定只展示为历史，不得用于当前提交。
+- 只读已有 `<workspace-dir>/review-decisions.json`。格式非法时停止，不得覆盖；提交或完整 Review
+  binding 不同的决定只展示为历史，不能复用于当前裁决。
 - 展示三条彼此独立的状态：Story 实现验证、本地三层 Review、GitHub 交付。不得把任意一条包装成另外两条的证明。
 
 ## 第二步：逐项裁决
@@ -38,30 +43,38 @@ description: 处理 coding-x 针对当前 PR 最新提交产生的结构化 Revi
 
 产品、架构或业务取舍必须停下来交给用户。模型不能替人选择产品行为，也不能自动批准例外。
 
-## 第三步：写入结构化决定
+## 第三步：提交结构化决定
 
-每次确认后，在保留已有合法记录的前提下，向 `.workspace/review-decisions.json` 追加一条：
+每次确认后，在**系统临时目录**创建一次性 JSON 请求。请求必须位于项目和 workspace 之外，且只
+包含用户给出的裁决数据：
 
 ```json
 {
   "schemaVersion": 1,
-  "decisions": [
-    {
-      "findingId": "spec-P1-...",
-      "headSha": "完整的当前提交 SHA",
-      "action": "counterevidence | p1-deferred | acknowledged | fix-requested",
-      "operator": "明确的 GitHub 用户名或用户给出的身份",
-      "at": "ISO-8601 时间",
-      "evidence": "反证或修复授权说明，适用时填写",
-      "issue": 123
-    }
-  ]
+  "findingId": "spec-P1-...",
+  "action": "counterevidence",
+  "operator": "明确的 GitHub 用户名或用户给出的身份",
+  "evidence": "不少于 20 个字符、可复核的具体反证"
 }
 ```
 
+请求不允许包含 `headSha`、`at`、目标文件路径、workspace 路径或任何归档/租约字段；这些值只能由
+引擎根据当前事实签发。`p1-deferred` 只增加正整数 `issue`，不带 `evidence`；`acknowledged` 不带
+二者；`fix-requested` 可带授权说明作为 `evidence`，但不带 `issue`。不适用字段整个省略，不能填
+`null` 或空字符串。
+
+随后只执行：
+
+```bash
+npx coding-x workspace record-review-decision --input <request-file> --workspace <workspace-dir>
+```
+
 - 不猜操作者身份；无法从已登录 GitHub 账户可靠取得时询问用户。
-- 写入前再次核对 HEAD，防止裁决过程中提交已经变化。
-- 同一 finding 有多条当前提交记录时，最后一条是当前决定；保留历史，不原地改写。
+- coding-x 会在短会话内重新核对当前 HEAD、PR 意图、base、Spec、工程规则、Final Review、finding、
+  已有决定、Runner 版本和延期 Issue，并由引擎填入完整 Review binding 摘要、`headSha` 与 `at`。
+  任一事实失效时保持零决定写入。
+- 同一 finding 有多条当前提交记录时，引擎追加的新记录成为当前决定；保留历史，不原地改写。
+- 命令成功或失败后都清理系统临时请求；不得在失败时回退为直接编辑 JSON。
 - Markdown 可作为阅读副本，但不得由本命令生成或修改后充当完成状态。
 
 ## 第四步：结束条件

@@ -1,8 +1,8 @@
 import { join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { permissionWarning, type AgentKind } from './agent.js';
-import { appendEvidence, clipEvidenceDiagnostic } from './evidence.js';
-import { writeFileAtomicSync } from './fs-atomic.js';
+import { appendEvidenceWithWriter, clipEvidenceDiagnostic } from './evidence.js';
+import type { ManagedGateContext } from './gate.js';
 import { readLoopInstructions, renderLoopInstructions } from './loop-instructions.js';
 import type { LoopConfig } from './loop.js';
 import {
@@ -11,7 +11,7 @@ import {
   renderPreflightSummary,
   type ModelPreflightResult,
 } from './model-preflight.js';
-import { createPrdGuard } from './prd-guard.js';
+import { createManagedPrdGuard } from './prd-guard.js';
 import type { Prd } from './prd.js';
 import {
   allStoriesResolvedAt,
@@ -21,7 +21,7 @@ import {
   tryReadState,
   type RunState,
 } from './state.js';
-import { checkTddPolicy, readTddConfig, type TddConfig } from './tdd-gate.js';
+import { checkTddPolicyManaged, readTddConfig, type TddConfig } from './tdd-gate.js';
 import { readGitHead } from './validation-protocol.js';
 import {
   assessQualityRuntime,
@@ -32,6 +32,7 @@ import {
 } from '../quality/contract.js';
 import { invalidateFinalReviewState, readFinalReviewState } from '../review/state.js';
 import { CODING_X_VERSION } from '../version.js';
+import type { WorkspaceSession } from '../workspace-safety/session.js';
 
 type QualityReader = NonNullable<LoopConfig['qualityContractReader']>;
 type ReadyQualityContract = Extract<QualityContractReadResult, { status: 'ready' }>;
@@ -41,7 +42,7 @@ export type LoopPreflightResult =
   | {
       status: 'ready';
       statePath: string;
-      guard: ReturnType<typeof createPrdGuard>;
+      guard: ReturnType<typeof createManagedPrdGuard>;
       projectRoot: string;
       qualityReader: QualityReader;
       qualityRead: ReadyQualityContract;
@@ -58,10 +59,14 @@ export type LoopPreflightResult =
       bootResolved: boolean;
     };
 
-export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightResult> {
+export async function runLoopPreflight(
+  cfg: LoopConfig,
+  session: WorkspaceSession,
+  termination?: ManagedGateContext['termination'],
+): Promise<LoopPreflightResult> {
   const prdPath = join(cfg.workspace, 'prd.json');
   const statePath = join(cfg.workspace, 'state.json');
-  const guard = createPrdGuard(prdPath);
+  const guard = createManagedPrdGuard(prdPath, session.writer);
   const instructionSources = readLoopInstructions(cfg.instructionsDir);
   const projectRoot = resolve(cfg.projectRoot ?? process.cwd());
   const qualityReader = cfg.qualityContractReader ?? readQualityContract;
@@ -95,7 +100,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
     );
   }
 
-  const bootPrd = guard.read().prd;
+  const bootPrd = (await guard.read()).prd;
   // 正式运行必须先绑定一个非空提交身份。这个检查发生在 state 创建/迁移、模型目录读取
   // 和任何 Agent 启动之前；失败时不得改变既有 Story 状态。
   const bootGitHead = readGitHead(projectRoot);
@@ -109,7 +114,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   const stateExisted = existsSync(statePath);
   const parsedBootState = bootPrd && stateExisted ? tryReadState(statePath) : null;
   let bootState = bootPrd
-    ? parsedBootState ?? (stateExisted ? blankStateFor(bootPrd) : initialStateFor(bootPrd))
+    ? (parsedBootState ?? (stateExisted ? blankStateFor(bootPrd) : initialStateFor(bootPrd)))
     : null;
   let bootInvalidatedStoryIds: string[] = [];
   let bootFinalReviewNeedsInvalidation = false;
@@ -117,10 +122,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   // 自己的结构化凭证、当前 PRD 与当前 HEAD 裁决。
   if (bootState && bootPrd) {
     const previousReview = readFinalReviewState(cfg.workspace);
-    if (
-      previousReview.status === 'ready' &&
-      previousReview.state.binding.headSha !== bootGitHead
-    ) {
+    if (previousReview.status === 'ready' && previousReview.state.binding.headSha !== bootGitHead) {
       bootFinalReviewNeedsInvalidation = true;
     }
     const reconciled = reconcileValidationReceipts(bootPrd, bootState, bootGitHead);
@@ -137,7 +139,7 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   if (tddRead.status === 'invalid') {
     const diagnostic = clipEvidenceDiagnostic(tddRead.error);
     try {
-      appendEvidence(cfg.workspace, {
+      await appendEvidenceWithWriter(session.writer, {
         type: 'tdd-gate',
         source: 'engine',
         at: new Date().toISOString(),
@@ -164,12 +166,16 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   }
   if (tddRead.status === 'enabled') {
     tddConfig = tddRead.config;
-    const policy = checkTddPolicy(tddConfig, projectRoot);
+    const policy = await checkTddPolicyManaged(tddConfig, projectRoot, {
+      session,
+      kind: 'tdd-check',
+      ...(termination ? { termination } : {}),
+    });
     const diagnostic = policy.failure
       ? clipEvidenceDiagnostic(policy.failure.outputTail).trim()
       : '';
     try {
-      appendEvidence(cfg.workspace, {
+      await appendEvidenceWithWriter(session.writer, {
         type: 'tdd-gate',
         source: 'engine',
         at: new Date().toISOString(),
@@ -269,10 +275,10 @@ export async function runLoopPreflight(cfg: LoopConfig): Promise<LoopPreflightRe
   // 所有启动预检均成功后才落盘对账结果。预检失败时 Story 候选、凭证与 retry
   // 必须保持原样；parsedBootState=null 代表既有文件损坏，也不覆盖诊断现场。
   if (bootState && (!stateExisted || parsedBootState)) {
-    writeFileAtomicSync(statePath, JSON.stringify(bootState, null, 2));
+    await session.writer.writeFile('state.json', JSON.stringify(bootState, null, 2));
   }
   if (bootFinalReviewNeedsInvalidation) {
-    invalidateFinalReviewState(cfg.workspace);
+    await invalidateFinalReviewState(session.writer);
   }
   if (bootInvalidatedStoryIds.length > 0) {
     console.warn(

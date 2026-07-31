@@ -1,8 +1,15 @@
-import { runContractQualityChecks, type ContractGateResult } from '../engine/gate.js';
+import {
+  runContractQualityChecks,
+  type ContractGateResult,
+  type ManagedGateContext,
+} from '../engine/gate.js';
 import type { AgentKind } from '../engine/agent.js';
 import { CODING_X_VERSION } from '../version.js';
-import { GhGitHubQualityClient, type GitHubQualityClient } from '../quality/github.js';
+import type { GitHubReviewReadClient } from '../quality/github.js';
 import type { QualityContract } from '../quality/contract.js';
+import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { workspacePathsReferToSameDirectory } from '../workspace-safety/filesystem.js';
+import { createReviewBinding, digestReviewBinding } from './binding.js';
 import { digest, normalizeText } from './common.js';
 import { unresolvedBlockingFindings } from './decisions.js';
 import { createReviewPackage } from './package.js';
@@ -13,9 +20,12 @@ import {
   type ReviewPreflightResult,
   type ReviewContextRevalidation,
 } from './preflight.js';
-import { evaluateReviewRemoteState } from './remote.js';
-import { assessReviewRisk } from './risk.js';
-import { REVIEW_RULES_DIGEST } from './rules.js';
+import { evaluateManagedReviewRemoteState } from './remote.js';
+import {
+  createManagedReviewObservation,
+  type ManagedReviewObservation,
+} from './managed-observation.js';
+import { applyReviewerRequestedDeepReview, assessReviewRisk } from './risk.js';
 import {
   RUNNER_TOOL_POLICY_VERSION,
   probeRunnerIsolation,
@@ -31,7 +41,6 @@ import {
   writeFinalReviewState,
 } from './state.js';
 import {
-  REVIEW_RULES_VERSION,
   REVIEW_STATE_SCHEMA_VERSION,
   type FinalReviewOutcome,
   type FinalReviewState,
@@ -45,12 +54,14 @@ import {
 } from './types.js';
 
 type AxisRunner = (options: {
+  session: WorkspaceSession;
   runner: AgentKind;
   model: string;
   runnerVersion: string;
   axis: ReviewAxis;
   reviewPackage: ReturnType<typeof createReviewPackage>;
   timeoutMs: number;
+  termination?: ManagedGateContext['termination'];
 }) => Promise<SafeRunnerInvocation>;
 
 function findingId(axis: ReviewAxis, finding: ModelReviewOutput['findings'][number]): string {
@@ -85,45 +96,6 @@ function engineFindings(options: {
     headSha: options.context.headSha,
     round: options.round,
   }));
-}
-
-function binding(options: {
-  context: ReviewPreflightContext;
-  risk: ReviewRiskAssessment;
-  codingXVersion: string;
-  runner: AgentKind;
-  model: string;
-  runnerVersion: string;
-}): ReviewBinding {
-  return {
-    prNumber: options.context.pullRequest.number,
-    targetBranch: options.context.pullRequest.baseBranch,
-    baseSha: options.context.baseSha,
-    headSha: options.context.headSha,
-    prTitleDigest: digest(normalizeText(options.context.pullRequest.title)),
-    prBodyDigest: digest(normalizeText(options.context.pullRequest.body)),
-    specDigest: digest(options.context.specs),
-    engineeringStandardsDigest: digest(options.context.engineeringStandards),
-    qualityContractDigest: options.context.baseContractDigest,
-    codingXVersion: options.codingXVersion,
-    runner: options.runner,
-    model: options.model,
-    runnerVersion: options.runnerVersion,
-    reviewRulesVersion: REVIEW_RULES_VERSION,
-    reviewRulesDigest: REVIEW_RULES_DIGEST,
-    riskDigest: options.risk.digest,
-  };
-}
-
-function reviewerEscalatedRisk(risk: ReviewRiskAssessment): ReviewRiskAssessment {
-  if (risk.categories.includes('reviewer-request')) return risk;
-  const value = {
-    ...risk,
-    triggered: true,
-    categories: [...risk.categories, 'reviewer-request' as const].sort(),
-    reasons: [...risk.reasons, 'Spec 或工程 Reviewer 主动升级为深度结构评审'].sort(),
-  };
-  return { ...value, digest: digest({ ...value, digest: undefined }) };
 }
 
 function stateOutcome(state: FinalReviewState): FinalReviewOutcome {
@@ -168,49 +140,88 @@ function makeState(options: {
 export async function runFinalReview(options: {
   root: string;
   workspace: string;
+  session: WorkspaceSession;
   currentContract: QualityContract;
   runner: AgentKind;
   model?: string;
   codingXVersion?: string;
   shadow?: boolean;
   timeoutMs?: number;
-  client?: GitHubQualityClient;
-  preflight?: () => ReviewPreflightResult;
-  gate?: (contract: QualityContract, root: string) => Promise<ContractGateResult>;
+  /** Test seam. Production formal Review uses the supervised observation client. */
+  client?: GitHubReviewReadClient;
+  /** Test seam. Production formal Review runs the supervised preflight. */
+  preflight?: () => ReviewPreflightResult | Promise<ReviewPreflightResult>;
+  /** Test seam for deterministic observation fixtures. */
+  observation?: ManagedReviewObservation;
+  gate?: (
+    contract: QualityContract,
+    root: string,
+    managed: ManagedGateContext,
+  ) => Promise<ContractGateResult>;
   probe?: typeof probeRunnerIsolation;
   axisRunner?: AxisRunner;
   runnerVersion?: string;
-  remote?: (context: ReviewPreflightContext, contract: QualityContract) => ReviewRemoteState;
-  revalidate?: () => ReviewContextRevalidation;
+  remote?: (
+    context: ReviewPreflightContext,
+    contract: QualityContract,
+  ) => ReviewRemoteState | Promise<ReviewRemoteState>;
+  revalidate?: () => ReviewContextRevalidation | Promise<ReviewContextRevalidation>;
+  termination?: ManagedGateContext['termination'];
 }): Promise<FinalReviewOutcome> {
   const startedAt = new Date().toISOString();
+  const workspace = options.session.writer.workspacePath;
+  let matchesSession = false;
+  try {
+    matchesSession = await workspacePathsReferToSameDirectory(options.workspace, workspace);
+  } catch {
+    // Unverifiable aliases must not select a second read/write root for a formal Review.
+  }
+  if (!matchesSession) {
+    return {
+      exitCode: 2,
+      message: '最终 Review 的 workspace 与受控会话不一致；拒绝读取或写入状态',
+    };
+  }
   if (!options.model?.trim()) {
     return {
       exitCode: 5,
-      message: '最终 Review 必须使用明确模型；请在 PRD models.validator 中固定，或传 --review-model',
+      message:
+        '最终 Review 必须使用明确模型；请在 PRD models.validator 中固定，或传 --review-model',
     };
   }
   const model = options.model.trim();
-  const client = options.client ?? new GhGitHubQualityClient();
-  const preflight = options.preflight?.() ?? runReviewPreflight({
-    root: options.root,
-    workspace: options.workspace,
-    currentContract: options.currentContract,
-    client,
-  });
+  const managedObservation =
+    options.observation ??
+    createManagedReviewObservation({
+      session: options.session,
+      root: options.root,
+      termination: options.termination,
+    });
+  const observation =
+    options.client === undefined
+      ? managedObservation
+      : { ...managedObservation, github: options.client };
+  const client = observation.github;
+  const preflight = await (options.preflight?.() ??
+    runReviewPreflight({
+      root: options.root,
+      workspace,
+      currentContract: options.currentContract,
+      observation,
+    }));
   if (preflight.status !== 'ready') {
-    const exitCode = preflight.status === 'config-error' ? 2
-      : preflight.status === 'remote-not-ready' ? 6 : 5;
+    const exitCode =
+      preflight.status === 'config-error' ? 2 : preflight.status === 'remote-not-ready' ? 6 : 5;
     return { exitCode, message: preflight.message };
   }
   const context = preflight.context;
-  const round = initialRound(options.workspace);
+  const round = initialRound(workspace);
   // 先使旧结果失效，再进入本轮任何可失败环节。否则同一 head 上的机械
   // 检查回归、裁决文件损坏或 Runner 中断可能让 status 继续读到旧的绿色结果。
-  invalidateFinalReviewState(options.workspace);
+  await invalidateFinalReviewState(options.session.writer);
   let decisions;
   try {
-    decisions = readReviewDecisions(options.workspace);
+    decisions = readReviewDecisions(workspace);
   } catch (error) {
     return {
       exitCode: 2,
@@ -218,14 +229,23 @@ export async function runFinalReview(options: {
     };
   }
 
+  const managedGate: ManagedGateContext = {
+    session: options.session,
+    kind: 'final-review',
+    termination: options.termination,
+  };
   const gate = await (options.gate
-    ? options.gate(context.baseContract, context.root)
-    : runContractQualityChecks(context.baseContract.checks, context.root));
+    ? options.gate(context.baseContract, context.root, managedGate)
+    : runContractQualityChecks(context.baseContract.checks, context.root, undefined, managedGate));
+  if (options.termination?.signal.aborted) {
+    return { exitCode: 5, message: '最终 Review 已由用户中断；旧结果保持失效' };
+  }
   if (!gate.ok) {
     const failure = gate.failure;
     return {
       exitCode: 1,
-      message: `最终 Review 前机械检查失败：${failure?.command ?? 'unknown'}` +
+      message:
+        `最终 Review 前机械检查失败：${failure?.command ?? 'unknown'}` +
         `${failure?.timedOut ? '（超时）' : failure?.exitCode !== null && failure?.exitCode !== undefined ? `（退出码 ${failure.exitCode}）` : ''}`,
     };
   }
@@ -237,28 +257,57 @@ export async function runFinalReview(options: {
   };
 
   let runnerVersion: string;
-  try { runnerVersion = options.runnerVersion ?? readRunnerVersion(options.runner); } catch (error) {
+  try {
+    runnerVersion =
+      options.runnerVersion ??
+      (await readRunnerVersion({
+        session: options.session,
+        runner: options.runner,
+        termination: options.termination,
+      }));
+  } catch (error) {
     return { exitCode: 5, message: error instanceof Error ? error.message : String(error) };
   }
   let risk = assessReviewRisk(context);
-  const remote = () => options.remote?.(context, context.baseContract)
-    ?? evaluateReviewRemoteState({ context, contract: context.baseContract, client });
-  const makeBinding = () => binding({
-    context,
-    risk,
-    codingXVersion: options.codingXVersion ?? CODING_X_VERSION,
-    runner: options.runner,
-    model,
-    runnerVersion,
-  });
+  const remote = async () =>
+    await (options.remote?.(context, context.baseContract) ??
+      evaluateManagedReviewRemoteState({ context, contract: context.baseContract, client }));
+  const makeBinding = () =>
+    createReviewBinding({
+      context,
+      risk,
+      codingXVersion: options.codingXVersion ?? CODING_X_VERSION,
+      runner: options.runner,
+      model,
+      runnerVersion,
+    });
+  const revalidateContext = async () =>
+    await (options.revalidate?.() ?? revalidateReviewContext(context, workspace, observation));
+  const verifyRunnerVersion = async (phase: string): Promise<string | null> => {
+    if (options.runnerVersion !== undefined) return null;
+    try {
+      const currentRunnerVersion = await readRunnerVersion({
+        session: options.session,
+        runner: options.runner,
+        termination: options.termination,
+      });
+      return currentRunnerVersion === runnerVersion
+        ? null
+        : `${phase} Runner 版本发生变化；本轮 Review 已作废`;
+    } catch (error) {
+      return `${phase}无法核对 Runner 版本：${error instanceof Error ? error.message : String(error)}`;
+    }
+  };
 
   let probe: RunnerIsolationProbe;
   try {
     probe = await (options.probe ?? probeRunnerIsolation)({
+      session: options.session,
       runner: options.runner,
       model,
       runnerVersion,
       timeoutMs: Math.min(options.timeoutMs ?? 30 * 60_000, 5 * 60_000),
+      termination: options.termination,
     });
   } catch (error) {
     probe = {
@@ -277,14 +326,36 @@ export async function runFinalReview(options: {
       ? ['spec', 'engineering', 'deep']
       : ['spec', 'engineering'];
     const axes: ReviewAxisResult[] = requiredAxes.map((axis) => ({
-      axis, status: 'unverifiable', requestDeepReview: false, summary,
-      findings: [], durationMs: probe.durationMs, attempts: 1,
+      axis,
+      status: 'unverifiable',
+      requestDeepReview: false,
+      summary,
+      findings: [],
+      durationMs: probe.durationMs,
+      attempts: 1,
     }));
+    const remoteState = await remote();
+    const runnerError = await verifyRunnerVersion('远端核验后');
+    if (runnerError) return { exitCode: 5, message: runnerError };
+    const finallyRevalidated = await revalidateContext();
+    if (!finallyRevalidated.ok) {
+      return {
+        exitCode: 5,
+        message: `${finallyRevalidated.message}；远端核验后的本轮 Review 已作废，请重新运行 coding-x`,
+      };
+    }
     const state = makeState({
-      status: 'unverifiable', deliveryStatus: 'unverifiable', binding: makeBinding(), risk,
-      axes, remote: remote(), round, shadow: options.shadow ?? false, startedAt,
+      status: 'unverifiable',
+      deliveryStatus: 'unverifiable',
+      binding: makeBinding(),
+      risk,
+      axes,
+      remote: remoteState,
+      round,
+      shadow: options.shadow ?? false,
+      startedAt,
     });
-    writeFinalReviewState(options.workspace, state);
+    await writeFinalReviewState(options.session.writer, state);
     return stateOutcome(state);
   }
 
@@ -294,15 +365,22 @@ export async function runFinalReview(options: {
     let reviewPackage: ReturnType<typeof createReviewPackage> | null = null;
     try {
       reviewPackage = createReviewPackage({
-        context, risk, axis, runner: options.runner, model, mechanicalEvidence,
+        context,
+        risk,
+        axis,
+        runner: options.runner,
+        model,
+        mechanicalEvidence,
       });
       const invocation = await axisRunner({
+        session: options.session,
         runner: options.runner,
         model,
         runnerVersion,
         axis,
         reviewPackage,
         timeoutMs: options.timeoutMs ?? 30 * 60_000,
+        termination: options.termination,
       });
       const output = invocation.output;
       axes.push({
@@ -321,7 +399,10 @@ export async function runFinalReview(options: {
         axis,
         status: 'unverifiable',
         summary: error instanceof Error ? error.message : String(error),
-        findings: [], requestDeepReview: false, durationMs: 0, attempts: reviewPackage ? 2 : 0,
+        findings: [],
+        requestDeepReview: false,
+        durationMs: 0,
+        attempts: reviewPackage ? 2 : 0,
       });
     } finally {
       reviewPackage?.cleanup();
@@ -329,41 +410,40 @@ export async function runFinalReview(options: {
   };
 
   await runAxis('spec');
-  await runAxis('engineering');
-  if (axes.some((axis) => axis.requestDeepReview)) risk = reviewerEscalatedRisk(risk);
-  if (risk.triggered) await runAxis('deep');
+  if (!options.termination?.signal.aborted) await runAxis('engineering');
+  risk = applyReviewerRequestedDeepReview(risk, axes);
+  if (risk.triggered && !options.termination?.signal.aborted) await runAxis('deep');
+  if (options.termination?.signal.aborted) {
+    return { exitCode: 5, message: '最终 Review 已由用户中断；旧结果保持失效' };
+  }
 
-  const revalidated = options.revalidate?.()
-    ?? (options.preflight ? { ok: true as const } : revalidateReviewContext(context, client));
+  const revalidated = await revalidateContext();
   if (!revalidated.ok) {
-    return { exitCode: 5, message: `${revalidated.message}；本轮 Review 已作废，请重新运行 coding-x` };
+    return {
+      exitCode: 5,
+      message: `${revalidated.message}；本轮 Review 已作废，请重新运行 coding-x`,
+    };
   }
-  if (options.runnerVersion === undefined) {
-    try {
-      const currentRunnerVersion = readRunnerVersion(options.runner);
-      if (currentRunnerVersion !== runnerVersion) {
-        return { exitCode: 5, message: '评审期间 Runner 版本发生变化；本轮 Review 已作废' };
-      }
-    } catch (error) {
-      return {
-        exitCode: 5,
-        message: `无法在评审结束时重新核对 Runner 版本：${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-  }
+  const runnerError = await verifyRunnerVersion('评审结束时');
+  if (runnerError) return { exitCode: 5, message: runnerError };
 
   const allFindings = axes.flatMap((axis) => axis.findings);
-  const resolution = unresolvedBlockingFindings({
+  const finalBinding = makeBinding();
+  const resolution = await unresolvedBlockingFindings({
     findings: allFindings,
     decisions: decisions.decisions,
     headSha: context.headSha,
+    reviewBindingDigest: digestReviewBinding(finalBinding),
     contract: context.baseContract,
     client,
   });
-  const anyUnverifiable = axes.some((axis) => axis.status === 'unverifiable')
-    || resolution.decisionErrors.length > 0;
-  const status = anyUnverifiable ? 'unverifiable'
-    : resolution.unresolved.length > 0 ? 'failed' : 'passed';
+  const anyUnverifiable =
+    axes.some((axis) => axis.status === 'unverifiable') || resolution.decisionErrors.length > 0;
+  const status = anyUnverifiable
+    ? 'unverifiable'
+    : resolution.unresolved.length > 0
+      ? 'failed'
+      : 'passed';
   if (resolution.decisionErrors.length > 0) {
     const engineering = axes.find((axis) => axis.axis === 'engineering');
     if (engineering) {
@@ -371,16 +451,31 @@ export async function runFinalReview(options: {
       engineering.summary = `${engineering.summary}；裁决记录无法验证：${resolution.decisionErrors.join('；')}`;
     }
   }
-  const remoteState = remote();
+  const remoteState = await remote();
+  const finalRunnerError = await verifyRunnerVersion('远端核验后');
+  if (finalRunnerError) return { exitCode: 5, message: finalRunnerError };
+  const finallyRevalidated = await revalidateContext();
+  if (!finallyRevalidated.ok) {
+    return {
+      exitCode: 5,
+      message: `${finallyRevalidated.message}；远端核验后的本轮 Review 已作废，请重新运行 coding-x`,
+    };
+  }
   const shadow = options.shadow ?? false;
-  const deliveryStatus = status === 'unverifiable' ? 'unverifiable'
-    : status === 'failed' ? 'findings'
-      : shadow ? 'shadow'
-        : remoteState.status !== 'ready' ? 'remote-pending' : 'ready';
+  const deliveryStatus =
+    status === 'unverifiable'
+      ? 'unverifiable'
+      : status === 'failed'
+        ? 'findings'
+        : shadow
+          ? 'shadow'
+          : remoteState.status !== 'ready'
+            ? 'remote-pending'
+            : 'ready';
   const state = makeState({
     status,
     deliveryStatus,
-    binding: makeBinding(),
+    binding: finalBinding,
     risk,
     axes,
     remote: remoteState,
@@ -388,6 +483,6 @@ export async function runFinalReview(options: {
     shadow,
     startedAt,
   });
-  writeFinalReviewState(options.workspace, state);
+  await writeFinalReviewState(options.session.writer, state);
   return stateOutcome(state);
 }

@@ -37,6 +37,11 @@ export interface CanonicalizeWorkspaceOptions {
   readonly create?: boolean;
 }
 
+export interface WorkspaceDirectoryIdentitySource {
+  readonly dev: bigint;
+  readonly ino: bigint;
+}
+
 export interface StableReadHooks {
   readonly afterOpen?: () => void | Promise<void>;
   readonly afterRead?: () => void | Promise<void>;
@@ -89,6 +94,51 @@ function errorCode(error: unknown): string | undefined {
 
 export function digestBytes(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+/**
+ * Bind a workspace record to the directory object, not to an unstable Windows path spelling.
+ *
+ * Windows may expose one directory as either an 8.3 path or its long path depending on which
+ * Node filesystem API resolved it. Both spellings name the same volume/file ID, so including the
+ * spelling would make a valid persistent record unreadable by another API in the same process.
+ * POSIX retains the canonical path component because its realpath spelling is stable.
+ */
+export function workspaceDirectoryIdentity(
+  canonicalPath: string,
+  source: WorkspaceDirectoryIdentitySource,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const stablePath = platform === 'win32' ? 'windows-file-id' : canonicalPath;
+  return digestBytes(
+    Buffer.from(`${stablePath}\0${source.dev.toString()}\0${source.ino.toString()}`, 'utf8'),
+  );
+}
+
+export function sameWorkspaceDirectoryEntry(
+  left: WorkspaceDirectoryIdentitySource,
+  right: WorkspaceDirectoryIdentitySource,
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/**
+ * Resolve both inputs independently and require that they remain stable before comparing their
+ * directory identities. Callers must use their already-authorized session path after this check;
+ * the user-supplied alias is never promoted into a second write authority.
+ */
+export async function workspacePathsReferToSameDirectory(
+  leftPath: string,
+  rightPath: string,
+): Promise<boolean> {
+  const left = await canonicalizeWorkspaceDirectory(leftPath);
+  const right = await canonicalizeWorkspaceDirectory(rightPath);
+  await assertWorkspaceDirectoryUnchanged(left);
+  await assertWorkspaceDirectoryUnchanged(right);
+  return sameWorkspaceDirectoryEntry(
+    { dev: left.device, ino: left.inode },
+    { dev: right.device, ino: right.inode },
+  );
 }
 
 export function jsonBytes(value: unknown): Buffer {
@@ -159,9 +209,7 @@ export async function canonicalizeWorkspaceDirectory(
   return {
     requestedPath,
     path: canonicalPath,
-    identity: digestBytes(
-      Buffer.from(`${canonicalPath}\0${first.dev.toString()}\0${first.ino.toString()}`, 'utf8'),
-    ),
+    identity: workspaceDirectoryIdentity(canonicalPath, first),
     device: first.dev,
     inode: first.ino,
     requestedDevice: requestedInfo.dev,

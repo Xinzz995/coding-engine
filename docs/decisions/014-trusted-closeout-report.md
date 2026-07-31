@@ -1,15 +1,17 @@
 ---
 title: 014-trusted-closeout-report
 status: active
-updated: 2026-07-30
+updated: 2026-07-31
 scope: root
 ---
 
 # 014. 可信收口报告
 
-> 2026-07-30 事实修正：Issue #106 证明“report 不持锁”和 `prd-to-json` 双 doctor 检查仍允许正式
-> 写入口并发。ADR-021 已批准让手动 report、`prd-to-json` 与 `/review-loop` 进入同一 owner-bound
-> 写租约；实施完成前，本文件仍描述 0.33.3 的实际行为，双检查只能称为尽力避让。
+> 2026-07-31 当前状态：ADR-021 只取代了本文“手动 report 不持锁”和 `prd-to-json` 双 doctor
+> 尽力避让的写并发规则。自动 report 借用 run session，手动 report 取得短 session；
+> `prd-to-json` 与 `/review-loop` 只生成临时请求，分别交给 `workspace apply-prd` 和
+> `workspace record-review-decision` 正式写入。下文报告信任来源、损坏 state 和展示语义仍然有效；
+> 与旧写排他有关的段落仅保留 0.25.x 至 0.33.3 的历史背景。
 
 ## 背景
 

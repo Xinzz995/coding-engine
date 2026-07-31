@@ -16,6 +16,10 @@ import { fileURLToPath } from 'node:url';
 
 const corePath = fileURLToPath(import.meta.url);
 const MAX_CONTROL_BYTES = 64 * 1024;
+// Canonical base64 expands a bounded control message by 4/3. Keep the generic IPC event-string
+// bound small, but give encoded control bytes their exact derived budget; otherwise ordinary CI
+// environments can fit the decoded DATA contract while being rejected before decoding.
+const MAX_CONTROL_BASE64_CHARS = Math.ceil(MAX_CONTROL_BYTES / 3) * 4;
 const MAX_BASELINE_BYTES = 64 * 1024 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
@@ -444,7 +448,15 @@ export function parseTarget(value) {
 }
 
 export function parseControlBytes(encoded, expectedType) {
-  const value = boundedString(encoded, `${expectedType} bytes`);
+  if (
+    typeof encoded !== 'string' ||
+    encoded.length === 0 ||
+    encoded.length > MAX_CONTROL_BASE64_CHARS ||
+    encoded.includes('\0')
+  ) {
+    throw new Error(`${expectedType} bytes are invalid`);
+  }
+  const value = encoded;
   const bytes = Buffer.from(value, 'base64');
   if (bytes.length > MAX_CONTROL_BYTES || bytes.toString('base64') !== value) {
     throw new Error(`${expectedType} bytes are invalid`);

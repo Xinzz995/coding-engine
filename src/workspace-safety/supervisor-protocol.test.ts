@@ -75,6 +75,27 @@ function dataBytes(operationId = OPERATION_ID): Buffer {
 }
 
 describe('supervisor protocol', () => {
+  it('keeps a legal DATA message below 64 KiB even when canonical base64 exceeds 4096 chars', () => {
+    const bytes = encodeSupervisorData({
+      operationId: OPERATION_ID,
+      target: {
+        executable: '/usr/bin/node',
+        args: ['dist/cli.js'],
+        cwd: '/tmp/package-owned-cwd',
+        environment: [
+          { name: 'CODING_X_PAD_A', value: 'a'.repeat(3000) },
+          { name: 'CODING_X_PAD_B', value: 'b'.repeat(3000) },
+        ],
+      },
+    });
+    const encoded = bytes.toString('base64');
+
+    expect(bytes.byteLength).toBeLessThanOrEqual(64 * 1024);
+    expect(encoded.length).toBeGreaterThan(4096);
+    expect(encoded.length).toBeLessThanOrEqual(4 * Math.ceil((64 * 1024) / 3));
+    expect(parseSupervisorData(bytes).target.environment).toHaveLength(2);
+  });
+
   it('authorizes DATA, containment, one START, one DRAINED receipt, and one ACK in order', () => {
     const machine = protocol();
     const acceptedTarget = machine.acceptData(dataBytes(), preparedBoundBinding());

@@ -1,8 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import { writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { readEvidence } from './evidence.js';
 import * as dashboard from '../dashboard/server.js';
+import { runLoop as runProductionLoop } from './loop.js';
+import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
+import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from '../workspace-safety/types.js';
 import {
   setup,
   story,
@@ -10,22 +13,34 @@ import {
   modelConfig,
   catalogWith,
   runLoop,
+  strictConfig,
 } from './loop-test-support.js';
 
-describe('runLoop model routing', () => {
+describe('runLoop model routing', { timeout: 30_000, concurrent: false }, () => {
   // fake 记录每次调用收到的 argv（一行一次），并把 story 翻绿让循环结束。
   // 行 1 = builder、行 2 = validator（同轮内先后调用）。
   function fakeArgvRecorder(workspace: string): { fake: string; argvLog: string } {
     const fake = join(workspace, 'fake-argv.mjs');
-    const argvLog = join(workspace, 'argv.log');
+    const projectRoot = resolve(workspace, '..');
+    const argvLog = join(projectRoot, 'argv.log');
+    const calls = join(projectRoot, 'argv-calls.txt');
     writeFileSync(
       fake,
       `
-      import { writeFileSync, appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
-      writeFileSync(${JSON.stringify(join(workspace, 'state.json'))}, JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 1, blocked: false },
-      }));
+      import { writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
+      const call = existsSync(${JSON.stringify(calls)})
+        ? Number(readFileSync(${JSON.stringify(calls)}, 'utf8')) + 1
+        : 1;
+      writeFileSync(${JSON.stringify(calls)}, String(call));
+      if (call % 2 === 1) {
+        const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        state['US-001'].passes = true;
+        state['US-001'].notes = '';
+        state['US-001'].blocked = false;
+        writeFileSync(statePath, JSON.stringify(state));
+      }
       process.exit(0);
     `,
     );
@@ -69,11 +84,8 @@ describe('runLoop model routing', () => {
       expect(iteration).toMatchObject({
         builderRouteSource: 'escalation',
         validatorRouteSource: 'validator',
-        stateRouteTamper: [
-          { expected: true, received: 'missing', side: 'builder' },
-          { expected: true, received: 'missing', side: 'validator' },
-        ],
       });
+      expect(iteration).not.toHaveProperty('stateRouteTamper');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -247,12 +259,12 @@ describe('runLoop model routing', () => {
     const { workspace, instructionsDir } = setup([story()], { models: 'opus' });
     // 非法配置必须在循环前失败，不能回退到 runner 默认模型。
     const fake = join(workspace, 'fake-argv-only.mjs');
-    const argvLog = join(workspace, 'argv.log');
+    const argvLog = join(resolve(workspace, '..'), 'argv.log');
     writeFileSync(
       fake,
       `
       import { appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
       // progress.md 每次调用递增写入：让每轮都有非空转产出，本用例只关心 models 警告去重，
       // 不是 Task 5 的 no-op 检测——真空转会跳过 validator，把 builder+validator 各跑一次的假设打破。
       appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'x');
@@ -289,7 +301,7 @@ describe('runLoop model routing', () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     process.env.CODING_X_CONFIG = join(workspace, 'missing-global-config.json');
     const fake = join(workspace, 'must-not-run.mjs');
-    const argvLog = join(workspace, 'argv.log');
+    const argvLog = join(resolve(workspace, '..'), 'argv.log');
     writeFileSync(
       fake,
       `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(argvLog)}, 'ran');`,
@@ -337,7 +349,7 @@ describe('runLoop model routing', () => {
     );
     process.env.CODING_X_CONFIG = configPath;
     const fake = join(workspace, 'must-not-run.mjs');
-    const argvLog = join(workspace, 'argv.log');
+    const argvLog = join(resolve(workspace, '..'), 'argv.log');
     writeFileSync(
       fake,
       `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(argvLog)}, 'ran');`,
@@ -380,7 +392,7 @@ describe('runLoop model routing', () => {
       }),
     );
     process.env.CODING_X_CONFIG = join(workspace, 'missing-global-models.json');
-    const argvLog = join(workspace, 'argv.log');
+    const argvLog = join(resolve(workspace, '..'), 'argv.log');
     const fake = join(workspace, 'must-not-run.mjs');
     writeFileSync(
       fake,
@@ -408,16 +420,16 @@ describe('runLoop model routing', () => {
   });
 });
 
-describe('模型升级触发与状态所有权', () => {
+describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: false }, () => {
   it('completed no-op 首次触发，下轮改走 escalation 且不增加 retryCount', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     const fake = join(workspace, 'fake-noop-route.mjs');
-    const argvLog = join(workspace, 'argv.log');
+    const argvLog = join(resolve(workspace, '..'), 'argv.log');
     writeFileSync(
       fake,
       `
       import { appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
       process.exit(0);
     `,
     );
@@ -456,12 +468,12 @@ describe('模型升级触发与状态所有权', () => {
       qualityChecks: ['node -e "process.exit(1)"'],
     });
     const fake = join(workspace, 'fake-gate-route.mjs');
-    const argvLog = join(workspace, 'argv.log');
+    const argvLog = join(resolve(workspace, '..'), 'argv.log');
     writeFileSync(
       fake,
       `
       import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
       const path = ${JSON.stringify(join(workspace, 'state.json'))};
       const state = JSON.parse(readFileSync(path, 'utf-8'));
       state['US-001'].passes = true;
@@ -495,13 +507,17 @@ describe('模型升级触发与状态所有权', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, 20_000);
 
   it('引擎接受 Validator failed claim 后，下轮 builder 改走 escalation', async () => {
-    const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
+    const { workspace, instructionsDir } = setup(
+      [routedStory({ acceptanceCriteria: ['fixture AC'] })],
+      { models: modelConfig() },
+    );
     const fake = join(workspace, 'fake-validator-route.mjs');
-    const calls = join(workspace, 'calls.txt');
-    const argvLog = join(workspace, 'argv.log');
+    const projectRoot = resolve(workspace, '..');
+    const calls = join(projectRoot, 'calls.txt');
+    const argvLog = join(projectRoot, 'argv.log');
     writeFileSync(
       fake,
       `
@@ -509,32 +525,44 @@ describe('模型升级触发与状态所有权', () => {
       const callsPath = ${JSON.stringify(calls)};
       const count = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf-8')) + 1 : 1;
       writeFileSync(callsPath, String(count));
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2).join(' ') + '\\n');
+      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
       const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
-      const state = JSON.parse(readFileSync(statePath, 'utf-8'));
       if (count % 2 === 1) {
+        const state = JSON.parse(readFileSync(statePath, 'utf-8'));
         state['US-001'].passes = true;
+        writeFileSync(statePath, JSON.stringify(state));
         appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder progress\\n');
       } else {
-        state['US-001'].passes = false;
-        state['US-001'].retryCount += 1;
+        const prompt = process.argv.at(-1) ?? '';
+        const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+        const jsonAt = prompt.indexOf('{', markerAt);
+        const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);
+        if (markerAt < 0 || jsonAt < 0 || fenceAt < 0) process.exit(9);
+        const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+        writeFileSync(request.resultPath, JSON.stringify({
+          version: 1,
+          requestId: request.requestId,
+          storyId: request.storyId,
+          acceptanceHash: request.acceptanceHash,
+          gitHead: request.gitHead,
+          verdict: 'failed',
+          checks: request.acceptanceCriteria.map((_, index) => ({
+            acIndex: index + 1,
+            passed: false,
+            evidence: 'fixture failed',
+          })),
+          summary: 'fixture failed',
+        }));
       }
-      writeFileSync(statePath, JSON.stringify(state));
       process.exit(0);
     `,
     );
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       expect(
-        await runLoop({
-          kind: 'claude',
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
           maxIterations: 2,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
           modelCatalog: catalogWith('fast-m', 'esc-m', 'val-m'),
         }),
       ).toBe(1);
@@ -551,7 +579,7 @@ describe('模型升级触发与状态所有权', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, 20_000);
 
   it('异常退出不触发升级', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
@@ -582,7 +610,7 @@ describe('模型升级触发与状态所有权', () => {
     }
   });
 
-  it('agent 擅自置位 escalated 会被恢复并留痕', async () => {
+  it('agent 擅自置位 escalated 时由生产 runLoop 隔离并保留现场', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     const fake = join(workspace, 'fake-tamper-route.mjs');
     writeFileSync(
@@ -601,34 +629,24 @@ describe('模型升级触发与状态所有权', () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
           modelCatalog: catalogWith('fast-m', 'esc-m', 'val-m'),
         }),
-      ).toBe(0);
+      ).toBe(2);
       expect(
         JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'].escalated,
-      ).toBe(false);
-      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
-      expect(iteration).toMatchObject({
-        stateRouteTamper: [
-          { expected: false, received: true, side: 'builder' },
-          { expected: false, received: true, side: 'validator' },
-        ],
-      });
+      ).toBe(true);
+      const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+      expect(existsSync(join(operation, QUARANTINE_FILE))).toBe(true);
+      expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(true);
+      expect(readEvidence(workspace).records.some((r) => r.type === 'iteration')).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });
 
-  it('agent 删除整条 story 状态时恢复路由所有权与其余状态', async () => {
+  it('agent 删除整条 story 状态时由生产 runLoop 隔离且不写普通 evidence', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     const statePath = join(workspace, 'state.json');
     writeFileSync(
@@ -653,38 +671,16 @@ describe('模型升级触发与状态所有权', () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
           modelCatalog: catalogWith('esc-m', 'val-m'),
         }),
-      ).toBe(1);
-      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toEqual({
-        passes: false,
-        validated: false,
-        validationReceipt: null,
-        notes: 'keep',
-        retryCount: 2,
-        blocked: false,
-        escalated: true,
-      });
-      const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
-      expect(iteration).toMatchObject({
-        stateRouteTamper: [
-          { expected: true, received: 'missing', side: 'builder' },
-          { expected: true, received: 'missing', side: 'validator' },
-        ],
-        stateValidationTamper: [
-          { expected: false, received: 'missing', side: 'builder' },
-          { expected: false, received: 'missing', side: 'validator' },
-        ],
-      });
+      ).toBe(2);
+      expect(JSON.parse(readFileSync(statePath, 'utf-8'))).not.toHaveProperty('US-001');
+      const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+      expect(existsSync(join(operation, QUARANTINE_FILE))).toBe(true);
+      expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(true);
+      expect(readEvidence(workspace).records.some((r) => r.type === 'iteration')).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }

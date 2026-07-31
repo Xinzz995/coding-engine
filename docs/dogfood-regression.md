@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-07-27
+updated: 2026-07-31
 scope: root
 
 ---
@@ -20,7 +20,7 @@ scope: root
 | 1 | 含 UI 验收的每个 story，builder 都先跑 `which agent-browser` 探测再做浏览器验证，无静默降级为 HTTP 冒烟 | 0.12.1 条件句翻车 | UI story 的 builder 输出含真实浏览器验证记录（操作序列/截图对账）；无以 HTTP 冒烟等价替代的表述（--print 模式无过程 transcript，2026-07-07 起以输出与工件为核对面） |
 | 2 | 最终浏览器验证留下 `builder-[story-id]-[序号].png` 于 workspace `screenshots/`；无截图视为未验证 | 0.14.1 | 按 story 对账 screenshots 目录 |
 | 3 | validator 验收执行了真实操作并留截图工件（通过与打回两分支皆有） | 0.3.0 / 0.12.1 反共谋实证 | 同上，含打回场景 |
-| 4 | prd-to-json 派生新 PRD 前，工作区旧 `state.json` 已删除或归档（story id 重编不撞旧状态） | 0.10.0 空转翻车 | 引擎首轮无「旧轮 passes 误判已完成」 |
+| 4 | `workspace apply-prd` 以 `replace-feature` 应用新 PRD 时，固定动作归档旧运行并安装“无 state”候选（story id 重编不撞旧状态） | 0.10.0 空转翻车 / ADR-021 | 对账归档完整、应用后 `state.json` 不存在；引擎首轮无「旧轮 passes 误判已完成」 |
 | 5 | builder 在有意识简化处留 `// 取舍: <当前上限>，<升级触发条件>`；compound-docs 收账产出账本（非空或「无取舍债务」） | 0.8.0 约定 / 0.12.1 首次触发 | `grep -rn "取舍:"` 与收口账本对照 |
 | 6 | 打回链路中 notes 保全仲裁标签行（`[需求冲突]`、`[需要人工核实]`）不丢失 | 0.4.0 仲裁约定 / 0.18.1 扩前缀族 | 触发过打回的 story 检查 notes |
 | 7 | 质量契约与固定版本匹配、PRD 摘要和派生检查快照完全一致时，builder 后 validator 前按固定类别执行；结构化命令不经 shell，失败确定性打回且该轮跳过 validator；任一绑定不一致都在 agent 启动前退出 2 | ADR-018 | 分别制造摘要漂移、快照删减、版本不符与一项检查失败，对账零 agent 调用或门禁打回路径 |
@@ -33,12 +33,16 @@ scope: root
 | 14 | builder 原样保留 `validated`/`escalated`；Validator 不修改任何 state 字段，只提交结构化 claim；只有引擎接受 passed claim 后签发 `validated=true`，status/report 才显示全绿 | 0.25.0–0.25.1 / ADR-015 收紧 | builder 后候选态、Validator 前后 state、最终 state、iteration.validationReceipt、status/report 对账 |
 | 15 | 使用 npm 正式发布物运行时，全局模型目录、预检与真实 runner 调用贯通；目录不做在线发现，provider 的非阻断诊断噪声不得改变引擎对进程结局和验收凭证的机械判定 | 0.24.0 / 0.25.2 | `config validate`、启动目录摘要、runner 实际结局、最终退出码与锁释放对账 |
 | 16 | builder 的 story 提交只包含实现与测试，不包含 prd/state/progress/evidence/report/lock 等 workspace 运行时文件；即使目标仓尚未 gitignore workspace，也必须先提交业务改动，再单独回写 state/progress | 0.25.2 真实链路发现 | `git show --name-only` 对账 story commit，循环结束后检查 runtime diff 只留在 workspace |
-| 17 | prd-to-json 在归档、再派生或首次创建 workspace 前先运行 doctor 检查工作区锁；发现“引擎运行中”或无法判定时停止且保持零写入，不删除 `engine.lock` | 0.25.4 可信收口 | 持活锁触发 skill，前后对账 workspace 文件哈希与锁内容均不变 |
-| 18 | prd-to-json 完成澄清、模型选择等只读准备后，在首次真实写入前再次运行 doctor；若锁结论变活跃、无法判定或与首次不同，停止且不写任何文件 | 0.25.4 TOCTOU 尽力收窄 | 首检后启动持锁引擎，再推进到写入点；核对第二次 doctor 被执行且 workspace 零变化 |
+| 17 | prd-to-json 只在项目与 workspace 外的系统临时目录生成候选和一次性请求；活动租约、无效输入或基线失败时，`workspace apply-prd` 拒绝且保持业务树零变化 | ADR-021 原子写入口 | 持活动租约分别触发 replace/rederive；对账 skill 未直写、命令失败、业务文件逐字节不变，协议记录只保留允许的拒绝事实 |
+| 18 | 用户显式传入的 workspace 参数从 skill 到正式命令原样保留；相对路径、绝对路径和符号链接别名都落到同一 canonical 身份并竞争同一租约，不再依赖二次 doctor 缩小竞态 | 0.25.4 TOCTOU 修正 / ADR-021 | 以三种拼写同时发起 apply；确认只有一个 owner，其他入口拒绝，且请求始终位于 workspace 外 |
 | 19 | Validator 只验证 engine-bound request 指定的 story/AC/Git HEAD，并按 1..N 写 v1 result；缺结果、复用旧文件、错 story/hash/HEAD、漏 AC 或改写 state 任一场景都不得签发凭证 | ADR-015 可信目标绑定 | 正常 pass/fail 各跑一次，再依次注入 missing/stale/mismatch/state-mutation；对账 `validation-claim` 来源、iteration protocol/error、state 回写与 report 红旗 |
-| 20 | 真实 runner 的 provider/认证/网络异常（实证：Claude Code 402）必须保持 state 未通过、跳过 Validator、释放锁，并在 iteration/status/report 留下 outcome、退出码、调用收口耗时与有界原始诊断；成功调用不持久化 transcript | 2026-07-22 Claude/Codex 双 runner dogfood / ADR-016 | fake 402 自动回归；真实失败时对账终端、state、engine.lock、`builderInvocation`/`validatorInvocation`、status 与 report |
+| 20 | 真实 runner 的 provider/认证/网络异常（实证：Claude Code 402）必须保持 state 未通过、跳过 Validator；coordinator 确认子进程集合清空后 owner 才安全释放租约，并在 iteration/status/report 留下 outcome、退出码、调用收口耗时与有界原始诊断；成功调用不持久化 transcript | 2026-07-22 Claude/Codex 双 runner dogfood / ADR-016/021 | fake 402 自动回归；真实失败时对账终端、state、lease 结算、`builderInvocation`/`validatorInvocation`、status 与 report |
 | 21 | 启用 TDD 时，builder 对每个公共行为留下可复核的真实 RED→同命令 GREEN→绿色重构记录；环境错误不能冒充 RED，过程记录不得被报告成机器证明 | ADR-017 强化版 A | 真实 story 对账 builder 输出/progress 与聚焦测试结局；人工抽查一个错误 RED 场景会停止而不是继续实现 |
 | 22 | Codex/Claude 插件 hook 与显式安装的 Cursor 项目检查只在 agent commit 前提前运行 TDD 检查；失败阻断、成功放行，且不安装目标 Git hook、不写持久日志。Cursor 首次/升级安装幂等，卸载保留用户原配置；真实验收不得用桌面应用代替 | ADR-017 跨宿主适配 | 三种真实 payload 对账共同脚本；Codex/Claude 真实插件 smoke；用构建产物执行 `hooks cursor install/status/remove`，再由真实 Cursor Agent 验证失败时 Git 历史不变、成功时提交产生 |
 | 23 | 无论宿主 hook 是否触发或曾通过，引擎都在契约派生检查后、Validator 前独立校验政策摘要/基线/新增 ignore marker并运行 coverageCheck；失败打回、跳过 Validator，`tdd-gate` evidence/report 区分政策失败与覆盖命令失败 | ADR-017 最终裁决 | 绕过 hook 后制造 coverage 失败、政策文件漂移、已提交 ignore marker 各跑一轮，对账 Validator 零调用、state/证据/报告 |
 | 24 | 候选 coding-x 只有显式 `--shadow` 才能越过固定版本不匹配；原本成功的收敛固定退出 7，失败仍保留真实失败码，任何 shadow 结果都不能显示为交付就绪 | ADR-018 | 用契约版本 N 运行候选 N+1 的成功、配置失败和门禁失败三条链，对账退出码与终端/状态文案 |
 | 25 | Spec Review 只判断改动行为，不循环证明本轮三轴 Review、GitHub 门禁或发布已经完成；这些后置条件由引擎独立判定 | 0.33.0 / ADR-018 | 在 PR 验证计划中声明本地 Review 与 GitHub 检查，确认审查包带当前 head 的机械检查事实和明确责任边界，Spec 轴不会因未来状态缺席而误报不可验证 |
+| 26 | run、repair、report、apply-prd、review-decision 与其他正式父进程写入口共享同一 session/lease 协议；第二个 writer 不能因命令不同而并发进入 | ADR-021 正式写入口统一 | 逐对并发启动写命令；确认首个 owner 存活期间第二个入口稳定拒绝，首个结束后才能取得新租约 |
+| 27 | `/review-loop` 只生成不含 HEAD、时间和路径的一次性最小请求；`workspace record-review-decision` 在租约内重核当前 Review/finding/Issue 并由引擎填入提交与时间绑定 | ADR-021 Review 裁决入口 | 对账临时请求 schema；伪造或残留旧 head/at/path 字段被拒，Review 失效或 Issue 无效时业务记录不变 |
+| 28 | Builder/Validator 在本次 operation 内启动的服务必须在返回前终止并确认退出；用户在 operation 外预先启动的外部服务可复用且不得被误杀；禁止 `nohup`、daemonize 或跨轮后台逃逸 | ADR-021 子进程边界 | 分别运行内部临时服务与外部预启动服务：operation 后前者零残留，后者仍存活；故意后台逃逸时进入隔离而非假成功 |
+| 29 | 父进程崩溃、终止失败或未提交 mutation 不进行 pid stale 自动接管；新 writer 只能在显式 `workspace recover` 或 `resume-mutation` 完成精确恢复后进入 | ADR-021 崩溃恢复 | 制造 hard crash 与中断 mutation；重启 run/apply 必须拒绝，错误恢复身份也拒绝，精确恢复完成后才回到 ready |

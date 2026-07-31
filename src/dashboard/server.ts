@@ -2,12 +2,19 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
 import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
 import { readDisplayState, mergedStories, type StoryView } from '../engine/state.js';
 import { readProgress } from '../engine/progress.js';
-import { readModelRouting, type ModelRouteSource, type ModelRoutingReadResult } from '../engine/models.js';
+import {
+  readModelRouting,
+  type ModelRouteSource,
+  type ModelRoutingReadResult,
+} from '../engine/models.js';
 import type { AgentKind } from '../engine/agent.js';
+import {
+  inspectWorkspaceSafetyStatus,
+  type WorkspaceSafetyStatusSnapshot,
+} from '../workspace-safety/status.js';
 
 export type Phase = 'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'error';
 
@@ -25,8 +32,15 @@ interface State {
 }
 
 const state: State = {
-  iteration: 0, maxIterations: 50, phase: 'idle', currentStory: null, model: null,
-  routeSource: null, storyDifficulty: null, runner: null, startedAt: null,
+  iteration: 0,
+  maxIterations: 50,
+  phase: 'idle',
+  currentStory: null,
+  model: null,
+  routeSource: null,
+  storyDifficulty: null,
+  runner: null,
+  startedAt: null,
 };
 let workspaceDir = '.workspace';
 
@@ -44,8 +58,12 @@ export function configureWorkspace(workspace: string, maxIterations: number): vo
 }
 
 export function setState(patch: {
-  iteration?: number; phase?: Phase; currentStory?: string | null; model?: string | null;
-  routeSource?: ModelRouteSource | null; storyDifficulty?: StoryDifficulty | null;
+  iteration?: number;
+  phase?: Phase;
+  currentStory?: string | null;
+  model?: string | null;
+  routeSource?: ModelRouteSource | null;
+  storyDifficulty?: StoryDifficulty | null;
   runner?: AgentKind | null;
 }): void {
   if (patch.iteration !== undefined) state.iteration = patch.iteration;
@@ -59,9 +77,14 @@ export function setState(patch: {
 
 export interface ApiResponse {
   runtime: {
-    iteration: number; max_iterations: number; phase: Phase;
-    current_story: string | null; elapsed: number; model: string | null;
-    route_source: ModelRouteSource | null; story_difficulty: StoryDifficulty | null;
+    iteration: number;
+    max_iterations: number;
+    phase: Phase;
+    current_story: string | null;
+    elapsed: number;
+    model: string | null;
+    route_source: ModelRouteSource | null;
+    story_difficulty: StoryDifficulty | null;
     runner: AgentKind | null;
   };
   project: string;
@@ -72,13 +95,18 @@ export interface ApiResponse {
   stateCorrupted: boolean;
   modelRouting: ModelRoutingReadResult;
   logs: string;
+  /** 只读安全观察；null 仅供尚未迁移的同步测试/调用方兼容。 */
+  workspaceSafety: WorkspaceSafetyStatusSnapshot | null;
 }
 
-export function buildApiResponse(): ApiResponse {
+function buildApiResponseForWorkspace(
+  workspace: string,
+  workspaceSafety: WorkspaceSafetyStatusSnapshot | null,
+): ApiResponse {
   const elapsed = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0;
-  const prd = tryReadPrd(join(workspaceDir, 'prd.json'));
-  const displayState = prd ? readDisplayState(join(workspaceDir, 'state.json'), prd) : null;
-  const logs = readProgress(join(workspaceDir, 'progress.md'));
+  const prd = tryReadPrd(join(workspace, 'prd.json'));
+  const displayState = prd ? readDisplayState(join(workspace, 'state.json'), prd) : null;
+  const logs = readProgress(join(workspace, 'progress.md'));
   return {
     runtime: {
       iteration: state.iteration,
@@ -98,21 +126,24 @@ export function buildApiResponse(): ApiResponse {
     stateCorrupted: displayState?.stateCorrupted ?? false,
     modelRouting: readModelRouting(prd),
     logs,
+    workspaceSafety,
   };
+}
+
+/** Existing synchronous view remains byte-for-byte read-only and exposes no guessed safety state. */
+export function buildApiResponse(): ApiResponse {
+  return buildApiResponseForWorkspace(workspaceDir, null);
+}
+
+/** Production dashboard view; captures one workspace path and reads its real safety state. */
+export async function buildApiResponseWithWorkspaceSafety(): Promise<ApiResponse> {
+  const workspace = workspaceDir;
+  const workspaceSafety = await inspectWorkspaceSafetyStatus(workspace);
+  return buildApiResponseForWorkspace(workspace, workspaceSafety);
 }
 
 function defaultPublicDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), 'public');
-}
-
-/**
- * Pure mapping from platform → the shell command that opens a URL in the user's
- * default browser. Exported so tests can assert behavior without spawning.
- */
-export function browserOpenCommand(platform: NodeJS.Platform, url: string): { cmd: string; args: string[] } {
-  if (platform === 'darwin') return { cmd: 'open', args: [url] };
-  if (platform === 'win32') return { cmd: 'cmd', args: ['/c', 'start', '', url] };
-  return { cmd: 'xdg-open', args: [url] };
 }
 
 export function start(opts: {
@@ -120,7 +151,6 @@ export function start(opts: {
   maxIterations: number;
   port?: number;
   publicDir?: string;
-  openBrowser?: boolean;
 }): { close(): void; address(): { port: number }; ready: Promise<{ port: number }> } {
   configureWorkspace(opts.workspace, opts.maxIterations);
   const publicDir = opts.publicDir ?? defaultPublicDir();
@@ -141,12 +171,19 @@ export function start(opts: {
   const server = createServer((req, res) => {
     const path = (req.url ?? '/').split('?')[0];
     if (path === '/api/state') {
-      const body = JSON.stringify(buildApiResponse());
-      res.writeHead(200, {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Access-Control-Allow-Origin': '*',
-      });
-      res.end(body);
+      void buildApiResponseWithWorkspaceSafety()
+        .then((response) => {
+          const body = JSON.stringify(response);
+          res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Access-Control-Allow-Origin': '*',
+          });
+          res.end(body);
+        })
+        .catch(() => {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Internal Server Error');
+        });
     } else if (path === '/' || path === '/index.html') {
       serveHtml(res, 'dashboard.html');
     } else if (path === '/p' || path === '/p.html') {
@@ -168,25 +205,6 @@ export function start(opts: {
       const bound = { port: address.port };
       const url = `http://localhost:${bound.port}`;
       console.log(`🖥️  Dashboard: ${url}`);
-      // Restore the original Python harness behavior: pop the dashboard open in the
-      // user's default browser unless explicitly suppressed (opts.openBrowser === false).
-      // The opener is best-effort — a missing `open`/`xdg-open` must never crash the harness.
-      if (opts.openBrowser !== false) {
-        try {
-          const { cmd, args } = browserOpenCommand(process.platform, url);
-          const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
-          // spawn reports a missing binary (ENOENT — e.g. no `xdg-open` on a headless
-          // box) as an asynchronous 'error' event, which the surrounding try/catch
-          // does NOT catch. With no 'error' listener Node throws an uncaught
-          // exception and crashes the harness — so swallow it here.
-          child.on('error', () => {
-            /* opener missing or failed — non-fatal */
-          });
-          child.unref();
-        } catch {
-          // swallow — browser launch failures are non-fatal
-        }
-      }
       resolve(bound);
     });
   });

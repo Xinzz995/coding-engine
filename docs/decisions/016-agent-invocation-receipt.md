@@ -1,15 +1,16 @@
 ---
 title: 016-agent-invocation-receipt
 status: active
-updated: 2026-07-30
+updated: 2026-07-31
 scope: root
 ---
 
 # 016. 每次真实 Agent 子进程调用留下有界调用凭证
 
-> 2026-07-30 目标边界修正：0.34.0 只有在受管 containment 已确认清空后，才允许写普通
-> completed/error/timeout 调用凭证；终止无法确认时进入 workspace 隔离，不再追加普通 iteration
-> 或 invocation receipt。0.33.3 尚未实现这条统一规则，不能把“已发出终止请求”伪装成已收口。
+> 2026-07-31 当前状态：ADR-021 已接入受管 containment。只有 coordinator 确认子进程集合清空且
+> delta 合法后，才允许结算 completed/error/timeout 调用凭证；终止无法确认时进入 workspace 隔离，
+> 不再追加普通 iteration 或 invocation receipt。下文凭证内容与展示语义仍有效，旧
+> `terminateProcessTree` 实现边界只保留历史背景。
 
 ## 背景
 

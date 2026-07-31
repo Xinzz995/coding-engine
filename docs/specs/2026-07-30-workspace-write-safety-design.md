@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离设计
 status: active
-updated: 2026-07-30
+updated: 2026-07-31
 scope: root
 ---
 
@@ -605,9 +605,21 @@ manifest/逐字节相同；半份 staging 不是最终 archive，可由 Recovery
 `kind` 首版固定为 `apply-prd-v1 | repair-v1 | generic-v1`：前两项保留未来正式调用入口的真实目的，
 `generic-v1` 仅供 dark implementation 与破坏性测试使用。通用 mutation 核心只执行调用方显式提供的
 有限 writes、deletes 与 archivePaths，不替 apply-prd/repair 决定要归档哪些业务文件；该策略仍留给
-后续公开接线裁决。generic-v1 的 canary 只能证明“未选入的普通业务秘密不被安全元数据额外复制”，
-不能证明任意 archivePaths 都不含秘密。后续 apply-prd/repair 必须各自冻结允许路径，并对真实固定
-路径执行独立 canary；本 PR 不选择路径或保留时长。
+公开接线裁决。generic-v1 的 canary 只能证明“未选入的普通业务秘密不被安全元数据额外复制”，
+不能证明任意 archivePaths 都不含秘密。
+
+一次性产品启用冻结两个独立白名单：
+
+- apply-prd 换功能：归档旧 `prd.json`、`state.json`、`progress.md`、`review-*.md`、
+  `final-review.json`、`review-decisions.json`、`evidence.jsonl`、`report.html`、`screenshots/` 与
+  `prd.tampered-*.json`；同功能再派生不归档 `progress.md`、报告、截图和篡改副本，只归档
+  `prd.json`、`state.json`、`review-*.md`、`final-review.json`、`review-decisions.json` 与
+  `evidence.jsonl`。两种模式都只删除、不归档一次性 `validation-result.json`；
+- repair：只归档本次实际修复前的 `prd.json` 与存在时的 `state.json` 原始字节。
+
+0.34.0 对这些归档不做自动期限或份数清理；未来清理必须是用户显式动作。两种固定动作都要用真实
+路径 secret canary 证明未列入白名单的普通文件不会被额外复制，但不承诺用户主动归档的截图或证据
+不含秘密。`generic-v1` 仍不得成为公开入口。
 
 v1 的 plannedPaths/archivePaths 一律拒绝永久协议根、安全标记、路径逃逸、软链接、硬链接与内部
 staging 名称。业务写的父目录必须已经存在；目录创建尚未进入 manifest 状态机，因此不能隐式创建。
@@ -775,7 +787,7 @@ supervisor 存活至 receipt 落盘、目标 pgid 为空，而不是只调用 co
    detached 新进程组不连接 parent 控制台，parent 是用户 Ctrl+C 的唯一接收者；
 2. CreateJobObject；
 3. SetInformationJobObject(KILL_ON_JOB_CLOSE)，不设置 breakaway；
-4. 解析完整 executable；`.cmd/.bat` 通过受测的 `cmd.exe` 规则；
+4. 解析完整 executable；普通项目命令的 `.cmd/.bat` 通过受测的 `cmd.exe` 安全子集规则；
 5. STARTUPINFOEX 同时传 JOB_LIST 与最小 HANDLE_LIST；
 6. CreateProcessW 使用 EXTENDED_STARTUPINFO_PRESENT、UNICODE_ENVIRONMENT、CREATE_SUSPENDED 与
    CREATE_NO_WINDOW；
@@ -794,8 +806,9 @@ Windows 原生检查另带一份由固定源码确定性构建的 `.NET Framewor
 规范名称和有界目录树，并对扫描发现的非目录文件调用 WofIsExternalFile，返回明确的 physical/external
 状态；external 结果必须带 FILE/WIM provider，FILE provider 还必须带已知 compression algorithm。helper
 也通过 OpenProcess、GetProcessTimes 与前后两次零等待存活检查读取进程 creation FILETIME。路径和
-进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；进程 helper 子进程执行另有小于
-supervisor 5 秒 handshake 的 3 秒硬上限。输入输出和失败阶段都采用有界协议，任何摘要、请求绑定、
+进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；进程 helper 子进程执行有
+4 秒硬上限。supervisor 的阶段握手默认 120 秒，以覆盖开始项目代码前重复的身份、租约和目录证明，
+并仍受 300 秒配置上限约束。输入输出和失败阶段都采用有界协议，任何摘要、请求绑定、
 路径、进程存活、重解析点、外部承载状态、枚举完整性或关闭句柄无法确认都按不可验证阻断。
 
 `paths-v1` 对每个 `found` 记录增加严格的 `externalBacking`：目录为
@@ -902,9 +915,9 @@ child 是唯一明确例外，其允许变化由 delta checker 裁决。
 - `prd-to-json` 在命令外只做发现、用户确认、候选与可选源文档编辑。apply 时绑定 source bytes、
   Git HEAD、quality digest 和 candidate digest；租约外不直接写 workspace，并把用户选择的同一
   `--workspace` 原样交给 CLI，禁止硬编码 `.workspace`；
-- `coding-x workspace record-review-decision --workspace <dir>` 在短 session 内重核 Final Review
-  binding、HEAD、现有决定和
-  延期 Issue 后原子覆盖结构化文件；
+- `coding-x workspace record-review-decision --workspace <dir>` 在短 session 开始和提交前重核完整
+  Final Review binding（含 PR 意图、base、Spec、工程规则、质量契约、Runner 与风险）、HEAD、现有
+  决定和延期 Issue；决定绑定完整 Review binding 摘要后原子覆盖结构化文件；
 - `/review-loop` 不直接改文件；
 - status/doctor/dashboard 只读；report collect 可只读，写 report.html 时必须持 session。
 
@@ -1095,7 +1108,8 @@ recovery 仍在。
 | 未选择的普通 secret canary 不落安全元数据      |              真机 |              真机 |                  真机 |
 
 Windows 另测 Node 22 与当前 Node、普通用户、嵌套外层 Job、不兼容 Job、固定 EXE 缺失/损坏/摘要错误、
-确定性重建与逐字节比较、breakaway 尝试、`.cmd` shim、Unicode/空参数、stdin/大 stdout/stderr、thread/process handle
+确定性重建与逐字节比较、breakaway 尝试、普通项目命令的 `.cmd` shim、Unicode/空参数、
+stdin/大 stdout/stderr、thread/process handle
 关闭顺序、ActiveProcesses 归零、receipt 损坏/错绑、supervisor 在 receipt 前后 hard kill 和 handle leak。
 同一普通用户证明还必须用 `compact.exe /C /EXE:LZX` 在 Unicode/空格路径上真实创建 WOF 压缩普通
 文件，并由 WofIsExternalFile 证明 `provider=file`、`algorithm=lzx`；该证明明确允许原始
@@ -1106,6 +1120,10 @@ WOF 查询、provider/algorithm 断言或任一拒绝断言失败都不得跳过
 GitHub Windows Server 2022 是最低真实证明；mock taskkill 不能替代。
 非 Windows 上的源码、摘要和条件测试只能证明分发合同，不能把 skip 或静态检查报告为 Job 行为已完成；
 上述 Windows 行为必须由 required Windows CI 真正执行后才算绿色。
+
+Developer、Validator 与 Final Review 的 AI Runner 不进入该 shell 子集：提示词及 Review 输入不能由
+`.cmd/.bat` 再次解释。Windows v1 在任何受管 AI 进程建立前明确拒绝脚本包装器，并要求三个
+`CODING_X_*_BIN` 覆盖指向对应工具的原生可执行文件；普通/TDD 项目检查继续保留上述 `.cmd` 能力。
 
 Windows 原生证明使用独立的 required job：工作流固定 `windows-2022`，先由 hosted runner 管理员创建
 一次性本地普通账户，再通过无交互 credential 启动该账户执行固定 Windows Job、parent crash、生产
@@ -1138,10 +1156,11 @@ POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代
    Builder 服务合同；没有“新 run + 旧旁路”的中间产品状态。
 4. closeout PR 只做真实 dogfood、文档对账和 Issue 证据。
 
-dark foundation 的 `workspace-safety` 生产模块只公开进程放置与集合状态的只读检查；POSIX 组信号只存在于
-摘要绑定的固定 launcher 内。0.33.3 仍在使用的 `src/engine/process-tree.ts` 是 activation PR 必须整体
-替换的已知旧边界，不属于本 PR 的新安全证明，也不能被新模块导入。测试失败后的破坏性清理仅允许位于
-test-only fixture，并在发送信号前重核已记录 launcher 的进程身份与 session/pgid。
+dark foundation 阶段的 `workspace-safety` 生产模块只公开进程放置与集合状态的只读检查；POSIX 组信号
+只存在于摘要绑定的固定 launcher 内。0.33.3 当时仍使用的 `src/engine/process-tree.ts` 是 activation
+PR 必须整体替换的已知旧边界，未被计入新安全证明，也未被新模块导入；当前启用阶段已经完成替换并删除
+旧路径。测试失败后的破坏性清理仅允许位于 test-only fixture，并在发送信号前重核已记录 launcher 的
+进程身份与 session/pgid。
 
 0.34.0 初始化真实测试实际运行冻结 0.33.3 binary 面对新版目录：
 
