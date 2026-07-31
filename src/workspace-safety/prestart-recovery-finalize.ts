@@ -75,6 +75,8 @@ export interface PrestartRecoveryFinalizationHooks {
 
 export interface ControlledFinalizePrestartRecoveryOptions extends PrestartRecoveryProbeOptions {
   readonly now?: () => Date;
+  /** Exact test/coordinator identity; omitted callers keep the real platform read. */
+  readonly attemptIdentity?: ProcessIdentitySnapshot;
   readonly hooks?: PrestartRecoveryFinalizationHooks;
   readonly finalRenameCommitCheck?: () => void;
 }
@@ -136,10 +138,11 @@ function requireCurrentAttemptOwner(
 
 function createAttemptBinding(
   domain: RecoveryDomain,
+  attemptIdentity?: ProcessIdentitySnapshot,
   verifySystemAuthority?: () => void | Promise<void>,
 ): PrestartAttemptBinding {
   if (!domain.attemptOwnerBytes) throw recoveryInvalid('prestart finalization needs an attempt');
-  const processIdentity = createIdentityProbe().current();
+  const processIdentity = attemptIdentity ?? createIdentityProbe().current();
   requireCurrentAttemptOwner(domain.attemptOwner, processIdentity);
   return {
     workspacePath: domain.workspace.path,
@@ -506,7 +509,11 @@ export async function finalizePrestartRecoveryControlled(
   if (initial.claim.mode !== 'mechanical-empty' || !initial.claim.prestartOperation) {
     throw new WorkspaceSafetyError('unsupported', 'claim is not prestart mechanical recovery');
   }
-  const attempt = createAttemptBinding(initial, options.verifySystemAuthority);
+  const attempt = createAttemptBinding(
+    initial,
+    options.attemptIdentity,
+    options.verifySystemAuthority,
+  );
   const now = options.now ?? (() => new Date());
   const hooks = options.hooks ?? {};
   let authorized = await readAuthorized(
@@ -591,6 +598,7 @@ export async function finalizePrestartRecovery(
 ): Promise<PrestartRecoveryCompletion> {
   const system = captureExactCurrentIdentityAuthority();
   return await finalizePrestartRecoveryControlled(handle, {
+    attemptIdentity: system.identity,
     helperBytes: readFixedPlatformHelperBundle(),
     probeSourceOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,

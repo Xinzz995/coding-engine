@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { uptime } from 'node:os';
-import { win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type {
   IdentityProbe,
@@ -12,6 +10,19 @@ import type {
 } from './types.js';
 import { WorkspaceSafetyError } from './types.js';
 import { MAX_SAFETY_STRING_LENGTH } from './schema.js';
+import {
+  readWindowsIdentitySnapshot,
+  readWindowsProcessIdentity,
+} from './windows-identity-transport.js';
+
+export {
+  parseWindowsIdentitySnapshotOutput,
+  resolveWindowsIdentityPowerShellLaunch,
+  resolveWindowsPowerShellPath,
+  WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
+  WINDOWS_IDENTITY_SNAPSHOT_SCRIPT,
+  type WindowsIdentityPowerShellLaunch,
+} from './windows-identity-protocol.js';
 
 export type SupportedIdentityPlatform = 'linux' | 'darwin' | 'win32';
 
@@ -213,12 +224,6 @@ interface CommandResult {
 }
 
 export const POSIX_IDENTITY_COMMAND_TIMEOUT_MS = 5_000;
-export const WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS = 30_000;
-
-export interface WindowsIdentityPowerShellLaunch {
-  readonly command: string;
-  readonly env: NodeJS.ProcessEnv;
-}
 
 function probePidExistence(pid: number): 'present' | 'missing' | 'unknown' {
   try {
@@ -263,58 +268,6 @@ function requireCommandText(command: string, args: string[], name: string): stri
   return boundedRawIdentity(result.stdout, name);
 }
 
-export function resolveWindowsIdentityPowerShellLaunch(
-  environment: NodeJS.ProcessEnv = process.env,
-): WindowsIdentityPowerShellLaunch {
-  const keys = Object.keys(environment).filter(
-    (candidate) => candidate.toLowerCase() === 'systemroot',
-  );
-  if (keys.length !== 1) {
-    throw new WorkspaceSafetyError('unsupported', 'Windows SystemRoot is unavailable or ambiguous');
-  }
-  const systemRoot = environment[keys[0]];
-  if (
-    typeof systemRoot !== 'string' ||
-    systemRoot.length === 0 ||
-    systemRoot.includes('\0') ||
-    !win32.isAbsolute(systemRoot)
-  ) {
-    throw new WorkspaceSafetyError('unsupported', 'Windows SystemRoot is invalid');
-  }
-  const normalizedRoot = win32.normalize(systemRoot);
-  const powerShellHome = win32.join(normalizedRoot, 'System32', 'WindowsPowerShell', 'v1.0');
-  return {
-    command: win32.join(powerShellHome, 'powershell.exe'),
-    env: {
-      SystemRoot: normalizedRoot,
-      windir: normalizedRoot,
-      PSModulePath: win32.join(powerShellHome, 'Modules'),
-    },
-  };
-}
-
-export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = process.env): string {
-  return resolveWindowsIdentityPowerShellLaunch(environment).command;
-}
-
-function runWindowsPowerShell(args: string[]): CommandResult {
-  const launch = resolveWindowsIdentityPowerShellLaunch();
-  return runCommand(
-    launch.command,
-    ['-NoLogo', '-NoProfile', '-NonInteractive', ...args],
-    launch.env,
-    WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
-  );
-}
-
-function requireWindowsPowerShellText(args: string[], name: string): string {
-  const result = runWindowsPowerShell(args);
-  if (result.error || result.status !== 0) {
-    throw new WorkspaceSafetyError('unsupported', `${name} is unavailable`);
-  }
-  return boundedRawIdentity(result.stdout, name);
-}
-
 function readDarwinProcessIdentity(pid: number): ProcessIdentityLookup {
   const result = runCommand(
     '/bin/ps',
@@ -329,124 +282,6 @@ function readDarwinProcessIdentity(pid: number): ProcessIdentityLookup {
   if (result.error || result.status !== 0) return { status: 'unknown' };
   const value = result.stdout.trim().replace(/\s+/g, ' ');
   return value ? { status: 'found', value } : { status: 'unknown' };
-}
-
-function readWindowsProcessIdentity(pid: number): ProcessIdentityLookup {
-  const script = [
-    `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue`,
-    'if ($null -eq $p) { exit 3 }',
-    'try { [Console]::Out.Write($p.StartTime.ToUniversalTime().ToFileTimeUtc()) } catch { exit 4 }',
-  ].join('; ');
-  const result = runWindowsPowerShell(['-Command', script]);
-  if (result.status === 3) {
-    const existence = probePidExistence(pid);
-    return existence === 'missing' ? { status: 'missing' } : { status: 'unknown' };
-  }
-  if (result.error || result.status !== 0) return { status: 'unknown' };
-  const value = result.stdout.trim();
-  return /^\d+$/.test(value) ? { status: 'found', value } : { status: 'unknown' };
-}
-
-function readWindowsBootIdentity(): string {
-  return validateWindowsBootIdentity(
-    requireWindowsPowerShellText(
-      [
-        '-Command',
-        '[Console]::Out.Write((Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O"))',
-      ],
-      'Windows boot identity',
-    ),
-  );
-}
-
-function validateWindowsBootIdentity(value: string): string {
-  const bootTime = Date.parse(value);
-  const uptimeDerived = Date.now() - uptime() * 1000;
-  if (!Number.isFinite(bootTime) || Math.abs(bootTime - uptimeDerived) > 120_000) {
-    throw new WorkspaceSafetyError('unsupported', 'Windows boot identity sources disagree');
-  }
-  return value;
-}
-
-export const WINDOWS_IDENTITY_SNAPSHOT_SCRIPT = [
-  "$ErrorActionPreference = 'Stop'",
-  '$targetProcessId = 0',
-  '$rawProcessId = [Environment]::GetEnvironmentVariable("CODING_X_WINDOWS_IDENTITY_PID", "Process")',
-  'if (-not [int]::TryParse($rawProcessId, [ref]$targetProcessId) -or $targetProcessId -le 0) { exit 6 }',
-  '$processStatus = "missing"',
-  '$processValue = $null',
-  '$target = Get-Process -Id $targetProcessId -ErrorAction SilentlyContinue',
-  'if ($null -ne $target) {',
-  '  try {',
-  '    $processValue = $target.StartTime.ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture)',
-  '    $processStatus = "found"',
-  '  } catch { $processStatus = "unknown" }',
-  '}',
-  '$bootIdentity = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString("O")',
-  '$hostIdentity = [string](Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Cryptography").MachineGuid',
-  '[Console]::Out.Write((@{ processStatus = $processStatus; processValue = $processValue; bootIdentity = $bootIdentity; hostIdentity = $hostIdentity } | ConvertTo-Json -Compress))',
-].join('\n');
-
-export function parseWindowsIdentitySnapshotOutput(output: string): {
-  readonly hostIdentity: string;
-  readonly bootIdentity: string;
-  readonly processStatus: 'found' | 'missing' | 'unknown';
-  readonly processValue: string | null;
-} {
-  let value: unknown;
-  try {
-    value = JSON.parse(output);
-  } catch {
-    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is malformed');
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is malformed');
-  }
-  const record = value as Record<string, unknown>;
-  if (
-    typeof record.hostIdentity !== 'string' ||
-    typeof record.bootIdentity !== 'string' ||
-    typeof record.processStatus !== 'string' ||
-    !['found', 'missing', 'unknown'].includes(record.processStatus) ||
-    (record.processStatus === 'found' &&
-      (typeof record.processValue !== 'string' || !/^\d+$/u.test(record.processValue))) ||
-    (record.processStatus !== 'found' && record.processValue !== null)
-  ) {
-    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is malformed');
-  }
-  return record as ReturnType<typeof parseWindowsIdentitySnapshotOutput>;
-}
-
-function readWindowsIdentitySnapshot(pid: number): {
-  readonly hostIdentity: string;
-  readonly bootIdentity: string;
-  readonly processIdentity: ProcessIdentityLookup;
-} {
-  const launch = resolveWindowsIdentityPowerShellLaunch();
-  const result = runCommand(
-    launch.command,
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_IDENTITY_SNAPSHOT_SCRIPT],
-    { ...launch.env, CODING_X_WINDOWS_IDENTITY_PID: String(pid) },
-    WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
-  );
-  if (result.error || result.status !== 0) {
-    throw new WorkspaceSafetyError('unsupported', 'Windows identity snapshot is unavailable');
-  }
-  const record = parseWindowsIdentitySnapshotOutput(result.stdout);
-  let processIdentity: ProcessIdentityLookup;
-  if (record.processStatus === 'found') {
-    processIdentity = { status: 'found', value: record.processValue! };
-  } else if (record.processStatus === 'unknown') {
-    processIdentity = { status: 'unknown' };
-  } else {
-    const existence = probePidExistence(pid);
-    processIdentity = existence === 'missing' ? { status: 'missing' } : { status: 'unknown' };
-  }
-  return {
-    processIdentity,
-    bootIdentity: validateWindowsBootIdentity(record.bootIdentity),
-    hostIdentity: record.hostIdentity,
-  };
 }
 
 export function createSystemIdentityAdapter(): IdentityProbeAdapter {
@@ -488,15 +323,8 @@ export function createSystemIdentityAdapter(): IdentityProbeAdapter {
     return {
       platform: 'win32',
       pid: process.pid,
-      readHostIdentity: () =>
-        requireWindowsPowerShellText(
-          [
-            '-Command',
-            '[Console]::Out.Write((Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Cryptography").MachineGuid)',
-          ],
-          'Windows host identity',
-        ),
-      readBootIdentity: readWindowsBootIdentity,
+      readHostIdentity: () => readWindowsIdentitySnapshot(process.pid).hostIdentity,
+      readBootIdentity: () => readWindowsIdentitySnapshot(process.pid).bootIdentity,
       readProcessIdentity: readWindowsProcessIdentity,
       readIdentitySnapshot: readWindowsIdentitySnapshot,
     };

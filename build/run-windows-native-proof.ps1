@@ -14,7 +14,43 @@ if ($Child) {
     $requestData = Get-Content -LiteralPath $Request -Raw | ConvertFrom-Json
     $env:TEMP = $requestData.tempPath
     $env:TMP = $requestData.tempPath
-    Set-Location -LiteralPath $requestData.workspace
+    $childWorkspace = [string]$requestData.workspace
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $fixtureCompiler = Join-Path $childWorkspace 'build\compile-windows-test-fixture.ps1'
+    $fixtures = @(
+        @{
+            environment = 'CODING_X_WINDOWS_BREAKAWAY_ASSEMBLY'
+            output = 'CodingX.WindowsBreakawayAttempt.dll'
+            source = 'WindowsBreakawayAttempt.cs'
+        },
+        @{
+            environment = 'CODING_X_WINDOWS_HANDLE_INVENTORY_ASSEMBLY'
+            output = 'CodingX.WindowsHandleInventory.dll'
+            source = 'WindowsHandleInventory.cs'
+        },
+        @{
+            environment = 'CODING_X_WINDOWS_CTRL_C_DRIVER_ASSEMBLY'
+            output = 'CodingX.WindowsCtrlCDriver.dll'
+            source = 'WindowsCtrlCDriver.cs'
+        }
+    )
+    foreach ($fixture in $fixtures) {
+        $sourcePath = Join-Path $childWorkspace "src\workspace-safety\__fixtures__\$($fixture.source)"
+        $assemblyPath = Join-Path ([string]$requestData.tempPath) ([string]$fixture.output)
+        & $windowsPowerShell `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -ExecutionPolicy Bypass `
+            -File $fixtureCompiler `
+            -SourcePath $sourcePath `
+            -OutputAssembly $assemblyPath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
+            throw "Could not precompile the Windows test fixture $($fixture.source)"
+        }
+        Set-Item -LiteralPath "Env:$($fixture.environment)" -Value $assemblyPath
+    }
+    Set-Location -LiteralPath $childWorkspace
     $childNodePath = [string]$requestData.nodePath
     & $childNodePath build/windows-native-proof.mjs `
         --expected-user $requestData.userName `

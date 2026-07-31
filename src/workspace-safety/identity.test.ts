@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import type { OwnerRecord, ProcessIdentityKind } from './types.js';
 import {
@@ -12,6 +13,10 @@ import {
 } from './identity.js';
 import { WorkspaceSafetyError } from './types.js';
 import { MAX_SAFETY_STRING_LENGTH } from './schema.js';
+import {
+  readWindowsIdentitySnapshot as readWindowsIdentityTestSnapshot,
+  readWindowsProcessIdentity as readWindowsTestProcessIdentity,
+} from './windows-identity-test-transport.js';
 
 const digest = `sha256:${'a'.repeat(64)}`;
 
@@ -201,6 +206,57 @@ describe('platform identity probe', () => {
     expect(probe.probe(ownerFrom(source))).toBe('alive');
     expect(readIdentitySnapshot).toHaveBeenNthCalledWith(1, 100);
     expect(readIdentitySnapshot).toHaveBeenNthCalledWith(2, 100);
+  });
+
+  it('keeps the ordinary Windows transport deterministic while preserving live/dead pid proof', () => {
+    const readIdentitySnapshot = (pid: number) => readWindowsIdentityTestSnapshot(pid);
+    const source: IdentityProbeAdapter = {
+      platform: 'win32',
+      pid: process.pid,
+      readHostIdentity: () => {
+        throw new Error('combined fixture snapshot must be used');
+      },
+      readBootIdentity: () => {
+        throw new Error('combined fixture snapshot must be used');
+      },
+      readProcessIdentity: () => {
+        throw new Error('combined fixture snapshot must be used');
+      },
+      readIdentitySnapshot,
+    };
+    const probe = createIdentityProbe(source);
+    const current = probe.current();
+    const record = ownerFrom(source, current);
+
+    expect(current.processIdentity.kind).toBe('windows-filetime');
+    expect(readWindowsTestProcessIdentity(process.pid)).toEqual({
+      status: 'found',
+      value: current.processIdentity.value,
+    });
+    expect(probe.probe(record)).toBe('alive');
+    expect(
+      probe.probe({
+        ...record,
+        pid: 2_000_000_000,
+        processIdentity: { kind: 'windows-filetime', value: '100000002000000000' },
+      }),
+    ).toBe('dead');
+  });
+
+  it('keeps process-only Windows liveness checks separate from the combined system snapshot', () => {
+    const identitySource = readFileSync(new URL('./identity.ts', import.meta.url), 'utf8');
+    const transportSource = readFileSync(
+      new URL('./windows-identity-transport.ts', import.meta.url),
+      'utf8',
+    );
+    const processLookup = transportSource.slice(
+      transportSource.indexOf('export function readWindowsProcessIdentity'),
+      transportSource.indexOf('export function readWindowsIdentitySnapshot'),
+    );
+
+    expect(identitySource).toContain('readProcessIdentity: readWindowsProcessIdentity');
+    expect(processLookup).toContain('Get-Process -Id');
+    expect(processLookup).not.toContain('WINDOWS_IDENTITY_SNAPSHOT_SCRIPT');
   });
 
   it('re-reads the combined snapshot instead of caching identity across verification boundaries', () => {

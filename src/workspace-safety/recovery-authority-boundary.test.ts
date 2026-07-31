@@ -79,6 +79,8 @@ import {
 type ForbiddenAuthorityKey =
   | 'identity'
   | 'identityProbe'
+  | 'attemptIdentity'
+  | 'readCurrentIdentity'
   | 'probeSourceOwner'
   | 'probeAttemptOwner'
   | 'probeSupervisor'

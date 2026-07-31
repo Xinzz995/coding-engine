@@ -376,6 +376,8 @@ export async function runOuterJobScenario(mode: 'compatible' | 'incompatible'): 
       OUTER_JOB_DRIVER,
       '-SourcePath',
       CTRL_C_DRIVER_SOURCE,
+      '-AssemblyPath',
+      process.env.CODING_X_WINDOWS_CTRL_C_DRIVER_ASSEMBLY ?? '',
       '-NodePath',
       realpathSync(process.execPath),
       '-WorkerPath',

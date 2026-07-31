@@ -1,5 +1,6 @@
 param(
   [Parameter(Mandatory = $true)] [string]$SourcePath,
+  [string]$AssemblyPath = '',
   [Parameter(Mandatory = $true)] [string]$NodePath,
   [Parameter(Mandatory = $true)] [string]$WorkerPath,
   [Parameter(Mandatory = $true)] [string]$AssetRoot,
@@ -17,13 +18,18 @@ try {
   if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     throw 'PowerShell FullLanguage mode is required for the outer-Job driver'
   }
-  $sourceBytes = [System.IO.File]::ReadAllBytes($SourcePath)
-  if ($sourceBytes.Length -gt 1MB) { throw 'outer-Job driver source is too large' }
-  $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
-  Add-Type -TypeDefinition ($utf8.GetString($sourceBytes)) -Language CSharp -ReferencedAssemblies @(
-    'System.dll',
-    'System.Core.dll'
-  ) -ErrorAction Stop
+  if ([string]::IsNullOrWhiteSpace($AssemblyPath)) {
+    $sourceBytes = [System.IO.File]::ReadAllBytes($SourcePath)
+    if ($sourceBytes.Length -gt 1MB) { throw 'outer-Job driver source is too large' }
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    Add-Type -TypeDefinition ($utf8.GetString($sourceBytes)) -Language CSharp -ReferencedAssemblies @(
+      'System.dll',
+      'System.Core.dll'
+    ) -ErrorAction Stop
+  } else {
+    $resolvedAssembly = (Resolve-Path -LiteralPath $AssemblyPath).Path
+    Add-Type -Path $resolvedAssembly -ErrorAction Stop
+  }
   exit [CodingX.WorkspaceSafety.Tests.WindowsCtrlCDriver]::RunOuterJob(
     $NodePath,
     $WorkerPath,

@@ -65,6 +65,8 @@ export interface RecoveryFinalizationHooks {
 /** Internal-only authority input used by trusted coordinators and the explicit test seam. */
 export interface ControlledFinalizeMechanicalEmptyRecoveryOptions {
   readonly now?: () => Date;
+  /** Exact test/coordinator identity; omitted callers keep the real platform read. */
+  readonly attemptIdentity?: ProcessIdentitySnapshot;
   readonly probeSourceOwner?: (owner: OwnerRecord) => IdentityVerdict;
   readonly hooks?: RecoveryFinalizationHooks;
   /** dark-only coordinator 的最终同步裁决点；抛错会在 rename 前完整保留 recovery。 */
@@ -148,12 +150,13 @@ function createBinding(
   handle: RecoveryAttemptHandle,
   domain: RecoveryDomain,
   expectedRebootQuarantine?: ExactContainmentQuarantine,
+  attemptIdentity?: ProcessIdentitySnapshot,
   verifySystemAuthority?: () => void | Promise<void>,
 ): RecoveryAuthorityBinding {
   if (!domain.attemptOwnerBytes) {
     throw recoveryInvalid('mechanical-empty finalization requires an active recovery attempt');
   }
-  const processIdentity = createIdentityProbe().current();
+  const processIdentity = attemptIdentity ?? createIdentityProbe().current();
   requireCurrentAttemptOwner(domain.attemptOwner, processIdentity);
   if ((domain.claim.rebootProof !== null) !== (expectedRebootQuarantine !== undefined)) {
     throw recoveryInvalid('mechanical containment authority does not match rebootProof presence');
@@ -362,6 +365,7 @@ export async function finalizeMechanicalEmptyRecoveryControlled(
     handle,
     initial,
     options.expectedRebootQuarantine,
+    options.attemptIdentity,
     options.verifySystemAuthority,
   );
   const probeSourceOwner = createSourceOwnerProbe(options.probeSourceOwner);
@@ -473,6 +477,7 @@ export async function finalizeMechanicalEmptyRecovery(
 ): Promise<MechanicalEmptyRecoveryCompletion> {
   const system = captureExactCurrentIdentityAuthority();
   return await finalizeMechanicalEmptyRecoveryControlled(handle, {
+    attemptIdentity: system.identity,
     probeSourceOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,
   });

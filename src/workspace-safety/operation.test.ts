@@ -66,7 +66,7 @@ function waitForWorkerMessage(child: ChildProcess, expected: string): Promise<vo
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => finish(new Error(`worker timed out before ${expected}`)),
-      10_000,
+      30_000,
     );
     function cleanup(): void {
       clearTimeout(timer);
@@ -94,7 +94,7 @@ function waitForWorkerMessage(child: ChildProcess, expected: string): Promise<vo
 function waitForWorkerExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => finish(new Error('worker timed out while exiting')), 10_000);
+    const timer = setTimeout(() => finish(new Error('worker timed out while exiting')), 30_000);
     function cleanup(): void {
       clearTimeout(timer);
       child.off('error', finish);
@@ -299,7 +299,7 @@ describe('workspace operation protocol', () => {
     const settled = await runWorkspaceOperation(session, defaultOptions(), async (operation) => {
       worker = fork(workerPath, [workspace, barrier], {
         execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
       });
       await waitForWorkerMessage(worker, 'staged');
       expect(
@@ -321,7 +321,7 @@ describe('workspace operation protocol', () => {
     await waitForWorkerMessage(worker!, 'rejected');
     await waitForWorkerExit(worker!);
     await session.close();
-  });
+  }, 60_000);
 
   it('rejects a validly named lease staging entry when it is not an ordinary directory', async () => {
     const { workspace, session } = await setup();

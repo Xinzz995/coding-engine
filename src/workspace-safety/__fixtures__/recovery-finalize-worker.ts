@@ -1,5 +1,8 @@
 import { existsSync } from 'node:fs';
-import { createIdentityProbe } from '../identity.js';
+import {
+  currentCrossProcessTestIdentity,
+  probeCrossProcessTestIdentity,
+} from './identity-test-support.js';
 import {
   acquireRecoveryAttemptWithAuthority as acquireRecoveryAttempt,
   finalizeMechanicalEmptyRecoveryWithAuthority as finalizeMechanicalEmptyRecovery,
@@ -28,9 +31,14 @@ try {
   const handle = await acquireRecoveryAttempt({
     workspacePath,
     attemptId,
-    identity: createIdentityProbe().current(),
+    identity: currentCrossProcessTestIdentity(),
+    probeSourceOwner: probeCrossProcessTestIdentity,
+    probeAttemptOwner: probeCrossProcessTestIdentity,
   });
-  await finalizeMechanicalEmptyRecovery(handle);
+  await finalizeMechanicalEmptyRecovery(handle, {
+    attemptIdentity: currentCrossProcessTestIdentity(),
+    probeSourceOwner: probeCrossProcessTestIdentity,
+  });
   await send('completed');
 } catch {
   await send('rejected');

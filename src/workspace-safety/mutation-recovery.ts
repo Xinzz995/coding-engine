@@ -86,6 +86,8 @@ export interface MutationRecoveryHooks extends MutationAdvanceHooks {
 
 export interface ControlledResumeMutationRecoveryOptions {
   readonly now?: () => Date;
+  /** Exact test/coordinator identity; omitted callers keep the real platform read. */
+  readonly attemptIdentity?: ProcessIdentitySnapshot;
   readonly probeSourceOwner?: (owner: OwnerRecord) => IdentityVerdict;
   readonly hooks?: MutationRecoveryHooks;
   readonly finalRenameCommitCheck?: () => void;
@@ -316,10 +318,11 @@ export async function acquireMutationRecoveryAttempt(
 function createBinding(
   handle: RecoveryAttemptHandle,
   domain: RecoveryDomain,
+  attemptIdentity?: ProcessIdentitySnapshot,
   verifySystemAuthority?: () => void | Promise<void>,
 ): MutableRecoveryBinding {
   if (!domain.attemptOwnerBytes) throw recoveryInvalid('mutation recovery has no active attempt');
-  const processIdentity = createIdentityProbe().current();
+  const processIdentity = attemptIdentity ?? createIdentityProbe().current();
   requireCurrentAttemptOwner(domain.attemptOwner, processIdentity);
   return {
     workspacePath: handle.workspacePath,
@@ -597,7 +600,12 @@ export async function resumeMutationRecoveryControlled(
   if (initial.claim.mode !== 'mutation-resume') {
     throw new WorkspaceSafetyError('unsupported', 'recovery mode is not mutation-resume');
   }
-  const binding = createBinding(handle, initial, options.verifySystemAuthority);
+  const binding = createBinding(
+    handle,
+    initial,
+    options.attemptIdentity,
+    options.verifySystemAuthority,
+  );
   const probeSourceOwner = createSourceOwnerProbe(options.probeSourceOwner);
   const now = options.now ?? (() => new Date());
   let authorized = await reconcileMutationBinding(binding, probeSourceOwner, now);
@@ -686,6 +694,7 @@ export async function resumeMutationRecovery(
 ): Promise<MutationRecoveryCompletion> {
   const system = captureExactCurrentIdentityAuthority();
   return await resumeMutationRecoveryControlled(handle, {
+    attemptIdentity: system.identity,
     probeSourceOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,
   });

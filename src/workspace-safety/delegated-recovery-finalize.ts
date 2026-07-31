@@ -74,6 +74,8 @@ export interface DelegatedRecoveryFinalizationHooks {
 
 export interface ControlledFinalizeDelegatedRecoveryOptions extends DelegatedRecoveryProbeOptions {
   readonly now?: () => Date;
+  /** Exact test/coordinator identity; omitted callers keep the real platform read. */
+  readonly attemptIdentity?: ProcessIdentitySnapshot;
   readonly hooks?: DelegatedRecoveryFinalizationHooks;
   /** dark-only coordinator 的最终同步裁决点；抛错会在 rename 前保留 recovery。 */
   readonly finalRenameCommitCheck?: () => void;
@@ -135,12 +137,13 @@ function requireCurrentAttemptOwner(
 
 function createDelegatedFinalizationBinding(
   domain: RecoveryDomain,
+  attemptIdentity?: ProcessIdentitySnapshot,
   verifySystemAuthority?: () => void | Promise<void>,
 ): DelegatedRecoveryAuthorityBinding {
   if (!domain.attemptOwnerBytes) {
     throw recoveryInvalid('delegated finalization requires an active recovery attempt');
   }
-  const processIdentity = createIdentityProbe().current();
+  const processIdentity = attemptIdentity ?? createIdentityProbe().current();
   requireCurrentAttemptOwner(domain.attemptOwner, processIdentity);
   return {
     workspacePath: domain.workspace.path,
@@ -533,7 +536,11 @@ export async function finalizeDelegatedRecoveryControlled(
       `Recovery is not eligible: ${initial.claim.mode} is not delegated-finalize`,
     );
   }
-  const binding = createDelegatedFinalizationBinding(initial, options.verifySystemAuthority);
+  const binding = createDelegatedFinalizationBinding(
+    initial,
+    options.attemptIdentity,
+    options.verifySystemAuthority,
+  );
   const now = options.now ?? (() => new Date());
   const hooks = options.hooks ?? {};
   let authorized = await readAuthorizedDelegatedRecovery(
@@ -655,6 +662,7 @@ export async function finalizeDelegatedRecovery(
 ): Promise<DelegatedRecoveryCompletion> {
   const system = captureExactCurrentIdentityAuthority();
   return await finalizeDelegatedRecoveryControlled(handle, {
+    attemptIdentity: system.identity,
     probeSourceOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,
   });

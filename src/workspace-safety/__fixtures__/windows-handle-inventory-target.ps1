@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory = $true)] [ValidateSet('root', 'descendant')] [string]$Mode,
   [Parameter(Mandatory = $true)] [string]$SourcePath,
+  [string]$AssemblyPath = '',
   [Parameter(Mandatory = $true)] [string]$PowerShellPath,
   [Parameter(Mandatory = $true)] [string]$ScriptPath,
   [Parameter(Mandatory = $true)] [string]$RootInventoryPath,
@@ -15,13 +16,18 @@ try {
   if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     throw 'PowerShell FullLanguage mode is required for the handle inventory fixture'
   }
-  $sourceBytes = [System.IO.File]::ReadAllBytes($SourcePath)
-  if ($sourceBytes.Length -gt 1MB) { throw 'handle inventory fixture source is too large' }
-  $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
-  Add-Type -TypeDefinition ($utf8.GetString($sourceBytes)) -Language CSharp -ReferencedAssemblies @(
-    'System.dll',
-    'System.Core.dll'
-  ) -ErrorAction Stop
+  if ([string]::IsNullOrWhiteSpace($AssemblyPath)) {
+    $sourceBytes = [System.IO.File]::ReadAllBytes($SourcePath)
+    if ($sourceBytes.Length -gt 1MB) { throw 'handle inventory fixture source is too large' }
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    Add-Type -TypeDefinition ($utf8.GetString($sourceBytes)) -Language CSharp -ReferencedAssemblies @(
+      'System.dll',
+      'System.Core.dll'
+    ) -ErrorAction Stop
+  } else {
+    $resolvedAssembly = (Resolve-Path -LiteralPath $AssemblyPath).Path
+    Add-Type -Path $resolvedAssembly -ErrorAction Stop
+  }
   if ($Mode -eq 'descendant') {
     exit [CodingX.WorkspaceSafety.Tests.WindowsHandleInventory]::RunDescendant(
       $DescendantInventoryPath
@@ -31,6 +37,7 @@ try {
     $PowerShellPath,
     $ScriptPath,
     $SourcePath,
+    $AssemblyPath,
     $RootInventoryPath,
     $DescendantInventoryPath,
     $ReadyPath

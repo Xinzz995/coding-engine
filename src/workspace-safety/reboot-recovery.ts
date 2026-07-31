@@ -78,6 +78,8 @@ export interface ControlledInspectSameHostRebootRecoveryOptions {
   readonly workspacePath: string;
   readonly now?: () => Date;
   readonly helperBytes?: Uint8Array;
+  /** Test-only deterministic source; production wrappers never expose or populate this field. */
+  readonly readCurrentIdentity?: () => ProcessIdentitySnapshot;
 }
 
 export interface InspectSameHostRebootRecoveryOptions {
@@ -102,6 +104,8 @@ export interface ControlledAcquireSameHostRebootRecoveryOptions {
   readonly attemptId?: string;
   readonly now?: () => Date;
   readonly helperBytes?: Uint8Array;
+  /** Test-only deterministic source; production wrappers never expose or populate this field. */
+  readonly readCurrentIdentity?: () => ProcessIdentitySnapshot;
 }
 
 export interface AcquireSameHostRebootRecoveryOptions {
@@ -139,6 +143,7 @@ interface SameHostRebootRecoveryHandleOptions {
   readonly sourceOwnerDigest: string;
   readonly quarantine: ExactContainmentQuarantine;
   readonly helperBytes?: Buffer;
+  readonly readCurrentIdentity: () => ProcessIdentitySnapshot;
 }
 
 const SAME_HOST_REBOOT_HANDLE_AUTHORITY = Symbol('same-host-reboot-handle-authority');
@@ -167,6 +172,7 @@ export class SameHostRebootRecoveryHandle {
         bytes: Buffer.from(options.quarantine.bytes),
         digest: options.quarantine.digest,
       },
+      readCurrentIdentity: options.readCurrentIdentity,
       ...(options.helperBytes ? { helperBytes: Buffer.from(options.helperBytes) } : {}),
     });
     Object.freeze(this);
@@ -189,6 +195,7 @@ function sameHostRebootHandleBinding(
       bytes: Buffer.from(binding.quarantine.bytes),
       digest: binding.quarantine.digest,
     },
+    readCurrentIdentity: binding.readCurrentIdentity,
     ...(binding.helperBytes ? { helperBytes: Buffer.from(binding.helperBytes) } : {}),
   };
 }
@@ -358,7 +365,7 @@ async function inspectInitialSource(options: {
 export async function inspectSameHostRebootRecoveryControlled(
   options: ControlledInspectSameHostRebootRecoveryOptions,
 ): Promise<SameHostRebootRecoveryPlan> {
-  const identity = currentIdentity();
+  const identity = (options.readCurrentIdentity ?? currentIdentity)();
   const inspected = await inspectInitialSource({
     workspacePath: options.workspacePath,
     identity,
@@ -418,9 +425,12 @@ function prestartProbes(plan: SameHostRebootRecoveryPlan) {
   };
 }
 
-function rebootSystemAuthority(plan: SameHostRebootRecoveryPlan): () => Promise<void> {
+function rebootSystemAuthority(
+  plan: SameHostRebootRecoveryPlan,
+  readCurrentIdentity: () => ProcessIdentitySnapshot,
+): () => Promise<void> {
   return async () => {
-    const current = currentIdentity();
+    const current = readCurrentIdentity();
     if (!jsonBytes(current).equals(jsonBytes(plan.identity))) {
       throw isolated('reboot coordinator system identity changed');
     }
@@ -442,8 +452,9 @@ function rebootSystemAuthority(plan: SameHostRebootRecoveryPlan): () => Promise<
 export async function installSameHostRebootRecoveryControlled(
   options: ControlledInstallSameHostRebootRecoveryOptions,
 ): Promise<SameHostRebootRecoveryHandle> {
+  const readCurrentIdentity = options.readCurrentIdentity ?? currentIdentity;
   const plan = await inspectSameHostRebootRecoveryControlled(options);
-  const verifySystemAuthority = rebootSystemAuthority(plan);
+  const verifySystemAuthority = rebootSystemAuthority(plan, readCurrentIdentity);
   await options.beforeClaimInstall?.();
   let attempt: RecoveryAttemptHandle;
   if (plan.mode === 'mechanical-empty') {
@@ -495,6 +506,7 @@ export async function installSameHostRebootRecoveryControlled(
     proof: plan.proof,
     sourceOwnerDigest: plan.sourceOwnerDigest,
     quarantine: plan.quarantine,
+    readCurrentIdentity,
     ...(plan.helperBytes ? { helperBytes: plan.helperBytes } : {}),
   });
 }
@@ -502,7 +514,7 @@ export async function installSameHostRebootRecoveryControlled(
 async function inspectContinuation(
   options: ControlledAcquireSameHostRebootRecoveryOptions,
 ): Promise<{ plan: SameHostRebootRecoveryPlan; domain: RecoveryDomain }> {
-  const identity = currentIdentity();
+  const identity = (options.readCurrentIdentity ?? currentIdentity)();
   const context = await loadRecoveryContext(options.workspacePath);
   const domain = await readRecoveryDomainAtPath(
     context.records,
@@ -597,8 +609,9 @@ async function inspectContinuation(
 export async function acquireSameHostRebootRecoveryControlled(
   options: ControlledAcquireSameHostRebootRecoveryOptions,
 ): Promise<SameHostRebootRecoveryHandle> {
+  const readCurrentIdentity = options.readCurrentIdentity ?? currentIdentity;
   const { plan } = await inspectContinuation(options);
-  const verifySystemAuthority = rebootSystemAuthority(plan);
+  const verifySystemAuthority = rebootSystemAuthority(plan, readCurrentIdentity);
   const common = {
     workspacePath: plan.workspacePath,
     attemptId: options.attemptId,
@@ -619,6 +632,7 @@ export async function acquireSameHostRebootRecoveryControlled(
     proof: plan.proof,
     sourceOwnerDigest: plan.sourceOwnerDigest,
     quarantine: plan.quarantine,
+    readCurrentIdentity,
     ...(plan.helperBytes ? { helperBytes: plan.helperBytes } : {}),
   });
 }
@@ -628,20 +642,25 @@ export async function finalizeSameHostRebootRecoveryControlled(
   options: ControlledFinalizeSameHostRebootRecoveryOptions = {},
 ): Promise<SameHostRebootRecoveryCompletion> {
   const binding = sameHostRebootHandleBinding(handle);
+  const attemptIdentity = binding.readCurrentIdentity();
   const common = {
     now: options.now,
+    attemptIdentity,
     probeSourceOwner: sourceOwnerProbe(binding.sourceOwnerDigest),
     finalRenameCommitCheck: options.finalRenameCommitCheck,
-    verifySystemAuthority: rebootSystemAuthority({
-      mode: binding.mode,
-      workspacePath: binding.attempt.workspacePath,
-      identity: currentIdentity(),
-      proof: binding.proof,
-      sourceOwnerDigest: binding.sourceOwnerDigest,
-      sourceSnapshotDigest: '',
-      quarantine: binding.quarantine,
-      ...(binding.helperBytes ? { helperBytes: binding.helperBytes } : {}),
-    }),
+    verifySystemAuthority: rebootSystemAuthority(
+      {
+        mode: binding.mode,
+        workspacePath: binding.attempt.workspacePath,
+        identity: attemptIdentity,
+        proof: binding.proof,
+        sourceOwnerDigest: binding.sourceOwnerDigest,
+        sourceSnapshotDigest: '',
+        quarantine: binding.quarantine,
+        ...(binding.helperBytes ? { helperBytes: binding.helperBytes } : {}),
+      },
+      binding.readCurrentIdentity,
+    ),
   };
   if (binding.mode === 'mechanical-empty') {
     return await finalizeMechanicalEmptyRecoveryControlled(binding.attempt, {

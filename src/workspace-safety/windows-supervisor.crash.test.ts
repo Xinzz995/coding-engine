@@ -117,6 +117,7 @@ windowsOnly(
           parentReadyPath,
           HANDLE_INVENTORY_TARGET,
           HANDLE_INVENTORY_SOURCE,
+          process.env.CODING_X_WINDOWS_HANDLE_INVENTORY_ASSEMBLY ?? '',
         ],
         {
           cwd: workspace,

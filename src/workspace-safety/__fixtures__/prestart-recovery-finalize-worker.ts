@@ -1,5 +1,5 @@
 import { HELPER_BYTES } from './operation-test-support.js';
-import { createIdentityProbe } from '../identity.js';
+import { currentCrossProcessTestIdentity } from './identity-test-support.js';
 import {
   acquirePrestartRecoveryWithAuthority as acquirePrestartRecovery,
   finalizePrestartRecoveryWithAuthority as finalizePrestartRecovery,
@@ -17,13 +17,14 @@ if (
   const handle = await acquirePrestartRecovery({
     workspacePath,
     attemptId,
-    identity: createIdentityProbe().current(),
+    identity: currentCrossProcessTestIdentity(),
     helperBytes: HELPER_BYTES,
     probeSourceOwner: () => 'dead',
     probeAttemptOwner: () => 'dead',
   });
   const stopped = new Promise<never>(() => undefined);
   await finalizePrestartRecovery(handle, {
+    attemptIdentity: currentCrossProcessTestIdentity(),
     helperBytes: HELPER_BYTES,
     probeSourceOwner: () => 'dead',
     hooks: {

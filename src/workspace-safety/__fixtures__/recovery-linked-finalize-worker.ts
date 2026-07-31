@@ -1,4 +1,7 @@
-import { createIdentityProbe } from '../identity.js';
+import {
+  currentCrossProcessTestIdentity,
+  probeCrossProcessTestIdentity,
+} from './identity-test-support.js';
 import {
   acquireRecoveryAttemptWithAuthority as acquireRecoveryAttempt,
   finalizeMechanicalEmptyRecoveryWithAuthority as finalizeMechanicalEmptyRecovery,
@@ -18,9 +21,13 @@ function send(message: string): Promise<void> {
 const handle = await acquireRecoveryAttempt({
   workspacePath,
   attemptId,
-  identity: createIdentityProbe().current(),
+  identity: currentCrossProcessTestIdentity(),
+  probeSourceOwner: probeCrossProcessTestIdentity,
+  probeAttemptOwner: probeCrossProcessTestIdentity,
 });
 await finalizeMechanicalEmptyRecovery(handle, {
+  attemptIdentity: currentCrossProcessTestIdentity(),
+  probeSourceOwner: probeCrossProcessTestIdentity,
   hooks: {
     beforeFinalManifestSourceUnlink: async () => {
       await send('linked');

@@ -74,14 +74,17 @@ async function unfinishedBootstrap(stage: 'root' | 'marker' = 'root'): Promise<s
   return workspace;
 }
 
-async function installFirstAttempt(workspace: string) {
+async function installFirstAttempt(
+  workspace: string,
+  identity: ProcessIdentitySnapshot = createIdentityProbe().current(),
+) {
   const sourceSnapshotDigest = await captureBootstrapRecoverySourceSnapshotDigest(workspace);
   return await installBootstrapRecoveryDomain({
     workspacePath: workspace,
     expectedSourceSnapshotDigest: sourceSnapshotDigest,
     recoveryId: RECOVERY_ID,
     attemptId: ATTEMPT_A,
-    identity: createIdentityProbe().current(),
+    identity,
     probeSourceOwner: () => 'dead',
     now: () => new Date('2026-07-30T00:10:00.000Z'),
   });
@@ -90,6 +93,7 @@ async function installFirstAttempt(workspace: string) {
 describe('bootstrap-complete recovery', () => {
   it('installs the exact missing marker and archives the bootstrap lease as its final write', async () => {
     const workspace = await unfinishedBootstrap();
+    const attemptIdentity = { ...deadIdentity(), pid: 2_000_000_001 };
     expect(
       await evaluateBootstrapRecoveryDiskStateWithAuthority(workspace, () => 'dead'),
     ).toMatchObject({
@@ -97,7 +101,7 @@ describe('bootstrap-complete recovery', () => {
       markerState: 'missing',
     });
 
-    const handle = await installFirstAttempt(workspace);
+    const handle = await installFirstAttempt(workspace, attemptIdentity);
     expect(
       await evaluateBootstrapRecoveryDiskStateWithAuthority(workspace, () => 'dead'),
     ).toMatchObject({
@@ -105,6 +109,7 @@ describe('bootstrap-complete recovery', () => {
       phase: 'claimed',
     });
     const completed = await finalizeBootstrapRecovery(handle, {
+      attemptIdentity,
       probeSourceOwner: () => 'dead',
       now: () => new Date('2026-07-30T00:20:00.000Z'),
     });

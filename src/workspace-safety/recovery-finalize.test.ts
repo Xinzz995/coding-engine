@@ -192,10 +192,13 @@ describe('mechanical-empty recovery finalization', () => {
   });
 
   it('commits claimed through verified and finalizing, then archives the whole active lease', async () => {
-    const { workspace, handle } = await installMechanicalRecovery();
+    const attemptIdentity = { ...createIdentityProbe().current(), pid: 2_000_000_001 };
+    const { workspace, handle } = await installMechanicalRecovery(attemptIdentity);
     writeFileSync(join(workspace, 'business.txt'), 'unchanged');
 
     const completion = await finalizeMechanicalEmptyRecovery(handle, {
+      attemptIdentity,
+      probeSourceOwner: () => 'dead',
       now: () => new Date(TIMESTAMP),
     });
 

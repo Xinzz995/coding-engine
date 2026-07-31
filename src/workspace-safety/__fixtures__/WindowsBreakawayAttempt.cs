@@ -12,6 +12,7 @@ namespace CodingX.WorkspaceSafety.Tests
         private const uint CREATE_SUSPENDED = 0x00000004;
         private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
         private const uint CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+        private const int ERROR_ACCESS_DENIED = 5;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct STARTUPINFO
@@ -27,6 +28,7 @@ namespace CodingX.WorkspaceSafety.Tests
             internal uint dwXCountChars;
             internal uint dwYCountChars;
             internal uint dwFillAttribute;
+            internal uint dwFlags;
             internal short wShowWindow;
             internal short cbReserved2;
             internal IntPtr lpReserved2;
@@ -118,7 +120,7 @@ namespace CodingX.WorkspaceSafety.Tests
                 }
                 File.WriteAllText(outcomePath, "{\"allowed\":false,\"error\":" +
                     error.ToString(CultureInfo.InvariantCulture) + "}", new UTF8Encoding(false));
-                return 0;
+                return error == ERROR_ACCESS_DENIED ? 0 : 3;
             }
             catch (Exception error)
             {

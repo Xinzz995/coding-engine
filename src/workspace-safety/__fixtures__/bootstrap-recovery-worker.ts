@@ -1,5 +1,8 @@
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from '../workspace-authority-test-seam.js';
-import { createIdentityProbe } from '../identity.js';
+import {
+  currentCrossProcessTestIdentity,
+  probeCrossProcessTestIdentity,
+} from './identity-test-support.js';
 import {
   finalizeBootstrapRecoveryWithAuthority as finalizeBootstrapRecovery,
   installBootstrapRecoveryDomainWithAuthority as installBootstrapRecoveryDomain,
@@ -18,7 +21,7 @@ if (!mode || !workspacePath) throw new Error('mode and workspace are required');
 if (mode === 'bootstrap-root' || mode === 'bootstrap-linked') {
   await bootstrapWorkspace({
     workspacePath,
-    identity: createIdentityProbe().current(),
+    identity: currentCrossProcessTestIdentity(),
     hooks:
       mode === 'bootstrap-root'
         ? { afterProtocolRootInstalled: () => blockAt('bootstrap-root') }
@@ -29,9 +32,11 @@ if (mode === 'bootstrap-root' || mode === 'bootstrap-linked') {
   const handle = await installBootstrapRecoveryDomain({
     workspacePath,
     expectedSourceSnapshotDigest: sourceSnapshotDigest,
-    identity: createIdentityProbe().current(),
+    identity: currentCrossProcessTestIdentity(),
+    probeSourceOwner: probeCrossProcessTestIdentity,
   });
   await finalizeBootstrapRecovery(handle, {
+    attemptIdentity: currentCrossProcessTestIdentity(),
     hooks: {
       beforeMarkerInstall: barrier === 'before-marker' ? () => blockAt('before-marker') : undefined,
       beforeMarkerSourceUnlink:

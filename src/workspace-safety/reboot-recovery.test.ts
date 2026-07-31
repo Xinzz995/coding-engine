@@ -331,6 +331,26 @@ describe('same-host reboot proof planning', () => {
 });
 
 describe('same-host reboot mechanical continuation', () => {
+  it('keeps one controlled identity source bound through install and finalization', async () => {
+    const setup = await idleContainmentWorkspace();
+    let reads = 0;
+    const readCurrentIdentity = (): ProcessIdentitySnapshot => {
+      reads += 1;
+      return setup.current;
+    };
+    const handle = await installSameHostRebootRecovery({
+      workspacePath: setup.workspace,
+      readCurrentIdentity,
+    });
+    const readsAfterInstall = reads;
+
+    await finalizeSameHostRebootRecovery(handle);
+
+    expect(readsAfterInstall).toBeGreaterThan(1);
+    expect(reads).toBeGreaterThan(readsAfterInstall);
+    expect(existsSync(leasePath(setup.workspace))).toBe(false);
+  });
+
   it('archives the original containment reason with the lease instead of deleting or relabeling it', async () => {
     const setup = await idleContainmentWorkspace();
     await installInExitedWorker('mechanical-empty', setup.workspace);
@@ -397,6 +417,7 @@ describe('same-host reboot mechanical continuation', () => {
       const declaration = source.slice(start, end);
       expect(declaration).not.toMatch(/readonly identity\??:/u);
       expect(declaration).not.toMatch(/readonly identityProbe\??:/u);
+      expect(declaration).not.toMatch(/readonly readCurrentIdentity\??:/u);
       expect(declaration).not.toMatch(/readonly probeAttemptOwner\??:/u);
     }
     expect(source).toContain('return createIdentityProbe().current()');

@@ -1,7 +1,9 @@
 import { existsSync } from 'node:fs';
-import { createIdentityProbe } from '../identity.js';
+import {
+  currentCrossProcessTestIdentity,
+  probeCrossProcessTestIdentity,
+} from './identity-test-support.js';
 import { acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease } from '../workspace-authority-test-seam.js';
-import { acquireMutationRecoveryAttempt, resumeMutationRecovery } from '../mutation-recovery.js';
 import {
   acquireMutationRecoveryAttemptWithAuthority,
   resumeMutationRecoveryWithAuthority,
@@ -29,7 +31,7 @@ if (mode === 'normal') {
   let businessStep = 0;
   const lease = await acquireWorkspaceLease({
     workspacePath,
-    identity: createIdentityProbe().current(),
+    identity: currentCrossProcessTestIdentity(),
     command: 'repair',
   });
   await runWorkspaceMutation(createWorkspaceSession(lease), {
@@ -55,10 +57,13 @@ if (mode === 'normal') {
 } else if (mode === 'resume') {
   const handle = await acquireMutationRecoveryAttemptWithAuthority({
     workspacePath,
-    identity: createIdentityProbe().current(),
+    identity: currentCrossProcessTestIdentity(),
+    probeSourceOwner: probeCrossProcessTestIdentity,
     probeAttemptOwner: () => 'dead',
   });
   await resumeMutationRecoveryWithAuthority(handle, {
+    attemptIdentity: currentCrossProcessTestIdentity(),
+    probeSourceOwner: probeCrossProcessTestIdentity,
     hooks: {
       afterMutationStateInstalled: (phase) => stopAt(`mutation-state-${phase}`),
       beforeFinalManifestSourceUnlink: () => stopAt('final-manifest-linked'),
@@ -69,10 +74,16 @@ if (mode === 'normal') {
   process.send('ready');
   while (!existsSync(barrier)) await new Promise((resolve) => setTimeout(resolve, 5));
   try {
-    const handle = await acquireMutationRecoveryAttempt({
+    const handle = await acquireMutationRecoveryAttemptWithAuthority({
       workspacePath,
+      identity: currentCrossProcessTestIdentity(),
+      probeSourceOwner: probeCrossProcessTestIdentity,
+      probeAttemptOwner: probeCrossProcessTestIdentity,
     });
-    await resumeMutationRecovery(handle);
+    await resumeMutationRecoveryWithAuthority(handle, {
+      attemptIdentity: currentCrossProcessTestIdentity(),
+      probeSourceOwner: probeCrossProcessTestIdentity,
+    });
     process.send('completed');
   } catch {
     process.send('rejected');

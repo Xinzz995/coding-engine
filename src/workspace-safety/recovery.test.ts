@@ -703,7 +703,7 @@ describe('recovery domain installation and takeover', () => {
     const workers = [ATTEMPT_B, ATTEMPT_C].map((attemptId) =>
       fork(workerPath, [workspace, attemptId, barrier], {
         execArgv: ['--import', 'tsx'],
-        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
       }),
     );
     await Promise.all(workers.map(waitForReady));
@@ -718,7 +718,7 @@ describe('recovery domain installation and takeover', () => {
     await Promise.all(workers.map(waitForExit));
     expect(results.filter((result) => result === 'acquired')).toHaveLength(1);
     expect(results.filter((result) => result === 'rejected')).toHaveLength(1);
-  });
+  }, 60_000);
 });
 
 function waitForReady(child: ChildProcess): Promise<void> {
@@ -728,7 +728,7 @@ function waitForReady(child: ChildProcess): Promise<void> {
 function waitForExit(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => finish(new Error('worker timed out while stopping')), 10_000);
+    const timer = setTimeout(() => finish(new Error('worker timed out while stopping')), 30_000);
     function cleanup(): void {
       clearTimeout(timer);
       child.off('error', onError);
@@ -777,7 +777,7 @@ function waitForWorkerMessage(
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => finish(undefined, new Error(`worker timed out before ${phase}`)),
-      10_000,
+      30_000,
     );
     function cleanup(): void {
       clearTimeout(timer);

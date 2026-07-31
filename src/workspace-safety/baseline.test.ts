@@ -71,7 +71,9 @@ describe('captureDelegatedBaseline', () => {
     ).toThrow(/安全协议路径/u);
   });
 
-  it('rejects symlinks instead of following them', () => {
+  // Windows reparse points require the native attribute checker and are covered by the mandatory
+  // standard-user windows-reparse-point suite. This portable unit uses POSIX symlink creation.
+  it.skipIf(process.platform === 'win32')('rejects symlinks instead of following them', () => {
     const root = workspace();
     writeFileSync(join(root, 'target.txt'), 'x');
     symlinkSync(join(root, 'target.txt'), join(root, 'link.txt'));

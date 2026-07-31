@@ -165,6 +165,7 @@ describe('Windows native proof report', () => {
 
   it('runs through a disposable standard account and fails outside Server 2022 CI', () => {
     const script = readFileSync('build/run-windows-native-proof.ps1', 'utf8');
+    const fixtureCompiler = readFileSync('build/compile-windows-test-fixture.ps1', 'utf8');
     const workflow = readFileSync('.github/workflows/quality-gate.yml', 'utf8');
     const nativeJob = workflow.slice(
       workflow.indexOf('  checks_windows-native-standard-user:'),
@@ -172,6 +173,15 @@ describe('Windows native proof report', () => {
     );
     expect(script).toContain("$env:ImageOS -ne 'win22'");
     expect(script).toContain('-Credential $credential');
+    expect(script).toContain('compile-windows-test-fixture.ps1');
+    expect(script).toContain('CODING_X_WINDOWS_BREAKAWAY_ASSEMBLY');
+    expect(script).toContain('CODING_X_WINDOWS_HANDLE_INVENTORY_ASSEMBLY');
+    expect(script).toContain('CODING_X_WINDOWS_CTRL_C_DRIVER_ASSEMBLY');
+    expect(script.indexOf('if ($Child)')).toBeLessThan(
+      script.indexOf('compile-windows-test-fixture.ps1'),
+    );
+    expect(fixtureCompiler).toContain('-OutputAssembly $OutputAssembly');
+    expect(fixtureCompiler).toContain('-OutputType Library');
     expect(script).toContain('Remove-LocalUser -Name $userName');
     expect(script).not.toContain('runas.exe');
     expect(nativeJob).toContain('build / windows-supervisor-reproducibility');
@@ -186,6 +196,15 @@ describe('Windows native proof report', () => {
   it('forces an isolated native config that resolves only the production transport', () => {
     const runner = readFileSync('build/windows-native-proof.mjs', 'utf8');
     const nativeConfig = readFileSync('build/vitest.windows-native.config.mjs', 'utf8');
+    const ordinaryConfig = readFileSync('vitest.config.ts', 'utf8');
+    const productionIdentityTransport = readFileSync(
+      'src/workspace-safety/windows-identity-transport.ts',
+      'utf8',
+    );
+    const testIdentityTransport = readFileSync(
+      'src/workspace-safety/windows-identity-test-transport.ts',
+      'utf8',
+    );
     expect(runner).toContain("join(projectRoot, 'build', 'vitest.windows-native.config.mjs')");
     expect(runner).toContain("'--config'");
     expect(runner).toContain("'--reporter=verbose'");
@@ -194,5 +213,55 @@ describe('Windows native proof report', () => {
     expect(runner).toContain('last stdout');
     expect(nativeConfig).toContain('windows-path-attributes-transport.ts');
     expect(nativeConfig).not.toMatch(/setupFiles|test-transport|process\.env/u);
+    expect(ordinaryConfig).toContain('REQUIRED_WINDOWS_NATIVE_SUITES');
+    expect(ordinaryConfig).toContain("process.platform === 'win32'");
+    expect(ordinaryConfig).toContain('windowsNativeSuitePaths');
+    expect(ordinaryConfig).toContain('ordinaryWindowsIdentityTransportAlias');
+    expect(ordinaryConfig).toContain('windows-identity-test-transport.ts');
+    expect(productionIdentityTransport).toContain('WINDOWS_IDENTITY_SNAPSHOT_SCRIPT');
+    expect(productionIdentityTransport).toContain('spawnSync');
+    expect(testIdentityTransport).toContain('MAX_TEST_INVOCATIONS');
+    expect(testIdentityTransport).not.toMatch(
+      /powershell\.exe|Get-CimInstance|WINDOWS_IDENTITY_SNAPSHOT_SCRIPT|spawnSync/u,
+    );
+  });
+
+  it('keeps ordinary Windows parent and spawned-fixture identities on one deterministic seam', () => {
+    const workerNames = [
+      'bootstrap-recovery-worker.ts',
+      'mutation-crash-worker.ts',
+      'prestart-recovery-finalize-worker.ts',
+      'prestart-recovery-owner-worker.ts',
+      'reboot-recovery-install-worker.ts',
+      'recovery-finalize-worker.ts',
+      'recovery-linked-finalize-worker.ts',
+    ];
+    for (const name of workerNames) {
+      const source = readFileSync(`src/workspace-safety/__fixtures__/${name}`, 'utf8');
+      expect(source, name).toContain('identity-test-support.js');
+      expect(source, name).not.toContain("from '../identity.js'");
+    }
+    for (const name of [
+      'bootstrap-recovery-worker.ts',
+      'mutation-crash-worker.ts',
+      'prestart-recovery-finalize-worker.ts',
+      'recovery-finalize-worker.ts',
+      'recovery-linked-finalize-worker.ts',
+    ]) {
+      const source = readFileSync(`src/workspace-safety/__fixtures__/${name}`, 'utf8');
+      expect(source, name).toContain('attemptIdentity: currentCrossProcessTestIdentity()');
+    }
+    const rebootWorker = readFileSync(
+      'src/workspace-safety/__fixtures__/reboot-recovery-install-worker.ts',
+      'utf8',
+    );
+    expect(rebootWorker).toContain('readCurrentIdentity: currentCrossProcessTestIdentity');
+
+    const nativeCrashWorker = readFileSync(
+      'src/workspace-safety/__fixtures__/delegated-recovery-crash-worker.ts',
+      'utf8',
+    );
+    expect(nativeCrashWorker).toContain("from '../identity.js'");
+    expect(nativeCrashWorker).not.toContain('identity-test-support.js');
   });
 });

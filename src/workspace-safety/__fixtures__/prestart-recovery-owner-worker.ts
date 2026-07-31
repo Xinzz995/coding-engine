@@ -1,5 +1,5 @@
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from '../workspace-authority-test-seam.js';
-import { createIdentityProbe } from '../identity.js';
+import { currentCrossProcessTestIdentity } from './identity-test-support.js';
 import { acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease } from '../workspace-authority-test-seam.js';
 import { runWorkspaceOperationWithAuthority as runWorkspaceOperation } from '../operation-authority-test-seam.js';
 import { readDarkPosixHelperBundle, runDarkPosixSupervisedOperation } from '../posix-supervisor.js';
@@ -22,7 +22,7 @@ if (
 ) {
   process.exitCode = 2;
 } else {
-  const identity = createIdentityProbe().current();
+  const identity = currentCrossProcessTestIdentity();
   await bootstrapWorkspace({
     workspacePath: workspace,
     identity,

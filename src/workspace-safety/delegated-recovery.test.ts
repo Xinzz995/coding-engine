@@ -254,10 +254,14 @@ describe('internal delegated-finalize recovery eligibility and attempt authority
 });
 
 describe('internal delegated-finalize recovery finalization', () => {
-  async function install(setup: OperationTestSetup, attemptId = ATTEMPT_A) {
+  async function install(
+    setup: OperationTestSetup,
+    attemptId = ATTEMPT_A,
+    identity = createIdentityProbe().current(),
+  ) {
     return await installDelegatedFinalizeRecovery({
       workspacePath: setup.workspace,
-      identity: createIdentityProbe().current(),
+      identity,
       recoveryId: RECOVERY_ID,
       attemptId,
       now: () => new Date('2026-07-30T02:00:00.000Z'),
@@ -272,10 +276,15 @@ describe('internal delegated-finalize recovery finalization', () => {
     'settles and archives a %s without ordinary outcome evidence',
     async (_label, change, hasCandidate) => {
       const setup = await armedWorkspace(change);
-      const completion = await finalizeDelegatedRecovery(await install(setup), {
-        now: () => new Date('2026-07-30T02:01:00.000Z'),
-        ...exactProbes,
-      });
+      const attemptIdentity = fakeAttemptIdentity(2_000_000_004);
+      const completion = await finalizeDelegatedRecovery(
+        await install(setup, ATTEMPT_A, attemptIdentity),
+        {
+          attemptIdentity,
+          now: () => new Date('2026-07-30T02:01:00.000Z'),
+          ...exactProbes,
+        },
+      );
 
       expect(existsSync(join(setup.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
       expect(existsSync(completion.archivePath)).toBe(true);

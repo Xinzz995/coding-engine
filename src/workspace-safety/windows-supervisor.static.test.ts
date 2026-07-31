@@ -11,10 +11,14 @@ import {
 import {
   ASSET_ROOT,
   BREAKAWAY_SOURCE,
+  BREAKAWAY_TARGET,
   created,
+  CTRL_C_DRIVER,
   CTRL_C_DRIVER_SOURCE,
   CTRL_C_PARENT,
   HANDLE_INVENTORY_SOURCE,
+  HANDLE_INVENTORY_TARGET,
+  OUTER_JOB_DRIVER,
   PARENT_CRASH_PARENT,
   windowsEnvironment,
 } from './windows-supervisor.test-support.js';
@@ -176,6 +180,8 @@ describe('fixed Windows Job supervisor assets', () => {
       /AssignProcessToJobObject|taskkill|Start-Process|Invoke-Expression|BREAKAWAY|ExecutionPolicy|shell\s*:/u,
     );
     const ctrlDriver = readFileSync(CTRL_C_DRIVER_SOURCE, 'utf8');
+    const ctrlDriverScript = readFileSync(CTRL_C_DRIVER, 'utf8');
+    const outerJobDriverScript = readFileSync(OUTER_JOB_DRIVER, 'utf8');
     const ctrlParent = readFileSync(CTRL_C_PARENT, 'utf8');
     const ctrlTarget = readFileSync(
       join(dirname(CTRL_C_PARENT), 'windows-ctrl-c-target.mjs'),
@@ -183,6 +189,8 @@ describe('fixed Windows Job supervisor assets', () => {
     );
     expect(ctrlDriver).toContain('CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP');
     expect(ctrlDriver).toContain('GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)');
+    expect(ctrlDriverScript).toContain('Add-Type -Path $resolvedAssembly');
+    expect(outerJobDriverScript).toContain('Add-Type -Path $resolvedAssembly');
     expect(ctrlParent).toContain("process.on('SIGINT'");
     expect(ctrlParent).toContain("reason: 'user-interrupt'");
     expect(ctrlParent).toContain("const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe'");
@@ -193,16 +201,27 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(`${ctrlDriver}\n${ctrlParent}\n${ctrlTarget}`).not.toContain('process.kill');
 
     const breakaway = readFileSync(BREAKAWAY_SOURCE, 'utf8');
+    const breakawayTarget = readFileSync(BREAKAWAY_TARGET, 'utf8');
     const handleInventory = readFileSync(HANDLE_INVENTORY_SOURCE, 'utf8');
+    const handleInventoryTarget = readFileSync(HANDLE_INVENTORY_TARGET, 'utf8');
     const parentCrash = readFileSync(PARENT_CRASH_PARENT, 'utf8');
     expect(breakaway).toContain('CREATE_BREAKAWAY_FROM_JOB');
+    expect(breakaway).toContain('ERROR_ACCESS_DENIED = 5');
+    expect(breakaway).toMatch(/dwFillAttribute;\s+internal uint dwFlags;/u);
+    expect(breakawayTarget).toContain('Add-Type -Path $resolvedAssembly');
     expect(handleInventory).toContain('NtQuerySystemInformation');
     expect(handleInventory).toContain('HANDLE_FLAG_INHERIT');
+    expect(handleInventory).toMatch(/dwFillAttribute;\s+internal uint dwFlags;/u);
+    expect(handleInventoryTarget).toContain('Add-Type -Path $resolvedAssembly');
+    expect(handleInventoryTarget).toContain('Add-Type -TypeDefinition');
+    expect(handleInventory).toContain('"-AssemblyPath", assemblyPath');
     expect(parentCrash).toContain('supervisorPid: bound.supervisorPid');
     expect(parentCrash).toContain(
       "const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe'",
     );
     expect(parentCrash).toContain('detached: true');
+    expect(parentCrash).toContain("events.next('RESULT')");
+    expect(parentCrash).toContain('target exited before ready');
     expect(parentCrash).toContain('await new Promise(() => {})');
     expect(`${breakaway}\n${handleInventory}\n${parentCrash}`).not.toContain('vi.mock');
   });

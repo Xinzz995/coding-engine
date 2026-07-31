@@ -193,10 +193,11 @@ async function install(
   setup: OperationTestSetup,
   probes: PrestartRecoveryProbeOptions,
   attemptId = ATTEMPT_A,
+  identity = createIdentityProbe().current(),
 ) {
   return await installPrestartRecovery({
     workspacePath: setup.workspace,
-    identity: createIdentityProbe().current(),
+    identity,
     recoveryId: RECOVERY_ID,
     attemptId,
     now: () => new Date('2026-07-30T03:00:00.000Z'),
@@ -276,10 +277,15 @@ describe('prestart mechanical recovery finalization', () => {
       const value = await make();
       const setup = 'setup' in value ? value.setup : value;
       const probes = probesFor();
-      const completion = await finalizePrestartRecovery(await install(setup, probes), {
-        ...probes,
-        now: () => new Date('2026-07-30T03:01:00.000Z'),
-      });
+      const attemptIdentity = { ...createIdentityProbe().current(), pid: 2_000_000_005 };
+      const completion = await finalizePrestartRecovery(
+        await install(setup, probes, ATTEMPT_A, attemptIdentity),
+        {
+          ...probes,
+          attemptIdentity,
+          now: () => new Date('2026-07-30T03:01:00.000Z'),
+        },
+      );
 
       expect(existsSync(join(setup.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
       expect(existsSync(completion.archivePath)).toBe(true);

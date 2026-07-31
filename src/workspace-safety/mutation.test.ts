@@ -392,13 +392,14 @@ describe('dark workspace mutation core', () => {
       }),
     ).rejects.toThrow(/fixture interruption/);
 
-    const identity = createIdentityProbe().current();
+    const identity = { ...createIdentityProbe().current(), pid: 2_000_000_006 };
     const handle = await installMutationRecoveryDomain({
       workspacePath: root,
       identity,
       probeSourceOwner: () => 'dead',
     });
     const completion = await resumeMutationRecovery(handle, {
+      attemptIdentity: identity,
       probeSourceOwner: () => 'dead',
     });
 

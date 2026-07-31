@@ -34,6 +34,7 @@ class Events {
       Symbol.asyncIterator
     ]();
     this.stderr = '';
+    this.outputTail = { stdout: '', stderr: '' };
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       this.stderr += chunk;
@@ -45,12 +46,24 @@ class Events {
       const step = await Promise.race([
         this.iterator.next(),
         new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`timed out waiting for ${expected}`)), 45_000),
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `timed out waiting for ${expected}; helper stderr: ${this.stderr}; target stdout: ${this.outputTail.stdout}; target stderr: ${this.outputTail.stderr}`,
+                ),
+              ),
+            45_000,
+          ),
         ),
       ]);
       if (step.done) throw new Error(`helper exited before ${expected}: ${this.stderr}`);
       const event = JSON.parse(step.value);
       if (event.type === 'FAILURE') throw new Error(`helper failure: ${event.message}`);
+      if (event.type === 'OUTPUT' && (event.stream === 'stdout' || event.stream === 'stderr')) {
+        const output = Buffer.from(String(event.data), 'base64').toString('utf8');
+        this.outputTail[event.stream] = `${this.outputTail[event.stream]}${output}`.slice(-8192);
+      }
       if (event.type === expected) return event;
     }
   }
@@ -138,8 +151,14 @@ function installPrepared(workspace, helperDigest, bound) {
 }
 
 async function main() {
-  const [assetRootInput, workspaceInput, parentReadyPath, handleTargetInput, handleSourceInput] =
-    process.argv.slice(2);
+  const [
+    assetRootInput,
+    workspaceInput,
+    parentReadyPath,
+    handleTargetInput,
+    handleSourceInput,
+    handleAssemblyInput = '',
+  ] = process.argv.slice(2);
   if (
     !assetRootInput ||
     !workspaceInput ||
@@ -153,6 +172,7 @@ async function main() {
   const workspace = realpathSync(workspaceInput);
   const handleTarget = realpathSync(handleTargetInput);
   const handleSource = realpathSync(handleSourceInput);
+  const handleAssembly = handleAssemblyInput ? realpathSync(handleAssemblyInput) : '';
   const helperDigest = digest(helperBundle(assetRoot));
   const supervisor = join(assetRoot, SUPERVISOR_EXECUTABLE);
   const powershell = win32.join(
@@ -216,6 +236,8 @@ async function main() {
           'root',
           '-SourcePath',
           handleSource,
+          '-AssemblyPath',
+          handleAssembly,
           '-PowerShellPath',
           powershell,
           '-ScriptPath',
@@ -255,7 +277,14 @@ async function main() {
     activeChildDigest: digest(armedBytes),
   });
   await events.next('STARTED');
-  await waitForFile(targetReadyPath);
+  await Promise.race([
+    waitForFile(targetReadyPath),
+    events.next('RESULT').then((result) => {
+      throw new Error(
+        `handle inventory target exited before ready with code ${String(result.code)}; stdout: ${events.outputTail.stdout}; stderr: ${events.outputTail.stderr}`,
+      );
+    }),
+  ]);
   const targetReady = JSON.parse(readFileSync(targetReadyPath, 'utf8'));
   writeFileSync(
     parentReadyPath,

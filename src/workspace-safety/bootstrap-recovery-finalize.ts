@@ -80,6 +80,8 @@ export interface BootstrapRecoveryFinalizationHooks {
 
 export interface ControlledFinalizeBootstrapRecoveryOptions {
   readonly now?: () => Date;
+  /** Exact test/coordinator identity; omitted callers keep the real platform read. */
+  readonly attemptIdentity?: ProcessIdentitySnapshot;
   readonly probeSourceOwner?: (owner: OwnerRecord) => IdentityVerdict;
   readonly hooks?: BootstrapRecoveryFinalizationHooks;
   readonly finalRenameCommitCheck?: () => void;
@@ -266,7 +268,7 @@ export async function finalizeBootstrapRecoveryControlled(
     workspacePath: handle.workspacePath,
     claimBytes: handleBinding.claimBytes,
     attemptOwnerBytes: handleBinding.attemptOwnerBytes,
-    processIdentity: createIdentityProbe().current(),
+    processIdentity: options.attemptIdentity ?? createIdentityProbe().current(),
     verifySystemAuthority: options.verifySystemAuthority,
   };
   const probe = asBootstrapSourceOwnerProbe(options.probeSourceOwner);
@@ -405,6 +407,7 @@ export async function finalizeBootstrapRecovery(
 ): Promise<BootstrapRecoveryCompletion> {
   const system = captureExactCurrentIdentityAuthority();
   return await finalizeBootstrapRecoveryControlled(handle, {
+    attemptIdentity: system.identity,
     probeSourceOwner: system.probeOwner,
     verifySystemAuthority: system.verifyCurrent,
   });

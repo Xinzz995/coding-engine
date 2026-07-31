@@ -574,10 +574,10 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     created.push(workspace);
     const escapeMarker = join(workspace, 'escaped.txt');
     const outcomePath = join(workspace, 'breakaway-outcome.json');
+    const breakawayAssembly = process.env.CODING_X_WINDOWS_BREAKAWAY_ASSEMBLY;
     const launch = createWindowsSupervisorLaunch({ assetRoot: ASSET_ROOT });
     const child = spawnWindowsJobSupervisor(launch);
-    // This fixture compiles its small P/Invoke probe inside the disposable standard-user process.
-    const events = new EventReader(child, 60_000);
+    const events = new EventReader(child, breakawayAssembly ? 15_000 : 60_000);
     const bound = await events.next('BOUND');
     const authority = installPreparedAuthority(workspace, launch.assets.helperDigest, bound);
     const powershell = win32.join(
@@ -599,6 +599,8 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
         BREAKAWAY_TARGET,
         '-SourcePath',
         BREAKAWAY_SOURCE,
+        '-AssemblyPath',
+        breakawayAssembly ?? '',
         '-NodePath',
         realpathSync(process.execPath),
         '-EscapeMarker',
@@ -622,13 +624,25 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       activeChildDigest: DIGEST(armedBytes),
     });
     await events.next('STARTED');
-    expect((await events.next('RESULT')).code).toBe(0);
+    const result = await events.next('RESULT');
+    const outcome = existsSync(outcomePath)
+      ? (JSON.parse(readFileSync(outcomePath, 'utf8')) as Record<string, unknown>)
+      : undefined;
+    expect(
+      result.code,
+      JSON.stringify({
+        outcome,
+        stdout: events.outputTail.stdout,
+        stderr: events.outputTail.stderr,
+      }),
+    ).toBe(0);
     const drained = await events.next('DRAINED');
     const drainedMessage = JSON.parse(
       Buffer.from(String(drained.messageBase64), 'base64').toString('utf8'),
     ) as Record<string, unknown>;
-    expect(JSON.parse(readFileSync(outcomePath, 'utf8'))).toMatchObject({
+    expect(outcome).toMatchObject({
       allowed: false,
+      error: 5,
     });
     expect(existsSync(escapeMarker)).toBe(false);
     sendEmbedded(child, 'ACK', {
@@ -715,6 +729,8 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
         CTRL_C_DRIVER,
         '-SourcePath',
         CTRL_C_DRIVER_SOURCE,
+        '-AssemblyPath',
+        process.env.CODING_X_WINDOWS_CTRL_C_DRIVER_ASSEMBLY ?? '',
         '-NodePath',
         realpathSync(process.execPath),
         '-WorkerPath',

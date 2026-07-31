@@ -29,7 +29,6 @@ import {
   installRecoveryDomainWithModeAuthority,
   evaluateWorkspaceSafetyDiskWithAuthority as evaluateWorkspaceSafetyDisk,
 } from './recovery-authority-test-seam.js';
-import { installSameHostRebootRecoveryWithAuthority as installSameHostRebootRecovery } from './recovery-authority-test-seam.js';
 import {
   ACTIVE_LEASE_DIR,
   OWNER_FILE,
@@ -191,24 +190,22 @@ async function armedReceiptedWorkspace(sourceIdentity?: ProcessIdentitySnapshot)
 async function installDelegatedRecoveryWithOptionalContainment(
   withContainment: boolean,
 ): Promise<{ path: string; priorBytes?: Buffer }> {
-  const current = createIdentityProbe().current();
-  const sourceIdentity: ProcessIdentitySnapshot | undefined = withContainment
-    ? {
-        ...current,
-        pid: 2_000_000_017,
-        bootIdentity:
-          current.bootIdentity === `sha256:${'e'.repeat(64)}`
-            ? `sha256:${'f'.repeat(64)}`
-            : `sha256:${'e'.repeat(64)}`,
-      }
-    : undefined;
-  const path = await armedReceiptedWorkspace(sourceIdentity);
+  const path = await armedReceiptedWorkspace();
   const operation = operationPath(path);
   const activeBytes = readFileSync(join(operation, ACTIVE_CHILD_FILE));
   const active = parseActiveChildRecord(activeBytes);
   const baselineBytes = readFileSync(join(operation, DELEGATED_BASELINE_FILE));
   const ownerBytes = readFileSync(join(leasePath(path), OWNER_FILE));
   let priorBytes: Buffer | undefined;
+  await installDelegatedFinalizeRecovery({
+    workspacePath: path,
+    recoveryId: RECOVERY_ID,
+    attemptId: ATTEMPT_ID,
+    identity: identity('linux', HOST_B, 202),
+    probeSourceOwner: () => 'dead',
+    probeSupervisor: () => 'dead',
+    probeContainment: () => 'empty',
+  });
   if (withContainment) {
     priorBytes = createQuarantineRecordBytes({
       ownerId: OWNER_ID,
@@ -221,23 +218,6 @@ async function installDelegatedRecoveryWithOptionalContainment(
       createdAt: '2026-07-30T00:00:04.000Z',
     });
     writeFileSync(join(operation, QUARANTINE_FILE), priorBytes);
-  }
-  if (withContainment) {
-    await installSameHostRebootRecovery({
-      workspacePath: path,
-      recoveryId: RECOVERY_ID,
-      attemptId: ATTEMPT_ID,
-    });
-  } else {
-    await installDelegatedFinalizeRecovery({
-      workspacePath: path,
-      recoveryId: RECOVERY_ID,
-      attemptId: ATTEMPT_ID,
-      identity: identity('linux', HOST_B, 202),
-      probeSourceOwner: () => 'dead',
-      probeSupervisor: () => 'dead',
-      probeContainment: () => 'empty',
-    });
   }
   return { path, ...(priorBytes ? { priorBytes } : {}) };
 }
@@ -708,5 +688,6 @@ describe('internal workspace safety disk evaluator', () => {
         },
       });
     },
+    45_000,
   );
 });

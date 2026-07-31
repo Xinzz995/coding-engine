@@ -48,6 +48,7 @@ namespace CodingX.WorkspaceSafety.Tests
             internal uint dwXCountChars;
             internal uint dwYCountChars;
             internal uint dwFillAttribute;
+            internal uint dwFlags;
             internal short wShowWindow;
             internal short cbReserved2;
             internal IntPtr lpReserved2;
@@ -216,7 +217,8 @@ namespace CodingX.WorkspaceSafety.Tests
         }
 
         public static int RunRoot(string powershellPath, string scriptPath, string sourcePath,
-            string rootInventoryPath, string descendantInventoryPath, string readyPath)
+            string assemblyPath, string rootInventoryPath, string descendantInventoryPath,
+            string readyPath)
         {
             PROCESS_INFORMATION child = new PROCESS_INFORMATION();
             bool ready = false;
@@ -226,6 +228,7 @@ namespace CodingX.WorkspaceSafety.Tests
                 string[] arguments = new string[] {
                     powershellPath, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
                     scriptPath, "-Mode", "descendant", "-SourcePath", sourcePath,
+                    "-AssemblyPath", assemblyPath,
                     "-PowerShellPath", powershellPath, "-ScriptPath", scriptPath,
                     "-RootInventoryPath", rootInventoryPath, "-DescendantInventoryPath",
                     descendantInventoryPath, "-ReadyPath", readyPath
