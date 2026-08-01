@@ -385,10 +385,18 @@ function isRenameConflict(error: unknown): boolean {
   return ['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES'].includes(errorCode(error) ?? '');
 }
 
+const WINDOWS_TRANSIENT_RENAME_RETRY_DELAYS_MS = [25, 50, 100] as const;
+
 export interface DirectoryMoveHooks {
   readonly beforeRename?: () => void | Promise<void>;
   /** 最后一个同步裁决点；返回后立即提交 rename，中间不再让出事件循环。 */
   readonly commitCheck?: () => void;
+  /** Test seam: production always uses the actual host platform. */
+  readonly platform?: NodeJS.Platform;
+  /** Test seam: production always uses node:fs/promises rename. */
+  readonly renameDirectory?: (source: string, target: string) => void | Promise<void>;
+  /** Test seam: production waits for the exact bounded retry delay. */
+  readonly waitBeforeRetry?: (delayMs: number) => void | Promise<void>;
 }
 
 function workspaceRootForProtocolMove(
@@ -429,23 +437,50 @@ export async function moveDirectoryNoReplace(
   }
   await hooks.beforeRename?.();
   const protocolMove = workspaceRootForProtocolMove(source, target);
-  if (protocolMove) {
-    if (protocolMove.includeBusinessTree) {
-      assertWindowsWorkspaceTreeHasNoReparsePoints(protocolMove.root);
-    } else {
-      assertWindowsSafetyTreeHasNoReparsePoints(protocolMove.root);
+  const platform = hooks.platform ?? process.platform;
+  const renameDirectory = hooks.renameDirectory ?? rename;
+  const waitBeforeRetry =
+    hooks.waitBeforeRetry ??
+    ((delayMs: number) => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delayMs)));
+  let retryIndex = 0;
+  while (true) {
+    await assertNonEmptyDirectory(source);
+    if (await pathExists(target)) {
+      throw safetyError('conflict', `目标目录已存在：${target}`);
     }
-  }
-  hooks.commitCheck?.();
-  try {
-    // 协议内的 canonical 目标只能由完整非空 staging 产生；POSIX/Windows rename 都不会替换
-    // 这样的目录。并发出现空目标需要另一个同账号进程绕过本协议，超出 ADR-021 信任边界。
-    await rename(source, target);
-  } catch (error) {
-    if (isRenameConflict(error) || (await pathExists(target))) {
-      throw safetyError('conflict', `目标目录已存在或竞争失败：${target}`, error);
+    if (protocolMove) {
+      if (protocolMove.includeBusinessTree) {
+        assertWindowsWorkspaceTreeHasNoReparsePoints(protocolMove.root);
+      } else {
+        assertWindowsSafetyTreeHasNoReparsePoints(protocolMove.root);
+      }
     }
-    throw error;
+    hooks.commitCheck?.();
+    try {
+      // 协议内的 canonical 目标只能由完整非空 staging 产生；POSIX/Windows rename 都不会替换
+      // 这样的目录。并发出现空目标需要另一个同账号进程绕过本协议，超出 ADR-021 信任边界。
+      await renameDirectory(source, target);
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      const targetExists = await pathExists(target);
+      const retryDelay = WINDOWS_TRANSIENT_RENAME_RETRY_DELAYS_MS[retryIndex];
+      if (
+        targetExists ||
+        code === 'EEXIST' ||
+        code === 'ENOTEMPTY' ||
+        platform !== 'win32' ||
+        !['EPERM', 'EACCES'].includes(code ?? '') ||
+        retryDelay === undefined
+      ) {
+        if (isRenameConflict(error) || targetExists) {
+          throw safetyError('conflict', `目标目录已存在或竞争失败：${target}`, error);
+        }
+        throw error;
+      }
+      retryIndex += 1;
+      await waitBeforeRetry(retryDelay);
+    }
   }
 }
 

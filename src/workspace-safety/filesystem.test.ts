@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -396,6 +397,252 @@ describe('workspace safety filesystem primitives', () => {
     expect(order).toEqual(['prepared', 'commit-check']);
     expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
     expect(() => readFileSync(join(target, 'owner.json'))).toThrow();
+  });
+
+  it.each(['EPERM', 'EACCES'])(
+    'retries a transient Windows %s rename failure only after repeating every commit check',
+    async (errorCode) => {
+      const root = temporaryRoot('workspace-directory-windows-retry-');
+      const protocolRoot = join(root, 'engine.lock');
+      mkdirSync(protocolRoot);
+      const candidate = await createStagingDirectory(
+        protocolRoot,
+        'operation.prepare-',
+        'candidate',
+      );
+      await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+      const target = join(protocolRoot, 'operation');
+      const delays: number[] = [];
+      let renameCalls = 0;
+      let commitChecks = 0;
+
+      await moveDirectoryNoReplace(candidate, target, {
+        platform: 'win32',
+        commitCheck: () => {
+          commitChecks += 1;
+        },
+        renameDirectory: (source, destination) => {
+          renameCalls += 1;
+          if (renameCalls === 1) {
+            throw Object.assign(new Error('temporarily busy'), { code: errorCode });
+          }
+          renameSync(source, destination);
+        },
+        waitBeforeRetry: (delayMs) => {
+          delays.push(delayMs);
+        },
+      });
+
+      expect(renameCalls).toBe(2);
+      expect(commitChecks).toBe(2);
+      expect(delays).toEqual([25]);
+      expect(readFileSync(join(target, 'owner.json'), 'utf8')).toBe('candidate');
+      expect(existsSync(candidate)).toBe(false);
+    },
+  );
+
+  it('bounds persistent Windows rename sharing failures without changing either directory', async () => {
+    const root = temporaryRoot('workspace-directory-windows-busy-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+    const target = join(root, 'lease');
+    const delays: number[] = [];
+    let renameCalls = 0;
+    let commitChecks = 0;
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        platform: 'win32',
+        commitCheck: () => {
+          commitChecks += 1;
+        },
+        renameDirectory: () => {
+          renameCalls += 1;
+          throw Object.assign(new Error('still busy'), { code: 'EACCES' });
+        },
+        waitBeforeRetry: (delayMs) => {
+          delays.push(delayMs);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+
+    expect(renameCalls).toBe(4);
+    expect(commitChecks).toBe(4);
+    expect(delays).toEqual([25, 50, 100]);
+    expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('does not retry when a competing Windows target appears during the retry wait', async () => {
+    const root = temporaryRoot('workspace-directory-windows-competitor-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+    const target = join(root, 'lease');
+    const delays: number[] = [];
+    let renameCalls = 0;
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        platform: 'win32',
+        renameDirectory: () => {
+          renameCalls += 1;
+          throw Object.assign(new Error('temporarily busy'), { code: 'EPERM' });
+        },
+        waitBeforeRetry: (delayMs) => {
+          delays.push(delayMs);
+          mkdirSync(target);
+          writeFileSync(join(target, 'owner.json'), 'winner');
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+
+    expect(renameCalls).toBe(1);
+    expect(delays).toEqual([25]);
+    expect(readFileSync(join(target, 'owner.json'), 'utf8')).toBe('winner');
+    expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
+  });
+
+  it('rechecks that the Windows source remains non-empty before retrying', async () => {
+    const root = temporaryRoot('workspace-directory-windows-source-change-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    const owner = join(candidate, 'owner.json');
+    await writeNewFile(owner, Buffer.from('candidate'));
+    const target = join(root, 'lease');
+    let renameCalls = 0;
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        platform: 'win32',
+        renameDirectory: () => {
+          renameCalls += 1;
+          throw Object.assign(new Error('temporarily busy'), { code: 'EPERM' });
+        },
+        waitBeforeRetry: () => {
+          rmSync(owner);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid' });
+
+    expect(renameCalls).toBe(1);
+    expect(existsSync(candidate)).toBe(true);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'blocks a Windows retry when a junction appears in the protocol tree during the wait',
+    async () => {
+      const root = temporaryRoot('workspace-directory-windows-reparse-retry-');
+      const external = temporaryRoot('workspace-directory-windows-reparse-target-');
+      const protocolRoot = join(root, 'engine.lock');
+      mkdirSync(protocolRoot);
+      const candidate = await createStagingDirectory(
+        protocolRoot,
+        'operation.prepare-',
+        'candidate',
+      );
+      await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+      const target = join(protocolRoot, 'operation');
+      let renameCalls = 0;
+
+      await expect(
+        moveDirectoryNoReplace(candidate, target, {
+          renameDirectory: () => {
+            renameCalls += 1;
+            throw Object.assign(new Error('temporarily busy'), { code: 'EPERM' });
+          },
+          waitBeforeRetry: () => {
+            symlinkSync(external, join(protocolRoot, 'injected-junction'), 'junction');
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'invalid' });
+
+      expect(renameCalls).toBe(1);
+      expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
+      expect(existsSync(target)).toBe(false);
+    },
+  );
+
+  it('lets a repeated commit check cancel a Windows rename retry', async () => {
+    const root = temporaryRoot('workspace-directory-windows-recheck-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+    const target = join(root, 'lease');
+    let renameCalls = 0;
+    let commitChecks = 0;
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        platform: 'win32',
+        commitCheck: () => {
+          commitChecks += 1;
+          if (commitChecks === 2) throw new Error('authority changed');
+        },
+        renameDirectory: () => {
+          renameCalls += 1;
+          throw Object.assign(new Error('temporarily busy'), { code: 'EPERM' });
+        },
+        waitBeforeRetry: () => undefined,
+      }),
+    ).rejects.toThrow('authority changed');
+
+    expect(renameCalls).toBe(1);
+    expect(commitChecks).toBe(2);
+    expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it.each([
+    { label: 'POSIX EPERM', platform: 'linux' as const, code: 'EPERM' },
+    { label: 'Windows EEXIST', platform: 'win32' as const, code: 'EEXIST' },
+    { label: 'Windows ENOTEMPTY', platform: 'win32' as const, code: 'ENOTEMPTY' },
+  ])('does not retry an immediate $label conflict', async ({ platform, code }) => {
+    const root = temporaryRoot('workspace-directory-immediate-conflict-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+    const target = join(root, 'lease');
+    const delays: number[] = [];
+    let renameCalls = 0;
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        platform,
+        renameDirectory: () => {
+          renameCalls += 1;
+          throw Object.assign(new Error('immediate conflict'), { code });
+        },
+        waitBeforeRetry: (delayMs) => {
+          delays.push(delayMs);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' });
+
+    expect(renameCalls).toBe(1);
+    expect(delays).toEqual([]);
+  });
+
+  it('does not turn an unrelated Windows rename error into a retry or conflict', async () => {
+    const root = temporaryRoot('workspace-directory-windows-io-error-');
+    const candidate = await createStagingDirectory(root, 'lease.prepare-', 'candidate');
+    await writeNewFile(join(candidate, 'owner.json'), Buffer.from('candidate'));
+    const target = join(root, 'lease');
+    const failure = Object.assign(new Error('storage failure'), { code: 'EIO' });
+    const delays: number[] = [];
+
+    await expect(
+      moveDirectoryNoReplace(candidate, target, {
+        platform: 'win32',
+        renameDirectory: () => {
+          throw failure;
+        },
+        waitBeforeRetry: (delayMs) => {
+          delays.push(delayMs);
+        },
+      }),
+    ).rejects.toBe(failure);
+
+    expect(delays).toEqual([]);
+    expect(readFileSync(join(candidate, 'owner.json'), 'utf8')).toBe('candidate');
+    expect(existsSync(target)).toBe(false);
   });
 
   it('canonicalizes a stable symbolic-link alias to the same workspace identity', async () => {

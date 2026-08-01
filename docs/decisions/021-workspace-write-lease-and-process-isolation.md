@@ -1,7 +1,7 @@
 ---
 title: 021-workspace-write-lease-and-process-isolation
 status: active
-updated: 2026-07-31
+updated: 2026-08-01
 scope: root
 ---
 
@@ -112,6 +112,11 @@ incident/tombstone。该 rename 必须是
 rename 成功才表示租约已释放；历史 released tombstone 或 inert staging 只能由后来已经取得 active
 lease 的当前 owner 在 creator exact dead 时尽力清理。任何前置步骤不确定时保留 lease 隔离并返回
 非绿。
+
+Windows 的目录 rename 如果只因文件共享返回 `EPERM/EACCES`，且目标仍不存在，可以按固定
+25/50/100ms 最多重试三次。每次重试前必须重新确认 source 非空、target 不存在、协议安全树无
+reparse point，并重新执行调用方提供的最终 commit check；永久竞争、目标出现、复查失败或预算耗尽都立即
+失败关闭。POSIX 不采用此例外，rename 成功仍是唯一 commit point。
 
 ### 2. 先持久化 containment，再允许项目代码运行
 

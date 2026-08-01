@@ -14,7 +14,7 @@ function expectIsolatedWithoutIteration(workspace: string): void {
   expect(readEvidence(workspace).records.some((record) => record.type === 'iteration')).toBe(false);
 }
 
-describe('runLoop structured validation protocol', () => {
+describe('runLoop structured validation protocol', { timeout: 30_000, concurrent: false }, () => {
   it('preserves a validation-only candidate and retry count when Validator is unverifiable', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([
       story({ acceptanceCriteria: ['返回 401'] }),

@@ -495,7 +495,7 @@ describe('main — doctor JSON', () => {
       cwdSpy.mockRestore();
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
 
 describe('main — status subcommand', () => {

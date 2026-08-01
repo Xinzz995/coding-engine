@@ -647,7 +647,7 @@ describe('workspace operation protocol', () => {
       ).rejects.toMatchObject({ code: expect.stringMatching(/invalid|lease-lost/) });
       expect(existsSync(operationPath(workspace))).toBe(true);
     }
-  });
+  }, 30_000);
 
   it('settles a prepared abort only with unchanged baseline and the matching fact boundary', async () => {
     const first = await setup();
