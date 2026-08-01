@@ -1,7 +1,7 @@
 ---
 title: 018-local-review-github-gate-and-staged-release
 status: active
-updated: 2026-07-28
+updated: 2026-08-01
 scope: root
 ---
 
@@ -34,6 +34,18 @@ GitHub 不调用模型，也不证明本地 Review。`.coding-x/quality.json` �
 版本、runner/model/规则版本与风险结论。Reviewer 在临时只读审查包中运行，不能使用项目
 工作目录、秘密、MCP、hooks、插件或危险 bypass 参数。任何输入变化使结果失效；无法保证
 完整上下文或只读隔离时返回 `unverifiable`。
+
+该隔离承诺还要求临时域本身绑定创建时的目录身份；审查包、Runner 调用目录、版本目录和隔离探测使用
+固定集合，固定文件由引擎以有界句柄核对；status 安全域使用有界动态目录树。只有受管进程正常结束、
+没有外部终止、超时或残留后代时才能清理。五类临时域共用相同的身份与收口规则。
+身份、目录树、固定文件句柄字节、进程终点或清理条件无法证明时，引擎只关闭身份句柄并保留对象，当前轴和总 Review 返回
+`unverifiable`；不以名称前缀、模型成功或 supervisor 最终杀净进程来替代异常现场。
+
+Reviewer CLI 的输入接口并不一致：Codex 通过规范路径读取 schema，Claude 接收内联 schema，Cursor
+由引擎在返回后严格解析；Codex 和 Claude 的 Prompt 经标准输入传递，Cursor 的 Prompt 使用有上限的参数。
+这些 CLI 都无法跨平台直接消费 Node 已打开的文件句柄。因此边界是：引擎自身的信任判定使用不跟随链接、
+有界且绑定句柄的读取；Reviewer 只在已反测的只读隔离中使用规范路径或已冻结字节，运行后的任何路径或字节变化都会使结果作废。这不声称能观察 Reviewer 内部的每一次
+文件系统调用。该修复也不扩大为防御同一系统账号下持续并发的任意外部恶意进程；若要作出该保证，必须另立 ADR。
 
 Spec Reviewer 只判断仓库改动是否满足行为意图，不负责证明本轮交付流程已经完成。完整机械
 检查由引擎在 Reviewer 前执行并绑定当前 head；全部 Review 轴、GitHub CI/Ruleset 和发布状态

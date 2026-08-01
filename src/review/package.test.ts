@@ -1,3 +1,4 @@
+import { existsSync, lstatSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { readQualityContract } from '../quality/contract.js';
 import { createReviewPackage, reviewOutputSchema } from './package.js';
@@ -86,6 +87,16 @@ describe('createReviewPackage', () => {
       });
       expect(input).not.toHaveProperty('workspace');
       reviewPackage.assertUnchanged();
+      if (process.platform !== 'win32') {
+        expect(lstatSync(reviewPackage.root).mode & 0o777).toBe(0o500);
+        for (const path of [
+          reviewPackage.inputPath,
+          reviewPackage.schemaPath,
+          reviewPackage.manifestPath,
+        ]) {
+          expect(lstatSync(path).mode & 0o777).toBe(0o400);
+        }
+      }
     } finally {
       reviewPackage.cleanup();
     }
@@ -114,4 +125,35 @@ describe('createReviewPackage', () => {
       scope: 'different-scope' as 'all-current-platform-applicable-contract-checks',
     })).toThrow('未绑定当前 Review 上下文');
   });
+
+  it.each(['afterInputWrite', 'beforePermissions'] as const)(
+    'safely cleans an identity-bound package after %s initialization fails',
+    (stage) => {
+      const ctx = context();
+      let root = '';
+      expect(() =>
+        createReviewPackage({
+          context: ctx,
+          risk: assessReviewRisk(ctx),
+          axis: 'engineering',
+          runner: 'codex',
+          model: 'gpt-5.6-terra',
+          mechanicalEvidence: {
+            status: 'passed',
+            headSha: ctx.headSha,
+            qualityContractDigest: ctx.baseContractDigest,
+            scope: 'all-current-platform-applicable-contract-checks',
+          },
+          initializationHooks: {
+            [stage]: (path: string) => {
+              root = path;
+              throw new Error(`injected ${stage} failure`);
+            },
+          },
+        }),
+      ).toThrow(/初始化失败现场已安全清理/u);
+      expect(root).not.toBe('');
+      expect(existsSync(root)).toBe(false);
+    },
+  );
 });

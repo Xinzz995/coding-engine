@@ -1,15 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
+  existsSync,
+  lstatSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
-  rmSync,
+  rmdirSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
@@ -17,26 +21,43 @@ import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession, type WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import type { ReviewPackage } from './package.js';
+import { ReviewTemporaryDirectory } from './temporary-directory.js';
 import {
   codexReviewPermissionOverrides,
   parseCodexReviewJsonl,
   parseModelReviewOutput,
   probeRunnerIsolation,
   readRunnerVersion,
+  RunnerPolicyViolation,
   runSafeReviewAxis,
 } from './runner.js';
 
 const temporaryRoots: string[] = [];
+
+function removeFixtureRoot(path: string): void {
+  if (!existsSync(path)) return;
+  const info = lstatSync(path);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    unlinkSync(path);
+    return;
+  }
+  chmodSync(path, 0o700);
+  for (const name of readdirSync(path)) removeFixtureRoot(join(path, name));
+  rmdirSync(path);
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
   while (temporaryRoots.length > 0) {
-    rmSync(temporaryRoots.pop()!, { recursive: true, force: true });
+    removeFixtureRoot(temporaryRoots.pop()!);
   }
 });
 
 const fakeSession = {} as WorkspaceSession;
 
-function managedResult(stdout: string) {
+type ManagedResult = Awaited<ReturnType<typeof runManagedWorkspaceProcess>>;
+
+function managedResult(stdout: string, over: Partial<ManagedResult> = {}): ManagedResult {
   return {
     verdict: 'completed' as const,
     exitCode: 0,
@@ -47,6 +68,7 @@ function managedResult(stdout: string) {
     processTreeNotEmpty: false,
     terminationReason: null,
     durationMs: 2,
+    ...over,
   };
 }
 
@@ -61,14 +83,63 @@ function packageFixture(input: string): ReviewPackage {
   writeFileSync(manifestPath, '{}\n');
   return {
     root,
+    projectRoot: process.cwd(),
     inputPath,
     schemaPath,
+    schema: '{}\n',
     manifestPath,
     input,
     inputBytes: Buffer.byteLength(input),
     digest: 'sha256:fixture',
-    cleanup: () => undefined,
+    cleanup: () => ({ status: 'removed' }),
     assertUnchanged: () => undefined,
+    prepareManagedUse: () => undefined,
+    beginManagedUse: () => undefined,
+    confirmManagedUseSettled: () => undefined,
+  };
+}
+
+function managedPackageFixture(input = '{}\n'): ReviewPackage {
+  const temporary = ReviewTemporaryDirectory.create({
+    prefix: 'coding-x-review-managed-test-',
+    projectRoot: process.cwd(),
+  });
+  temporaryRoots.push(temporary.root);
+  const inputPath = join(temporary.root, 'review-input.json');
+  const schemaPath = join(temporary.root, 'response-schema.json');
+  const manifestPath = join(temporary.root, 'manifest.json');
+  const schema = '{}\n';
+  const manifest = '{}\n';
+  writeFileSync(inputPath, input, { mode: 0o400 });
+  writeFileSync(schemaPath, schema, { mode: 0o400 });
+  writeFileSync(manifestPath, manifest, { mode: 0o400 });
+  chmodSync(temporary.root, 0o500);
+  temporary.sealExactTree({
+    files: [
+      {
+        path: 'review-input.json',
+        bytes: Buffer.from(input),
+        maximumBytes: Math.max(4096, Buffer.byteLength(input)),
+      },
+      { path: 'response-schema.json', bytes: Buffer.from(schema), maximumBytes: 4096 },
+      { path: 'manifest.json', bytes: Buffer.from(manifest), maximumBytes: 4096 },
+    ],
+  });
+  return {
+    root: temporary.root,
+    projectRoot: process.cwd(),
+    inputPath,
+    schemaPath,
+    schema,
+    manifestPath,
+    input,
+    inputBytes: Buffer.byteLength(input),
+    digest: 'sha256:managed-fixture',
+    cleanup: () => temporary.cleanup(),
+    assertUnchanged: () => temporary.assertUnchanged(),
+    prepareManagedUse: () => temporary.prepareManagedUse(),
+    beginManagedUse: () => temporary.beginManagedUse(),
+    confirmManagedUseSettled: () => temporary.confirmManagedUseSettled(),
   };
 }
 
@@ -202,6 +273,19 @@ describe('parseModelReviewOutput', () => {
       ),
     ).toThrow('正整数');
   });
+
+  it('does not echo a model-controlled unknown field into diagnostics', () => {
+    const secretKey = 'SHOULD_NOT_APPEAR_AS_UNKNOWN_FIELD';
+    let failure: unknown;
+    try {
+      parseModelReviewOutput(valid({ [secretKey]: true }));
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('未知字段');
+    expect((failure as Error).message).not.toContain(secretKey);
+  });
 });
 
 describe('parseCodexReviewJsonl', () => {
@@ -246,7 +330,7 @@ describe('parseCodexReviewJsonl', () => {
         JSON.stringify({ type: 'item.started', item: { type } }),
         JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '{}' } }),
       ].join('\n');
-      expect(() => parseCodexReviewJsonl(stdout)).toThrow(`禁用工具事件：${type}`);
+      expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件');
     },
   );
 
@@ -255,7 +339,7 @@ describe('parseCodexReviewJsonl', () => {
       type: 'item.started',
       item: { type: 'future_capability' },
     });
-    expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件：future_capability');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件');
   });
 
   it('rejects an unrecognized top-level event even when a valid final answer follows', () => {
@@ -267,7 +351,20 @@ describe('parseCodexReviewJsonl', () => {
         item: { type: 'agent_message', text: JSON.stringify(answer) },
       }),
     ].join('\n');
-    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知顶层事件：future.event');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知顶层事件');
+  });
+
+  it('does not echo a model-controlled event type into diagnostics', () => {
+    const secretType = 'SHOULD_NOT_APPEAR_AS_EVENT_TYPE';
+    let failure: unknown;
+    try {
+      parseCodexReviewJsonl(JSON.stringify({ type: secretType }));
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('未知顶层事件');
+    expect((failure as Error).message).not.toContain(secretType);
   });
 
   it('rejects an item event whose item payload is missing', () => {
@@ -313,6 +410,7 @@ describe('managed Final Review runner execution', () => {
         readRunnerVersion({
           session: fakeSession,
           runner: 'codex',
+          projectRoot: process.cwd(),
           managedProcess: managed,
         }),
       ).rejects.toThrow(/原生可执行文件/u);
@@ -350,6 +448,7 @@ describe('managed Final Review runner execution', () => {
       readRunnerVersion({
         session: fakeSession,
         runner: 'codex',
+        projectRoot: process.cwd(),
         managedProcess: managed,
       }),
     ).resolves.toBe('codex-cli 1.2.3');
@@ -358,17 +457,102 @@ describe('managed Final Review runner execution', () => {
   it('preserves workspace safety failures from Runner version supervision', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     const failure = new WorkspaceSafetyError('isolated', 'process tree not empty');
-    const managed: typeof runManagedWorkspaceProcess = async () => {
+    let retainedPath = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      retainedPath = options.cwd;
+      temporaryRoots.push(retainedPath);
       throw failure;
+    };
+
+    const outcome = expect(
+      readRunnerVersion({
+        session: fakeSession,
+        runner: 'codex',
+        projectRoot: process.cwd(),
+        managedProcess: managed,
+      }),
+    ).rejects;
+    await outcome.toMatchObject({ code: 'isolated' });
+    await outcome.toThrow(/process tree not empty.*Runner 版本临时域已保留/u);
+    expect(retainedPath).not.toBe('');
+    expect(() => realpathSync.native(retainedPath)).not.toThrow();
+  });
+
+  it('retains the Runner version domain after a supervised timeout', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let retainedPath = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      retainedPath = options.cwd;
+      temporaryRoots.push(retainedPath);
+      return managedResult('', {
+        verdict: 'terminated',
+        exitCode: null,
+        timedOut: true,
+        terminationReason: 'timeout',
+      });
     };
 
     await expect(
       readRunnerVersion({
         session: fakeSession,
         runner: 'codex',
+        projectRoot: process.cwd(),
         managedProcess: managed,
       }),
-    ).rejects.toBe(failure);
+    ).rejects.toThrow(/临时域已保留.*版本核对超时/u);
+    expect(existsSync(retainedPath)).toBe(true);
+  });
+
+  it.each(['user-interrupt', 'parent-shutdown'] as const)(
+    'retains the Runner version domain after %s',
+    async (terminationReason) => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      let retainedPath = '';
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        retainedPath = options.cwd;
+        temporaryRoots.push(retainedPath);
+        return managedResult('', {
+          verdict: 'terminated',
+          exitCode: null,
+          terminationReason,
+        });
+      };
+
+      await expect(
+        readRunnerVersion({
+          session: fakeSession,
+          runner: 'codex',
+          projectRoot: process.cwd(),
+          managedProcess: managed,
+        }),
+      ).rejects.toThrow(/临时域已保留.*被外部终止/u);
+      expect(existsSync(retainedPath)).toBe(true);
+      if (process.platform !== 'win32') {
+        expect(lstatSync(retainedPath).mode & 0o777).toBe(0o500);
+      }
+    },
+  );
+
+  it('retains a Runner version domain whose fixed tree changes during execution', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let retainedPath = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      retainedPath = options.cwd;
+      temporaryRoots.push(retainedPath);
+      chmodSync(retainedPath, 0o755);
+      writeFileSync(join(retainedPath, 'unexpected-file'), 'pollution\n');
+      return managedResult('codex-cli 1.2.3\n');
+    };
+
+    await expect(
+      readRunnerVersion({
+        session: fakeSession,
+        runner: 'codex',
+        projectRoot: process.cwd(),
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/临时域已保留.*固定目录树发生变化/u);
+    expect(existsSync(retainedPath)).toBe(true);
   });
 
   it('routes the isolation probe through the managed proxy operation', async () => {
@@ -401,12 +585,267 @@ describe('managed Final Review runner execution', () => {
       session: fakeSession,
       runner: 'codex',
       model: 'review-model',
+      projectRoot: process.cwd(),
       runnerVersion: 'codex-test',
       timeoutMs: 1000,
       managedProcess: managed,
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok, result.failures.join('；')).toBe(true);
     expect(calls).toBe(1);
+  });
+
+  it('retains both isolation-probe domains when descendants outlive the root process', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let probeRoot = '';
+    let invocationRoot = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      probeRoot = dirname(options.cwd);
+      invocationRoot = dirname(options.args[1]);
+      temporaryRoots.push(probeRoot, invocationRoot);
+      return managedResult('', {
+        verdict: 'process-tree-not-empty',
+        processTreeNotEmpty: true,
+      });
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('后代进程');
+    expect(result.failures.join('；')).toContain('现场已保留');
+    expect(existsSync(probeRoot)).toBe(true);
+    expect(existsSync(invocationRoot)).toBe(true);
+  });
+
+  it('does not retry and retains the invocation plus package after process-tree residue', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    let invocationRoot = '';
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      invocationRoot = dirname(options.args[1]);
+      temporaryRoots.push(invocationRoot);
+      return managedResult('', {
+        verdict: 'process-tree-not-empty',
+        processTreeNotEmpty: true,
+      });
+    };
+
+    await expect(
+      runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/临时域已保留.*后代进程/u);
+    expect(calls).toBe(1);
+    expect(reviewPackage.cleanup()).toMatchObject({
+      status: 'retained',
+      path: reviewPackage.root,
+    });
+    expect(existsSync(reviewPackage.root)).toBe(true);
+    expect(existsSync(invocationRoot)).toBe(true);
+  });
+
+  it.each(['user-interrupt', 'parent-shutdown'] as const)(
+    'does not retry and retains owner-only Review domains after %s',
+    async (terminationReason) => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const reviewPackage = managedPackageFixture();
+      let invocationRoot = '';
+      let calls = 0;
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        calls += 1;
+        invocationRoot = dirname(options.args[1]);
+        temporaryRoots.push(invocationRoot);
+        return managedResult('', {
+          verdict: 'terminated',
+          exitCode: null,
+          terminationReason,
+        });
+      };
+
+      await expect(
+        runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage,
+          timeoutMs: 1000,
+          managedProcess: managed,
+        }),
+      ).rejects.toThrow(/临时域已保留.*被外部终止/u);
+      expect(calls).toBe(1);
+      expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+      expect(existsSync(reviewPackage.root)).toBe(true);
+      expect(existsSync(invocationRoot)).toBe(true);
+      if (process.platform !== 'win32') {
+        expect(lstatSync(reviewPackage.root).mode & 0o777).toBe(0o500);
+        expect(lstatSync(invocationRoot).mode & 0o777).toBe(0o500);
+        for (const name of ['review-runner-proxy.mjs', 'prompt.txt', 'proxy-config.json']) {
+          expect(lstatSync(join(invocationRoot, name)).mode & 0o777).toBe(0o400);
+        }
+      }
+    },
+  );
+
+  it('retains both Review domains when managed process startup throws directly', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    let invocationRoot = '';
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      invocationRoot = dirname(options.args[1]);
+      temporaryRoots.push(invocationRoot);
+      throw new Error('fixture managed startup failure');
+    };
+
+    await expect(
+      runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/临时域已保留.*managed startup failure/u);
+    expect(calls).toBe(1);
+    expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+    expect(existsSync(reviewPackage.root)).toBe(true);
+    expect(existsSync(invocationRoot)).toBe(true);
+  });
+
+  it('records two attempts when a retry ends in a temporary-domain policy failure', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      if (calls === 1) return managedResult('not-jsonl\n');
+      temporaryRoots.push(dirname(options.args[1]));
+      return managedResult('', {
+        verdict: 'process-tree-not-empty',
+        processTreeNotEmpty: true,
+      });
+    };
+
+    let failure: unknown;
+    try {
+      await runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(calls).toBe(2);
+    expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+    expect((failure as RunnerPolicyViolation).attempts).toBe(2);
+    expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+  });
+
+  it('does not retry when the invocation directory is polluted during a managed call', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = packageFixture('{}');
+    let invocationRoot = '';
+    let calls = 0;
+    const attackerControlledName = 'PROMPT_FRAGMENT_SECRET';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      invocationRoot = dirname(options.args[1]);
+      temporaryRoots.push(invocationRoot);
+      chmodSync(invocationRoot, 0o755);
+      writeFileSync(join(invocationRoot, attackerControlledName), 'pollution\n');
+      return managedResult(
+        codexAnswer({
+          status: 'passed',
+          summary: 'ok',
+          requestDeepReview: false,
+          unverifiableReason: null,
+          findings: [],
+        }),
+      );
+    };
+
+    let failure: unknown;
+    try {
+      await runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+    expect((failure as Error).message).toMatch(/临时域已保留.*固定目录树发生变化/u);
+    expect((failure as Error).message).not.toContain(attackerControlledName);
+    expect(calls).toBe(1);
+    expect(existsSync(invocationRoot)).toBe(true);
+  });
+
+  it('does not copy Runner output containing source or secrets into failure diagnostics', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const secret = 'SHOULD_NOT_APPEAR_IN_DIAGNOSTICS';
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult(secret, {
+        exitCode: 9,
+        stderr: Buffer.from(`prompt and source: ${secret}`),
+      });
+    };
+
+    let failure: unknown;
+    try {
+      await runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage: packageFixture('{}'),
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(calls).toBe(2);
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('退出码 9');
+    expect((failure as Error).message).not.toContain(secret);
   });
 
   it.runIf(process.platform !== 'win32')(
@@ -547,7 +986,9 @@ describe('managed Final Review runner execution', () => {
       await bootstrapWorkspace({ workspacePath: workspace });
       const lease = await acquireWorkspaceLease({ workspacePath: workspace, command: 'run' });
       const session = createWorkspaceSession(lease);
-      const reviewPackage = packageFixture(JSON.stringify({ diff: 'x'.repeat(128 * 1024) }));
+      const reviewPackage = managedPackageFixture(
+        JSON.stringify({ diff: 'x'.repeat(128 * 1024) }),
+      );
       try {
         await expect(
           runSafeReviewAxis({
@@ -563,11 +1004,142 @@ describe('managed Final Review runner execution', () => {
           attempts: 1,
           output: { status: 'passed' },
         });
+        expect(() => reviewPackage.assertUnchanged()).not.toThrow();
+        expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+        expect(existsSync(reviewPackage.root)).toBe(false);
       } finally {
+        reviewPackage.cleanup();
         await session.close();
       }
     },
     20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'retains real Review domains when the supervised runner leaves a descendant',
+    async () => {
+      const workspace = mkdtempSync(join(tmpdir(), 'review-runner-residue-workspace-'));
+      const runnerRoot = mkdtempSync(join(tmpdir(), 'review-runner-residue-binary-'));
+      temporaryRoots.push(workspace, runnerRoot);
+      const runnerPath = join(runnerRoot, 'fake-codex.mjs');
+      writeFileSync(
+        runnerPath,
+        [
+          '#!/usr/bin/env node',
+          'import {spawn} from "node:child_process";',
+          'process.stdin.resume();',
+          'process.stdin.on("end",()=>{',
+          '  const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],',
+          '    {stdio:"ignore"});',
+          '  child.unref();',
+          '  child.once("spawn",()=>{',
+          '    const answer={status:"passed",summary:"ok",requestDeepReview:false,',
+          '      unverifiableReason:null,findings:[]};',
+          '    process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"fixture"})+"\\n");',
+          '    process.stdout.write(JSON.stringify({type:"item.completed",item:{',
+          '      type:"agent_message",text:JSON.stringify(answer)}})+"\\n");',
+          '    process.stdout.write(JSON.stringify({type:"turn.completed"})+"\\n");',
+          '  });',
+          '});',
+        ].join('\n'),
+      );
+      chmodSync(runnerPath, 0o755);
+      vi.stubEnv('CODING_X_CODEX_BIN', runnerPath);
+      await bootstrapWorkspace({ workspacePath: workspace });
+      const lease = await acquireWorkspaceLease({ workspacePath: workspace, command: 'run' });
+      const session = createWorkspaceSession(lease);
+      const reviewPackage = managedPackageFixture();
+      let failure: unknown;
+      try {
+        await runSafeReviewAxis({
+          session,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage,
+          timeoutMs: 5000,
+        });
+      } catch (error) {
+        failure = error;
+      } finally {
+        await session.close();
+      }
+      expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+      expect((failure as Error).message).toMatch(/临时域已保留.*后代进程/u);
+      const invocationPath = (failure as Error).message.match(/临时域已保留 ([^：]+)：/u)?.[1];
+      expect(invocationPath).toBeTruthy();
+      if (invocationPath) temporaryRoots.push(invocationPath);
+      expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+      expect(existsSync(reviewPackage.root)).toBe(true);
+      expect(invocationPath && existsSync(invocationPath)).toBe(true);
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'retains real Review domains after a supervised user interrupt',
+    async () => {
+      const workspace = mkdtempSync(join(tmpdir(), 'review-runner-interrupt-workspace-'));
+      const runnerRoot = mkdtempSync(join(tmpdir(), 'review-runner-interrupt-binary-'));
+      temporaryRoots.push(workspace, runnerRoot);
+      const runnerPath = join(runnerRoot, 'fake-codex.mjs');
+      const startedPath = join(runnerRoot, 'runner-started');
+      writeFileSync(
+        runnerPath,
+        [
+          '#!/usr/bin/env node',
+          'import {writeFileSync} from "node:fs";',
+          `writeFileSync(${JSON.stringify(startedPath)},"started\\n");`,
+          'process.stdin.resume();',
+          'setInterval(()=>{},1000);',
+        ].join('\n'),
+      );
+      chmodSync(runnerPath, 0o755);
+      vi.stubEnv('CODING_X_CODEX_BIN', runnerPath);
+      await bootstrapWorkspace({ workspacePath: workspace });
+      const lease = await acquireWorkspaceLease({ workspacePath: workspace, command: 'run' });
+      const session = createWorkspaceSession(lease);
+      const reviewPackage = managedPackageFixture();
+      const controller = new AbortController();
+      let failure: unknown;
+      const operation = runSafeReviewAxis({
+        session,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 5000,
+        termination: { signal: controller.signal, reason: 'user-interrupt' },
+      });
+      try {
+        await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true), { timeout: 5000 });
+      } catch (barrierError) {
+        controller.abort();
+        await operation.catch(() => undefined);
+        await session.close();
+        throw barrierError;
+      }
+      controller.abort();
+      try {
+        await operation;
+      } catch (error) {
+        failure = error;
+      } finally {
+        controller.abort();
+        await session.close();
+      }
+      expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+      expect((failure as Error).message).toMatch(/临时域已保留.*被外部终止/u);
+      const invocationPath = (failure as Error).message.match(/临时域已保留 ([^：]+)：/u)?.[1];
+      expect(invocationPath).toBeTruthy();
+      if (invocationPath) temporaryRoots.push(invocationPath);
+      expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+      expect(existsSync(reviewPackage.root)).toBe(true);
+      expect(invocationPath && existsSync(invocationPath)).toBe(true);
+    },
+    30_000,
   );
 
   it('contains no production child-process bypass in the TypeScript runner', () => {

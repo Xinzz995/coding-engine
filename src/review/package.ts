@@ -1,25 +1,36 @@
-import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { chmodSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AgentKind } from '../engine/agent.js';
-import { digest, isOwnedTempDirectory } from './common.js';
+import { digest } from './common.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { REVIEW_RULES_DIGEST, rulesForAxis } from './rules.js';
+import {
+  ReviewTemporaryDirectory,
+  ReviewTemporaryDirectoryError,
+  type ReviewTemporaryCleanupResult,
+} from './temporary-directory.js';
 import type { ReviewAxis, ReviewRiskAssessment } from './types.js';
 
 export const DEFAULT_REVIEW_INPUT_LIMIT_BYTES = 512 * 1024;
 export const LARGE_CONTEXT_REVIEW_INPUT_LIMIT_BYTES = 2 * 1024 * 1024;
+const REVIEW_SCHEMA_LIMIT_BYTES = 128 * 1024;
+const REVIEW_MANIFEST_LIMIT_BYTES = 64 * 1024;
 
 export interface ReviewPackage {
   root: string;
+  projectRoot: string;
   inputPath: string;
   schemaPath: string;
+  schema: string;
   manifestPath: string;
   input: string;
   inputBytes: number;
   digest: string;
-  cleanup(): void;
+  cleanup(): ReviewTemporaryCleanupResult;
   assertUnchanged(): void;
+  prepareManagedUse(): void;
+  beginManagedUse(): void;
+  confirmManagedUseSettled(): void;
 }
 
 export interface ReviewMechanicalEvidence {
@@ -140,14 +151,6 @@ function axisInput(
   return { ...common, risk, engineeringStandards: context.engineeringStandards };
 }
 
-function fileSnapshot(root: string): Record<string, { bytes: number; digest: string }> {
-  return Object.fromEntries(readdirSync(root).sort().map((name) => {
-    const path = join(root, name);
-    const data = readFileSync(path);
-    return [name, { bytes: statSync(path).size, digest: digest(data.toString('base64')) }];
-  }));
-}
-
 export function createReviewPackage(options: {
   context: ReviewPreflightContext;
   risk: ReviewRiskAssessment;
@@ -155,6 +158,11 @@ export function createReviewPackage(options: {
   runner: AgentKind;
   model: string;
   mechanicalEvidence: ReviewMechanicalEvidence;
+  /** @internal Deterministic initialization failure seams; production leaves this undefined. */
+  initializationHooks?: {
+    readonly afterInputWrite?: (root: string) => void;
+    readonly beforePermissions?: (root: string) => void;
+  };
 }): ReviewPackage {
   assertMechanicalEvidence(options.context, options.mechanicalEvidence);
   const input = `${JSON.stringify(axisInput(
@@ -171,12 +179,15 @@ export function createReviewPackage(options: {
       '不会截断或自动分片，请拆分 PR',
     );
   }
-  const root = mkdtempSync(join(tmpdir(), 'coding-x-review-'));
+  const temporary = ReviewTemporaryDirectory.create({
+    prefix: 'coding-x-review-',
+    projectRoot: options.context.root,
+  });
+  const root = temporary.root;
   const inputPath = join(root, 'review-input.json');
   const schemaPath = join(root, 'response-schema.json');
   const manifestPath = join(root, 'manifest.json');
-  writeFileSync(inputPath, input, { encoding: 'utf8', mode: 0o444 });
-  writeFileSync(schemaPath, `${JSON.stringify(reviewOutputSchema())}\n`, { encoding: 'utf8', mode: 0o444 });
+  const schema = `${JSON.stringify(reviewOutputSchema())}\n`;
   const manifest = {
     schemaVersion: 1,
     axis: options.axis,
@@ -186,31 +197,52 @@ export function createReviewPackage(options: {
     inputDigest: digest(input),
     reviewRulesDigest: REVIEW_RULES_DIGEST,
   };
-  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', mode: 0o444 });
-  chmodSync(root, 0o555);
-  const before = fileSnapshot(root);
-  const cleanup = () => {
-    const target = resolve(root);
-    if (!isOwnedTempDirectory(target, 'coding-x-review-')) {
-      throw new Error(`拒绝清理非审查临时目录：${target}`);
-    }
-    chmodSync(root, 0o755);
-    rmSync(root, { recursive: true, force: true });
-  };
+  const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  try {
+    writeFileSync(inputPath, input, { encoding: 'utf8', mode: 0o400 });
+    options.initializationHooks?.afterInputWrite?.(root);
+    writeFileSync(schemaPath, schema, { encoding: 'utf8', mode: 0o400 });
+    writeFileSync(manifestPath, manifestBytes, { encoding: 'utf8', mode: 0o400 });
+    options.initializationHooks?.beforePermissions?.(root);
+    chmodSync(root, 0o500);
+    temporary.sealExactTree({
+      files: [
+        { path: 'review-input.json', bytes: Buffer.from(input), maximumBytes: limit },
+        {
+          path: 'response-schema.json',
+          bytes: Buffer.from(schema),
+          maximumBytes: REVIEW_SCHEMA_LIMIT_BYTES,
+        },
+        {
+          path: 'manifest.json',
+          bytes: Buffer.from(manifestBytes),
+          maximumBytes: REVIEW_MANIFEST_LIMIT_BYTES,
+        },
+      ],
+    });
+  } catch (error) {
+    const cleanup = temporary.cleanup();
+    throw new ReviewTemporaryDirectoryError(
+      `${error instanceof Error ? error.message : String(error)}；` +
+        (cleanup.status === 'retained'
+          ? `初始化失败现场已保留 ${cleanup.path}：${cleanup.reason}`
+          : '初始化失败现场已安全清理'),
+    );
+  }
   return {
     root,
+    projectRoot: options.context.root,
     inputPath,
     schemaPath,
+    schema,
     manifestPath,
     input,
     inputBytes,
     digest: digest(manifest),
-    cleanup,
-    assertUnchanged: () => {
-      const after = fileSnapshot(root);
-      if (JSON.stringify(after) !== JSON.stringify(before)) {
-        throw new Error('Reviewer 改写了只读审查包或产生了额外文件');
-      }
-    },
+    cleanup: () => temporary.cleanup(),
+    assertUnchanged: () => temporary.assertUnchanged(),
+    prepareManagedUse: () => temporary.prepareManagedUse(),
+    beginManagedUse: () => temporary.beginManagedUse(),
+    confirmManagedUseSettled: () => temporary.confirmManagedUseSettled(),
   };
 }

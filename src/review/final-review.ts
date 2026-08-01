@@ -9,6 +9,7 @@ import type { GitHubReviewReadClient } from '../quality/github.js';
 import type { QualityContract } from '../quality/contract.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { workspacePathsReferToSameDirectory } from '../workspace-safety/filesystem.js';
+import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { createReviewBinding, digestReviewBinding } from './binding.js';
 import { digest, normalizeText } from './common.js';
 import { unresolvedBlockingFindings } from './decisions.js';
@@ -28,12 +29,14 @@ import {
 import { applyReviewerRequestedDeepReview, assessReviewRisk } from './risk.js';
 import {
   RUNNER_TOOL_POLICY_VERSION,
+  RunnerPolicyViolation,
   probeRunnerIsolation,
   readRunnerVersion,
   runSafeReviewAxis,
   type RunnerIsolationProbe,
   type SafeRunnerInvocation,
 } from './runner.js';
+import { ReviewTemporaryDirectoryError } from './temporary-directory.js';
 import {
   invalidateFinalReviewState,
   readFinalReviewState,
@@ -170,6 +173,17 @@ export async function runFinalReview(options: {
 }): Promise<FinalReviewOutcome> {
   const startedAt = new Date().toISOString();
   const workspace = options.session.writer.workspacePath;
+  const persistState = async (state: FinalReviewState): Promise<string | null> => {
+    if (options.session.state !== 'open') {
+      return `workspace session 处于 ${options.session.state}，无法写入最终 Review 状态`;
+    }
+    try {
+      await writeFinalReviewState(options.session.writer, state);
+      return null;
+    } catch (error) {
+      return `无法写入最终 Review 状态：${error instanceof Error ? error.message : String(error)}`;
+    }
+  };
   let matchesSession = false;
   try {
     matchesSession = await workspacePathsReferToSameDirectory(options.workspace, workspace);
@@ -263,6 +277,7 @@ export async function runFinalReview(options: {
       (await readRunnerVersion({
         session: options.session,
         runner: options.runner,
+        projectRoot: context.root,
         termination: options.termination,
       }));
   } catch (error) {
@@ -289,6 +304,7 @@ export async function runFinalReview(options: {
       const currentRunnerVersion = await readRunnerVersion({
         session: options.session,
         runner: options.runner,
+        projectRoot: context.root,
         termination: options.termination,
       });
       return currentRunnerVersion === runnerVersion
@@ -305,6 +321,7 @@ export async function runFinalReview(options: {
       session: options.session,
       runner: options.runner,
       model,
+      projectRoot: context.root,
       runnerVersion,
       timeoutMs: Math.min(options.timeoutMs ?? 30 * 60_000, 5 * 60_000),
       termination: options.termination,
@@ -322,6 +339,12 @@ export async function runFinalReview(options: {
   }
   if (!probe.ok) {
     const summary = `Runner 隔离反测未通过：${probe.failures.join('；')}`;
+    if (options.session.state !== 'open') {
+      return {
+        exitCode: 5,
+        message: `${summary}；workspace session 处于 ${options.session.state}，旧结果保持失效`,
+      };
+    }
     const requiredAxes: ReviewAxis[] = risk.triggered
       ? ['spec', 'engineering', 'deep']
       : ['spec', 'engineering'];
@@ -355,14 +378,20 @@ export async function runFinalReview(options: {
       shadow: options.shadow ?? false,
       startedAt,
     });
-    await writeFinalReviewState(options.session.writer, state);
+    const persistenceError = await persistState(state);
+    if (persistenceError !== null) return { exitCode: 5, message: persistenceError };
     return stateOutcome(state);
   }
 
   const axes: ReviewAxisResult[] = [];
   const axisRunner = options.axisRunner ?? runSafeReviewAxis;
-  const runAxis = async (axis: ReviewAxis): Promise<void> => {
+  const runAxis = async (
+    axis: ReviewAxis,
+  ): Promise<{ readonly stop: boolean; readonly diagnostic?: string }> => {
     let reviewPackage: ReturnType<typeof createReviewPackage> | null = null;
+    let result: ReviewAxisResult;
+    let stop = false;
+    let invocationFailed = false;
     try {
       reviewPackage = createReviewPackage({
         context,
@@ -383,7 +412,7 @@ export async function runFinalReview(options: {
         termination: options.termination,
       });
       const output = invocation.output;
-      axes.push({
+      result = {
         axis,
         status: output.status,
         summary: output.unverifiableReason
@@ -393,28 +422,123 @@ export async function runFinalReview(options: {
         requestDeepReview: output.requestDeepReview,
         durationMs: invocation.durationMs,
         attempts: invocation.attempts,
-      });
+      };
     } catch (error) {
-      axes.push({
+      invocationFailed = true;
+      const securityError =
+        error instanceof RunnerPolicyViolation ||
+        error instanceof ReviewTemporaryDirectoryError ||
+        error instanceof WorkspaceSafetyError;
+      stop = securityError;
+      result = {
         axis,
         status: 'unverifiable',
         summary: error instanceof Error ? error.message : String(error),
         findings: [],
         requestDeepReview: false,
         durationMs: 0,
-        attempts: reviewPackage ? 2 : 0,
-      });
-    } finally {
-      reviewPackage?.cleanup();
+        attempts: reviewPackage
+          ? error instanceof RunnerPolicyViolation
+            ? error.attempts
+            : securityError
+              ? 1
+              : 2
+          : 0,
+      };
     }
+
+    let cleanupDiagnostic: string | undefined;
+    if (reviewPackage !== null) {
+      try {
+        const cleanup = reviewPackage.cleanup();
+        if (cleanup.status === 'retained') {
+          cleanupDiagnostic = `Reviewer 临时审查包已保留 ${cleanup.path}：${cleanup.reason}`;
+        }
+      } catch (error) {
+        cleanupDiagnostic = `Reviewer 临时审查包无法安全收口：${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    }
+    if (cleanupDiagnostic !== undefined) {
+      result.status = 'unverifiable';
+      result.summary = invocationFailed
+        ? `${result.summary}；${cleanupDiagnostic}`
+        : cleanupDiagnostic;
+      result.findings = [];
+      result.requestDeepReview = false;
+      stop = true;
+    }
+    axes.push(result);
+    return cleanupDiagnostic === undefined
+      ? { stop }
+      : { stop, diagnostic: cleanupDiagnostic };
   };
 
-  await runAxis('spec');
-  if (!options.termination?.signal.aborted) await runAxis('engineering');
+  let securityStop = await runAxis('spec');
+  if (!securityStop.stop && !options.termination?.signal.aborted) {
+    securityStop = await runAxis('engineering');
+  }
   risk = applyReviewerRequestedDeepReview(risk, axes);
-  if (risk.triggered && !options.termination?.signal.aborted) await runAxis('deep');
+  if (risk.triggered && !securityStop.stop && !options.termination?.signal.aborted) {
+    securityStop = await runAxis('deep');
+  }
+  if (options.termination?.signal.aborted && securityStop.stop) {
+    return {
+      exitCode: 5,
+      message:
+        '最终 Review 已由用户中断，且 Reviewer 安全边界无法收口；' +
+        (securityStop.diagnostic ?? axes.at(-1)?.summary ?? '现场已保留'),
+    };
+  }
   if (options.termination?.signal.aborted) {
     return { exitCode: 5, message: '最终 Review 已由用户中断；旧结果保持失效' };
+  }
+  if (securityStop.stop) {
+    const summary = securityStop.diagnostic ?? '本轮 Reviewer 安全边界无法验证';
+    if (options.session.state !== 'open') {
+      return {
+        exitCode: 5,
+        message: `${summary}；workspace session 处于 ${options.session.state}，旧结果保持失效`,
+      };
+    }
+    const requiredAxes: ReviewAxis[] = risk.triggered
+      ? ['spec', 'engineering', 'deep']
+      : ['spec', 'engineering'];
+    for (const axis of requiredAxes) {
+      if (axes.some((entry) => entry.axis === axis)) continue;
+      axes.push({
+        axis,
+        status: 'unverifiable',
+        summary: `前序 Reviewer 安全边界无法收口，${axis} Review 未执行`,
+        findings: [],
+        requestDeepReview: false,
+        durationMs: 0,
+        attempts: 0,
+      });
+    }
+    const state = makeState({
+      status: 'unverifiable',
+      deliveryStatus: 'unverifiable',
+      binding: makeBinding(),
+      risk,
+      axes,
+      remote: {
+        status: 'invalid',
+        checks: [],
+        rulesetErrors: [],
+        detail: summary,
+        checkedAt: new Date().toISOString(),
+      },
+      round,
+      shadow: options.shadow ?? false,
+      startedAt,
+    });
+    const persistenceError = await persistState(state);
+    if (persistenceError !== null) {
+      return { exitCode: 5, message: `${summary}；${persistenceError}` };
+    }
+    return stateOutcome(state);
   }
 
   const revalidated = await revalidateContext();
@@ -483,6 +607,7 @@ export async function runFinalReview(options: {
     shadow,
     startedAt,
   });
-  await writeFinalReviewState(options.session.writer, state);
+  const persistenceError = await persistState(state);
+  if (persistenceError !== null) return { exitCode: 5, message: persistenceError };
   return stateOutcome(state);
 }

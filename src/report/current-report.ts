@@ -138,6 +138,7 @@ export async function writeCurrentReportWithSession(options: {
             await adapters.readVersion({
               session: options.session,
               runner: read.state.binding.runner,
+              projectRoot: options.projectRoot,
               ...(options.termination === undefined ? {} : { termination: options.termination }),
             }),
           );
@@ -175,6 +176,7 @@ export async function writeCurrentReportWithSession(options: {
               await adapters.readVersion({
                 session: options.session,
                 runner: read.state.binding.runner,
+                projectRoot: options.projectRoot,
                 ...(options.termination === undefined ? {} : { termination: options.termination }),
               }),
             );
