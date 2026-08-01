@@ -17,7 +17,7 @@ import {
   TEST_QUALITY_CONTRACT,
 } from './loop-test-support.js';
 
-describe('runLoop quality gate', () => {
+describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
   it('validation-only clears the candidate only when a project command explicitly fails', async () => {
     const { workspace, instructionsDir } = setup([story()], {
       qualityChecks: ['node -e "process.exit(7)"'],

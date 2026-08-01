@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离设计
 status: active
-updated: 2026-07-31
+updated: 2026-08-01
 scope: root
 ---
 
@@ -329,6 +329,11 @@ containment empty 且 semantic delta accepted 后，不逐个删除 baseline、a
 point。随后 parent 才能写普通 outcome/evidence。崩溃在 rename 前仍由 recovery 复核完整 operation，
 崩溃在 rename 后则 operation 已完整 settled，不存在 orphan baseline/receipt。settled 记录不授予权限，
 随 active lease 最终移出；不得由已释放 owner 清理。存在 quarantine 时禁止 settle。
+
+Windows 上如果目标仍不存在而原子目录 rename 仅返回 `EPERM/EACCES` 文件共享冲突，允许按固定
+25/50/100ms 做最多三次重试。每次重试前必须重新确认 source 是非空普通目录、target 仍不存在、
+安全树没有 reparse point，并重新执行调用方的最终 commit check。`EEXIST/ENOTEMPTY`、target 已出现、
+复查失败或重试耗尽都立即失败关闭；POSIX 不采用这条重试。
 
 prepared/prepared-bound 的 setup/capability failure 或首个受支持用户中断使用
 `prestart-abort.json`。它严格绑定 ownerId、operationId、active-child/baseline 摘要、受控 reason 与
@@ -807,7 +812,9 @@ Windows 原生检查另带一份由固定源码确定性构建的 `.NET Framewor
 状态；external 结果必须带 FILE/WIM provider，FILE provider 还必须带已知 compression algorithm。helper
 也通过 OpenProcess、GetProcessTimes 与前后两次零等待存活检查读取进程 creation FILETIME。路径和
 进程热路径都不经过 PowerShell、运行时编译或旧版 managed 路径枚举；进程 helper 子进程执行有
-4 秒硬上限。supervisor 的阶段握手默认 120 秒，以覆盖开始项目代码前重复的身份、租约和目录证明，
+4 秒硬上限。普通 Windows Vitest 仅对仍在运行的 Vitest 自身使用测试专属的单次 10 秒预算，正式
+入口、其他 PID、原生证明和 supervisor 都不能调用这个测试入口。supervisor 的阶段握手默认 120 秒，
+以覆盖开始项目代码前重复的身份、租约和目录证明，
 并仍受 300 秒配置上限约束。输入输出和失败阶段都采用有界协议，任何摘要、请求绑定、
 路径、进程存活、重解析点、外部承载状态、枚举完整性或关闭句柄无法确认都按不可验证阻断。
 

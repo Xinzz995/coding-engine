@@ -429,7 +429,10 @@ export function parseWindowsPathAttributeResponse(
   return { schemaVersion: 1, mode: 'paths-v1', records };
 }
 
-function runWindowsPathAttributeProbe(request: WindowsPathRequest): WindowsPathResponse {
+function runWindowsPathAttributeProbe(
+  request: WindowsPathRequest,
+  processIdentityTimeoutMs = WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS,
+): WindowsPathResponse {
   if (process.platform !== 'win32') {
     throw new WorkspaceSafetyError('unsupported', 'Windows path attributes require Windows');
   }
@@ -450,13 +453,18 @@ function runWindowsPathAttributeProbe(request: WindowsPathRequest): WindowsPathR
     requestBytes,
     maxResponseBytes: MAX_RESPONSE_BYTES,
     ...(request.mode === 'process-identity-v1'
-      ? { timeoutMs: WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS }
+      ? {
+          timeoutMs: integer(processIdentityTimeoutMs, 1, 60_000, 'process identity timeout'),
+        }
       : {}),
   });
   return parseWindowsPathAttributeResponse(responseBytes, request);
 }
 
-export function inspectWindowsProcessIdentity(pid: number): WindowsProcessIdentityResponse {
+function inspectWindowsProcessIdentityWithin(
+  pid: number,
+  timeoutMs: number,
+): WindowsProcessIdentityResponse {
   if (process.platform !== 'win32') {
     throw new WorkspaceSafetyError('unsupported', 'Windows process identity requires Windows');
   }
@@ -465,11 +473,23 @@ export function inspectWindowsProcessIdentity(pid: number): WindowsProcessIdenti
     mode: 'process-identity-v1',
     payload: { pid: integer(pid, 1, 0xffffffff, 'pid') },
   };
-  const response = runWindowsPathAttributeProbe(request);
+  const response = runWindowsPathAttributeProbe(request, timeoutMs);
   if (response.mode !== 'process-identity-v1') {
     throw invalid('process identity probe returned the wrong response mode');
   }
   return response;
+}
+
+export function inspectWindowsProcessIdentity(pid: number): WindowsProcessIdentityResponse {
+  return inspectWindowsProcessIdentityWithin(pid, WINDOWS_PROCESS_IDENTITY_TIMEOUT_MS);
+}
+
+/** Test-only seam for the ordinary Windows Vitest process; production callers use the fixed 4s API. */
+export function inspectWindowsProcessIdentityForTest(
+  pid: number,
+  timeoutMs: number,
+): WindowsProcessIdentityResponse {
+  return inspectWindowsProcessIdentityWithin(pid, timeoutMs);
 }
 
 export function inspectWindowsPathAttributes(

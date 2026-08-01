@@ -602,11 +602,21 @@ describe('runLoop keepOpen', { timeout: 30_000, concurrent: false }, () => {
       keepOpen: true,
       interrupt,
     });
+    let earlyResult: { exitCode: number } | { error: unknown } | undefined;
+    void running.then(
+      (exitCode) => {
+        earlyResult = { exitCode };
+      },
+      (error: unknown) => {
+        earlyResult = { error };
+      },
+    );
     try {
       // 等待真实完成信号，不能假定 Windows 等较慢环境会在固定 300ms 内完成两次 agent 调用。
       let completedPhase: string | undefined;
-      const deadline = Date.now() + 10_000;
+      const deadline = Date.now() + 30_000;
       while (Date.now() < deadline) {
+        if (earlyResult !== undefined) break;
         try {
           const response = await fetch(`http://127.0.0.1:${port}/api/state`);
           if (response.ok) {
@@ -617,7 +627,16 @@ describe('runLoop keepOpen', { timeout: 30_000, concurrent: false }, () => {
         } catch {
           // 仪表盘可能还未开始监听；在期限内继续轮询。
         }
-        await new Promise((r) => setTimeout(r, 25));
+        // The real dashboard polls every two seconds. Keep this test responsive without creating
+        // a 40 requests/second read storm around the Windows atomic settlement boundary.
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      if (earlyResult !== undefined) {
+        const detail =
+          'exitCode' in earlyResult
+            ? `exit code ${earlyResult.exitCode}`
+            : `error ${String(earlyResult.error)}`;
+        throw new Error(`runProductionLoop exited before the dashboard reached done: ${detail}`);
       }
       expect(completedPhase).toBe('done');
 
@@ -641,7 +660,7 @@ describe('runLoop keepOpen', { timeout: 30_000, concurrent: false }, () => {
       await running.catch(() => undefined);
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  }, 15_000);
+  }, 40_000);
 
   it('closes immediately after completion when keepOpen is not set', async () => {
     const { workspace, instructionsDir } = setup([story()]);

@@ -253,25 +253,24 @@ describe('platform identity probe', () => {
   it('caches only the still-executing test process identity in the ordinary Windows transport', () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
     const otherPid = process.pid + 1;
-    const inspect = vi
+    const inspectCurrent = vi
+      .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentityForTest')
+      .mockImplementation((pid) => ({
+        schemaVersion: 1,
+        mode: 'process-identity-v1',
+        pid,
+        status: 'found',
+        value: '100000000000000001',
+      }));
+    const inspectOther = vi
       .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentity')
-      .mockImplementation((pid) =>
-        pid === process.pid
-          ? {
-              schemaVersion: 1,
-              mode: 'process-identity-v1',
-              pid,
-              status: 'found',
-              value: '100000000000000001',
-            }
-          : {
-              schemaVersion: 1,
-              mode: 'process-identity-v1',
-              pid,
-              status: 'missing',
-              value: null,
-            },
-      );
+      .mockImplementation((pid) => ({
+        schemaVersion: 1,
+        mode: 'process-identity-v1',
+        pid,
+        status: 'missing',
+        value: null,
+      }));
     Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
     resetWindowsIdentityTestTransport();
     try {
@@ -283,21 +282,23 @@ describe('platform identity probe', () => {
       expect(readWindowsIdentityTestSnapshot(process.pid).processIdentity).toEqual(expected);
       expect(readWindowsTestProcessIdentity(otherPid)).toEqual({ status: 'missing' });
       expect(readWindowsTestProcessIdentity(otherPid)).toEqual({ status: 'missing' });
-      expect(inspect).toHaveBeenCalledTimes(3);
-      expect(inspect).toHaveBeenNthCalledWith(1, process.pid);
-      expect(inspect).toHaveBeenNthCalledWith(2, otherPid);
-      expect(inspect).toHaveBeenNthCalledWith(3, otherPid);
+      expect(inspectCurrent).toHaveBeenCalledTimes(1);
+      expect(inspectCurrent).toHaveBeenCalledWith(process.pid, 10_000);
+      expect(inspectOther).toHaveBeenCalledTimes(2);
+      expect(inspectOther).toHaveBeenNthCalledWith(1, otherPid);
+      expect(inspectOther).toHaveBeenNthCalledWith(2, otherPid);
     } finally {
       resetWindowsIdentityTestTransport();
-      inspect.mockRestore();
+      inspectCurrent.mockRestore();
+      inspectOther.mockRestore();
       if (platform) Object.defineProperty(process, 'platform', platform);
     }
   });
 
-  it('never caches an unavailable current-process identity in the ordinary Windows transport', () => {
+  it('does not cache an unknown current-process identity and caches a later exact success', () => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
     const inspect = vi
-      .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentity')
+      .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentityForTest')
       .mockReturnValueOnce({
         schemaVersion: 1,
         mode: 'process-identity-v1',
@@ -325,8 +326,46 @@ describe('platform identity probe', () => {
         value: '100000000000000002',
       });
       expect(inspect).toHaveBeenCalledTimes(2);
-      expect(inspect).toHaveBeenNthCalledWith(1, process.pid);
-      expect(inspect).toHaveBeenNthCalledWith(2, process.pid);
+      expect(inspect).toHaveBeenNthCalledWith(1, process.pid, 10_000);
+      expect(inspect).toHaveBeenNthCalledWith(2, process.pid, 10_000);
+    } finally {
+      resetWindowsIdentityTestTransport();
+      inspect.mockRestore();
+      if (platform) Object.defineProperty(process, 'platform', platform);
+    }
+  });
+
+  it('fails closed for an unavailable current process and never caches that result', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const unavailable = {
+      schemaVersion: 1 as const,
+      mode: 'process-identity-v1' as const,
+      pid: process.pid,
+      status: 'unknown' as const,
+      value: null,
+    };
+    const inspect = vi
+      .spyOn(windowsPathAttributes, 'inspectWindowsProcessIdentityForTest')
+      .mockReturnValue(unavailable);
+    Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+    resetWindowsIdentityTestTransport();
+    try {
+      expect(readWindowsTestProcessIdentity(process.pid)).toEqual({ status: 'unknown' });
+      expect(inspect).toHaveBeenCalledTimes(1);
+      inspect.mockReturnValue({
+        ...unavailable,
+        status: 'found',
+        value: '100000000000000003',
+      });
+      expect(readWindowsTestProcessIdentity(process.pid)).toEqual({
+        status: 'found',
+        value: '100000000000000003',
+      });
+      expect(readWindowsIdentityTestSnapshot(process.pid).processIdentity).toEqual({
+        status: 'found',
+        value: '100000000000000003',
+      });
+      expect(inspect).toHaveBeenCalledTimes(2);
     } finally {
       resetWindowsIdentityTestTransport();
       inspect.mockRestore();
@@ -347,6 +386,7 @@ describe('platform identity probe', () => {
 
     expect(identitySource).toContain('readProcessIdentity: readWindowsProcessIdentity');
     expect(processLookup).toContain('inspectWindowsProcessIdentity');
+    expect(processLookup).not.toContain('inspectWindowsProcessIdentityForTest');
     expect(processLookup).not.toContain('Get-Process -Id');
     expect(processLookup).not.toContain('spawnSync');
     expect(processLookup).not.toContain('WINDOWS_IDENTITY_SNAPSHOT_SCRIPT');

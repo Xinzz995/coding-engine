@@ -9,11 +9,15 @@
  */
 import type { ProcessIdentityLookup } from './identity.js';
 import type { WindowsIdentitySnapshot } from './windows-identity-transport.js';
-import { inspectWindowsProcessIdentity } from './windows-path-attributes.js';
+import {
+  inspectWindowsProcessIdentity,
+  inspectWindowsProcessIdentityForTest,
+} from './windows-path-attributes.js';
 
 const TEST_HOST_IDENTITY = 'coding-x-windows-test-host-v1';
 const TEST_BOOT_IDENTITY = 'coding-x-windows-test-boot-v1';
 const MAX_TEST_INVOCATIONS = 10_000;
+const TEST_CURRENT_PROCESS_IDENTITY_TIMEOUT_MS = 10_000;
 let invocationCount = 0;
 let currentProcessIdentity: string | undefined;
 
@@ -57,13 +61,18 @@ function processIdentity(pid: number): ProcessIdentityLookup {
     return { status: 'found', value: currentProcessIdentity };
   }
   try {
-    const observed = inspectWindowsProcessIdentity(pid);
-    if (pid === process.pid && observed.status === 'found') {
-      currentProcessIdentity = observed.value;
+    const observed =
+      pid === process.pid
+        ? inspectWindowsProcessIdentityForTest(pid, TEST_CURRENT_PROCESS_IDENTITY_TIMEOUT_MS)
+        : inspectWindowsProcessIdentity(pid);
+    const result: ProcessIdentityLookup =
+      observed.status === 'found'
+        ? { status: 'found', value: observed.value }
+        : { status: observed.status };
+    if (pid === process.pid && result.status === 'found') {
+      currentProcessIdentity = result.value;
     }
-    return observed.status === 'found'
-      ? { status: 'found', value: observed.value }
-      : { status: observed.status };
+    return result;
   } catch {
     return { status: 'unknown' };
   }
