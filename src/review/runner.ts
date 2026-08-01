@@ -97,7 +97,7 @@ export function reviewRunnerEnvironment(
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
-  const exactNames = [
+  const baselineExactNames = [
     'PATH',
     'HOME',
     'USER',
@@ -119,22 +119,28 @@ export function reviewRunnerEnvironment(
     'ALL_PROXY',
     'NO_PROXY',
   ];
-  const exact = new Map(
-    exactNames.map((name) => [platform === 'win32' ? name.toLowerCase() : name, name]),
-  );
-  const prefixes =
+  const runnerExactNames =
     kind === 'codex'
       ? ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_HOME']
       : kind === 'claude'
         ? [
             'ANTHROPIC_API_KEY',
-            'CLAUDE_CODE_',
-            'AWS_',
-            'ANTHROPIC_VERTEX_',
             'GOOGLE_APPLICATION_CREDENTIALS',
             'CLOUD_ML_REGION',
           ]
         : ['CURSOR_API_KEY', 'CURSOR_API_ENDPOINT'];
+  const exact = new Map(
+    [...baselineExactNames, ...runnerExactNames].map((name) => [
+      platform === 'win32' ? name.toLowerCase() : name,
+      name,
+    ]),
+  );
+  const prefixes =
+    kind === 'codex'
+      ? []
+      : kind === 'claude'
+        ? ['CLAUDE_CODE_', 'AWS_', 'ANTHROPIC_VERTEX_']
+        : [];
   const result: NodeJS.ProcessEnv = {};
   const selected = new Set<string>();
   for (const [key, value] of Object.entries(environment)) {
@@ -142,7 +148,7 @@ export function reviewRunnerEnvironment(
     const exactName = exact.get(comparisonKey);
     const prefixMatch = prefixes.some((prefix) => {
       const comparisonPrefix = platform === 'win32' ? prefix.toLowerCase() : prefix;
-      return comparisonKey === comparisonPrefix || comparisonKey.startsWith(comparisonPrefix);
+      return comparisonKey.startsWith(comparisonPrefix);
     });
     if (exactName !== undefined || prefixMatch) {
       const outputName = exactName ?? key;

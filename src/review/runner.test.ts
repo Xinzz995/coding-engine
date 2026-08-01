@@ -407,6 +407,8 @@ describe('reviewRunnerEnvironment', () => {
           tmp: 'C:\\ReviewTemp',
           Path: 'C:\\Tools',
           openai_api_key: 'fixture-key',
+          OPENAI_API_KEY_BACKUP: 'must-not-pass',
+          CODEX_HOMEX: 'must-not-pass',
           UNRELATED_SECRET: 'must-not-pass',
         },
         'win32',
@@ -416,7 +418,60 @@ describe('reviewRunnerEnvironment', () => {
       TEMP: 'C:\\ReviewTemp',
       TMP: 'C:\\ReviewTemp',
       PATH: 'C:\\Tools',
-      openai_api_key: 'fixture-key',
+      OPENAI_API_KEY: 'fixture-key',
+      CI: '1',
+      NO_COLOR: '1',
+    });
+  });
+
+  it('keeps exact credentials and declared namespaces without widening their names', () => {
+    expect(
+      reviewRunnerEnvironment('codex', {
+        CODEX_API_KEY: 'codex-key',
+        OPENAI_API_KEY: 'openai-key',
+        CODEX_HOME: '/codex-home',
+        OPENAI_API_KEY_BACKUP: 'must-not-pass',
+        CODEX_HOMEX: 'must-not-pass',
+      }),
+    ).toEqual({
+      CODEX_API_KEY: 'codex-key',
+      OPENAI_API_KEY: 'openai-key',
+      CODEX_HOME: '/codex-home',
+      CI: '1',
+      NO_COLOR: '1',
+    });
+    expect(
+      reviewRunnerEnvironment('claude', {
+        ANTHROPIC_API_KEY: 'anthropic-key',
+        GOOGLE_APPLICATION_CREDENTIALS: '/credentials.json',
+        CLOUD_ML_REGION: 'region',
+        CLAUDE_CODE_USE_VERTEX: '1',
+        AWS_PROFILE: 'review',
+        ANTHROPIC_VERTEX_PROJECT_ID: 'project',
+        ANTHROPIC_API_KEY_OLD: 'must-not-pass',
+        GOOGLE_APPLICATION_CREDENTIALS_BACKUP: 'must-not-pass',
+        CLOUD_ML_REGION_OLD: 'must-not-pass',
+      }),
+    ).toEqual({
+      ANTHROPIC_API_KEY: 'anthropic-key',
+      GOOGLE_APPLICATION_CREDENTIALS: '/credentials.json',
+      CLOUD_ML_REGION: 'region',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      AWS_PROFILE: 'review',
+      ANTHROPIC_VERTEX_PROJECT_ID: 'project',
+      CI: '1',
+      NO_COLOR: '1',
+    });
+    expect(
+      reviewRunnerEnvironment('cursor', {
+        CURSOR_API_KEY: 'cursor-key',
+        CURSOR_API_ENDPOINT: 'https://cursor.example',
+        CURSOR_API_KEY_OLD: 'must-not-pass',
+        CURSOR_API_ENDPOINT_BACKUP: 'must-not-pass',
+      }),
+    ).toEqual({
+      CURSOR_API_KEY: 'cursor-key',
+      CURSOR_API_ENDPOINT: 'https://cursor.example',
       CI: '1',
       NO_COLOR: '1',
     });
