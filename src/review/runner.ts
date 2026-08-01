@@ -92,8 +92,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function allowedEnvironment(kind: AgentKind): NodeJS.ProcessEnv {
-  const exact = new Set([
+export function reviewRunnerEnvironment(
+  kind: AgentKind,
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const exactNames = [
     'PATH',
     'HOME',
     'USER',
@@ -114,7 +118,10 @@ function allowedEnvironment(kind: AgentKind): NodeJS.ProcessEnv {
     'HTTP_PROXY',
     'ALL_PROXY',
     'NO_PROXY',
-  ]);
+  ];
+  const exact = new Map(
+    exactNames.map((name) => [platform === 'win32' ? name.toLowerCase() : name, name]),
+  );
   const prefixes =
     kind === 'codex'
       ? ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_HOME']
@@ -129,9 +136,22 @@ function allowedEnvironment(kind: AgentKind): NodeJS.ProcessEnv {
           ]
         : ['CURSOR_API_KEY', 'CURSOR_API_ENDPOINT'];
   const result: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (exact.has(key) || prefixes.some((prefix) => key === prefix || key.startsWith(prefix))) {
-      result[key] = value;
+  const selected = new Set<string>();
+  for (const [key, value] of Object.entries(environment)) {
+    const comparisonKey = platform === 'win32' ? key.toLowerCase() : key;
+    const exactName = exact.get(comparisonKey);
+    const prefixMatch = prefixes.some((prefix) => {
+      const comparisonPrefix = platform === 'win32' ? prefix.toLowerCase() : prefix;
+      return comparisonKey === comparisonPrefix || comparisonKey.startsWith(comparisonPrefix);
+    });
+    if (exactName !== undefined || prefixMatch) {
+      const outputName = exactName ?? key;
+      const identity = platform === 'win32' ? outputName.toLowerCase() : outputName;
+      if (selected.has(identity)) {
+        throw new RunnerPolicyViolation('Review Runner 环境变量名称存在大小写冲突');
+      }
+      selected.add(identity);
+      result[outputName] = value;
     }
   }
   result.CI = '1';
@@ -352,7 +372,7 @@ async function runProcess(options: {
   managedProcess?: ManagedProcessRunner;
   temporaryUses?: readonly ManagedTemporaryUse[];
 }): Promise<ProcessResult> {
-  const environment = allowedEnvironment(options.runner);
+  const environment = reviewRunnerEnvironment(options.runner);
   const cwd = canonicalManagedProcessPath(options.cwd);
   const executable = resolveRunnerExecutablePath(
     options.runner,
@@ -462,7 +482,7 @@ export async function readRunnerVersion(options: {
   try {
     chmodSync(root, 0o500);
     temporary.sealExactTree({ files: [] });
-    const environment = allowedEnvironment(options.runner);
+    const environment = reviewRunnerEnvironment(options.runner);
     temporary.prepareManagedUse();
     temporary.beginManagedUse();
     const result = await (options.managedProcess ?? runManagedWorkspaceProcess)(options.session, {

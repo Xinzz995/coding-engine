@@ -28,6 +28,7 @@ import {
   parseModelReviewOutput,
   probeRunnerIsolation,
   readRunnerVersion,
+  reviewRunnerEnvironment,
   RunnerPolicyViolation,
   runSafeReviewAxis,
 } from './runner.js';
@@ -392,6 +393,43 @@ describe('codexReviewPermissionOverrides', () => {
       '-c',
       'permissions.coding_x_review.network.enabled=true',
     ]);
+  });
+});
+
+describe('reviewRunnerEnvironment', () => {
+  it('canonicalizes the Windows system baseline without passing unrelated values', () => {
+    expect(
+      reviewRunnerEnvironment(
+        'codex',
+        {
+          SYSTEMROOT: 'C:\\Windows',
+          Temp: 'C:\\ReviewTemp',
+          tmp: 'C:\\ReviewTemp',
+          Path: 'C:\\Tools',
+          openai_api_key: 'fixture-key',
+          UNRELATED_SECRET: 'must-not-pass',
+        },
+        'win32',
+      ),
+    ).toEqual({
+      SystemRoot: 'C:\\Windows',
+      TEMP: 'C:\\ReviewTemp',
+      TMP: 'C:\\ReviewTemp',
+      PATH: 'C:\\Tools',
+      openai_api_key: 'fixture-key',
+      CI: '1',
+      NO_COLOR: '1',
+    });
+  });
+
+  it('fails closed on case-insensitive Windows environment aliases', () => {
+    expect(() =>
+      reviewRunnerEnvironment(
+        'codex',
+        { SystemRoot: 'C:\\Windows', SYSTEMROOT: 'C:\\Other' },
+        'win32',
+      ),
+    ).toThrow('大小写冲突');
   });
 });
 
