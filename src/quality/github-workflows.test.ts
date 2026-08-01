@@ -62,6 +62,7 @@ describe('coding-engine quality contract', () => {
       expect.arrayContaining([
         'assets/workspace-safety/**',
         'src/contracts/**',
+        'src/review/**',
         'src/workspace-safety/**',
       ]),
     );
@@ -83,6 +84,7 @@ describe('coding-engine quality contract', () => {
       expect.arrayContaining([
         'src/workspace-safety/delegated-recovery.windows-crash.test.ts',
         'src/workspace-safety/windows-reparse-point.windows.test.ts',
+        'src/workspace-safety/windows-review-temporary-domain.windows.test.ts',
         'src/workspace-safety/windows-path-attributes-transport.test.ts',
         'src/workspace-safety/windows-path-attributes-transport.ts',
         'src/workspace-safety/windows-path-attributes.test.ts',
@@ -90,6 +92,8 @@ describe('coding-engine quality contract', () => {
         'src/workspace-safety/windows-supervisor.crash.test.ts',
         'src/workspace-safety/windows-supervisor-integration.test.ts',
         'src/workspace-safety/windows-supervisor.test.ts',
+        'src/review/**',
+        'src/status/runner-version-observation.ts',
         'tsconfig.json',
       ]),
     );
@@ -204,6 +208,9 @@ describe('renderPolicyGuardWorkflow', () => {
       'docs/golden-principles.md',
       'native/windows-supervisor/**',
       'package.json',
+      'src/review/**',
+      'src/status/runner-version-observation.ts',
+      'src/workspace-safety/windows-review-temporary-domain.windows.test.ts',
       'tsup.config.ts',
       'vitest.config.ts',
     ]) {

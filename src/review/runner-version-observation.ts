@@ -41,6 +41,7 @@ export async function observeCurrentReviewRunnerVersion(options: {
     const version = await (options.readVersion ?? readRunnerVersion)({
       session: options.session,
       runner,
+      projectRoot,
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     return { status: 'ready', runner, version };

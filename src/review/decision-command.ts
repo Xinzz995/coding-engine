@@ -251,6 +251,7 @@ function createCurrentBindingReader(options: {
       runnerVersion = await readRunnerVersion({
         session: options.session,
         runner: options.review.binding.runner,
+        projectRoot: options.root,
         termination: options.termination,
       });
     } catch (error) {

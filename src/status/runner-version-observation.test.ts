@@ -1,13 +1,23 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { digest } from '../review/common.js';
+import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
 import { observeStatusRunnerVersionControlled } from './runner-version-observation.js';
 
 const roots: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -94,6 +104,34 @@ function readyReviewWorkspace(): { projectRoot: string; workspace: string } {
 }
 
 describe('status Runner version transient safety domain', () => {
+  it('removes a partially initialized status safety domain before observation', async () => {
+    const { projectRoot, workspace } = readyReviewWorkspace();
+    const createTemporary = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let safetyPath = '';
+    vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = createTemporary(options);
+      safetyPath = temporary.root;
+      roots.push(safetyPath);
+      vi.spyOn(temporary, 'sealSafeTree').mockImplementation(() => {
+        throw new Error('injected safe-tree seal failure');
+      });
+      return temporary;
+    });
+    const observe = vi.fn();
+
+    const result = await observeStatusRunnerVersionControlled(
+      { workspace, projectRoot },
+      { observe },
+    );
+
+    expect(result).toMatchObject({ status: 'unverifiable', runner: 'codex' });
+    if (result.status !== 'unverifiable') throw new Error('expected unverifiable');
+    expect(result.message).toMatch(/injected safe-tree seal failure.*初始化现场已安全清理/u);
+    expect(observe).not.toHaveBeenCalled();
+    expect(safetyPath).not.toBe('');
+    expect(existsSync(safetyPath)).toBe(false);
+  });
+
   it('supervises the observation outside the project and removes the safely closed domain', async () => {
     const { projectRoot, workspace } = readyReviewWorkspace();
     let safetyPath = '';
@@ -158,8 +196,61 @@ describe('status Runner version transient safety domain', () => {
 
     expect(result).toMatchObject({ status: 'unverifiable', runner: 'codex' });
     if (result.status !== 'unverifiable') throw new Error('expected unverifiable');
+    expect(result.message).toContain('fixture isolated observation');
     expect(result.message).toContain('isolated');
     expect(result.message).toContain(basename(safetyPath));
     expect(existsSync(safetyPath)).toBe(true);
+  });
+
+  it('retains the transient domain when session close throws', async () => {
+    const { projectRoot, workspace } = readyReviewWorkspace();
+    let safetyPath = '';
+
+    const result = await observeStatusRunnerVersionControlled(
+      { workspace, projectRoot },
+      {
+        observe: async (options) => {
+          safetyPath = options.session.writer.workspacePath;
+          roots.push(safetyPath);
+          vi.spyOn(options.session, 'close').mockRejectedValue(
+            new Error('fixture session close failure'),
+          );
+          return { status: 'ready' as const, runner: 'codex' as const, version: 'codex 1.2.3' };
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'unverifiable', runner: 'codex' });
+    if (result.status !== 'unverifiable') throw new Error('expected unverifiable');
+    expect(result.message).toContain('session 无法安全关闭');
+    expect(result.message).toContain('fixture session close failure');
+    expect(existsSync(safetyPath)).toBe(true);
+  });
+
+  it('retains both identities and never deletes a replacement safety root', async () => {
+    const { projectRoot, workspace } = readyReviewWorkspace();
+    let safetyPath = '';
+    let originalPath = '';
+
+    const result = await observeStatusRunnerVersionControlled(
+      { workspace, projectRoot },
+      {
+        observe: async (options) => {
+          safetyPath = options.session.writer.workspacePath;
+          originalPath = `${safetyPath}-original`;
+          renameSync(safetyPath, originalPath);
+          roots.push(safetyPath, originalPath);
+          mkdirSync(safetyPath);
+          writeFileSync(join(safetyPath, 'sentinel.txt'), 'replacement\n');
+          return { status: 'ready' as const, runner: 'codex' as const, version: 'codex 1.2.3' };
+        },
+      },
+    );
+
+    expect(result).toMatchObject({ status: 'unverifiable', runner: 'codex' });
+    if (result.status !== 'unverifiable') throw new Error('expected unverifiable');
+    expect(result.message).toContain('保留位置无法验证');
+    expect(readFileSync(join(safetyPath, 'sentinel.txt'), 'utf8')).toBe('replacement\n');
+    expect(existsSync(originalPath)).toBe(true);
   });
 });

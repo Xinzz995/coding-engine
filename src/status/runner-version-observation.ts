@@ -1,9 +1,10 @@
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
 import { observeCurrentReviewRunnerVersion } from '../review/runner-version-observation.js';
 import type { RunnerVersionObservation } from '../review/currentness.js';
 import { readFinalReviewState } from '../review/state.js';
+import {
+  describeReviewTemporaryRetention,
+  ReviewTemporaryDirectory,
+} from '../review/temporary-directory.js';
 import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession, type WorkspaceSession } from '../workspace-safety/session.js';
@@ -21,67 +22,57 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function noSuchPath(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    String((error as { readonly code?: unknown }).code) === 'ENOENT'
-  );
-}
-
-async function removeOwnedTransientSafetyDirectory(path: string): Promise<void> {
-  const canonicalParent = await realpath(tmpdir());
-  let canonical: string;
-  try {
-    canonical = await realpath(path);
-  } catch (error) {
-    if (noSuchPath(error)) return;
-    throw error;
-  }
-  const name = basename(canonical);
-  if (
-    dirname(canonical) !== canonicalParent ||
-    !name.startsWith(TRANSIENT_SAFETY_PREFIX) ||
-    name.length === TRANSIENT_SAFETY_PREFIX.length
-  ) {
-    throw new Error(`拒绝清理非 status Runner 临时安全域：${canonical}`);
-  }
-  await rm(canonical, { recursive: true, force: false, maxRetries: 2, retryDelay: 10 });
-}
-
 async function closeTransientSession(
-  path: string,
+  temporary: ReviewTemporaryDirectory,
   session: WorkspaceSession | undefined,
+  managedUseStarted: boolean,
 ): Promise<string | null> {
+  const path = temporary.root;
+  const retain = (reason: string): string => {
+    const retained = temporary.retain(reason);
+    return `临时安全域${describeReviewTemporaryRetention(retained)}：${retained.reason}`;
+  };
   if (session !== undefined) {
     if (session.state === 'open') {
       try {
         await session.close();
       } catch (error) {
-        return `临时安全域无法安全关闭，已保留 ${path}：${errorMessage(error)}`;
+        return retain(`session 无法安全关闭：${errorMessage(error)}`);
       }
     }
     if (session.state !== 'closed') {
-      return `临时安全域处于 ${session.state}，已保留 ${path}`;
+      return retain(`session 处于 ${session.state}`);
     }
   } else {
     let safety;
     try {
       safety = await inspectWorkspaceSafetyStatus(path);
     } catch (error) {
-      return `临时安全域无法完成无写入者核验，已保留 ${path}：${errorMessage(error)}`;
+      return retain(`无法完成无写入者核验：${errorMessage(error)}`);
     }
     if (safety.status !== 'ready' && safety.status !== 'uninitialized') {
-      return `临时安全域未证明无活动写入者，已保留 ${path}（${safety.status}）`;
+      return retain(`未证明无活动写入者（${safety.status}）`);
+    }
+  }
+
+  if (managedUseStarted) {
+    try {
+      temporary.confirmManagedUseSettled();
+    } catch (error) {
+      const cleanup = temporary.cleanup();
+      return cleanup.status !== 'removed'
+        ? `临时安全域身份核对失败，现场${describeReviewTemporaryRetention(cleanup)}：${errorMessage(error)}；${cleanup.reason}`
+        : `临时安全域身份核对失败：${errorMessage(error)}`;
     }
   }
 
   try {
-    await removeOwnedTransientSafetyDirectory(path);
-    return null;
+    const cleanup = temporary.cleanup();
+    return cleanup.status === 'removed'
+      ? null
+      : `临时安全域清理失败，现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`;
   } catch (error) {
-    return `临时安全域清理失败，已保留 ${path}：${errorMessage(error)}`;
+    return `临时安全域清理失败，保留位置无法验证（候选路径：${path}）：${errorMessage(error)}`;
   }
 }
 
@@ -93,22 +84,38 @@ export async function observeStatusRunnerVersionControlled(
   const review = readFinalReviewState(options.workspace);
   if (review.status !== 'ready') return { status: 'not-required' };
   const runner = review.state.binding.runner;
-  let safetyPath: string;
+  let temporary: ReviewTemporaryDirectory | undefined;
   try {
-    safetyPath = await mkdtemp(join(tmpdir(), TRANSIENT_SAFETY_PREFIX));
+    temporary = ReviewTemporaryDirectory.create({
+      prefix: TRANSIENT_SAFETY_PREFIX,
+      projectRoot: options.projectRoot,
+    });
+    temporary.sealSafeTree();
   } catch (error) {
+    const cleanup = temporary?.cleanup();
     return {
       status: 'unverifiable',
       runner,
-      message: `无法创建 Runner 版本观察的临时安全域：${errorMessage(error)}`,
+      message:
+        `无法创建 Runner 版本观察的临时安全域：${errorMessage(error)}` +
+        (cleanup === undefined
+          ? ''
+          : cleanup.status !== 'removed'
+            ? `；现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`
+            : '；初始化现场已安全清理'),
     };
   }
+  const safetyPath = temporary.root;
   let session: WorkspaceSession | undefined;
+  let managedUseStarted = false;
   let observation: RunnerVersionObservation;
   try {
     await bootstrapWorkspace({ workspacePath: safetyPath });
     const lease = await acquireWorkspaceLease({ workspacePath: safetyPath, command: 'report' });
     session = createWorkspaceSession(lease);
+    temporary.prepareManagedUse();
+    temporary.beginManagedUse();
+    managedUseStarted = true;
     observation = await adapter.observe({
       workspace: options.workspace,
       projectRoot: options.projectRoot,
@@ -122,12 +129,14 @@ export async function observeStatusRunnerVersionControlled(
     };
   }
 
-  const cleanupError = await closeTransientSession(safetyPath, session);
+  const cleanupError = await closeTransientSession(temporary, session, managedUseStarted);
   if (cleanupError !== null) {
+    const observationFailure =
+      observation.status === 'unverifiable' ? `${observation.message}；` : '';
     return {
       status: 'unverifiable',
       runner,
-      message: cleanupError,
+      message: `${observationFailure}${cleanupError}`,
     };
   }
   return observation;

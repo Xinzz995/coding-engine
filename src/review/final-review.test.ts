@@ -1,10 +1,21 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readQualityContract, type QualityContract } from '../quality/contract.js';
 import type { WorkspaceSession, WorkspaceWriteData } from '../workspace-safety/session.js';
+import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { digestReviewBinding } from './binding.js';
 import { runFinalReview } from './final-review.js';
 import type { ReviewPreflightContext } from './preflight.js';
@@ -14,8 +25,28 @@ import { readFinalReviewState } from './state.js';
 import type { ReviewAxis, ReviewRemoteState } from './types.js';
 
 const roots: string[] = [];
+function makeFixtureRemovable(path: string): void {
+  let info: ReturnType<typeof lstatSync>;
+  try {
+    info = lstatSync(path);
+  } catch {
+    return;
+  }
+  if (info.isSymbolicLink()) return;
+  if (!info.isDirectory()) {
+    chmodSync(path, 0o600);
+    return;
+  }
+  chmodSync(path, 0o700);
+  for (const name of readdirSync(path)) makeFixtureRemovable(join(path, name));
+}
+
 afterEach(() => {
-  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
+  while (roots.length > 0) {
+    const root = roots.pop()!;
+    makeFixtureRemovable(root);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function contract(): QualityContract {
@@ -32,6 +63,7 @@ function workspace(): string {
 
 function session(workspacePath: string): WorkspaceSession {
   return {
+    state: 'open',
     writer: {
       workspacePath,
       writeFile: async (relativePath: string, data: WorkspaceWriteData) => {
@@ -292,6 +324,93 @@ describe('runFinalReview', () => {
         expect.objectContaining({ axis: 'engineering', status: 'passed' }),
       ]),
     );
+  });
+
+  it('stops remaining axes and records an unverifiable state when a review package is polluted', async () => {
+    const calls: ReviewAxis[] = [];
+    let retainedPath = '';
+    const ws = workspace();
+    const modelControlledSummary = 'MODEL_MUST_NOT_LEAK_SOURCE_OR_PROMPT';
+    const attackerControlledName = 'PROMPT_FRAGMENT_SECRET';
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      axisRunner: async (request) => {
+        calls.push(request.axis);
+        retainedPath = request.reviewPackage.root;
+        roots.push(retainedPath);
+        chmodSync(retainedPath, 0o755);
+        writeFileSync(join(retainedPath, attackerControlledName), 'pollution\n');
+        const completed = output(request.axis);
+        return {
+          ...completed,
+          output: { ...completed.output, summary: modelControlledSummary },
+        };
+      },
+    });
+
+    expect(calls).toEqual(['spec']);
+    expect(result.exitCode).toBe(5);
+    expect(result.state).toMatchObject({
+      status: 'unverifiable',
+      deliveryStatus: 'unverifiable',
+      remote: { status: 'invalid' },
+      axes: [
+        {
+          axis: 'spec',
+          status: 'unverifiable',
+          findings: [],
+          requestDeepReview: false,
+        },
+        { axis: 'engineering', status: 'unverifiable', attempts: 0 },
+      ],
+    });
+    expect(result.state?.axes[0].summary).toContain('临时审查包已保留');
+    expect(result.state?.axes[0].summary).toContain(retainedPath);
+    expect(result.state?.axes[0].summary).not.toContain(modelControlledSummary);
+    expect(result.state?.axes[0].summary).not.toContain(attackerControlledName);
+    expect(result.message).not.toContain(attackerControlledName);
+    expect(existsSync(retainedPath)).toBe(true);
+    expect(readFinalReviewState(ws)).toMatchObject({
+      status: 'ready',
+      state: { status: 'unverifiable', deliveryStatus: 'unverifiable' },
+    });
+  });
+
+  it('preserves the model failure and cleanup failure in one retained diagnostic', async () => {
+    let retainedPath = '';
+    const result = await runFinalReview({
+      ...options(workspace(), context()),
+      axisRunner: async (request) => {
+        retainedPath = request.reviewPackage.root;
+        roots.push(retainedPath);
+        chmodSync(retainedPath, 0o755);
+        writeFileSync(join(retainedPath, 'unexpected-file'), 'pollution\n');
+        throw new Error('fixture model service failure');
+      },
+    });
+
+    expect(result.exitCode).toBe(5);
+    expect(result.state?.axes[0].summary).toContain('fixture model service failure');
+    expect(result.state?.axes[0].summary).toContain('临时审查包已保留');
+    expect(result.state?.axes[0].summary).toContain(retainedPath);
+    expect(existsSync(retainedPath)).toBe(true);
+  });
+
+  it('returns exit 5 without attempting a state write after the workspace session is isolated', async () => {
+    const ws = workspace();
+    const base = options(ws, context());
+    const result = await runFinalReview({
+      ...base,
+      axisRunner: async () => {
+        Object.defineProperty(base.session, 'state', { value: 'isolated', configurable: true });
+        throw new WorkspaceSafetyError('isolated', 'fixture session isolated');
+      },
+    });
+
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('session 处于 isolated');
+    expect(result.state).toBeUndefined();
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
   });
 
   it('invalidates all model results when the bound commit or PR changes during Review', async () => {
