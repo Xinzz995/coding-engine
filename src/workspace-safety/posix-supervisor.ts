@@ -31,6 +31,7 @@ import {
   type SupervisorTerminationReason,
 } from './supervisor-protocol.js';
 import { digestBytes } from './filesystem.js';
+import { MonotonicDeadline } from './deadline.js';
 import { WorkspaceSafetyError } from './types.js';
 export {
   readDarkPosixHelperBundle,
@@ -217,14 +218,29 @@ function resolveTimeouts(input: PosixSupervisorTimeouts = {}): ResolvedTimeouts 
     }
     return resolved;
   };
+  const killMs = bounded(input.killMs, 10_000, 1, 'killMs');
+  const termMs = bounded(
+    input.termMs,
+    Math.min(5000, Math.floor(killMs / 2)),
+    0,
+    'termMs',
+  );
+  if (termMs > killMs) invalid('termMs must fit inside the total killMs deadline');
   return {
     handshakeMs: bounded(input.handshakeMs, 10_000, 10, 'handshakeMs'),
     naturalDrainMs: bounded(input.naturalDrainMs, 5000, 0, 'naturalDrainMs'),
-    termMs: bounded(input.termMs, 5000, 0, 'termMs'),
-    killMs: bounded(input.killMs, 5000, 1, 'killMs'),
+    termMs,
+    killMs,
     ackMs: bounded(input.ackMs, 10_000, 10, 'ackMs'),
     pollMs: bounded(input.pollMs, 25, 1, 'pollMs'),
   };
+}
+
+function posixDeadlineError(label: string): WorkspaceSafetyError {
+  return new WorkspaceSafetyError(
+    'isolated',
+    `POSIX supervisor did not prove completion before the ${label} deadline`,
+  );
 }
 
 function helperBundleBytes(): Buffer {
@@ -446,13 +462,34 @@ class PosixSupervisorProcess {
   }
 
   send(envelope: StrictRecord): Promise<void> {
-    if (!this.child.connected) return Promise.reject(new Error('supervisor IPC is closed'));
+    if (!this.child.connected || !this.child.send) {
+      return Promise.reject(new Error('supervisor IPC is closed'));
+    }
     return new Promise((resolve, reject) => {
-      this.child.send?.(envelope, (error) => {
+      this.child.send(envelope, (error) => {
         if (error) reject(error);
         else resolve();
       });
     });
+  }
+
+  nextBefore<T extends ProtocolEvent['type']>(
+    expected: readonly T[],
+    deadline: MonotonicDeadline,
+    label: string,
+  ): Promise<Extract<ProtocolEvent, { type: T }>> {
+    return deadline.run(
+      () => this.nextAny(expected, Math.max(1, deadline.remainingMs())),
+      () => posixDeadlineError(label),
+    );
+  }
+
+  sendBefore(
+    envelope: StrictRecord,
+    deadline: MonotonicDeadline,
+    label: string,
+  ): Promise<void> {
+    return deadline.run(() => this.send(envelope), () => posixDeadlineError(label));
   }
 
   disconnect(): void {
@@ -467,21 +504,33 @@ class PosixSupervisorProcess {
     return this.#exit;
   }
 
+  waitForExitBefore(
+    deadline: MonotonicDeadline,
+    label: string,
+  ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+    return deadline.run(() => this.#exit, () => posixDeadlineError(label));
+  }
+
   async abort(): Promise<void> {
     this.#exitExpected = true;
     this.disconnect();
-    const waitMs = this.timeouts.termMs + this.timeouts.killMs + this.timeouts.handshakeMs;
+    const deadline = MonotonicDeadline.after(this.timeouts.killMs + this.timeouts.ackMs);
+    const gracefulMs = Math.min(this.timeouts.killMs, deadline.remainingMs());
     let timer: NodeJS.Timeout | undefined;
     const exited = await Promise.race([
       this.#exit.then(() => true),
       new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), waitMs);
+        timer = setTimeout(() => resolve(false), gracefulMs);
       }),
     ]);
     if (timer) clearTimeout(timer);
     if (!exited) {
       this.child.kill('SIGKILL');
-      await this.#exit;
+      try {
+        await deadline.run(() => this.#exit, () => posixDeadlineError('forced abort exit'));
+      } catch {
+        // The caller remains fail-closed and verifies exact death before any normal settlement.
+      }
     }
   }
 }
@@ -559,6 +608,7 @@ function assertExactSupervisorDeath(pid: number, expectedIdentity: string): void
 interface TerminationTrigger {
   readonly promise: Promise<SupervisorTerminationReason>;
   readonly reason: SupervisorTerminationReason | undefined;
+  readonly commandDeadline: MonotonicDeadline | undefined;
   startCommandTimer(): void;
   rootCompleted(): void;
   dispose(): void;
@@ -578,6 +628,7 @@ function createTerminationTrigger(
   }
   let frozenReason: SupervisorTerminationReason | undefined;
   let timeout: NodeJS.Timeout | undefined;
+  let commandDeadline: MonotonicDeadline | undefined;
   let resolveTrigger: (reason: SupervisorTerminationReason) => void = () => undefined;
   const promise = new Promise<SupervisorTerminationReason>((resolve) => {
     resolveTrigger = resolve;
@@ -599,9 +650,13 @@ function createTerminationTrigger(
     get reason() {
       return frozenReason;
     },
+    get commandDeadline() {
+      return commandDeadline;
+    },
     startCommandTimer() {
       if (commandTimeoutMs !== undefined && frozenReason === undefined) {
-        timeout = setTimeout(() => freeze('timeout'), commandTimeoutMs);
+        commandDeadline = MonotonicDeadline.after(commandTimeoutMs);
+        timeout = setTimeout(() => freeze('timeout'), commandDeadline.remainingMs());
       }
     },
     rootCompleted() {
@@ -642,32 +697,47 @@ async function abortPreparedPosixOperation(
   supervisorIdentity: string | undefined,
   reason: PrestartAbortReason,
 ): Promise<void> {
+  const settlementDeadline = MonotonicDeadline.after(10_000);
   if (processHandle) {
     if (!supervisorIdentity) isolated('spawned supervisor identity was never established');
     await processHandle.abort();
     assertExactSupervisorDeath(processHandle.pid, supervisorIdentity);
   }
-  await operation.abortPrestartControlled({
-    reason,
-    proof: 'supervisor-never-bound-v1',
-    supervisor: processHandle ? 'dead' : 'never-created',
-    containment: 'not-created',
-  });
+  await settlementDeadline.run(
+    () =>
+      operation.abortPrestartControlled({
+        reason,
+        proof: 'supervisor-never-bound-v1',
+        supervisor: processHandle ? 'dead' : 'never-created',
+        containment: 'not-created',
+      }),
+    () => posixDeadlineError('prestart settlement'),
+  );
 }
 
 async function abortPreparedBoundPosixOperation(
   operation: WorkspaceOperationHandleControlled,
   processHandle: PosixSupervisorProcess,
   descriptor: BoundSupervisorDescriptor,
+  timeouts: ResolvedTimeouts,
   reason: PrestartAbortReason,
 ): Promise<void> {
+  const drainDeadline = MonotonicDeadline.after(timeouts.killMs);
   processHandle.expectCleanExit();
-  await processHandle.send({
-    schemaVersion: 1,
-    type: 'ABORT_BEFORE_START',
-    messageBase64: encodeSupervisorAbortBeforeStart(operation.operationId).toString('base64'),
-  });
-  const event = await processHandle.next('PRESTART_DRAINED');
+  await processHandle.sendBefore(
+    {
+      schemaVersion: 1,
+      type: 'ABORT_BEFORE_START',
+      messageBase64: encodeSupervisorAbortBeforeStart(operation.operationId).toString('base64'),
+    },
+    drainDeadline,
+    'prestart abort delivery',
+  );
+  const event = await processHandle.nextBefore(
+    ['PRESTART_DRAINED'],
+    drainDeadline,
+    'prestart drain',
+  );
   const drained = parseSupervisorPrestartDrained(event.messageBytes);
   if (
     drained.operationId !== operation.operationId ||
@@ -677,18 +747,23 @@ async function abortPreparedBoundPosixOperation(
     invalid('PRESTART_DRAINED does not bind the prepared-bound supervisor');
   }
   processHandle.disconnect();
-  const exit = await processHandle.waitForExit();
+  const exitDeadline = MonotonicDeadline.after(timeouts.ackMs);
+  const exit = await processHandle.waitForExitBefore(exitDeadline, 'prestart supervisor exit');
   if (exit.code !== 0 || exit.signal !== null) {
     isolated('supervisor did not close cleanly after prestart abort');
   }
   assertExactSupervisorDeath(processHandle.pid, descriptor.supervisorIdentity);
-  await operation.abortPrestartControlled({
-    reason,
-    proof: 'supervisor-prestart-empty-v1',
-    supervisor: 'dead',
-    containment: 'empty',
-    prestartDrainedBytes: event.messageBytes,
-  });
+  await exitDeadline.run(
+    () =>
+      operation.abortPrestartControlled({
+        reason,
+        proof: 'supervisor-prestart-empty-v1',
+        supervisor: 'dead',
+        containment: 'empty',
+        prestartDrainedBytes: event.messageBytes,
+      }),
+    () => posixDeadlineError('prestart settlement'),
+  );
 }
 
 async function quarantineUnfinishedPosixOperation(
@@ -710,6 +785,7 @@ export async function runDarkPosixSupervisedOperation(
   let descriptor: BoundSupervisorDescriptor | undefined;
   let terminationAttempted = false;
   let completed = false;
+  let resolvedTimeouts: ResolvedTimeouts | undefined;
   try {
     terminationTrigger = createTerminationTrigger(options.commandTimeoutMs, options.termination);
     throwIfPrestartInterrupted(terminationTrigger);
@@ -717,60 +793,96 @@ export async function runDarkPosixSupervisedOperation(
       invalid('target executable and cwd must be absolute');
     }
     const timeouts = resolveTimeouts(options.timeouts);
+    resolvedTimeouts = timeouts;
+    const prepareDeadline = MonotonicDeadline.after(timeouts.handshakeMs);
     const helperBytes = helperBundleBytes();
     const helperDigest = digestBytes(helperBytes);
     processHandle = spawnSupervisor(timeouts);
     supervisorIdentity = processIdentity(processHandle.pid);
     throwIfPrestartInterrupted(terminationTrigger);
-    const boundEvent = await processHandle.next('BOUND');
+    const boundEvent = await processHandle.nextBefore(['BOUND'], prepareDeadline, 'prepare');
     descriptor = validateSupervisorBound(processHandle, boundEvent, helperDigest);
-    await options.hooks?.onBound?.({
-      supervisorPid: processHandle.pid,
-      placement: inspectPosixProcessPlacement(processHandle.pid),
-    });
+    await prepareDeadline.run(
+      () =>
+        options.hooks?.onBound?.({
+          supervisorPid: processHandle!.pid,
+          placement: inspectPosixProcessPlacement(processHandle!.pid),
+        }),
+      () => posixDeadlineError('prepare hook'),
+    );
     throwIfPrestartInterrupted(terminationTrigger);
-    await operation.bindSupervisorControlled(descriptor);
-    await operation.readPreparedBoundBindingControlled(helperBytes);
+    await prepareDeadline.run(
+      () => operation.bindSupervisorControlled(descriptor!),
+      () => posixDeadlineError('prepare binding'),
+    );
+    await prepareDeadline.run(
+      () => operation.readPreparedBoundBindingControlled(helperBytes),
+      () => posixDeadlineError('prepare authority read'),
+    );
     throwIfPrestartInterrupted(terminationTrigger);
 
     const dataBytes = encodeSupervisorData({
       operationId: operation.operationId,
       target: options.target,
     });
-    await processHandle.send({
-      schemaVersion: 1,
-      type: 'DATA',
-      workspacePath: operation.workspacePath,
-      messageBase64: dataBytes.toString('base64'),
-    });
+    await processHandle.sendBefore(
+      {
+        schemaVersion: 1,
+        type: 'DATA',
+        workspacePath: operation.workspacePath,
+        messageBase64: dataBytes.toString('base64'),
+      },
+      prepareDeadline,
+      'DATA delivery',
+    );
 
-    const armedEvent = await processHandle.next('ARMED');
+    const armedEvent = await processHandle.nextBefore(['ARMED'], prepareDeadline, 'prepare');
     const containment = validateContainment(processHandle.pid, armedEvent);
     throwIfPrestartInterrupted(terminationTrigger);
-    await operation.armContainmentControlled(containment);
-    const armedBinding = await operation.readArmedBindingControlled(helperBytes);
-    await options.hooks?.onArmed?.({ supervisorPid: processHandle.pid, containment });
+    await prepareDeadline.run(
+      () => operation.armContainmentControlled(containment),
+      () => posixDeadlineError('prepare containment binding'),
+    );
+    const armedBinding = await prepareDeadline.run(
+      () => operation.readArmedBindingControlled(helperBytes),
+      () => posixDeadlineError('prepare armed authority read'),
+    );
+    await prepareDeadline.run(
+      () => options.hooks?.onArmed?.({ supervisorPid: processHandle!.pid, containment }),
+      () => posixDeadlineError('prepare hook'),
+    );
     let startSent = false;
     let terminationSent: SupervisorTerminationReason | undefined;
     let started: StartedEvent | undefined;
     let result: ResultEvent | undefined;
     let drained: DrainedEvent | undefined;
+    let closeoutDeadline: MonotonicDeadline | undefined;
     const runningSupervisor = processHandle;
 
     const sendTermination = async (reason: SupervisorTerminationReason): Promise<void> => {
       if (terminationSent !== undefined) return;
+      if (closeoutDeadline) closeoutDeadline.tightenAfter(timeouts.killMs);
+      else closeoutDeadline = MonotonicDeadline.after(timeouts.killMs);
       terminationSent = reason;
       terminationAttempted = true;
-      await runningSupervisor.send({
-        schemaVersion: 1,
-        type: 'TERMINATE',
-        messageBase64: encodeSupervisorTerminate(operation.operationId, reason).toString('base64'),
-      });
-      await options.hooks?.onTerminating?.({
-        supervisorPid: runningSupervisor.pid,
-        containment,
-        reason,
-      });
+      await runningSupervisor.sendBefore(
+        {
+          schemaVersion: 1,
+          type: 'TERMINATE',
+          messageBase64: encodeSupervisorTerminate(operation.operationId, reason).toString('base64'),
+        },
+        closeoutDeadline,
+        'termination delivery',
+      );
+      await closeoutDeadline.run(
+        () =>
+          options.hooks?.onTerminating?.({
+            supervisorPid: runningSupervisor.pid,
+            containment,
+            reason,
+          }),
+        () => posixDeadlineError('termination hook'),
+      );
     };
 
     if (terminationTrigger.reason !== undefined) {
@@ -780,11 +892,15 @@ export async function runDarkPosixSupervisedOperation(
         operation.operationId,
         armedBinding.activeChildDigest,
       );
-      await processHandle.send({
-        schemaVersion: 1,
-        type: 'START',
-        messageBase64: startBytes.toString('base64'),
-      });
+      await processHandle.sendBefore(
+        {
+          schemaVersion: 1,
+          type: 'START',
+          messageBase64: startBytes.toString('base64'),
+        },
+        prepareDeadline,
+        'START delivery',
+      );
       startSent = true;
       terminationTrigger.startCommandTimer();
     }
@@ -795,7 +911,7 @@ export async function runDarkPosixSupervisedOperation(
         await sendTermination(terminationTrigger.reason);
       }
       const next =
-        terminationSent === undefined
+        closeoutDeadline === undefined
           ? await Promise.race([
               pendingEvent.then((event) => ({ kind: 'event' as const, event })),
               terminationTrigger.promise.then((reason) => ({
@@ -803,7 +919,13 @@ export async function runDarkPosixSupervisedOperation(
                 reason,
               })),
             ])
-          : { kind: 'event' as const, event: await pendingEvent };
+          : {
+              kind: 'event' as const,
+              event: await closeoutDeadline.run(
+                () => pendingEvent,
+                () => posixDeadlineError('termination and drain'),
+              ),
+            };
       if (next.kind === 'termination') {
         await sendTermination(next.reason);
         continue;
@@ -812,21 +934,40 @@ export async function runDarkPosixSupervisedOperation(
       if (event.type === 'STARTED') {
         if (started || result) invalid('STARTED is duplicated or follows RESULT');
         started = event;
-        await options.hooks?.onStarted?.({
-          supervisorPid: processHandle.pid,
-          containment,
-          targetPid: event.targetPid,
-        });
+        if (options.hooks?.onStarted) {
+          const startedHook = () =>
+            options.hooks!.onStarted!({
+              supervisorPid: processHandle!.pid,
+              containment,
+              targetPid: event.targetPid,
+            });
+          if (terminationTrigger.commandDeadline) {
+            await terminationTrigger.commandDeadline.run(startedHook, () =>
+              posixDeadlineError('command hook'),
+            );
+          } else {
+            await startedHook();
+          }
+        }
       } else if (event.type === 'RESULT') {
         if (!started || result) invalid('RESULT is duplicated or precedes STARTED');
         result = event;
         terminationTrigger.rootCompleted();
-        await options.hooks?.onRootResult?.({
-          supervisorPid: processHandle.pid,
-          containment,
-          code: event.code,
-          signal: event.signal,
-        });
+        closeoutDeadline ??= MonotonicDeadline.after(
+          terminationTrigger.reason === undefined
+            ? timeouts.naturalDrainMs + timeouts.killMs
+            : timeouts.killMs,
+        );
+        await closeoutDeadline.run(
+          () =>
+            options.hooks?.onRootResult?.({
+              supervisorPid: processHandle!.pid,
+              containment,
+              code: event.code,
+              signal: event.signal,
+            }),
+          () => posixDeadlineError('natural drain hook'),
+        );
       } else {
         drained = event;
       }
@@ -835,8 +976,12 @@ export async function runDarkPosixSupervisedOperation(
       }
     }
     terminationTrigger.dispose();
+    const ackExitDeadline = MonotonicDeadline.after(timeouts.ackMs);
     const drainedMessage = parseSupervisorDrained(drained.messageBytes);
-    const receipt = await operation.acceptInstalledDrainedReceiptControlled(drained.messageBytes);
+    const receipt = await ackExitDeadline.run(
+      () => operation.acceptInstalledDrainedReceiptControlled(drained.messageBytes),
+      () => posixDeadlineError('receipt acceptance'),
+    );
     const receiptPath = join(operation.operationPath, 'drained-receipt.json');
     if (
       drainedMessage.operationId !== operation.operationId ||
@@ -860,17 +1005,27 @@ export async function runDarkPosixSupervisedOperation(
     ) {
       invalid('receipt drain reason does not match observed POSIX events');
     }
-    await options.hooks?.onDrained?.({ supervisorPid: processHandle.pid, containment, receipt });
+    await ackExitDeadline.run(
+      () => options.hooks?.onDrained?.({ supervisorPid: processHandle!.pid, containment, receipt }),
+      () => posixDeadlineError('post-drain hook'),
+    );
     processHandle.expectCleanExit();
-    await processHandle.send({
-      schemaVersion: 1,
-      type: 'ACK',
-      messageBase64: encodeSupervisorAcknowledgement(
-        operation.operationId,
-        drainedMessage.receiptDigest,
-      ).toString('base64'),
-    });
-    const supervisorExit = await processHandle.waitForExit();
+    await processHandle.sendBefore(
+      {
+        schemaVersion: 1,
+        type: 'ACK',
+        messageBase64: encodeSupervisorAcknowledgement(
+          operation.operationId,
+          drainedMessage.receiptDigest,
+        ).toString('base64'),
+      },
+      ackExitDeadline,
+      'ACK delivery',
+    );
+    const supervisorExit = await processHandle.waitForExitBefore(
+      ackExitDeadline,
+      'supervisor exit after ACK',
+    );
     if (supervisorExit.code !== 0 || supervisorExit.signal !== null) {
       isolated('supervisor did not close cleanly after ACK');
     }
@@ -878,10 +1033,14 @@ export async function runDarkPosixSupervisedOperation(
     if (probePosixProcessGroup(containment.pgid) !== 'empty') {
       isolated('target process group is not empty after supervisor close');
     }
-    const settlement = await operation.settleArmedControlled({
-      supervisor: 'dead',
-      containment: 'empty',
-    });
+    const settlement = await ackExitDeadline.run(
+      () =>
+        operation.settleArmedControlled({
+          supervisor: 'dead',
+          containment: 'empty',
+        }),
+      () => posixDeadlineError('final settlement'),
+    );
     completed = true;
     const leftover = receipt.drainReason === 'process-tree-not-empty';
     const terminationReason = externallyTerminated ? receipt.drainReason : null;
@@ -916,7 +1075,13 @@ export async function runDarkPosixSupervisedOperation(
           if (!processHandle || !descriptor) {
             isolated('prepared-bound operation lost its supervisor binding in memory');
           }
-          await abortPreparedBoundPosixOperation(operation, processHandle, descriptor, reason);
+          await abortPreparedBoundPosixOperation(
+            operation,
+            processHandle,
+            descriptor,
+            resolvedTimeouts ?? resolveTimeouts(options.timeouts),
+            reason,
+          );
         } else {
           await quarantineUnfinishedPosixOperation(
             operation,

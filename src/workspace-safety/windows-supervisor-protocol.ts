@@ -11,6 +11,7 @@ import {
   type SupervisorTerminationReason,
 } from './supervisor-protocol.js';
 import type { WindowsSupervisorTimeouts } from './windows-supervisor-launch.js';
+import { MonotonicDeadline } from './deadline.js';
 import { WorkspaceSafetyError } from './types.js';
 
 const MAX_EVENT_LINE_BYTES = 64 * 1024;
@@ -457,13 +458,38 @@ export class WindowsSupervisorProcess {
     });
   }
 
+  nextBefore<T extends WindowsProtocolEvent['type']>(
+    expected: readonly T[],
+    deadline: MonotonicDeadline,
+    label: string,
+  ): Promise<Extract<WindowsProtocolEvent, { type: T }>> {
+    return deadline.run(
+      () => this.nextAny(expected, Math.max(1, deadline.remainingMs())),
+      () => protocolError(`${label} timed out`),
+    );
+  }
+
+  sendBefore(
+    envelope: StrictRecord,
+    deadline: MonotonicDeadline,
+    label: string,
+  ): Promise<void> {
+    return deadline.run(() => this.send(envelope), () => protocolError(`${label} timed out`));
+  }
+
   expectCleanExit(): void {
     this.#exitExpected = true;
   }
 
-  async waitForCleanExit(timeoutMs: number): Promise<void> {
-    const exit = await withTimeout(this.#exit, timeoutMs, 'supervisor exit after ACK');
-    await withTimeout(this.#stdoutEnd, timeoutMs, 'supervisor stdout close after ACK');
+  async waitForCleanExit(deadline: MonotonicDeadline): Promise<void> {
+    const exit = await deadline.run(
+      () => this.#exit,
+      () => protocolError('supervisor exit after ACK timed out'),
+    );
+    await deadline.run(
+      () => this.#stdoutEnd,
+      () => protocolError('supervisor stdout close after ACK timed out'),
+    );
     if (exit.code !== 0 || exit.signal !== null) {
       protocolIsolated('supervisor did not exit cleanly after ACK');
     }
@@ -473,9 +499,15 @@ export class WindowsSupervisorProcess {
     }
   }
 
-  async waitForPrestartExit(timeoutMs: number): Promise<void> {
-    const exit = await withTimeout(this.#exit, timeoutMs, 'supervisor exit after prestart abort');
-    await withTimeout(this.#stdoutEnd, timeoutMs, 'supervisor stdout close after prestart abort');
+  async waitForPrestartExit(deadline: MonotonicDeadline): Promise<void> {
+    const exit = await deadline.run(
+      () => this.#exit,
+      () => protocolError('supervisor exit after prestart abort timed out'),
+    );
+    await deadline.run(
+      () => this.#stdoutEnd,
+      () => protocolError('supervisor stdout close after prestart abort timed out'),
+    );
     if (exit.code !== 0 || exit.signal !== null) {
       protocolIsolated('supervisor did not exit cleanly after prestart abort');
     }
@@ -490,7 +522,11 @@ export class WindowsSupervisorProcess {
     this.child.stdin.destroy();
     if (this.child.exitCode === null) this.child.kill('SIGKILL');
     try {
-      await withTimeout(this.#exit, 5000, 'failed supervisor termination');
+      const deadline = MonotonicDeadline.after(5000);
+      await deadline.run(
+        () => this.#exit,
+        () => protocolError('failed supervisor termination timed out'),
+      );
     } catch {
       // The caller already fails closed and leaves the canonical operation fence.
     }
@@ -502,20 +538,4 @@ function protocolError(message: string): WorkspaceSafetyError {
     'isolated',
     `Windows supervisor did not prove completion: ${message}`,
   );
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  return new Promise((resolvePromise, reject) => {
-    const timer = setTimeout(() => reject(protocolError(`${label} timed out`)), timeoutMs);
-    void promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolvePromise(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : protocolError('supervisor promise rejected'));
-      },
-    );
-  });
 }

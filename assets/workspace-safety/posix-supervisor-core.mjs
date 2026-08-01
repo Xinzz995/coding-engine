@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import {
   closeSync,
   constants,
@@ -406,13 +407,29 @@ export function delay(milliseconds) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
-export async function waitUntil(predicate, timeoutMs, pollMs = 25) {
-  const deadline = Date.now() + timeoutMs;
+export function monotonicNow() {
+  return performance.now();
+}
+
+export function deadlineAfter(timeoutMs) {
+  return monotonicNow() + timeoutMs;
+}
+
+export function remainingDeadlineMs(deadline) {
+  return Math.max(0, Math.ceil(deadline - monotonicNow()));
+}
+
+export async function waitUntilDeadline(predicate, deadline, pollMs = 25) {
   do {
     if (predicate()) return true;
-    if (Date.now() >= deadline) return false;
-    await delay(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    const remaining = remainingDeadlineMs(deadline);
+    if (remaining === 0) return false;
+    await delay(Math.min(pollMs, remaining));
   } while (true);
+}
+
+export async function waitUntil(predicate, timeoutMs, pollMs = 25) {
+  return waitUntilDeadline(predicate, deadlineAfter(timeoutMs), pollMs);
 }
 
 export function parseTarget(value) {

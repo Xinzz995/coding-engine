@@ -471,15 +471,15 @@ namespace CodingX.WorkspaceSafety
             return message;
         }
 
-        private void SendBound()
+        private void SendBound(MonotonicDeadline deadline)
         {
             ProtocolWriter.Send(new Dictionary<string, object> {
                 { "schemaVersion", 1 }, { "type", "BOUND" }, { "supervisorPid", supervisorPid },
                 { "supervisorIdentity", supervisorIdentity }, { "helperDigest", helperDigest }
-            });
+            }, deadline);
         }
 
-        private void SendPrestartDrained(string operationId)
+        private void SendPrestartDrained(string operationId, MonotonicDeadline deadline)
         {
             Dictionary<string, object> message = new Dictionary<string, object> {
                 { "schemaVersion", 1 }, { "type", "PRESTART_DRAINED" },
@@ -491,12 +491,13 @@ namespace CodingX.WorkspaceSafety
             ProtocolWriter.Send(new Dictionary<string, object> {
                 { "schemaVersion", 1 }, { "type", "PRESTART_DRAINED" },
                 { "messageBase64", Convert.ToBase64String(Hashing.Utf8(StrictJson.Serialize(message))) }
-            });
+            }, deadline);
         }
 
-        private void DrainAndSend(string drainReason, bool waitForAcknowledgement, string proof)
+        private void DrainAndSend(string drainReason, bool waitForAcknowledgement, string proof,
+            MonotonicDeadline closeoutDeadline)
         {
-            if (!jobTarget.WaitForEmptyAndEof(timeouts.TerminateMs, timeouts.PollMs))
+            if (!jobTarget.WaitForEmptyAndEof(closeoutDeadline, timeouts.PollMs))
                 throw new SafetyException("Windows Job or output pipes did not drain");
             if (binding == null) throw new SafetyException("START binding was not cached");
             byte[] receipt = binding.InstallReceipt(proof, drainReason);
@@ -508,18 +509,17 @@ namespace CodingX.WorkspaceSafety
             ProtocolWriter.Send(new Dictionary<string, object> {
                 { "schemaVersion", 1 }, { "type", "DRAINED" },
                 { "messageBase64", Convert.ToBase64String(Hashing.Utf8(StrictJson.Serialize(message))) }
-            });
+            }, closeoutDeadline);
             if (!waitForAcknowledgement) return;
             WaitForAcknowledgement();
         }
 
         private void WaitForAcknowledgement()
         {
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeouts.AckMs);
-            while (DateTime.UtcNow <= deadline)
+            MonotonicDeadline deadline = MonotonicDeadline.Start(timeouts.AckMs);
+            while (!deadline.Expired)
             {
-                int remaining = (int)Math.Max(1, (deadline - DateTime.UtcNow).TotalMilliseconds);
-                ControlFrame frame = control.Take(remaining);
+                ControlFrame frame = control.Take(deadline, "ACK");
                 if (frame.EndOfFile) { ProtocolWriter.Disconnect(); return; }
                 Dictionary<string, object> envelope = StrictJson.ParseObject(frame.Line, "post-drain envelope");
                 string envelopeType = StrictJson.String(envelope, "type", "post-drain type", false);
@@ -579,6 +579,7 @@ namespace CodingX.WorkspaceSafety
         {
             string requestedTermination = null;
             bool parentConnected = true;
+            MonotonicDeadline closeoutDeadline = null;
             while (!jobTarget.CaptureRootResult())
             {
                 ControlFrame frame;
@@ -586,25 +587,38 @@ namespace CodingX.WorkspaceSafety
                 {
                     requestedTermination = HandleTermination(frame);
                     parentConnected = !frame.EndOfFile;
-                    if (requestedTermination != null) break;
+                    if (requestedTermination != null)
+                    {
+                        closeoutDeadline = MonotonicDeadline.Start(timeouts.TerminateMs);
+                        break;
+                    }
                 }
             }
             if (requestedTermination != null) jobTarget.Terminate();
             if (!jobTarget.CaptureRootResult() && !jobTarget.WaitForEmptyAndEof(
-                timeouts.TerminateMs, timeouts.PollMs))
+                closeoutDeadline, timeouts.PollMs))
                 throw new SafetyException("terminated root did not exit");
+            if (closeoutDeadline == null)
+                closeoutDeadline = MonotonicDeadline.Start(
+                    timeouts.NaturalDrainMs + timeouts.TerminateMs);
             ProtocolWriter.Send(new Dictionary<string, object> {
                 { "schemaVersion", 1 }, { "type", "RESULT" },
                 { "code", (long)jobTarget.RootExitCode }, { "signal", null }
-            });
-            DateTime naturalDeadline = DateTime.UtcNow.AddMilliseconds(timeouts.NaturalDrainMs);
-            while (requestedTermination == null && !jobTarget.Drained && DateTime.UtcNow <= naturalDeadline)
+            }, closeoutDeadline);
+            MonotonicDeadline naturalDeadline = MonotonicDeadline.Start(timeouts.NaturalDrainMs);
+            while (requestedTermination == null && !jobTarget.Drained &&
+                !naturalDeadline.Expired && !closeoutDeadline.Expired)
             {
                 ControlFrame frame;
-                if (control.TryTake(timeouts.PollMs, out frame))
+                int waitMs = Math.Min(timeouts.PollMs,
+                    Math.Min(naturalDeadline.RemainingMilliseconds,
+                        closeoutDeadline.RemainingMilliseconds));
+                if (waitMs > 0 && control.TryTake(waitMs, out frame))
                 {
                     requestedTermination = HandleTermination(frame);
                     parentConnected = !frame.EndOfFile;
+                    if (requestedTermination != null)
+                        closeoutDeadline.TightenAfter(timeouts.TerminateMs);
                 }
             }
             string drainReason;
@@ -620,15 +634,17 @@ namespace CodingX.WorkspaceSafety
             }
             else drainReason = "natural";
             DrainAndSend(drainReason, parentConnected && ProtocolWriter.Connected,
-                "windows-job-zero-and-pipes-eof-v1");
+                "windows-job-zero-and-pipes-eof-v1", closeoutDeadline);
         }
 
         internal int Run()
         {
             using (control = new ControlReader())
             {
-                SendBound();
-                Dictionary<string, object> dataEnvelope = Message(control.Take(timeouts.HandshakeMs), "DATA envelope");
+                MonotonicDeadline prepareDeadline = MonotonicDeadline.Start(timeouts.HandshakeMs);
+                SendBound(prepareDeadline);
+                Dictionary<string, object> dataEnvelope = Message(
+                    control.Take(prepareDeadline, "DATA handshake"), "DATA envelope");
                 if (dataEnvelope == null) return 0;
                 string firstType = StrictJson.String(dataEnvelope, "type", "initial envelope type", false);
                 if (firstType == "ABORT_BEFORE_START")
@@ -642,7 +658,9 @@ namespace CodingX.WorkspaceSafety
                         StrictJson.String(abort, "type", "ABORT type", false) != "ABORT_BEFORE_START" ||
                         !Patterns.Uuid.IsMatch(operationId))
                         throw new SafetyException("ABORT_BEFORE_START binding is invalid");
-                    SendPrestartDrained(operationId);
+                    MonotonicDeadline closeoutDeadline =
+                        MonotonicDeadline.Start(timeouts.TerminateMs);
+                    SendPrestartDrained(operationId, closeoutDeadline);
                     return 0;
                 }
                 target = TargetSpec.Parse(dataEnvelope);
@@ -655,13 +673,15 @@ namespace CodingX.WorkspaceSafety
                             { "platform", "windows-job-v1" }, { "targetPid", (long)jobTarget.ProcessId },
                             { "targetIdentity", jobTarget.ProcessIdentity }
                         } }
-                    });
-                    ControlFrame frame = control.Take(timeouts.HandshakeMs);
+                    }, prepareDeadline);
+                    ControlFrame frame = control.Take(prepareDeadline, "START handshake");
                     if (frame.EndOfFile)
                     {
                         ProtocolWriter.Disconnect();
+                        MonotonicDeadline closeoutDeadline =
+                            MonotonicDeadline.Start(timeouts.TerminateMs);
                         jobTarget.Terminate();
-                        if (!jobTarget.WaitForEmptyAndEof(timeouts.TerminateMs, timeouts.PollMs))
+                        if (!jobTarget.WaitForEmptyAndEof(closeoutDeadline, timeouts.PollMs))
                             throw new SafetyException("prestart Job did not drain after parent EOF");
                         binding = AuthorityBinding.ReadCurrentArmed(target, prepared, helperDigest,
                             supervisorPid, supervisorIdentity, jobTarget.ProcessId, jobTarget.ProcessIdentity);
@@ -681,10 +701,12 @@ namespace CodingX.WorkspaceSafety
                             StrictJson.String(abort, "operationId", "operationId", false) != target.OperationId)
                             throw new SafetyException("ABORT_BEFORE_START binding is invalid");
                         prepared.AssertStillPrepared(target);
+                        MonotonicDeadline closeoutDeadline =
+                            MonotonicDeadline.Start(timeouts.TerminateMs);
                         jobTarget.Terminate();
-                        if (!jobTarget.WaitForEmptyAndEof(timeouts.TerminateMs, timeouts.PollMs))
+                        if (!jobTarget.WaitForEmptyAndEof(closeoutDeadline, timeouts.PollMs))
                             throw new SafetyException("prestart Job did not drain");
-                        SendPrestartDrained(target.OperationId);
+                        SendPrestartDrained(target.OperationId, closeoutDeadline);
                         jobTarget.CloseJob();
                         return 0;
                     }
@@ -696,9 +718,11 @@ namespace CodingX.WorkspaceSafety
                             supervisorPid, supervisorIdentity, jobTarget.ProcessId, jobTarget.ProcessIdentity);
                         if (binding == null)
                             throw new SafetyException("TERMINATE before START requires canonical armed authority");
+                        MonotonicDeadline closeoutDeadline =
+                            MonotonicDeadline.Start(timeouts.TerminateMs);
                         jobTarget.Terminate();
                         DrainAndSend(reason, ProtocolWriter.Connected,
-                            "never-started-containment-empty-v1");
+                            "never-started-containment-empty-v1", closeoutDeadline);
                         jobTarget.CloseJob();
                         return 0;
                     }

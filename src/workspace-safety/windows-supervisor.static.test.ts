@@ -29,6 +29,7 @@ import {
 
 const REVIEWED_WINDOWS_SOURCES = [
   'WindowsJobSupervisor.cs',
+  'WindowsJobDeadlines.cs',
   'WindowsJobProcess.cs',
   'WindowsJobAuthority.cs',
   'WindowsSupervisorProgram.cs',
@@ -149,7 +150,7 @@ describe('fixed Windows Job supervisor assets', () => {
     const sources = REVIEWED_WINDOWS_SOURCES.map((name) =>
       readFileSync(join(ASSET_ROOT, name), 'utf8'),
     );
-    const [core, processSource, authority, program] = sources;
+    const [core, deadlines, processSource, authority, program] = sources;
     const all = sources.join('\n');
 
     for (const source of sources) expect(source.split('\n').length).toBeLessThan(1000);
@@ -181,6 +182,17 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(core).toContain(
       'Range(StrictJson.Integer(record, "handshakeMs", "handshakeMs"), 10, 300000)',
     );
+    expect(deadlines).toContain('Stopwatch.GetTimestamp()');
+    expect(deadlines).toContain('RemainingMilliseconds');
+    expect(deadlines).toContain('TightenAfter');
+    expect(deadlines).toContain('protocol send timed out');
+    expect(deadlines).not.toContain('DateTime.UtcNow');
+    expect(processSource).toContain('WaitForEmptyAndEof(MonotonicDeadline deadline');
+    expect(processSource).not.toContain('DateTime.UtcNow.AddMilliseconds');
+    expect(authority).toContain('control.Take(prepareDeadline, "DATA handshake")');
+    expect(authority).toContain('control.Take(prepareDeadline, "START handshake")');
+    expect(authority).toContain('control.Take(deadline, "ACK")');
+    expect(authority).not.toContain('DateTime.UtcNow.AddMilliseconds');
     expect(processSource.indexOf('CreateJobObjectW')).toBeLessThan(
       processSource.indexOf('CreateProcessW'),
     );
@@ -226,8 +238,8 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(authority.indexOf('firstType == "ABORT_BEFORE_START"')).toBeLessThan(
       authority.indexOf('target = TargetSpec.Parse(dataEnvelope)'),
     );
-    expect(authority).toContain('SendPrestartDrained(operationId)');
-    expect(authority).toContain('SendPrestartDrained(target.OperationId)');
+    expect(authority).toContain('SendPrestartDrained(operationId, closeoutDeadline)');
+    expect(authority).toContain('SendPrestartDrained(target.OperationId, closeoutDeadline)');
     expect(authority).toContain('{ "proof", proof }, { "drainReason", drainReason }');
     expect(authority).toContain(
       'StrictJson.ExactKeys(contract, "delegation contract", "version", "semantic", "rules")',

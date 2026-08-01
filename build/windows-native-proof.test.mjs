@@ -35,6 +35,7 @@ describe('Windows native proof report', () => {
       'windows-supervisor.test.ts',
       'windows-supervisor.crash.test.ts',
       'windows-supervisor-integration.test.ts',
+      'windows-supervisor-deadline.test.ts',
       'delegated-recovery.windows-crash.test.ts',
       'windows-reparse-point.windows.test.ts',
       'windows-review-temporary-domain.windows.test.ts',
@@ -81,7 +82,7 @@ describe('Windows native proof report', () => {
     ).toThrow(/did not report success/u);
 
     expect(() => combineWindowsNativeVitestReports(separate.slice(1))).toThrow(
-      /expected 6 reports/u,
+      /expected 7 reports/u,
     );
   });
 

@@ -39,6 +39,7 @@ $SourceNames = if ($Target -eq 'PathInspector') {
   @(
     'WindowsSupervisorProgram.cs',
     'WindowsJobSupervisor.cs',
+    'WindowsJobDeadlines.cs',
     'WindowsJobProcess.cs',
     'WindowsJobAuthority.cs'
   )

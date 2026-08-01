@@ -413,14 +413,13 @@ namespace CodingX.WorkspaceSafety
             Native.Close(ref thread);
         }
 
-        internal bool WaitForEmptyAndEof(int timeoutMs, int pollMs)
+        internal bool WaitForEmptyAndEof(MonotonicDeadline deadline, int pollMs)
         {
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-            while (DateTime.UtcNow <= deadline)
+            while (!deadline.Expired)
             {
                 CaptureRootResult();
                 if (ActiveProcesses(job) == 0 && OutputEnded) return true;
-                Thread.Sleep(pollMs);
+                Thread.Sleep(Math.Min(pollMs, deadline.RemainingMilliseconds));
             }
             return ActiveProcesses(job) == 0 && OutputEnded;
         }

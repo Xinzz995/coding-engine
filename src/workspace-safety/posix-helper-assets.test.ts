@@ -129,6 +129,12 @@ describe.runIf(process.platform !== 'win32')('fixed POSIX helper assets', () => 
     }
     expect(supervisor).not.toContain('process.kill(-');
     expect(supervisor).not.toContain('signalGroup(');
+    expect(supervisor).toContain('const prepareDeadline = deadlineAfter(timeouts.handshakeMs)');
+    expect(supervisor).toContain('remainingDeadlineMs(deadline)');
+    expect(supervisor).not.toContain('Date.now()');
+    expect(core).toContain("import { performance } from 'node:perf_hooks'");
+    expect(core).toContain('export async function waitUntilDeadline');
+    expect(core).not.toContain('Date.now()');
     expect(launcher).toContain('process.kill(-process.pid, signal)');
   });
 

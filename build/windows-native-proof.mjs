@@ -8,6 +8,7 @@ export const REQUIRED_WINDOWS_NATIVE_SUITES = [
   'windows-supervisor.test.ts',
   'windows-supervisor.crash.test.ts',
   'windows-supervisor-integration.test.ts',
+  'windows-supervisor-deadline.test.ts',
   'delegated-recovery.windows-crash.test.ts',
   'windows-reparse-point.windows.test.ts',
   'windows-review-temporary-domain.windows.test.ts',

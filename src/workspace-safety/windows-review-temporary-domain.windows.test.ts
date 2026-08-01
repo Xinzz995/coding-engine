@@ -215,7 +215,7 @@ describe.skipIf(process.platform !== 'win32')(
                     ...options,
                     supervisorTimeouts: {
                       ...options.supervisorTimeouts,
-                      handshakeMs: 5000,
+                      prepareMs: 5000,
                     },
                   });
                   mark(`managed-process-${result.verdict}`);
