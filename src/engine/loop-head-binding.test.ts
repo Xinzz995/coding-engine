@@ -860,6 +860,13 @@ describe('runLoop Git HEAD validation chain', () => {
           records.find((record) => record.type === 'tdd-gate' && record.phase === 'post-builder'),
         ).toMatchObject({ ok: tddExitCode === 0, accepted: false });
         const iteration = records.find((record) => record.type === 'iteration');
+        const tddRecord = records.find(
+          (record) => record.type === 'tdd-gate' && record.phase === 'post-builder',
+        );
+        if (iteration?.type !== 'iteration' || tddRecord?.type !== 'tdd-gate') {
+          throw new Error('expected TDD and iteration evidence');
+        }
+        expect(tddRecord.runId).toBe(iteration.runId);
         expect(iteration).toMatchObject({
           builderRan: false,
           validatorRan: false,

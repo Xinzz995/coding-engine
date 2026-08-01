@@ -428,18 +428,21 @@ describe('TDD 门禁证据', () => {
       { ...base, phase: 'unknown' },
       { ...base, policyOk: true, commandRan: false },
       { ...base, policyOk: false, commandRan: true, failureCode: 'coverage-check-failed' },
+      { ...base, commandOk: true, failureCode: 'source-scan-failed' },
+      { ...base, commandOk: false, policyOk: false },
       { ...base, diagnosticTail: 'x'.repeat(2001) },
     ].map((value) => JSON.stringify(value)).join('\n') + '\n');
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 5 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 7 });
   });
 });
 
 describe('同一提交检查链中止证据', () => {
   const head1 = 'a'.repeat(40);
   const head2 = 'b'.repeat(40);
+  const runId = '11111111-1111-4111-8111-111111111111';
   const iteration = {
     type: 'iteration', source: 'engine', at: '2026-08-02T01:00:00.000Z', iteration: 2,
-    storyId: 'US-001', builderRan: false, builderModel: null,
+    runId, storyId: 'US-001', builderRan: false, builderModel: null,
     validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
   } as const;
 
@@ -466,16 +469,16 @@ describe('同一提交检查链中止证据', () => {
         diagnostic: 'Validator 前无法读取 HEAD',
       },
     };
-    const unacceptedGate: EvidenceRecord = { ...gateRun, accepted: false };
+    const unacceptedGate: EvidenceRecord = { ...gateRun, runId, accepted: false };
     const unacceptedTdd: EvidenceRecord = {
       type: 'tdd-gate', source: 'engine', at: '2026-08-02T01:01:00.000Z',
       phase: 'post-builder', iteration: 2, storyId: 'US-001', ok: true,
-      policyOk: true, commandRan: true, ms: 10, accepted: false,
+      runId, policyOk: true, commandRan: true, commandOk: true, ms: 10, accepted: false,
     };
     const unacceptedBeforeCommand: EvidenceRecord = {
       type: 'tdd-gate', source: 'engine', at: '2026-08-02T01:02:00.000Z',
       phase: 'post-builder', iteration: 4, storyId: 'US-001', ok: false,
-      policyOk: false, commandRan: false, ms: 10, accepted: false,
+      runId, policyOk: false, commandRan: false, ms: 10, accepted: false,
       failureCode: 'policy-hash-mismatch', failedCommand: '[tdd-policy]',
       exitCode: null, timedOut: false, diagnosticTail: '政策预检失败',
     };
@@ -510,6 +513,7 @@ describe('同一提交检查链中止证据', () => {
       { ...iteration, validationHeadAbort: { ...abort, diagnostic: '' } },
       { ...iteration, validationHeadAbort: { ...abort, diagnostic: 'x'.repeat(2001) } },
       { ...iteration, storyId: null, validationHeadAbort: abort },
+      { ...iteration, runId: 'not-a-uuid', validationHeadAbort: abort },
       { ...gateRun, accepted: true },
       {
         type: 'tdd-gate', source: 'engine', at: 'x', phase: 'post-builder', iteration: 1,
@@ -520,7 +524,20 @@ describe('同一提交检查链中止证据', () => {
         storyId: null, ok: true, policyOk: true, commandRan: false, ms: 1, accepted: false,
       },
     ].map((value) => JSON.stringify(value)).join('\n') + '\n');
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 9 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 10 });
+  });
+
+  it('显式保留 coverage 命令失败，即使外层状态保护覆盖了总失败原因', () => {
+    const dir = ws();
+    const record: EvidenceRecord = {
+      type: 'tdd-gate', source: 'engine', at: '2026-08-02T02:00:00.000Z',
+      runId, phase: 'post-builder', iteration: 5, storyId: 'US-001',
+      ok: false, policyOk: false, commandRan: true, commandOk: false, ms: 10,
+      failureCode: 'source-scan-failed', failedCommand: '[state-ownership]',
+      exitCode: null, timedOut: false, diagnosticTail: '状态被恢复',
+    };
+    appendEvidence(dir, record);
+    expect(readEvidence(dir)).toEqual({ records: [record], skippedLines: 0 });
   });
 });
 

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { runAgent, type AgentKind, type RunResult } from './agent.js';
@@ -230,6 +231,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       bootResolved,
     } = startup;
     const agentCwd = projectRoot;
+    const runId = randomUUID();
 
     server = dashboard.start({
       workspace: cfg.workspace,
@@ -603,6 +605,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           type: 'iteration',
           source: 'engine',
           at: new Date().toISOString(),
+          runId,
           iteration: i,
           storyId: currentStory,
           builderRan: !validationOnly && !!builder,
@@ -999,6 +1002,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           type: 'gate-run',
           source: 'engine',
           at: new Date().toISOString(),
+          runId,
           iteration: i,
           storyId: currentStory,
           ok: gate.ok,
@@ -1171,6 +1175,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ok: tddGate.ok,
           policyOk: tddGate.policyOk,
           commandRan: tddGate.commandRan,
+          ...(tddGate.commandOk === null ? {} : { commandOk: tddGate.commandOk }),
+          runId,
           ms: tddGate.ms,
           ...(tddArtifactChanged ? { accepted: false as const } : {}),
           ...(tddGate.failure

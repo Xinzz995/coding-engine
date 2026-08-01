@@ -319,28 +319,34 @@ function invocationMeta(value: { durationMs: number; exitCode: number | null } |
 
 type GateOrTddRun = Extract<EvidenceRecord, { type: 'gate-run' | 'tdd-gate' }>;
 
-/**
- * gate/TDD 的 HEAD 在本阶段结束时可能仍一致，却在同轮下一阶段才漂移。iteration 是每次
- * run 重新从 1 开始的局部编号，因此必须按 evidence 行序、以 closing iteration 分组，不能
- * 只按数字建立全局 Map，否则会误伤历史轮次。
- */
+function evidenceChainKey(record: {
+  runId?: string;
+  iteration: number;
+  storyId: string | null;
+}): string | null {
+  return record.runId === undefined
+    ? null
+    : `${record.runId}\0${record.iteration}\0${record.storyId ?? ''}`;
+}
+
+/** gate/TDD 与 closing iteration 只用同一 run 身份关联；旧记录绝不靠邻接或轮号猜测。 */
 function runsRejectedByLaterHeadAbort(records: EvidenceRecord[]): Set<GateOrTddRun> {
-  const rejected = new Set<GateOrTddRun>();
-  let pending: GateOrTddRun[] = [];
-  for (const record of records) {
-    if (record.type === 'gate-run' || (record.type === 'tdd-gate' && record.phase === 'post-builder')) {
-      pending.push(record);
-      continue;
-    }
-    if (record.type !== 'iteration') continue;
-    if (record.validationHeadAbort) {
-      for (const run of pending) {
-        if (run.iteration === record.iteration && run.storyId === record.storyId) rejected.add(run);
-      }
-    }
-    pending = [];
-  }
-  return rejected;
+  const aborted = new Set(
+    records
+      .filter((record): record is Extract<EvidenceRecord, { type: 'iteration' }> =>
+        record.type === 'iteration' && record.validationHeadAbort !== undefined)
+      .map(evidenceChainKey)
+      .filter((key): key is string => key !== null),
+  );
+  return new Set(
+    records.filter((record): record is GateOrTddRun =>
+      (record.type === 'gate-run' ||
+        (record.type === 'tdd-gate' && record.phase === 'post-builder')) &&
+      (() => {
+        const key = evidenceChainKey(record);
+        return key !== null && aborted.has(key);
+      })()),
+  );
 }
 
 function renderGateHistory(records: EvidenceRecord[]): string {
@@ -370,7 +376,8 @@ function renderTddHistory(records: EvidenceRecord[]): string {
   const rows = runs.map((run) => {
     const phase = run.phase === 'preflight' ? '启动预检' : `第 ${run.iteration} 轮`;
     const policy = run.policyOk ? '政策通过' : '政策未通过';
-    const commandPassed = run.commandRan && run.failureCode !== 'coverage-check-failed';
+    const commandPassed = run.commandRan &&
+      (run.commandOk ?? run.failureCode !== 'coverage-check-failed');
     const commandFact = !run.commandRan
       ? '未执行'
       : commandPassed ? '覆盖命令通过' : '覆盖命令未通过';
