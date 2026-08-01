@@ -119,7 +119,7 @@ export type EvidenceRecord =
       }> }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
       ok: boolean; total: number; ran: number; ms: number;
-      /** 命令已执行，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
+      /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
       accepted?: false;
       failedCommand?: string; exitCode?: number | null; timedOut?: boolean;
       /** 失败命令 stdout/stderr 合并输出的尾部；有界保存。 */
@@ -127,7 +127,7 @@ export type EvidenceRecord =
   | { type: 'tdd-gate'; source: 'engine'; at: string;
       phase: 'preflight' | 'post-builder'; iteration: number; storyId: string | null;
       ok: boolean; policyOk: boolean; commandRan: boolean; ms: number;
-      /** 命令已执行，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
+      /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
       accepted?: false;
       failureCode?: TddEvidenceFailureCode; failedCommand?: string;
       exitCode?: number | null; timedOut?: boolean; diagnosticTail?: string }
@@ -344,7 +344,7 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
       if (v.phase === 'post-builder' && (v.iteration === 0 || typeof v.storyId !== 'string')) {
         return false;
       }
-      if (v.accepted === false && (v.phase !== 'post-builder' || v.commandRan !== true)) {
+      if (v.accepted === false && v.phase !== 'post-builder') {
         return false;
       }
       if (v.ok) {
@@ -354,13 +354,22 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
           && v.exitCode === undefined && v.timedOut === undefined
           && v.diagnosticTail === undefined;
       }
-      return isTddFailureCode(v.failureCode)
+      const validFailure = isTddFailureCode(v.failureCode)
         && typeof v.failedCommand === 'string' && v.failedCommand.length > 0
         && (v.exitCode === null || typeof v.exitCode === 'number')
         && typeof v.timedOut === 'boolean'
-        && isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0
-        && !(v.policyOk === false && v.commandRan === true)
-        && !(v.phase === 'preflight' && v.policyOk === true);
+        && isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0;
+      if (!validFailure) return false;
+      if (v.phase === 'preflight') {
+        return v.policyOk === false && v.commandRan === false
+          && v.failureCode !== 'coverage-check-failed';
+      }
+      if (v.commandRan === false) {
+        return v.policyOk === false && v.failureCode !== 'coverage-check-failed';
+      }
+      return v.policyOk
+        ? v.failureCode === 'coverage-check-failed'
+        : v.failureCode !== 'coverage-check-failed';
     }
     case 'tamper':
       return v.source === 'engine' && typeof v.iteration === 'number'

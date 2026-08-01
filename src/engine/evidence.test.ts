@@ -379,9 +379,30 @@ describe('TDD 门禁证据', () => {
       timedOut: false,
       diagnosticTail: 'lines 88% < 90%',
     };
+    const policyAfterCommand: EvidenceRecord = {
+      type: 'tdd-gate',
+      source: 'engine',
+      at: '2026-07-23T01:02:00.000Z',
+      phase: 'post-builder',
+      iteration: 2,
+      storyId: 'US-001',
+      ok: false,
+      policyOk: false,
+      commandRan: true,
+      ms: 430,
+      failureCode: 'policy-hash-mismatch',
+      failedCommand: '[tdd-policy]',
+      exitCode: null,
+      timedOut: false,
+      diagnosticTail: '覆盖命令后政策文件发生变化',
+    };
     appendEvidence(dir, preflight);
     appendEvidence(dir, failed);
-    expect(readEvidence(dir)).toEqual({ records: [preflight, failed], skippedLines: 0 });
+    appendEvidence(dir, policyAfterCommand);
+    expect(readEvidence(dir)).toEqual({
+      records: [preflight, failed, policyAfterCommand],
+      skippedLines: 0,
+    });
   });
 
   it('拒绝自相矛盾或超限的 TDD 门禁记录', () => {
@@ -405,10 +426,11 @@ describe('TDD 门禁证据', () => {
     writeFileSync(join(dir, EVIDENCE_FILE), [
       { ...base, ok: true },
       { ...base, phase: 'unknown' },
-      { ...base, policyOk: false, commandRan: true },
+      { ...base, policyOk: true, commandRan: false },
+      { ...base, policyOk: false, commandRan: true, failureCode: 'coverage-check-failed' },
       { ...base, diagnosticTail: 'x'.repeat(2001) },
     ].map((value) => JSON.stringify(value)).join('\n') + '\n');
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 4 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 5 });
   });
 });
 
@@ -450,11 +472,24 @@ describe('同一提交检查链中止证据', () => {
       phase: 'post-builder', iteration: 2, storyId: 'US-001', ok: true,
       policyOk: true, commandRan: true, ms: 10, accepted: false,
     };
-    for (const record of [changed, unreadable, unacceptedGate, unacceptedTdd]) {
+    const unacceptedBeforeCommand: EvidenceRecord = {
+      type: 'tdd-gate', source: 'engine', at: '2026-08-02T01:02:00.000Z',
+      phase: 'post-builder', iteration: 4, storyId: 'US-001', ok: false,
+      policyOk: false, commandRan: false, ms: 10, accepted: false,
+      failureCode: 'policy-hash-mismatch', failedCommand: '[tdd-policy]',
+      exitCode: null, timedOut: false, diagnosticTail: '政策预检失败',
+    };
+    for (const record of [
+      changed,
+      unreadable,
+      unacceptedGate,
+      unacceptedTdd,
+      unacceptedBeforeCommand,
+    ]) {
       appendEvidence(dir, record);
     }
     expect(readEvidence(dir)).toEqual({
-      records: [changed, unreadable, unacceptedGate, unacceptedTdd],
+      records: [changed, unreadable, unacceptedGate, unacceptedTdd, unacceptedBeforeCommand],
       skippedLines: 0,
     });
   });

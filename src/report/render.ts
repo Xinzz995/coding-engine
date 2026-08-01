@@ -317,14 +317,42 @@ function invocationMeta(value: { durationMs: number; exitCode: number | null } |
   return ` · ${(value.durationMs / 1000).toFixed(1)}s · ${exit}`;
 }
 
+type GateOrTddRun = Extract<EvidenceRecord, { type: 'gate-run' | 'tdd-gate' }>;
+
+/**
+ * gate/TDD 的 HEAD 在本阶段结束时可能仍一致，却在同轮下一阶段才漂移。iteration 是每次
+ * run 重新从 1 开始的局部编号，因此必须按 evidence 行序、以 closing iteration 分组，不能
+ * 只按数字建立全局 Map，否则会误伤历史轮次。
+ */
+function runsRejectedByLaterHeadAbort(records: EvidenceRecord[]): Set<GateOrTddRun> {
+  const rejected = new Set<GateOrTddRun>();
+  let pending: GateOrTddRun[] = [];
+  for (const record of records) {
+    if (record.type === 'gate-run' || (record.type === 'tdd-gate' && record.phase === 'post-builder')) {
+      pending.push(record);
+      continue;
+    }
+    if (record.type !== 'iteration') continue;
+    if (record.validationHeadAbort) {
+      for (const run of pending) {
+        if (run.iteration === record.iteration && run.storyId === record.storyId) rejected.add(run);
+      }
+    }
+    pending = [];
+  }
+  return rejected;
+}
+
 function renderGateHistory(records: EvidenceRecord[]): string {
   const runs = gateRunsOf(records);
   if (runs.length === 0) return '';
+  const rejectedByLaterAbort = runsRejectedByLaterHeadAbort(records);
   const rows = runs.map((r) => {
+    const accepted = r.accepted !== false && !rejectedByLaterAbort.has(r);
     const failNote = r.ok
-      ? r.accepted === false ? '提交身份复核失败；命令结果未进入裁决' : ''
+      ? accepted ? '' : '提交身份复核失败；命令结果未进入裁决'
       : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
-    const result = r.accepted === false
+    const result = !accepted
       ? `⚠️ 已执行，结果未采用（命令${r.ok ? '通过' : '未通过'}）`
       : r.ok ? '✅ 通过' : '❌ 未通过';
     return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${result}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
@@ -338,20 +366,23 @@ function renderTddHistory(records: EvidenceRecord[]): string {
   const runs = records.filter((record): record is Extract<EvidenceRecord, { type: 'tdd-gate' }> =>
     record.type === 'tdd-gate');
   if (runs.length === 0) return '';
+  const rejectedByLaterAbort = runsRejectedByLaterHeadAbort(records);
   const rows = runs.map((run) => {
     const phase = run.phase === 'preflight' ? '启动预检' : `第 ${run.iteration} 轮`;
     const policy = run.policyOk ? '政策通过' : '政策未通过';
+    const commandPassed = run.commandRan && run.failureCode !== 'coverage-check-failed';
     const commandFact = !run.commandRan
       ? '未执行'
-      : run.ok ? '覆盖命令通过' : '覆盖命令未通过';
-    const command = run.accepted === false ? `${commandFact}，结果未采用` : commandFact;
+      : commandPassed ? '覆盖命令通过' : '覆盖命令未通过';
+    const accepted = run.accepted !== false && !rejectedByLaterAbort.has(run);
+    const command = accepted ? commandFact : `${commandFact}，结果未采用`;
     const failure = run.ok
       ? ''
       : `${text(run.failureCode ?? '')} · ${text(run.failedCommand ?? '')}`
         + `${run.timedOut ? '（超时）' : run.exitCode !== undefined && run.exitCode !== null ? `（退出码 ${run.exitCode}）` : ''}`
         + renderDiagnostic('TDD 门禁输出尾部', run.diagnosticTail);
-    const result = run.accepted === false
-      ? `⚠️ 已执行，结果未采用（命令${run.ok ? '通过' : '未通过'}）`
+    const result = !accepted
+      ? `⚠️ 流程结束，结果未采用（覆盖命令${run.commandRan ? commandPassed ? '通过' : '未通过' : '未执行'}）`
       : run.ok ? '✅ 通过' : '❌ 未通过';
     return `<tr><td>${phase}</td><td>${text(run.storyId ?? '—')}</td>`
       + `<td>${result}</td><td>${policy}</td><td>${command}</td>`
