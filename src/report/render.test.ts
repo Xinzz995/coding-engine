@@ -440,6 +440,44 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('branch 80% &lt; 90%');
   });
 
+  it('提交漂移后保留命令事实，但成功、失败和 HEAD 不可读都明确显示结果未采用', () => {
+    const head = 'a'.repeat(40);
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T06:00:00.000Z',
+        iteration: 1, storyId: 'US-001', ok: true, total: 1, ran: 1, ms: 20,
+        accepted: false,
+      },
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T06:01:00.000Z',
+        iteration: 2, storyId: 'US-001', ok: false, total: 1, ran: 1, ms: 20,
+        accepted: false, failedCommand: 'npm test', exitCode: 1, timedOut: false,
+      },
+      {
+        type: 'tdd-gate', source: 'engine', at: '2026-08-02T06:02:00.000Z',
+        phase: 'post-builder', iteration: 3, storyId: 'US-001', ok: true,
+        policyOk: true, commandRan: true, ms: 20, accepted: false,
+      },
+      {
+        type: 'iteration', source: 'engine', at: '2026-08-02T06:03:00.000Z',
+        iteration: 3, storyId: 'US-001', builderRan: false, builderModel: null,
+        validatorRan: false, validatorModel: null, skippedValidator: false,
+        agentBlocked: false,
+        validationHeadAbort: {
+          phase: 'validator-start', reason: 'head-unreadable',
+          expectedGitHead: head, actualGitHead: null,
+          diagnostic: 'Validator 请求建立前无法读取 HEAD',
+        },
+      },
+    ])));
+    expect(html).toContain('⚠️ 已执行，结果未采用（命令通过）');
+    expect(html).toContain('⚠️ 已执行，结果未采用（命令未通过）');
+    expect(html).toContain('覆盖命令通过，结果未采用');
+    expect(html).toContain('检查链中止：提交身份不可读@validator-start');
+    expect(html).toContain('实际 unavailable');
+    expect(html).not.toContain('✅ 通过</td><td>1/1');
+  });
+
   it('claim 按 acIndex（1 起）挂到对应 AC 并带 agent 声明标注与免责行', () => {
     const html = renderReportHtml(data(ev([
       { type: 'screenshot-claim', source: 'validator', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'validator-us-001-pass-1.png', acIndex: 1, note: '页面打开成功' },

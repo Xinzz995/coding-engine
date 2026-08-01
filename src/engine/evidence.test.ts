@@ -412,6 +412,83 @@ describe('TDD 门禁证据', () => {
   });
 });
 
+describe('同一提交检查链中止证据', () => {
+  const head1 = 'a'.repeat(40);
+  const head2 = 'b'.repeat(40);
+  const iteration = {
+    type: 'iteration', source: 'engine', at: '2026-08-02T01:00:00.000Z', iteration: 2,
+    storyId: 'US-001', builderRan: false, builderModel: null,
+    validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+  } as const;
+
+  it('往返保留变化与不可读两类中止，并保留未采用的命令事实', () => {
+    const dir = ws();
+    const changed: EvidenceRecord = {
+      ...iteration,
+      validationHeadAbort: {
+        phase: 'quality-check-finish',
+        reason: 'head-changed',
+        expectedGitHead: head1,
+        actualGitHead: head2,
+        diagnostic: '项目检查后 HEAD 变化',
+      },
+    };
+    const unreadable: EvidenceRecord = {
+      ...iteration,
+      iteration: 3,
+      validationHeadAbort: {
+        phase: 'validator-start',
+        reason: 'head-unreadable',
+        expectedGitHead: head2,
+        actualGitHead: null,
+        diagnostic: 'Validator 前无法读取 HEAD',
+      },
+    };
+    const unacceptedGate: EvidenceRecord = { ...gateRun, accepted: false };
+    const unacceptedTdd: EvidenceRecord = {
+      type: 'tdd-gate', source: 'engine', at: '2026-08-02T01:01:00.000Z',
+      phase: 'post-builder', iteration: 2, storyId: 'US-001', ok: true,
+      policyOk: true, commandRan: true, ms: 10, accepted: false,
+    };
+    for (const record of [changed, unreadable, unacceptedGate, unacceptedTdd]) {
+      appendEvidence(dir, record);
+    }
+    expect(readEvidence(dir)).toEqual({
+      records: [changed, unreadable, unacceptedGate, unacceptedTdd],
+      skippedLines: 0,
+    });
+  });
+
+  it('拒绝错误原因、非法身份、无界诊断与 accepted=true', () => {
+    const dir = ws();
+    const abort = {
+      phase: 'quality-check-finish',
+      reason: 'head-changed',
+      expectedGitHead: head1,
+      actualGitHead: head2,
+      diagnostic: 'changed',
+    };
+    writeFileSync(join(dir, EVIDENCE_FILE), [
+      { ...iteration, validationHeadAbort: { ...abort, phase: 'unknown' } },
+      { ...iteration, validationHeadAbort: { ...abort, reason: 'head-unreadable' } },
+      { ...iteration, validationHeadAbort: { ...abort, actualGitHead: head1 } },
+      { ...iteration, validationHeadAbort: { ...abort, diagnostic: '' } },
+      { ...iteration, validationHeadAbort: { ...abort, diagnostic: 'x'.repeat(2001) } },
+      { ...iteration, storyId: null, validationHeadAbort: abort },
+      { ...gateRun, accepted: true },
+      {
+        type: 'tdd-gate', source: 'engine', at: 'x', phase: 'post-builder', iteration: 1,
+        storyId: 'US-001', ok: true, policyOk: true, commandRan: true, ms: 1, accepted: true,
+      },
+      {
+        type: 'tdd-gate', source: 'engine', at: 'x', phase: 'preflight', iteration: 0,
+        storyId: null, ok: true, policyOk: true, commandRan: false, ms: 1, accepted: false,
+      },
+    ].map((value) => JSON.stringify(value)).join('\n') + '\n');
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 9 });
+  });
+});
+
 describe('Agent 调用凭证', () => {
   const base = {
     type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z', iteration: 1,

@@ -321,8 +321,13 @@ function renderGateHistory(records: EvidenceRecord[]): string {
   const runs = gateRunsOf(records);
   if (runs.length === 0) return '';
   const rows = runs.map((r) => {
-    const failNote = r.ok ? '' : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
-    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${r.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
+    const failNote = r.ok
+      ? r.accepted === false ? '提交身份复核失败；命令结果未进入裁决' : ''
+      : `${text(r.failedCommand ?? '')}${r.timedOut ? '（超时）' : r.exitCode !== undefined && r.exitCode !== null ? `（退出码 ${r.exitCode}）` : ''}${renderDiagnostic('门禁输出尾部', r.diagnosticTail)}`;
+    const result = r.accepted === false
+      ? `⚠️ 已执行，结果未采用（命令${r.ok ? '通过' : '未通过'}）`
+      : r.ok ? '✅ 通过' : '❌ 未通过';
+    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${result}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
   }).join('');
   return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
@@ -336,16 +341,20 @@ function renderTddHistory(records: EvidenceRecord[]): string {
   const rows = runs.map((run) => {
     const phase = run.phase === 'preflight' ? '启动预检' : `第 ${run.iteration} 轮`;
     const policy = run.policyOk ? '政策通过' : '政策未通过';
-    const command = !run.commandRan
+    const commandFact = !run.commandRan
       ? '未执行'
       : run.ok ? '覆盖命令通过' : '覆盖命令未通过';
+    const command = run.accepted === false ? `${commandFact}，结果未采用` : commandFact;
     const failure = run.ok
       ? ''
       : `${text(run.failureCode ?? '')} · ${text(run.failedCommand ?? '')}`
         + `${run.timedOut ? '（超时）' : run.exitCode !== undefined && run.exitCode !== null ? `（退出码 ${run.exitCode}）` : ''}`
         + renderDiagnostic('TDD 门禁输出尾部', run.diagnosticTail);
+    const result = run.accepted === false
+      ? `⚠️ 已执行，结果未采用（命令${run.ok ? '通过' : '未通过'}）`
+      : run.ok ? '✅ 通过' : '❌ 未通过';
     return `<tr><td>${phase}</td><td>${text(run.storyId ?? '—')}</td>`
-      + `<td>${run.ok ? '✅ 通过' : '❌ 未通过'}</td><td>${policy}</td><td>${command}</td>`
+      + `<td>${result}</td><td>${policy}</td><td>${command}</td>`
       + `<td>${(run.ms / 1000).toFixed(1)}s</td><td>${stampOf(run.at)}</td><td>${failure}</td></tr>`;
   }).join('');
   return '<div class="meta-line">TDD 门禁执行历史（engine 记录）：</div>'
@@ -367,6 +376,17 @@ function renderTimeline(records: EvidenceRecord[]): string {
     if (r.validatorOutcome === 'error') flags.push('validator 异常退出');
     if (r.abortRollback) flags.push(`已回写 ${text(r.abortRollback.storyId)} 待复核`);
     if (r.validationRollback) flags.push('未签发验收凭证，已回写待复核');
+    if (r.validationHeadAbort) {
+      const expected = r.validationHeadAbort.expectedGitHead?.slice(0, 12) ?? 'unavailable';
+      const actual = r.validationHeadAbort.actualGitHead?.slice(0, 12) ?? 'unavailable';
+      const reason = r.validationHeadAbort.reason === 'head-unreadable'
+        ? '提交身份不可读'
+        : '提交身份变化';
+      flags.push(
+        `检查链中止：${reason}@${text(r.validationHeadAbort.phase)}` +
+        `（期望 ${text(expected)}，实际 ${text(actual)}）；相关执行结果未采用`,
+      );
+    }
     if (r.validationReceipt) flags.push('验收凭证已签发');
     if (r.validationProtocol === 'passed') flags.push('结构化验收协议通过');
     if (r.validationProtocol === 'failed') flags.push('结构化验收结论未通过');
