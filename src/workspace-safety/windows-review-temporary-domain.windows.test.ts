@@ -200,7 +200,7 @@ describe.skipIf(process.platform !== 'win32')(
         compactWithWof(input);
         const inputHandle = openSync(input, 'r');
         try {
-          expect(fstatSync(inputHandle).isSymbolicLink()).toBe(false);
+          expect(fstatSync(inputHandle).isFile()).toBe(true);
           expect(readFileSync(inputHandle).byteLength).toBe(bytes.byteLength);
         } finally {
           closeSync(inputHandle);
@@ -211,6 +211,7 @@ describe.skipIf(process.platform !== 'win32')(
             files: [{ path: 'review-input.json', bytes, maximumBytes: bytes.byteLength }],
           }),
         ).toThrow(/Windows path attribute|external backing/u);
+        expect(lstatSync(input).isSymbolicLink()).toBe(false);
         expect(temporary.retain('native WOF fixture')).toMatchObject({ status: 'retained' });
       },
       WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
