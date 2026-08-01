@@ -1,10 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -195,8 +198,13 @@ describe.skipIf(process.platform !== 'win32')(
         const bytes = Buffer.alloc(1024 * 1024, 0x61);
         writeFileSync(input, bytes);
         compactWithWof(input);
-        expect(lstatSync(input).isSymbolicLink()).toBe(false);
-        expect(readFileSync(input).byteLength).toBe(bytes.byteLength);
+        const inputHandle = openSync(input, 'r');
+        try {
+          expect(fstatSync(inputHandle).isSymbolicLink()).toBe(false);
+          expect(readFileSync(inputHandle).byteLength).toBe(bytes.byteLength);
+        } finally {
+          closeSync(inputHandle);
+        }
 
         expect(() =>
           temporary.sealExactTree({
