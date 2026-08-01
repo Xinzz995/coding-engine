@@ -1,7 +1,10 @@
 import { observeCurrentReviewRunnerVersion } from '../review/runner-version-observation.js';
 import type { RunnerVersionObservation } from '../review/currentness.js';
 import { readFinalReviewState } from '../review/state.js';
-import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
+import {
+  describeReviewTemporaryRetention,
+  ReviewTemporaryDirectory,
+} from '../review/temporary-directory.js';
 import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession, type WorkspaceSession } from '../workspace-safety/session.js';
@@ -27,7 +30,7 @@ async function closeTransientSession(
   const path = temporary.root;
   const retain = (reason: string): string => {
     const retained = temporary.retain(reason);
-    return `临时安全域已保留 ${retained.path}：${retained.reason}`;
+    return `临时安全域${describeReviewTemporaryRetention(retained)}：${retained.reason}`;
   };
   if (session !== undefined) {
     if (session.state === 'open') {
@@ -57,8 +60,8 @@ async function closeTransientSession(
       temporary.confirmManagedUseSettled();
     } catch (error) {
       const cleanup = temporary.cleanup();
-      return cleanup.status === 'retained'
-        ? `临时安全域身份核对失败，已保留 ${cleanup.path}：${errorMessage(error)}；${cleanup.reason}`
+      return cleanup.status !== 'removed'
+        ? `临时安全域身份核对失败，现场${describeReviewTemporaryRetention(cleanup)}：${errorMessage(error)}；${cleanup.reason}`
         : `临时安全域身份核对失败：${errorMessage(error)}`;
     }
   }
@@ -67,9 +70,9 @@ async function closeTransientSession(
     const cleanup = temporary.cleanup();
     return cleanup.status === 'removed'
       ? null
-      : `临时安全域清理失败，已保留 ${cleanup.path}：${cleanup.reason}`;
+      : `临时安全域清理失败，现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`;
   } catch (error) {
-    return `临时安全域清理失败，已保留 ${path}：${errorMessage(error)}`;
+    return `临时安全域清理失败，保留位置无法验证（候选路径：${path}）：${errorMessage(error)}`;
   }
 }
 
@@ -97,8 +100,8 @@ export async function observeStatusRunnerVersionControlled(
         `无法创建 Runner 版本观察的临时安全域：${errorMessage(error)}` +
         (cleanup === undefined
           ? ''
-          : cleanup.status === 'retained'
-            ? `；现场已保留 ${cleanup.path}：${cleanup.reason}`
+          : cleanup.status !== 'removed'
+            ? `；现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`
             : '；初始化现场已安全清理'),
     };
   }

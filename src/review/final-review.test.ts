@@ -2,8 +2,10 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -23,8 +25,28 @@ import { readFinalReviewState } from './state.js';
 import type { ReviewAxis, ReviewRemoteState } from './types.js';
 
 const roots: string[] = [];
+function makeFixtureRemovable(path: string): void {
+  let info: ReturnType<typeof lstatSync>;
+  try {
+    info = lstatSync(path);
+  } catch {
+    return;
+  }
+  if (info.isSymbolicLink()) return;
+  if (!info.isDirectory()) {
+    chmodSync(path, 0o600);
+    return;
+  }
+  chmodSync(path, 0o700);
+  for (const name of readdirSync(path)) makeFixtureRemovable(join(path, name));
+}
+
 afterEach(() => {
-  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
+  while (roots.length > 0) {
+    const root = roots.pop()!;
+    makeFixtureRemovable(root);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function contract(): QualityContract {

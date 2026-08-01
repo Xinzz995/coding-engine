@@ -5,6 +5,7 @@ import { digest } from './common.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { REVIEW_RULES_DIGEST, rulesForAxis } from './rules.js';
 import {
+  describeReviewTemporaryRetention,
   ReviewTemporaryDirectory,
   ReviewTemporaryDirectoryError,
   type ReviewTemporaryCleanupResult,
@@ -224,8 +225,8 @@ export function createReviewPackage(options: {
     const cleanup = temporary.cleanup();
     throw new ReviewTemporaryDirectoryError(
       `${error instanceof Error ? error.message : String(error)}；` +
-        (cleanup.status === 'retained'
-          ? `初始化失败现场已保留 ${cleanup.path}：${cleanup.reason}`
+        (cleanup.status !== 'removed'
+          ? `初始化失败现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`
           : '初始化失败现场已安全清理'),
     );
   }

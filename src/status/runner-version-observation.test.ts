@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { basename, isAbsolute, join, relative } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { digest } from '../review/common.js';
+import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
 import { observeStatusRunnerVersionControlled } from './runner-version-observation.js';
 
 const roots: string[] = [];
@@ -103,6 +104,34 @@ function readyReviewWorkspace(): { projectRoot: string; workspace: string } {
 }
 
 describe('status Runner version transient safety domain', () => {
+  it('removes a partially initialized status safety domain before observation', async () => {
+    const { projectRoot, workspace } = readyReviewWorkspace();
+    const createTemporary = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let safetyPath = '';
+    vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = createTemporary(options);
+      safetyPath = temporary.root;
+      roots.push(safetyPath);
+      vi.spyOn(temporary, 'sealSafeTree').mockImplementation(() => {
+        throw new Error('injected safe-tree seal failure');
+      });
+      return temporary;
+    });
+    const observe = vi.fn();
+
+    const result = await observeStatusRunnerVersionControlled(
+      { workspace, projectRoot },
+      { observe },
+    );
+
+    expect(result).toMatchObject({ status: 'unverifiable', runner: 'codex' });
+    if (result.status !== 'unverifiable') throw new Error('expected unverifiable');
+    expect(result.message).toMatch(/injected safe-tree seal failure.*初始化现场已安全清理/u);
+    expect(observe).not.toHaveBeenCalled();
+    expect(safetyPath).not.toBe('');
+    expect(existsSync(safetyPath)).toBe(false);
+  });
+
   it('supervises the observation outside the project and removes the safely closed domain', async () => {
     const { projectRoot, workspace } = readyReviewWorkspace();
     let safetyPath = '';
@@ -220,7 +249,7 @@ describe('status Runner version transient safety domain', () => {
 
     expect(result).toMatchObject({ status: 'unverifiable', runner: 'codex' });
     if (result.status !== 'unverifiable') throw new Error('expected unverifiable');
-    expect(result.message).toContain('已保留');
+    expect(result.message).toContain('保留位置无法验证');
     expect(readFileSync(join(safetyPath, 'sentinel.txt'), 'utf8')).toBe('replacement\n');
     expect(existsSync(originalPath)).toBe(true);
   });

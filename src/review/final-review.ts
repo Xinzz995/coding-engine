@@ -36,7 +36,10 @@ import {
   type RunnerIsolationProbe,
   type SafeRunnerInvocation,
 } from './runner.js';
-import { ReviewTemporaryDirectoryError } from './temporary-directory.js';
+import {
+  describeReviewTemporaryRetention,
+  ReviewTemporaryDirectoryError,
+} from './temporary-directory.js';
 import {
   invalidateFinalReviewState,
   readFinalReviewState,
@@ -451,8 +454,9 @@ export async function runFinalReview(options: {
     if (reviewPackage !== null) {
       try {
         const cleanup = reviewPackage.cleanup();
-        if (cleanup.status === 'retained') {
-          cleanupDiagnostic = `Reviewer 临时审查包已保留 ${cleanup.path}：${cleanup.reason}`;
+        if (cleanup.status !== 'removed') {
+          cleanupDiagnostic =
+            `Reviewer 临时审查包${describeReviewTemporaryRetention(cleanup)}：` + cleanup.reason;
         }
       } catch (error) {
         cleanupDiagnostic = `Reviewer 临时审查包无法安全收口：${

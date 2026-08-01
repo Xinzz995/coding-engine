@@ -283,7 +283,10 @@ describe.skipIf(process.platform !== 'win32')(
           }),
         ).toThrow(/Windows path attribute|external backing/u);
         expect(lstatSync(input).isSymbolicLink()).toBe(false);
-        expect(temporary.retain('native WOF fixture')).toMatchObject({ status: 'retained' });
+        expect(temporary.retain('native WOF fixture')).toMatchObject({
+          status: 'retained',
+          protection: { status: 'unverifiable', reason: 'platform-unsupported' },
+        });
       },
       WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
     );
@@ -318,6 +321,7 @@ describe.skipIf(process.platform !== 'win32')(
         ).toThrow(/Windows path attribute|external backing/u);
         expect(temporary.retain('native nested WOF fixture')).toMatchObject({
           status: 'retained',
+          protection: { status: 'unverifiable', reason: 'platform-unsupported' },
         });
       },
       WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
@@ -337,12 +341,11 @@ describe.skipIf(process.platform !== 'win32')(
         writeFileSync(output, Buffer.alloc(1024 * 1024, 0x63));
         compactWithWof(output);
 
-        expect(() => temporary.assertUnchanged()).toThrow(
-          /Windows path attribute|external backing/u,
-        );
+        expect(() => temporary.assertUnchanged()).toThrow('Reviewer 临时域身份核对失败');
         expect(temporary.cleanup()).toMatchObject({
           status: 'retained',
-          path: temporary.root,
+          location: { status: 'verified', path: temporary.root },
+          protection: { status: 'unverifiable', reason: 'platform-unsupported' },
         });
       },
       WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
@@ -373,7 +376,10 @@ describe.skipIf(process.platform !== 'win32')(
           ],
         }),
       ).toThrow(/Windows path attribute|reparse/u);
-      expect(temporary.retain('native junction fixture')).toMatchObject({ status: 'retained' });
+      expect(temporary.retain('native junction fixture')).toMatchObject({
+        status: 'retained',
+        protection: { status: 'unverifiable', reason: 'platform-unsupported' },
+      });
       expect(readFileSync(outsideInput, 'utf8')).toBe('outside-canary\n');
     });
 
@@ -431,7 +437,11 @@ describe.skipIf(process.platform !== 'win32')(
       symlinkSync(outside, temporary.root, 'junction');
       expect(lstatSync(temporary.root).isSymbolicLink()).toBe(true);
 
-      expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
+      expect(temporary.cleanup()).toMatchObject({
+        status: 'unverifiable',
+        location: { status: 'unverifiable', candidates: [temporary.root] },
+        protection: { status: 'unverifiable', reason: 'identity-or-tree-unverified' },
+      });
       expect(readFileSync(canary, 'utf8')).toBe('outside-canary\n');
       expect(existsSync(original)).toBe(true);
     });
@@ -458,7 +468,11 @@ describe.skipIf(process.platform !== 'win32')(
       expect(lstatSync(parent).isSymbolicLink()).toBe(true);
       expect(readFileSync(join(temporary.root, 'sentinel.txt'), 'utf8')).toBe('outside-canary\n');
 
-      expect(temporary.cleanup()).toMatchObject({ status: 'retained' });
+      expect(temporary.cleanup()).toMatchObject({
+        status: 'unverifiable',
+        location: { status: 'unverifiable', candidates: [temporary.root] },
+        protection: { status: 'unverifiable', reason: 'identity-or-tree-unverified' },
+      });
       expect(readFileSync(canary, 'utf8')).toBe('outside-canary\n');
       expect(existsSync(join(originalParent, win32.basename(temporary.root), 'status.json'))).toBe(
         true,

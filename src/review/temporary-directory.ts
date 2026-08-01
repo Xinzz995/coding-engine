@@ -4,6 +4,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  fchmodSync,
   fstatSync,
   lstatSync,
   mkdtempSync,
@@ -43,11 +44,13 @@ function assertWindowsReviewTreeHasNoReparsePoints(
 interface DirectoryIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
+  readonly uid: bigint;
 }
 
 interface FileSnapshot extends DirectoryIdentity {
   readonly nlink: bigint;
   readonly size: bigint;
+  readonly mode: bigint;
   readonly mtimeNs: bigint;
   readonly ctimeNs: bigint;
 }
@@ -65,6 +68,7 @@ interface ExactDirectoryRecord {
   readonly relativePath: string;
   readonly path: string;
   readonly identity: DirectoryIdentity;
+  readonly permissionBits: number;
   descriptor: number | undefined;
 }
 
@@ -85,7 +89,50 @@ export interface ReviewTemporaryExactTree {
 
 export type ReviewTemporaryCleanupResult =
   | { readonly status: 'removed' }
-  | { readonly status: 'retained'; readonly path: string; readonly reason: string };
+  | {
+      readonly status: 'retained';
+      readonly location: Extract<ReviewTemporaryRetentionLocation, { readonly status: 'verified' }>;
+      readonly reason: string;
+      readonly protection: ReviewTemporaryRetentionProtection;
+    }
+  | {
+      readonly status: 'unverifiable';
+      readonly location: Extract<
+        ReviewTemporaryRetentionLocation,
+        { readonly status: 'unverifiable' }
+      >;
+      readonly reason: string;
+      readonly protection: ReviewTemporaryRetentionProtection;
+    };
+
+export type ReviewTemporaryRetentionLocation =
+  | { readonly status: 'verified'; readonly path: string }
+  | { readonly status: 'unverifiable'; readonly candidates: readonly string[] };
+
+export type ReviewTemporaryRetentionProtection =
+  | {
+      readonly status: 'restricted';
+      readonly mechanism: 'posix-bound-descriptor-v1';
+      readonly scope: 'retained-root-at-closeout';
+    }
+  | {
+      readonly status: 'unverifiable';
+      readonly reason:
+        | 'process-unsettled'
+        | 'identity-or-tree-unverified'
+        | 'descriptor-unavailable'
+        | 'descriptor-protection-failed'
+        | 'platform-unsupported';
+    };
+
+export function describeReviewTemporaryRetention(
+  result: Exclude<ReviewTemporaryCleanupResult, { readonly status: 'removed' }>,
+): string {
+  if (result.location.status === 'verified') return `已保留 ${result.location.path}`;
+  return result.location.candidates.length === 0
+    ? '保留位置无法验证'
+    : `保留位置无法验证（候选路径：${result.location.candidates.join('、')}）`;
+}
 
 export class ReviewTemporaryDirectoryError extends Error {
   constructor(message: string) {
@@ -116,12 +163,18 @@ function sameIdentity(left: DirectoryIdentity, right: DirectoryIdentity): boolea
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+function sameIdentityAndOwner(left: DirectoryIdentity, right: DirectoryIdentity): boolean {
+  return sameIdentity(left, right) && left.uid === right.uid;
+}
+
 function fileSnapshot(info: BigIntStats): FileSnapshot {
   return {
     dev: info.dev,
     ino: info.ino,
+    uid: info.uid,
     nlink: info.nlink,
     size: info.size,
+    mode: info.mode,
     mtimeNs: info.mtimeNs,
     ctimeNs: info.ctimeNs,
   };
@@ -131,11 +184,28 @@ function sameFileSnapshot(left: FileSnapshot, right: BigIntStats): boolean {
   return (
     left.dev === right.dev &&
     left.ino === right.ino &&
+    left.uid === right.uid &&
     left.nlink === right.nlink &&
     left.size === right.size &&
+    left.mode === right.mode &&
     left.mtimeNs === right.mtimeNs &&
     left.ctimeNs === right.ctimeNs
   );
+}
+
+function sameRetainedFileSnapshot(left: FileSnapshot, right: BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.uid === right.uid &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs
+  );
+}
+
+function permissionBits(info: BigIntStats): number {
+  return Number(info.mode & 0o777n);
 }
 
 function pathWithin(parent: string, candidate: string): boolean {
@@ -161,7 +231,7 @@ function directoryIdentity(path: string, label: string): DirectoryIdentity {
   if (info.isSymbolicLink() || !info.isDirectory()) {
     throw new ReviewTemporaryDirectoryError(`${label} 不是普通目录：${path}`);
   }
-  return { dev: info.dev, ino: info.ino };
+  return { dev: info.dev, ino: info.ino, uid: info.uid };
 }
 
 function optionalDirectoryDescriptor(path: string): number | undefined {
@@ -255,13 +325,17 @@ export class ReviewTemporaryDirectory {
     readonly beforeRename?: () => void;
     readonly beforeMakeRemovable?: (path: string) => void;
     readonly beforeRemove?: (path: string) => void;
+    readonly afterRemove?: () => void;
   };
   #rootDescriptor: number | undefined;
   #parentDescriptor: number | undefined;
   #files: ExactFileRecord[] = [];
   #directories: ExactDirectoryRecord[] = [];
   #treeMode: ReviewTemporaryTreeMode = 'unsealed';
+  #sealedRootPermissionBits: number | undefined;
   #lifecycle: ReviewTemporaryLifecycle = 'available';
+  #managedSettlementObserved = false;
+  #retentionProtection: ReviewTemporaryRetentionProtection | undefined;
   #cleanupResult: ReviewTemporaryCleanupResult | undefined;
 
   private constructor(options: {
@@ -276,6 +350,7 @@ export class ReviewTemporaryDirectory {
       readonly beforeRename?: () => void;
       readonly beforeMakeRemovable?: (path: string) => void;
       readonly beforeRemove?: (path: string) => void;
+      readonly afterRemove?: () => void;
     };
   }) {
     this.root = options.root;
@@ -300,6 +375,7 @@ export class ReviewTemporaryDirectory {
       readonly beforeRename?: () => void;
       readonly beforeMakeRemovable?: (path: string) => void;
       readonly beforeRemove?: (path: string) => void;
+      readonly afterRemove?: () => void;
     };
   }): ReviewTemporaryDirectory {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}-$/.test(options.prefix)) {
@@ -377,7 +453,8 @@ export class ReviewTemporaryDirectory {
       }
       if (retainedReason !== undefined && createdPath !== undefined) {
         throw new ReviewTemporaryDirectoryError(
-          `${errorMessage(error)}；Reviewer 临时域初始化现场已保留 ${createdPath}：${retainedReason}`,
+          `${errorMessage(error)}；Reviewer 临时域初始化现场已保留 ${createdPath}：` +
+            `${retainedReason}；保留现场保护状态无法验证（descriptor-unavailable），需人工隔离处理`,
         );
       }
       throw error;
@@ -415,11 +492,13 @@ export class ReviewTemporaryDirectory {
       for (const relativePath of directories) {
         const path = join(this.root, relativePath);
         const identity = directoryIdentity(path, 'Reviewer 临时域固定子目录');
+        const info = lstatSync(path, { bigint: true });
         const descriptor = optionalDirectoryDescriptor(path);
         this.#directories.push({
           relativePath,
           path,
           identity,
+          permissionBits: permissionBits(info),
           descriptor,
         });
       }
@@ -467,11 +546,13 @@ export class ReviewTemporaryDirectory {
         MAX_EXACT_TREE_ENTRIES,
         MAX_SAFE_TREE_DEPTH,
       );
+      this.#sealedRootPermissionBits = permissionBits(lstatSync(this.root, { bigint: true }));
       this.#treeMode = 'exact';
     } catch (error) {
       this.#closeContentDescriptors();
       this.#files = [];
       this.#directories = [];
+      this.#sealedRootPermissionBits = undefined;
       this.#treeMode = 'failed';
       throw error;
     }
@@ -487,8 +568,10 @@ export class ReviewTemporaryDirectory {
         MAX_SAFE_TREE_DEPTH,
       );
       this.#assertSafeTree(this.root);
+      this.#sealedRootPermissionBits = permissionBits(lstatSync(this.root, { bigint: true }));
       this.#treeMode = 'safe';
     } catch (error) {
+      this.#sealedRootPermissionBits = undefined;
       this.#treeMode = 'failed';
       throw error;
     }
@@ -498,6 +581,7 @@ export class ReviewTemporaryDirectory {
     this.#assertOpenAndSealed();
     try {
       this.#assertRootIdentity();
+      this.#assertSealedRootPermissionUnchanged();
       if (this.#treeMode === 'exact') this.#assertExactTree(true, this.root);
       else this.#assertSafeTree(this.root);
     } catch (error) {
@@ -521,6 +605,7 @@ export class ReviewTemporaryDirectory {
     if (this.#lifecycle !== 'prepared') {
       throw new ReviewTemporaryDirectoryError('Reviewer 临时域未完成运行前身份核对');
     }
+    this.#managedSettlementObserved = false;
     this.#lifecycle = 'running';
   }
 
@@ -528,6 +613,7 @@ export class ReviewTemporaryDirectory {
     if (this.#lifecycle !== 'running') {
       throw new ReviewTemporaryDirectoryError('Reviewer 临时域没有待结算的受管调用');
     }
+    this.#managedSettlementObserved = true;
     this.assertUnchanged();
     this.#lifecycle = 'settled';
   }
@@ -544,112 +630,96 @@ export class ReviewTemporaryDirectory {
     try {
       this.assertUnchangedForCleanup();
     } catch (error) {
-      const closeError = this.#closeAllDescriptors();
-      return this.#finish({
-        status: 'retained',
-        path: this.root,
-        reason:
-          closeError === null
-            ? safeFilesystemFailure(error, 'Reviewer 临时域收口核对').message
-            : `${safeFilesystemFailure(error, 'Reviewer 临时域收口核对').message}；` +
-              `关闭身份句柄失败：${closeError}`,
-      });
+      return this.#finishRetained(
+        this.root,
+        safeFilesystemFailure(error, 'Reviewer 临时域收口核对').message,
+      );
     }
 
+    this.#retentionProtection = this.#protectRetainedDomain();
     const closeError = this.#closeAllDescriptors();
     if (closeError !== null) {
-      return this.#finish({
-        status: 'retained',
-        path: this.root,
-        reason: `关闭身份句柄失败：${closeError}`,
-      });
+      return this.#finishRetained(this.root, `关闭身份句柄失败：${closeError}`);
     }
     try {
       this.#assertRootIdentity(false);
-      if (this.#treeMode === 'exact') this.#assertExactTree(false, this.root);
+      if (this.#treeMode === 'exact') this.#assertExactTree(false, this.root, true);
       else this.#assertSafeTree(this.root);
     } catch (error) {
-      return this.#finish({
-        status: 'retained',
-        path: this.root,
-        reason: safeFilesystemFailure(error, 'Reviewer 临时域关闭后核对').message,
-      });
+      return this.#finishRetained(
+        this.root,
+        safeFilesystemFailure(error, 'Reviewer 临时域关闭后核对').message,
+        'identity-or-tree-unverified',
+      );
     }
 
     const tombstone = join(this.parent, `.coding-x-review-cleanup-${randomUUID()}`);
+    let renamed = false;
+    let postRenameVerified = false;
+    let removalStarted = false;
     try {
       try {
         lstatSync(tombstone);
-        return this.#finish({
-          status: 'retained',
-          path: this.root,
-          reason: '唯一清理目标已存在',
-        });
+        return this.#finishRetained(this.root, '唯一清理目标已存在');
       } catch (error) {
         if (errorCode(error) !== 'ENOENT') throw error;
       }
       this.#cleanupHooks.beforeRename?.();
       renameSync(this.root, tombstone);
+      renamed = true;
       this.#assertParentIdentity(false);
       const moved = lstatSync(tombstone, { bigint: true });
       if (
         moved.isSymbolicLink() ||
         !moved.isDirectory() ||
-        !sameIdentity(this.#rootIdentity, moved)
+        !sameIdentityAndOwner(this.#rootIdentity, moved)
       ) {
-        return this.#finish({
-          status: 'retained',
-          path: tombstone,
-          reason: '清理提交后的目录身份不匹配',
-        });
+        return this.#finishRetained(
+          tombstone,
+          '清理提交后的目录身份不匹配',
+          'identity-or-tree-unverified',
+        );
       }
       if (realpathSync.native(tombstone) !== tombstone) {
-        return this.#finish({
-          status: 'retained',
-          path: tombstone,
-          reason: '清理提交后的目录解析发生变化',
-        });
+        return this.#finishRetained(
+          tombstone,
+          '清理提交后的目录解析发生变化',
+          'identity-or-tree-unverified',
+        );
       }
       assertWindowsWorkspacePathAncestry(tombstone, tombstone);
-      if (this.#treeMode === 'exact') this.#assertExactTree(false, tombstone);
+      if (this.#treeMode === 'exact') this.#assertExactTree(false, tombstone, true);
       else this.#assertSafeTree(tombstone);
+      postRenameVerified = true;
       this.#cleanupHooks.beforeMakeRemovable?.(tombstone);
       this.#makeVerifiedTreeRemovable(tombstone);
       this.#cleanupHooks.beforeRemove?.(tombstone);
+      removalStarted = true;
       rmSync(tombstone, { recursive: true, force: false, maxRetries: 2, retryDelay: 10 });
+      this.#cleanupHooks.afterRemove?.();
       return this.#finish({ status: 'removed' });
     } catch (error) {
-      const retainedPath = (() => {
-        try {
-          lstatSync(tombstone);
-          return tombstone;
-        } catch {
-          return this.root;
-        }
-      })();
-      return this.#finish({
-        status: 'retained',
-        path: retainedPath,
-        reason: safeFilesystemFailure(error, 'Reviewer 临时域墓碑清理').message,
-      });
+      return this.#finishRetained(
+        [tombstone, this.root],
+        safeFilesystemFailure(error, 'Reviewer 临时域墓碑清理').message,
+        (renamed && !postRenameVerified) || removalStarted
+          ? 'identity-or-tree-unverified'
+          : undefined,
+      );
     }
   }
 
-  retain(reason: string): Extract<ReviewTemporaryCleanupResult, { readonly status: 'retained' }> {
+  retain(reason: string): Exclude<ReviewTemporaryCleanupResult, { readonly status: 'removed' }> {
     if (this.#cleanupResult !== undefined) {
-      if (this.#cleanupResult.status === 'retained') return this.#cleanupResult;
+      if (this.#cleanupResult.status !== 'removed') return this.#cleanupResult;
       return {
-        status: 'retained',
-        path: this.root,
+        status: 'unverifiable',
+        location: { status: 'unverifiable', candidates: [this.root] },
         reason: 'Reviewer 临时域已安全删除，无法再保留',
+        protection: { status: 'unverifiable', reason: 'descriptor-unavailable' },
       };
     }
-    const closeError = this.#closeAllDescriptors();
-    return this.#finish({
-      status: 'retained',
-      path: this.root,
-      reason: closeError === null ? reason : `${reason}；关闭身份句柄失败：${closeError}`,
-    }) as Extract<ReviewTemporaryCleanupResult, { readonly status: 'retained' }>;
+    return this.#finishRetained(this.root, reason);
   }
 
   private assertUnchangedForCleanup(): void {
@@ -659,6 +729,7 @@ export class ReviewTemporaryDirectory {
       return;
     }
     this.#assertRootIdentity();
+    this.#assertSealedRootPermissionUnchanged();
     if (this.#treeMode === 'exact') this.#assertExactTree(true, this.root);
     else this.#assertSafeTree(this.root);
   }
@@ -684,20 +755,302 @@ export class ReviewTemporaryDirectory {
     }
   }
 
-  #finish(result: ReviewTemporaryCleanupResult): ReviewTemporaryCleanupResult {
+  #assertSealedRootPermissionUnchanged(): void {
+    if (this.#sealedRootPermissionBits === undefined) {
+      throw new ReviewTemporaryDirectoryError('Reviewer 临时域根目录权限未冻结');
+    }
+    const info = lstatSync(this.root, { bigint: true });
+    if (permissionBits(info) !== this.#sealedRootPermissionBits) {
+      throw new ReviewTemporaryDirectoryError('Reviewer 临时域根目录权限发生变化');
+    }
+  }
+
+  #finish<Result extends ReviewTemporaryCleanupResult>(result: Result): Result {
     this.#lifecycle = 'closed';
     this.#cleanupResult = result;
     return result;
   }
 
+  #finishRetained(
+    pathCandidates: string | readonly string[],
+    reason: string,
+    forcedProtectionReason?: Extract<
+      ReviewTemporaryRetentionProtection,
+      { readonly status: 'unverifiable' }
+    >['reason'],
+  ): Exclude<ReviewTemporaryCleanupResult, { readonly status: 'removed' }> {
+    if (forcedProtectionReason !== undefined) {
+      this.#retentionProtection = {
+        status: 'unverifiable',
+        reason: forcedProtectionReason,
+      };
+    } else {
+      this.#retentionProtection ??= this.#protectRetainedDomain();
+    }
+
+    const closeError = this.#closeAllDescriptors();
+    const candidates = [
+      ...new Set(Array.isArray(pathCandidates) ? pathCandidates : [pathCandidates]),
+    ];
+    const location = this.#retainedLocation(candidates);
+    if (this.#retentionProtection.status === 'restricted') {
+      if (location.status === 'unverifiable') {
+        this.#retentionProtection = {
+          status: 'unverifiable',
+          reason: 'identity-or-tree-unverified',
+        };
+      } else {
+        try {
+          this.#assertRetainedPathStillRestricted(location.path);
+        } catch {
+          this.#retentionProtection = {
+            status: 'unverifiable',
+            reason: 'identity-or-tree-unverified',
+          };
+        }
+      }
+    }
+
+    const protectionMessage =
+      this.#retentionProtection.status === 'restricted'
+        ? '保留现场已在收口时通过绑定句柄收紧 POSIX 权限位'
+        : `保留现场保护状态无法验证（${this.#retentionProtection.reason}），需人工隔离处理`;
+    const closeMessage = closeError === null ? '' : `；关闭身份句柄失败：${closeError}`;
+    const retainedReason = `${reason}${closeMessage}；${protectionMessage}`;
+    return location.status === 'verified'
+      ? this.#finish({
+          status: 'retained',
+          location,
+          reason: retainedReason,
+          protection: this.#retentionProtection,
+        })
+      : this.#finish({
+          status: 'unverifiable',
+          location,
+          reason: retainedReason,
+          protection: this.#retentionProtection,
+        });
+  }
+
+  #retainedLocation(candidates: readonly string[]): ReviewTemporaryRetentionLocation {
+    for (const path of candidates) {
+      try {
+        this.#assertRetainableRoot(path, false);
+        return { status: 'verified', path };
+      } catch {
+        // 继续检查其余由引擎生成的候选路径；不扫描名称前缀。
+      }
+    }
+    return { status: 'unverifiable', candidates };
+  }
+
+  #protectRetainedDomain(): ReviewTemporaryRetentionProtection {
+    if (
+      this.#lifecycle === 'running' ||
+      (this.#lifecycle === 'unsafe' && !this.#managedSettlementObserved)
+    ) {
+      return { status: 'unverifiable', reason: 'process-unsettled' };
+    }
+
+    try {
+      this.#assertRetainableRoot(this.root, false);
+    } catch {
+      return { status: 'unverifiable', reason: 'identity-or-tree-unverified' };
+    }
+    if (process.platform === 'win32') {
+      return { status: 'unverifiable', reason: 'platform-unsupported' };
+    }
+
+    try {
+      if (this.#treeMode === 'exact') this.#assertExactTree(false, this.root, true);
+      else this.#assertSafeTree(this.root);
+    } catch {
+      this.#bestEffortRestrictBoundRoot();
+      return { status: 'unverifiable', reason: 'identity-or-tree-unverified' };
+    }
+
+    if (
+      this.#parentDescriptor === undefined ||
+      this.#rootDescriptor === undefined ||
+      (this.#treeMode === 'exact' &&
+        (this.#directories.some((entry) => entry.descriptor === undefined) ||
+          this.#files.some((entry) => entry.descriptor === undefined)))
+    ) {
+      this.#bestEffortRestrictBoundRoot();
+      return { status: 'unverifiable', reason: 'descriptor-unavailable' };
+    }
+
+    try {
+      this.#assertRetentionDescriptors();
+    } catch {
+      this.#bestEffortRestrictBoundRoot();
+      return { status: 'unverifiable', reason: 'identity-or-tree-unverified' };
+    }
+
+    try {
+      fchmodSync(this.#rootDescriptor, 0o500);
+      for (const directory of this.#directories) {
+        fchmodSync(directory.descriptor!, 0o500);
+      }
+      for (const file of this.#files) {
+        fchmodSync(file.descriptor!, 0o400);
+      }
+      this.#assertRetentionDescriptors(true);
+      this.#assertRetainedPathStillRestricted(this.root);
+    } catch {
+      return { status: 'unverifiable', reason: 'descriptor-protection-failed' };
+    }
+
+    return {
+      status: 'restricted',
+      mechanism: 'posix-bound-descriptor-v1',
+      scope: 'retained-root-at-closeout',
+    };
+  }
+
+  #bestEffortRestrictBoundRoot(): void {
+    if (
+      process.platform === 'win32' ||
+      this.#parentDescriptor === undefined ||
+      this.#rootDescriptor === undefined
+    ) {
+      return;
+    }
+    try {
+      const effectiveUser = process.geteuid?.();
+      const parent = fstatSync(this.#parentDescriptor, { bigint: true });
+      const root = fstatSync(this.#rootDescriptor, { bigint: true });
+      if (
+        effectiveUser === undefined ||
+        !parent.isDirectory() ||
+        !sameIdentityAndOwner(this.#parentIdentity, parent) ||
+        !root.isDirectory() ||
+        !sameIdentityAndOwner(this.#rootIdentity, root) ||
+        root.uid !== BigInt(effectiveUser)
+      ) {
+        return;
+      }
+      fchmodSync(this.#rootDescriptor, 0o500);
+      const restricted = fstatSync(this.#rootDescriptor, { bigint: true });
+      if (
+        !restricted.isDirectory() ||
+        !sameIdentityAndOwner(this.#rootIdentity, restricted) ||
+        (permissionBits(restricted) & 0o077) !== 0
+      ) {
+        return;
+      }
+    } catch {
+      // The structured result remains unverifiable; this is only a bound-object risk reduction.
+    }
+  }
+
+  #assertRetentionDescriptors(requireRestricted = false): void {
+    const effectiveUser = process.geteuid?.();
+    if (effectiveUser === undefined || this.#rootIdentity.uid !== BigInt(effectiveUser)) {
+      throw new ReviewTemporaryDirectoryError('Reviewer 临时域属主无法核对');
+    }
+    if (this.#parentDescriptor === undefined || this.#rootDescriptor === undefined) {
+      throw new ReviewTemporaryDirectoryError('Reviewer 临时域身份句柄不可用');
+    }
+
+    const parent = fstatSync(this.#parentDescriptor, { bigint: true });
+    const root = fstatSync(this.#rootDescriptor, { bigint: true });
+    if (
+      !parent.isDirectory() ||
+      !sameIdentityAndOwner(this.#parentIdentity, parent) ||
+      !root.isDirectory() ||
+      !sameIdentityAndOwner(this.#rootIdentity, root) ||
+      (requireRestricted && (permissionBits(root) & 0o077) !== 0)
+    ) {
+      throw new ReviewTemporaryDirectoryError('Reviewer 临时域绑定目录身份或权限发生变化');
+    }
+
+    if (this.#treeMode !== 'exact') return;
+    for (const directory of this.#directories) {
+      if (directory.descriptor === undefined) {
+        throw new ReviewTemporaryDirectoryError('Reviewer 临时域固定子目录句柄不可用');
+      }
+      const opened = fstatSync(directory.descriptor, { bigint: true });
+      if (
+        !opened.isDirectory() ||
+        !sameIdentityAndOwner(directory.identity, opened) ||
+        opened.uid !== BigInt(effectiveUser) ||
+        (requireRestricted && (permissionBits(opened) & 0o077) !== 0)
+      ) {
+        throw new ReviewTemporaryDirectoryError('Reviewer 临时域固定子目录身份或权限发生变化');
+      }
+    }
+    for (const file of this.#files) {
+      if (file.descriptor === undefined) {
+        throw new ReviewTemporaryDirectoryError('Reviewer 临时域固定文件句柄不可用');
+      }
+      const opened = fstatSync(file.descriptor, { bigint: true });
+      const bytes = boundedDescriptorBytes(file.descriptor, file.maximumBytes);
+      const after = fstatSync(file.descriptor, { bigint: true });
+      if (
+        !opened.isFile() ||
+        !sameRetainedFileSnapshot(file.snapshot, opened) ||
+        !sameRetainedFileSnapshot(file.snapshot, after) ||
+        opened.uid !== BigInt(effectiveUser) ||
+        !bytes.equals(file.expectedBytes) ||
+        (requireRestricted &&
+          ((permissionBits(opened) & 0o077) !== 0 || (permissionBits(after) & 0o077) !== 0))
+      ) {
+        throw new ReviewTemporaryDirectoryError('Reviewer 临时域固定文件身份、内容或权限发生变化');
+      }
+    }
+  }
+
+  #assertRetainableRoot(root: string, requireRestricted: boolean): void {
+    this.#assertParentIdentity(false);
+    const current = directoryIdentity(root, 'Reviewer 临时域保留根目录');
+    const effectiveUser = process.geteuid?.();
+    if (
+      !sameIdentityAndOwner(this.#rootIdentity, current) ||
+      dirname(root) !== this.parent ||
+      realpathSync.native(root) !== root ||
+      (process.platform !== 'win32' &&
+        (effectiveUser === undefined || current.uid !== BigInt(effectiveUser)))
+    ) {
+      throw new ReviewTemporaryDirectoryError('Reviewer 临时域保留路径身份发生变化');
+    }
+    if (requireRestricted) {
+      const info = lstatSync(root, { bigint: true });
+      if ((permissionBits(info) & 0o077) !== 0) {
+        throw new ReviewTemporaryDirectoryError('Reviewer 临时域保留根目录权限未收紧');
+      }
+    }
+  }
+
+  #assertRetainedPathStillRestricted(root: string): void {
+    this.#assertRetainableRoot(root, true);
+    if (this.#treeMode === 'exact') {
+      this.#assertExactTree(false, root, true);
+      for (const directory of this.#directories) {
+        const info = lstatSync(join(root, directory.relativePath), { bigint: true });
+        if ((permissionBits(info) & 0o077) !== 0) {
+          throw new ReviewTemporaryDirectoryError('Reviewer 临时域固定子目录权限未收紧');
+        }
+      }
+      for (const file of this.#files) {
+        const info = lstatSync(join(root, file.relativePath), { bigint: true });
+        if ((permissionBits(info) & 0o077) !== 0) {
+          throw new ReviewTemporaryDirectoryError('Reviewer 临时域固定文件权限未收紧');
+        }
+      }
+      return;
+    }
+    this.#assertSafeTree(root);
+  }
+
   #assertParentIdentity(checkDescriptor = true): void {
     const current = directoryIdentity(this.parent, 'Reviewer 临时域父目录');
-    if (!sameIdentity(this.#parentIdentity, current)) {
+    if (!sameIdentityAndOwner(this.#parentIdentity, current)) {
       throw new ReviewTemporaryDirectoryError('Reviewer 临时域父目录身份发生变化');
     }
     if (checkDescriptor && this.#parentDescriptor !== undefined) {
       const opened = fstatSync(this.#parentDescriptor, { bigint: true });
-      if (!opened.isDirectory() || !sameIdentity(this.#parentIdentity, opened)) {
+      if (!opened.isDirectory() || !sameIdentityAndOwner(this.#parentIdentity, opened)) {
         throw new ReviewTemporaryDirectoryError('Reviewer 临时域父目录句柄身份发生变化');
       }
     }
@@ -706,7 +1059,7 @@ export class ReviewTemporaryDirectory {
   #assertRootIdentity(checkDescriptor = true): void {
     this.#assertParentIdentity(checkDescriptor);
     const current = directoryIdentity(this.root, 'Reviewer 临时域');
-    if (!sameIdentity(this.#rootIdentity, current)) {
+    if (!sameIdentityAndOwner(this.#rootIdentity, current)) {
       throw new ReviewTemporaryDirectoryError('Reviewer 临时域根目录身份发生变化');
     }
     if (dirname(this.root) !== this.parent || realpathSync.native(this.root) !== this.root) {
@@ -714,14 +1067,14 @@ export class ReviewTemporaryDirectory {
     }
     if (checkDescriptor && this.#rootDescriptor !== undefined) {
       const opened = fstatSync(this.#rootDescriptor, { bigint: true });
-      if (!opened.isDirectory() || !sameIdentity(this.#rootIdentity, opened)) {
+      if (!opened.isDirectory() || !sameIdentityAndOwner(this.#rootIdentity, opened)) {
         throw new ReviewTemporaryDirectoryError('Reviewer 临时域根目录句柄身份发生变化');
       }
     }
     assertWindowsWorkspacePathAncestry(this.root, this.root);
   }
 
-  #assertExactTree(useDescriptors: boolean, root: string): void {
+  #assertExactTree(useDescriptors: boolean, root: string, retained = false): void {
     assertWindowsReviewTreeHasNoReparsePoints(root, MAX_EXACT_TREE_ENTRIES, MAX_SAFE_TREE_DEPTH);
     const expected = [
       ...this.#directories.map((entry) => entry.relativePath),
@@ -734,14 +1087,23 @@ export class ReviewTemporaryDirectory {
     for (const entry of this.#directories) {
       const path = join(root, entry.relativePath);
       const info = lstatSync(path, { bigint: true });
-      if (info.isSymbolicLink() || !info.isDirectory() || !sameIdentity(entry.identity, info)) {
+      if (
+        info.isSymbolicLink() ||
+        !info.isDirectory() ||
+        !sameIdentityAndOwner(entry.identity, info) ||
+        (!retained && permissionBits(info) !== entry.permissionBits)
+      ) {
         throw new ReviewTemporaryDirectoryError(
           `Reviewer 临时域固定子目录发生变化：${entry.relativePath}`,
         );
       }
       if (useDescriptors && entry.descriptor !== undefined) {
         const opened = fstatSync(entry.descriptor, { bigint: true });
-        if (!opened.isDirectory() || !sameIdentity(entry.identity, opened)) {
+        if (
+          !opened.isDirectory() ||
+          !sameIdentityAndOwner(entry.identity, opened) ||
+          (!retained && permissionBits(opened) !== entry.permissionBits)
+        ) {
           throw new ReviewTemporaryDirectoryError(
             `Reviewer 临时域固定子目录句柄发生变化：${entry.relativePath}`,
           );
@@ -755,7 +1117,9 @@ export class ReviewTemporaryDirectory {
         info.isSymbolicLink() ||
         !info.isFile() ||
         info.nlink !== 1n ||
-        !sameFileSnapshot(entry.snapshot, info)
+        !(retained
+          ? sameRetainedFileSnapshot(entry.snapshot, info)
+          : sameFileSnapshot(entry.snapshot, info))
       ) {
         throw new ReviewTemporaryDirectoryError(
           `Reviewer 临时域固定文件发生变化：${entry.relativePath}`,
@@ -771,8 +1135,12 @@ export class ReviewTemporaryDirectory {
         const bytes = boundedDescriptorBytes(entry.descriptor, entry.maximumBytes);
         const after = fstatSync(entry.descriptor, { bigint: true });
         if (
-          !sameFileSnapshot(entry.snapshot, opened) ||
-          !sameFileSnapshot(entry.snapshot, after) ||
+          !(retained
+            ? sameRetainedFileSnapshot(entry.snapshot, opened)
+            : sameFileSnapshot(entry.snapshot, opened)) ||
+          !(retained
+            ? sameRetainedFileSnapshot(entry.snapshot, after)
+            : sameFileSnapshot(entry.snapshot, after)) ||
           !bytes.equals(entry.expectedBytes)
         ) {
           throw new ReviewTemporaryDirectoryError(

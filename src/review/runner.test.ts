@@ -48,6 +48,7 @@ function removeFixtureRoot(path: string): void {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   while (temporaryRoots.length > 0) {
     removeFixtureRoot(temporaryRoots.pop()!);
@@ -55,6 +56,21 @@ afterEach(() => {
 });
 
 const fakeSession = {} as WorkspaceSession;
+
+function injectNextExactSealFailure(): () => string {
+  const createTemporary = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+  let root = '';
+  vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+    const temporary = createTemporary(options);
+    root = temporary.root;
+    temporaryRoots.push(root);
+    vi.spyOn(temporary, 'sealExactTree').mockImplementation(() => {
+      throw new Error('injected exact-tree seal failure');
+    });
+    return temporary;
+  });
+  return () => root;
+}
 
 type ManagedResult = Awaited<ReturnType<typeof runManagedWorkspaceProcess>>;
 
@@ -488,6 +504,80 @@ describe('reviewRunnerEnvironment', () => {
   });
 });
 
+describe('Reviewer temporary-domain initialization cleanup', () => {
+  it('removes a partially initialized Runner invocation before any process starts', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const invocationRoot = injectNextExactSealFailure();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult('');
+    };
+
+    await expect(
+      runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage: packageFixture('{}'),
+        timeoutMs: 1000,
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/Runner 调用初始化现场已安全清理/u);
+    expect(calls).toBe(0);
+    expect(invocationRoot()).not.toBe('');
+    expect(existsSync(invocationRoot())).toBe(false);
+  });
+
+  it('removes a partially initialized Runner version domain before execution', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const versionRoot = injectNextExactSealFailure();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult('');
+    };
+
+    await expect(
+      readRunnerVersion({
+        session: fakeSession,
+        runner: 'codex',
+        projectRoot: process.cwd(),
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/injected exact-tree seal failure/u);
+    expect(calls).toBe(0);
+    expect(versionRoot()).not.toBe('');
+    expect(existsSync(versionRoot())).toBe(false);
+  });
+
+  it('removes a partially initialized isolation probe before execution', async () => {
+    const probeRoot = injectNextExactSealFailure();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult('');
+    };
+
+    await expect(
+      probeRunnerIsolation({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        projectRoot: process.cwd(),
+        timeoutMs: 1000,
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/Runner 隔离探测初始化失败.*现场已安全清理/u);
+    expect(calls).toBe(0);
+    expect(probeRoot()).not.toBe('');
+    expect(existsSync(probeRoot())).toBe(false);
+  });
+});
+
 describe('managed Final Review runner execution', () => {
   it.runIf(process.platform === 'win32')(
     'rejects a Windows Runner script wrapper before version or Review execution',
@@ -644,7 +734,7 @@ describe('managed Final Review runner execution', () => {
         projectRoot: process.cwd(),
         managedProcess: managed,
       }),
-    ).rejects.toThrow(/临时域已保留.*固定目录树发生变化/u);
+    ).rejects.toThrow(/临时域已保留.*(?:根目录权限|固定目录树)发生变化/u);
     expect(existsSync(retainedPath)).toBe(true);
   });
 
@@ -748,14 +838,14 @@ describe('managed Final Review runner execution', () => {
     expect(calls).toBe(1);
     expect(reviewPackage.cleanup()).toMatchObject({
       status: 'retained',
-      path: reviewPackage.root,
+      location: { status: 'verified', path: reviewPackage.root },
     });
     expect(existsSync(reviewPackage.root)).toBe(true);
     expect(existsSync(invocationRoot)).toBe(true);
   });
 
   it.each(['user-interrupt', 'parent-shutdown'] as const)(
-    'does not retry and retains owner-only Review domains after %s',
+    'does not retry and retains Review domains after an unsettled %s',
     async (terminationReason) => {
       vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
       const reviewPackage = managedPackageFixture();
@@ -902,7 +992,7 @@ describe('managed Final Review runner execution', () => {
       failure = error;
     }
     expect(failure).toBeInstanceOf(RunnerPolicyViolation);
-    expect((failure as Error).message).toMatch(/临时域已保留.*固定目录树发生变化/u);
+    expect((failure as Error).message).toMatch(/临时域已保留.*(?:根目录权限|固定目录树)发生变化/u);
     expect((failure as Error).message).not.toContain(attackerControlledName);
     expect(calls).toBe(1);
     expect(existsSync(invocationRoot)).toBe(true);

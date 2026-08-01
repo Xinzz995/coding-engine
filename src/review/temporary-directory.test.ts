@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -19,9 +20,36 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ReviewTemporaryDirectory } from './temporary-directory.js';
 
 const roots: string[] = [];
+const expectedSettledRetentionProtection =
+  process.platform === 'win32'
+    ? ({ status: 'unverifiable', reason: 'platform-unsupported' } as const)
+    : ({ status: 'restricted', mechanism: 'posix-bound-descriptor-v1' } as const);
+const expectedTreeFailureProtection =
+  process.platform === 'win32'
+    ? expectedSettledRetentionProtection
+    : ({ status: 'unverifiable', reason: 'identity-or-tree-unverified' } as const);
+
+function makeFixtureRemovable(path: string): void {
+  let info: ReturnType<typeof lstatSync>;
+  try {
+    info = lstatSync(path);
+  } catch {
+    return;
+  }
+  if (info.isSymbolicLink()) return;
+  if (!info.isDirectory()) {
+    chmodSync(path, 0o600);
+    return;
+  }
+  chmodSync(path, 0o700);
+  for (const name of readdirSync(path)) makeFixtureRemovable(join(path, name));
+}
 
 afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const root of roots.splice(0)) {
+    makeFixtureRemovable(root);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function parent(): string {
@@ -68,13 +96,18 @@ describe('ReviewTemporaryDirectory', () => {
     const temporary = exactDomain();
     temporary.prepareManagedUse();
     temporary.beginManagedUse();
+    if (process.platform !== 'win32') chmodSync(temporary.root, 0o755);
 
     expect(temporary.cleanup()).toMatchObject({
       status: 'retained',
-      path: temporary.root,
+      location: { status: 'verified', path: temporary.root },
       reason: expect.stringContaining('未证明'),
+      protection: { status: 'unverifiable', reason: 'process-unsettled' },
     });
     expect(readFileSync(join(temporary.root, 'input.json'), 'utf8')).toBe('input\n');
+    if (process.platform !== 'win32') {
+      expect(lstatSync(temporary.root).mode & 0o777).toBe(0o755);
+    }
   });
 
   it('permanently retains a domain after one post-run identity check fails', () => {
@@ -88,8 +121,9 @@ describe('ReviewTemporaryDirectory', () => {
     unlinkSync(pollution);
     expect(temporary.cleanup()).toMatchObject({
       status: 'retained',
-      path: temporary.root,
+      location: { status: 'verified', path: temporary.root },
       reason: expect.stringContaining('曾失败'),
+      protection: expectedSettledRetentionProtection,
     });
     expect(readFileSync(join(temporary.root, 'input.json'), 'utf8')).toBe('input\n');
   });
@@ -106,20 +140,106 @@ describe('ReviewTemporaryDirectory', () => {
     unlinkSync(pollution);
     expect(temporary.cleanup()).toMatchObject({
       status: 'retained',
-      path: temporary.root,
+      location: { status: 'verified', path: temporary.root },
       reason: expect.stringContaining('曾失败'),
+      protection: expectedSettledRetentionProtection,
     });
     expect(readFileSync(join(temporary.root, 'input.json'), 'utf8')).toBe('input\n');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'restricts a permission-drifted exact tree through its frozen descriptors',
+    () => {
+      const temporary = ReviewTemporaryDirectory.create({
+        prefix: 'coding-x-review-permission-drift-',
+        projectRoot: process.cwd(),
+        temporaryParent: parent(),
+      });
+      const nested = join(temporary.root, 'nested');
+      const input = join(temporary.root, 'input.json');
+      const detail = join(nested, 'detail.json');
+      mkdirSync(nested, { mode: 0o700 });
+      writeFileSync(input, 'input\n', { mode: 0o400 });
+      writeFileSync(detail, 'detail\n', { mode: 0o400 });
+      chmodSync(nested, 0o500);
+      temporary.sealExactTree({
+        directories: ['nested'],
+        files: [
+          { path: 'input.json', bytes: Buffer.from('input\n'), maximumBytes: 32 },
+          { path: 'nested/detail.json', bytes: Buffer.from('detail\n'), maximumBytes: 32 },
+        ],
+      });
+      temporary.prepareManagedUse();
+      temporary.beginManagedUse();
+
+      chmodSync(nested, 0o755);
+      chmodSync(input, 0o444);
+      chmodSync(detail, 0o444);
+
+      expect(() => temporary.confirmManagedUseSettled()).toThrow('固定子目录发生变化');
+      expect(temporary.cleanup()).toMatchObject({
+        status: 'retained',
+        location: { status: 'verified', path: temporary.root },
+        protection: {
+          status: 'restricted',
+          mechanism: 'posix-bound-descriptor-v1',
+          scope: 'retained-root-at-closeout',
+        },
+      });
+      expect(lstatSync(temporary.root).mode & 0o777).toBe(0o500);
+      expect(lstatSync(nested).mode & 0o777).toBe(0o500);
+      expect(lstatSync(input).mode & 0o777).toBe(0o400);
+      expect(lstatSync(detail).mode & 0o777).toBe(0o400);
+    },
+  );
 
   it('retains the complete domain when an extra file appears', () => {
     const temporary = exactDomain();
     writeFileSync(join(temporary.root, 'extra.txt'), 'unexpected');
 
     expect(() => temporary.assertUnchanged()).toThrow('固定目录树发生变化');
-    expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
+    expect(temporary.cleanup()).toMatchObject({
+      status: 'retained',
+      location: { status: 'verified', path: temporary.root },
+      protection: expectedTreeFailureProtection,
+    });
     expect(readFileSync(join(temporary.root, 'extra.txt'), 'utf8')).toBe('unexpected');
+    if (process.platform !== 'win32') {
+      expect(lstatSync(temporary.root).mode & 0o777).toBe(0o500);
+    }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'detects and restricts permission drift on a safe-tree root',
+    () => {
+      const temporary = ReviewTemporaryDirectory.create({
+        prefix: 'coding-x-review-safe-retention-',
+        projectRoot: process.cwd(),
+        temporaryParent: parent(),
+      });
+      temporary.sealSafeTree();
+      temporary.prepareManagedUse();
+      temporary.beginManagedUse();
+      const output = join(temporary.root, 'runner-output.json');
+      writeFileSync(output, '{}\n', { mode: 0o644 });
+      chmodSync(temporary.root, 0o755);
+
+      expect(() => temporary.confirmManagedUseSettled()).toThrow(
+        'Reviewer 临时域根目录权限发生变化',
+      );
+
+      expect(temporary.cleanup()).toMatchObject({
+        status: 'retained',
+        protection: {
+          status: 'restricted',
+          mechanism: 'posix-bound-descriptor-v1',
+          scope: 'retained-root-at-closeout',
+        },
+      });
+      expect(lstatSync(temporary.root).mode & 0o777).toBe(0o500);
+      expect(lstatSync(output).mode & 0o777).toBe(0o644);
+    },
+  );
 
   it('rejects a hard-linked fixed file instead of accepting aliased bytes', () => {
     const temporary = ReviewTemporaryDirectory.create({
@@ -229,7 +349,8 @@ describe('ReviewTemporaryDirectory', () => {
     expect(() => temporary.assertUnchanged()).toThrow('固定文件发生变化');
     expect(temporary.cleanup()).toMatchObject({
       status: 'retained',
-      path: temporary.root,
+      location: { status: 'verified', path: temporary.root },
+      protection: expectedTreeFailureProtection,
     });
     expect(readFileSync(inputPath, 'utf8')).toBe('input\n');
   });
@@ -297,7 +418,11 @@ describe('ReviewTemporaryDirectory', () => {
       writeFileSync(join(temporary.root, 'sentinel.txt'), 'replacement');
       chmodSync(temporary.root, 0o711);
 
-      expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
+      expect(temporary.cleanup()).toMatchObject({
+        status: 'unverifiable',
+        location: { status: 'unverifiable', candidates: [temporary.root] },
+        protection: { status: 'unverifiable', reason: 'identity-or-tree-unverified' },
+      });
       expect(readFileSync(join(temporary.root, 'sentinel.txt'), 'utf8')).toBe('replacement');
       expect(lstatSync(temporary.root).mode & 0o777).toBe(0o711);
       expect(readFileSync(join(original, 'input.json'), 'utf8')).toBe('input\n');
@@ -315,7 +440,10 @@ describe('ReviewTemporaryDirectory', () => {
       renameSync(temporary.root, original);
       symlinkSync(sibling, temporary.root, 'dir');
 
-      expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
+      expect(temporary.cleanup()).toMatchObject({
+        status: 'unverifiable',
+        location: { status: 'unverifiable', candidates: [temporary.root] },
+      });
       expect(readFileSync(join(sibling, 'sentinel.txt'), 'utf8')).toBe('sibling');
       expect(lstatSync(temporary.root).isSymbolicLink()).toBe(true);
     },
@@ -332,7 +460,10 @@ describe('ReviewTemporaryDirectory', () => {
       mkdirSync(temporary.root);
       writeFileSync(join(temporary.root, 'sentinel.txt'), 'replacement-parent');
 
-      expect(temporary.cleanup()).toMatchObject({ status: 'retained' });
+      expect(temporary.cleanup()).toMatchObject({
+        status: 'unverifiable',
+        location: { status: 'unverifiable', candidates: [temporary.root] },
+      });
       expect(readFileSync(join(temporary.root, 'sentinel.txt'), 'utf8')).toBe('replacement-parent');
       expect(
         readFileSync(join(originalParent, basename(temporary.root), 'input.json'), 'utf8'),
@@ -366,7 +497,7 @@ describe('ReviewTemporaryDirectory', () => {
           throw new Error('injected post-create failure');
         },
       }),
-    ).toThrow(/injected post-create failure.*初始化现场已保留/u);
+    ).toThrow(/injected post-create failure.*初始化现场已保留.*descriptor-unavailable/u);
     expect(retainedPath).not.toBe('');
     expect(readFileSync(join(retainedPath, 'failure-evidence.txt'), 'utf8')).toBe('fixture\n');
   });
@@ -397,8 +528,9 @@ describe('ReviewTemporaryDirectory', () => {
 
     expect(temporary.cleanup()).toMatchObject({
       status: 'retained',
-      path: temporary.root,
-      reason: 'Reviewer 临时域墓碑清理失败',
+      location: { status: 'verified', path: temporary.root },
+      reason: expect.stringContaining('Reviewer 临时域墓碑清理失败'),
+      protection: expectedSettledRetentionProtection,
     });
     expect(readFileSync(join(temporary.root, 'input.json'), 'utf8')).toBe('input\n');
   });
@@ -415,15 +547,49 @@ describe('ReviewTemporaryDirectory', () => {
       const cleanup = temporary.cleanup();
       expect(cleanup).toMatchObject({
         status: 'retained',
-        reason: 'Reviewer 临时域墓碑清理失败',
+        reason: expect.stringContaining('Reviewer 临时域墓碑清理失败'),
+        protection: expectedSettledRetentionProtection,
       });
       if (cleanup.status !== 'retained') throw new Error('expected retained cleanup');
-      expect(cleanup.path).not.toBe(temporary.root);
-      roots.push(cleanup.path);
-      expect(basename(cleanup.path)).toMatch(/^\.coding-x-review-cleanup-/u);
-      expect(readFileSync(join(cleanup.path, 'input.json'), 'utf8')).toBe('input\n');
+      expect(cleanup.location.status).toBe('verified');
+      if (cleanup.location.status !== 'verified') throw new Error('expected verified location');
+      expect(cleanup.location.path).not.toBe(temporary.root);
+      roots.push(cleanup.location.path);
+      expect(basename(cleanup.location.path)).toMatch(/^\.coding-x-review-cleanup-/u);
+      expect(readFileSync(join(cleanup.location.path, 'input.json'), 'utf8')).toBe('input\n');
     },
   );
+
+  it('reports an unverifiable location when removal completed before cleanup threw', () => {
+    const temporary = exactDomain({
+      afterRemove: () => {
+        throw new Error('injected post-remove failure');
+      },
+    });
+
+    const cleanup = temporary.cleanup();
+    expect(cleanup).toMatchObject({
+      status: 'unverifiable',
+      location: { status: 'unverifiable' },
+      protection: { status: 'unverifiable', reason: 'identity-or-tree-unverified' },
+      reason: expect.stringContaining('Reviewer 临时域墓碑清理失败'),
+    });
+    if (cleanup.status !== 'unverifiable') throw new Error('expected unverifiable cleanup');
+    expect(cleanup.location.candidates).toContain(temporary.root);
+    expect(cleanup.location.candidates.every((path) => !existsSync(path))).toBe(true);
+  });
+
+  it('does not invent a retained path after an already removed domain', () => {
+    const temporary = exactDomain();
+    expect(temporary.cleanup()).toEqual({ status: 'removed' });
+
+    expect(temporary.retain('too late')).toEqual({
+      status: 'unverifiable',
+      location: { status: 'unverifiable', candidates: [temporary.root] },
+      reason: 'Reviewer 临时域已安全删除，无法再保留',
+      protection: { status: 'unverifiable', reason: 'descriptor-unavailable' },
+    });
+  });
 
   it.skipIf(process.platform === 'win32')(
     'safe-tree cleanup rejects a link and preserves its external target',

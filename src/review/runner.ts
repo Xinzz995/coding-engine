@@ -24,6 +24,7 @@ import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import type { ReviewPackage } from './package.js';
 import {
+  describeReviewTemporaryRetention,
   ReviewTemporaryDirectory,
   ReviewTemporaryDirectoryError,
   type ReviewTemporaryCleanupResult,
@@ -350,8 +351,8 @@ function createRunnerInvocation(options: {
     const cleanup = temporary.cleanup();
     throw new ReviewTemporaryDirectoryError(
       `${error instanceof Error ? error.message : String(error)}；` +
-        (cleanup.status === 'retained'
-          ? `Runner 调用初始化现场已保留 ${cleanup.path}：${cleanup.reason}`
+        (cleanup.status !== 'removed'
+          ? `Runner 调用初始化现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`
           : 'Runner 调用初始化现场已安全清理'),
     );
   }
@@ -458,9 +459,9 @@ async function runProcess(options: {
     failure = error;
   }
   const cleanup = invocation.cleanup();
-  if (cleanup.status === 'retained') {
+  if (cleanup.status !== 'removed') {
     throw new RunnerPolicyViolation(
-      `Review Runner 临时域已保留 ${cleanup.path}：${cleanup.reason}` +
+      `Review Runner 临时域${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}` +
         (failure === undefined ? '' : `；原始失败：${errorMessage(failure)}`),
     );
   }
@@ -531,9 +532,9 @@ export async function readRunnerVersion(options: {
     failure = error;
   }
   const cleanup = temporary.cleanup();
-  if (cleanup.status === 'retained') {
+  if (cleanup.status !== 'removed') {
     const message =
-      `Runner 版本临时域已保留 ${cleanup.path}：${cleanup.reason}` +
+      `Runner 版本临时域${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}` +
       (failure === undefined ? '' : `；原始失败：${errorMessage(failure)}`);
     if (failure instanceof WorkspaceSafetyError) {
       throw new WorkspaceSafetyError(failure.code, `${failure.message}；${message}`);
@@ -878,8 +879,8 @@ export async function probeRunnerIsolation(options: {
     const cleanup = temporary.cleanup();
     throw new ReviewTemporaryDirectoryError(
       `Runner 隔离探测初始化失败：${errorMessage(error)}；` +
-        (cleanup.status === 'retained'
-          ? `现场已保留 ${cleanup.path}：${cleanup.reason}`
+        (cleanup.status !== 'removed'
+          ? `现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`
           : '现场已安全清理'),
     );
   }
@@ -931,8 +932,10 @@ export async function probeRunnerIsolation(options: {
     failures.push(error instanceof Error ? error.message : String(error));
   }
   const cleanup = temporary.cleanup();
-  if (cleanup.status === 'retained') {
-    failures.push(`Runner 隔离探测现场已保留 ${cleanup.path}：${cleanup.reason}`);
+  if (cleanup.status !== 'removed') {
+    failures.push(
+      `Runner 隔离探测现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`,
+    );
   }
   return {
     ok: failures.length === 0,
