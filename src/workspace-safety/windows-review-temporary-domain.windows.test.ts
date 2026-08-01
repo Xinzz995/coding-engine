@@ -21,6 +21,7 @@ import type { ReviewPackage } from '../review/package.js';
 import { runSafeReviewAxis } from '../review/runner.js';
 import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
 import { bootstrapWorkspace } from './bootstrap.js';
+import { runManagedWorkspaceProcess } from './coordinator.js';
 import { acquireWorkspaceLease } from './lease.js';
 import { createWorkspaceSession } from './session.js';
 import { inspectWindowsPathAttributes } from './windows-path-attributes.js';
@@ -41,7 +42,7 @@ function temporaryRoot(label: string): string {
   return root;
 }
 
-function managedReviewPackage(): ReviewPackage {
+function managedReviewPackage(onPhase: (phase: string) => void = () => undefined): ReviewPackage {
   const temporary = ReviewTemporaryDirectory.create({
     prefix: 'coding-x-review-windows-managed-',
     projectRoot: process.cwd(),
@@ -51,17 +52,18 @@ function managedReviewPackage(): ReviewPackage {
   const schema = '{}\n';
   const manifest = '{}\n';
   const runner = [
-    'const chunks=[];',
-    'process.stdin.on("data",chunk=>chunks.push(chunk));',
-    'process.stdin.on("end",()=>{',
-    '  if(Buffer.concat(chunks).length===0) process.exit(9);',
-    '  const answer={status:"passed",summary:"ok",requestDeepReview:false,',
-    '    unverifiableReason:null,findings:[]};',
-    '  process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"fixture"})+"\\n");',
-    '  process.stdout.write(JSON.stringify({type:"item.completed",item:{',
-    '    type:"agent_message",text:JSON.stringify(answer)}})+"\\n");',
-    '  process.stdout.write(JSON.stringify({type:"turn.completed"})+"\\n");',
-    '});',
+    'const fs=require("node:fs");',
+    'const prompt=fs.readFileSync(0);',
+    'if(prompt.length===0) process.exit(9);',
+    'const answer={status:"passed",summary:"ok",requestDeepReview:false,',
+    '  unverifiableReason:null,findings:[]};',
+    'const output=[',
+    '  JSON.stringify({type:"thread.started",thread_id:"fixture"}),',
+    '  JSON.stringify({type:"item.completed",item:{',
+    '    type:"agent_message",text:JSON.stringify(answer)}}),',
+    '  JSON.stringify({type:"turn.completed"}),',
+    '].join("\\n")+"\\n";',
+    'fs.writeSync(1,output);',
   ].join('\n');
   const inputPath = join(temporary.root, 'review-input.json');
   const schemaPath = join(temporary.root, 'response-schema.json');
@@ -90,11 +92,28 @@ function managedReviewPackage(): ReviewPackage {
     input,
     inputBytes: Buffer.byteLength(input),
     digest: 'sha256:windows-native-fixture',
-    cleanup: () => temporary.cleanup(),
+    cleanup: () => {
+      onPhase('package-cleanup-start');
+      const result = temporary.cleanup();
+      onPhase(`package-cleanup-${result.status}`);
+      return result;
+    },
     assertUnchanged: () => temporary.assertUnchanged(),
-    prepareManagedUse: () => temporary.prepareManagedUse(),
-    beginManagedUse: () => temporary.beginManagedUse(),
-    confirmManagedUseSettled: () => temporary.confirmManagedUseSettled(),
+    prepareManagedUse: () => {
+      onPhase('package-prepare-start');
+      temporary.prepareManagedUse();
+      onPhase('package-prepare-complete');
+    },
+    beginManagedUse: () => {
+      onPhase('package-begin-start');
+      temporary.beginManagedUse();
+      onPhase('package-begin-complete');
+    },
+    confirmManagedUseSettled: () => {
+      onPhase('package-confirm-start');
+      temporary.confirmManagedUseSettled();
+      onPhase('package-confirm-complete');
+    },
   };
 }
 
@@ -165,11 +184,19 @@ describe.skipIf(process.platform !== 'win32')(
     it(
       'runs a real managed Review package through the Windows supervisor and fixed proxy',
       async () => {
+        const startedAt = Date.now();
+        const mark = (phase: string): void => {
+          process.stdout.write(`[windows-review-phase] ${Date.now() - startedAt}ms ${phase}\n`);
+        };
         const workspace = temporaryRoot('managed-workspace');
+        mark('workspace-created');
         await bootstrapWorkspace({ workspacePath: workspace });
+        mark('workspace-bootstrapped');
         const lease = await acquireWorkspaceLease({ workspacePath: workspace, command: 'run' });
+        mark('lease-acquired');
         const session = createWorkspaceSession(lease);
-        const reviewPackage = managedReviewPackage();
+        const reviewPackage = managedReviewPackage(mark);
+        mark('package-created');
         vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
         try {
           await expect(
@@ -181,17 +208,38 @@ describe.skipIf(process.platform !== 'win32')(
               axis: 'engineering',
               reviewPackage,
               timeoutMs: 10_000,
+              managedProcess: async (managedSession, options) => {
+                mark('managed-process-start');
+                try {
+                  const result = await runManagedWorkspaceProcess(managedSession, {
+                    ...options,
+                    supervisorTimeouts: {
+                      ...options.supervisorTimeouts,
+                      handshakeMs: 5000,
+                    },
+                  });
+                  mark(`managed-process-${result.verdict}`);
+                  return result;
+                } catch (error) {
+                  mark(`managed-process-error-${error instanceof Error ? error.name : 'unknown'}`);
+                  throw error;
+                }
+              },
             }),
           ).resolves.toMatchObject({
             attempts: 1,
             output: { status: 'passed' },
           });
+          mark('review-complete');
           expect(() => reviewPackage.assertUnchanged()).not.toThrow();
+          mark('package-asserted');
           expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
           expect(existsSync(reviewPackage.root)).toBe(false);
         } finally {
           reviewPackage.cleanup();
+          mark('session-close-start');
           await session.close();
+          mark('session-close-complete');
         }
       },
       WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
