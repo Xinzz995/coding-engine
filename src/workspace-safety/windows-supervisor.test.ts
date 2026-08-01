@@ -968,7 +968,8 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       realpathSync(process.execPath),
       [
         '-e',
-        `require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(${JSON.stringify(ready)},'ready');setInterval(()=>{},1000)`,
+        "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(process.argv[1],'ready');setInterval(()=>{},1000)",
+        ready,
       ],
       windowsTestTargetEnvironment(),
     );

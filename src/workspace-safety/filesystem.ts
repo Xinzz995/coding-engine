@@ -50,6 +50,8 @@ export interface StableReadHooks {
 export interface InstallFileNoReplaceHooks {
   readonly beforeLink?: () => void | Promise<void>;
   readonly afterLink?: () => void | Promise<void>;
+  /** Test seam: deterministically changes a path between preflight and handle acquisition. */
+  readonly beforeLinkedOpen?: () => void | Promise<void>;
   readonly afterLinkedRead?: () => void | Promise<void>;
   readonly beforeSourceUnlink?: () => void | Promise<void>;
 }
@@ -521,10 +523,10 @@ async function readControlledLinkedPair(
     }
 
     const noFollow = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW;
-    [sourceHandle, targetHandle] = await Promise.all([
-      open(source, constants.O_RDONLY | noFollow),
-      open(target, constants.O_RDONLY | noFollow),
-    ]);
+    const nonBlock = process.platform === 'win32' ? 0 : constants.O_NONBLOCK;
+    await hooks.beforeLinkedOpen?.();
+    sourceHandle = await open(source, constants.O_RDONLY | noFollow | nonBlock);
+    targetHandle = await open(target, constants.O_RDONLY | noFollow | nonBlock);
     const [sourceOpened, targetOpened] = await Promise.all([
       sourceHandle.stat({ bigint: true }),
       targetHandle.stat({ bigint: true }),
