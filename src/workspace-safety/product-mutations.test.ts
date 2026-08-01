@@ -469,12 +469,34 @@ describe('fixed apply-prd-v1 product mutation', () => {
 
   it('rechecks every binding after a successful TDD command before installing mutation', async () => {
     const project = gitProject();
+    const nextHead = execFileSync(
+      'git',
+      [
+        'commit-tree',
+        `${project.head}^{tree}`,
+        '-p',
+        project.head,
+        '-m',
+        'test: prebuilt TDD HEAD drift',
+      ],
+      {
+        cwd: project.root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z',
+          GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z',
+        },
+      },
+    )
+      .trim()
+      .toLowerCase();
     const { root, session } = await fixture('apply-prd');
     writeOldRun(root);
     const candidate = {
       prd: prd('ralph/new-feature', 'new', {
         tdd: {
-          coverageCheck: 'git commit --allow-empty -m tdd-mutated-head',
+          coverageCheck: `git update-ref HEAD ${nextHead} ${project.head}`,
           sourcePathspecs: ['src/**'],
           policyFiles: [],
           baselineRef: project.head,
@@ -492,6 +514,7 @@ describe('fixed apply-prd-v1 product mutation', () => {
         { projectRoot: project.root },
       ),
     ).rejects.toThrow(/Git HEAD no longer matches/u);
+    expect(readGitHead(project.root)).toBe(nextHead);
     expect(readFileSync(join(root, 'prd.json'), 'utf8')).toContain('"old"');
     await expect(
       readCanonicalMutationDomain({
@@ -500,7 +523,7 @@ describe('fixed apply-prd-v1 product mutation', () => {
       }),
     ).rejects.toThrow();
     await expect(session.close()).resolves.toContain('released-');
-  });
+  }, 10_000);
 
   it.each([
     {
