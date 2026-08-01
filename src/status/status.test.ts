@@ -785,6 +785,95 @@ describe('renderStatusReport', () => {
       rmSync(ws, { recursive: true, force: true });
     }
   });
+
+  it('展示最近一次提交检查链中止，并在 JSON 中保留精确身份', () => {
+    const ws = makeWorkspace();
+    const expectedGitHead = 'a'.repeat(40);
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: false,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
+      writeFileSync(
+        join(ws, 'evidence.jsonl'),
+        JSON.stringify({
+          type: 'iteration', source: 'engine', at: '2026-08-02T11:00:00.000Z',
+          iteration: 6, storyId: 'US-001', builderRan: false, builderModel: null,
+          validatorRan: false, validatorModel: null, skippedValidator: false,
+          agentBlocked: false,
+          validationHeadAbort: {
+            phase: 'validator-start', reason: 'head-unreadable',
+            expectedGitHead, actualGitHead: null,
+            diagnostic: 'Validator 请求建立前无法读取 HEAD',
+          },
+        }) + '\n',
+      );
+
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report).text;
+      expect(human).toContain('检查链中止：提交身份不可读@validator-start');
+      expect(human).toContain('实际 unavailable');
+      expect(human).toContain('相关执行结果未采用 · 第6轮');
+
+      const json = JSON.parse(renderStatusJson(report).text);
+      expect(json.recentValidationHeadAbort['US-001']).toEqual({
+        iteration: 6,
+        phase: 'validator-start',
+        reason: 'head-unreadable',
+        expectedGitHead,
+        actualGitHead: null,
+        diagnostic: 'Validator 请求建立前无法读取 HEAD',
+      });
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('后续完整验收成功后不再把历史提交漂移显示成当前中止', () => {
+    const ws = makeWorkspace();
+    const gitHead = 'a'.repeat(40);
+    const baseIteration = {
+      type: 'iteration', source: 'engine', storyId: 'US-001',
+      builderRan: false, builderModel: null, validatorRan: false,
+      validatorModel: null, skippedValidator: false, agentBlocked: false,
+    };
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({}));
+      writeFileSync(
+        join(ws, 'evidence.jsonl'),
+        [
+          {
+            ...baseIteration, at: '2026-08-02T11:00:00.000Z', iteration: 6,
+            validationHeadAbort: {
+              phase: 'quality-check-finish', reason: 'head-changed',
+              expectedGitHead: gitHead, actualGitHead: 'b'.repeat(40), diagnostic: 'changed',
+            },
+          },
+          {
+            ...baseIteration, at: '2026-08-02T11:01:00.000Z', iteration: 7,
+            validatorRan: true, validationReceipt: true, validationProtocol: 'passed',
+          },
+        ].map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+
+      const report = collectStatus(ws);
+      expect(renderStatusReport(report).text).not.toContain('检查链中止');
+      expect(JSON.parse(renderStatusJson(report).text).recentValidationHeadAbort).toEqual({});
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('renderStatusJson', () => {

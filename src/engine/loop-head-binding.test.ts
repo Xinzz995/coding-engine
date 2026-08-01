@@ -242,12 +242,21 @@ describe('runLoop Git HEAD validation chain', () => {
         });
         expect(existsSync(calls)).toBe(false);
         const evidence = readEvidence(fixture.workspace);
-        expect(evidence.records.some((record) => record.type === 'gate-run')).toBe(false);
+        expect(evidence.records.find((record) => record.type === 'gate-run')).toMatchObject({
+          ok: gateExitCode === 0,
+          accepted: false,
+        });
         const iteration = evidence.records.find((record) => record.type === 'iteration');
         expect(iteration).toMatchObject({
           builderRan: false,
           validatorRan: false,
           validatorOutcome: 'skipped',
+          validationHeadAbort: {
+            phase: 'quality-check-finish',
+            reason: 'head-changed',
+            expectedGitHead: initialHead,
+            actualGitHead: fixture.head(),
+          },
         });
         expect(iteration).not.toHaveProperty('validationProtocol');
         expect(iteration).not.toHaveProperty('validationProtocolError');
@@ -359,6 +368,12 @@ describe('runLoop Git HEAD validation chain', () => {
           builderRan: false,
           validatorRan: false,
           validatorOutcome: 'skipped',
+          validationHeadAbort: {
+            phase: 'validator-start',
+            reason: 'head-changed',
+            expectedGitHead: expect.stringMatching(/^[a-f0-9]{40}$/),
+            actualGitHead: fixture.head(),
+          },
         });
         expect(iteration).not.toHaveProperty('validationProtocol');
         expect(iteration).not.toHaveProperty('validationProtocolError');
@@ -472,6 +487,12 @@ describe('runLoop Git HEAD validation chain', () => {
         validatorRan: false,
         builderOutcome: 'completed',
         validationRollback: true,
+        validationHeadAbort: {
+          phase: 'quality-check-start',
+          reason: 'head-unreadable',
+          expectedGitHead: expect.stringMatching(/^[a-f0-9]{40}$/),
+          actualGitHead: null,
+        },
       });
     },
     HEAD_BINDING_TEST_TIMEOUT_MS,
@@ -523,6 +544,12 @@ describe('runLoop Git HEAD validation chain', () => {
         builderRan: false,
         validatorRan: false,
         validatorOutcome: 'skipped',
+        validationHeadAbort: {
+          phase: 'validator-start',
+          reason: 'head-unreadable',
+          expectedGitHead: expect.stringMatching(/^[a-f0-9]{40}$/),
+          actualGitHead: null,
+        },
       });
       expect(iteration).not.toHaveProperty('validationProtocol');
       expect(iteration).not.toHaveProperty('validationProtocolError');
@@ -589,6 +616,12 @@ describe('runLoop Git HEAD validation chain', () => {
           validatorOutcome: 'completed',
           validationProtocol: 'invalid',
           validationProtocolError: { code: 'artifact-changed' },
+          validationHeadAbort: {
+            phase: 'validator-finish',
+            reason: 'head-changed',
+            expectedGitHead: initialHead,
+            actualGitHead: fixture.head(),
+          },
         });
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
@@ -639,6 +672,12 @@ describe('runLoop Git HEAD validation chain', () => {
           validationRollback: true,
           validationProtocol: 'invalid',
           validationProtocolError: { code: 'artifact-changed' },
+          validationHeadAbort: {
+            phase: 'validator-finish',
+            reason: 'head-changed',
+            expectedGitHead: initialHead,
+            actualGitHead: fixture.head(),
+          },
         });
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
@@ -765,8 +804,10 @@ describe('runLoop Git HEAD validation chain', () => {
         const evidence = readEvidence(fixture.workspace).records;
         expect(evidence.filter((record) => record.type === 'iteration')).toHaveLength(2);
         const gateRuns = evidence.filter((record) => record.type === 'gate-run');
-        expect(gateRuns).toHaveLength(1);
-        expect(gateRuns[0]).toMatchObject({ ok: true, ran: 1 });
+        expect(gateRuns).toHaveLength(2);
+        expect(gateRuns[0]).toMatchObject({ ok: true, ran: 1, accepted: false });
+        expect(gateRuns[1]).toMatchObject({ ok: true, ran: 1 });
+        expect(gateRuns[1]).not.toHaveProperty('accepted');
         expect(evidence.find((record) => record.type === 'validation-claim')).toMatchObject({
           verdict: 'passed',
           gitHead: fixture.head(),
@@ -816,13 +857,26 @@ describe('runLoop Git HEAD validation chain', () => {
         expect(existsSync(calls)).toBe(false);
         const records = readEvidence(workspace).records;
         expect(
-          records.some((record) => record.type === 'tdd-gate' && record.phase === 'post-builder'),
-        ).toBe(false);
+          records.find((record) => record.type === 'tdd-gate' && record.phase === 'post-builder'),
+        ).toMatchObject({ ok: tddExitCode === 0, accepted: false });
         const iteration = records.find((record) => record.type === 'iteration');
+        const tddRecord = records.find(
+          (record) => record.type === 'tdd-gate' && record.phase === 'post-builder',
+        );
+        if (iteration?.type !== 'iteration' || tddRecord?.type !== 'tdd-gate') {
+          throw new Error('expected TDD and iteration evidence');
+        }
+        expect(tddRecord.runId).toBe(iteration.runId);
         expect(iteration).toMatchObject({
           builderRan: false,
           validatorRan: false,
           validatorOutcome: 'skipped',
+          validationHeadAbort: {
+            phase: 'tdd-check-finish',
+            reason: 'head-changed',
+            expectedGitHead: initialHead,
+            actualGitHead: fixture.head(),
+          },
         });
         expect(iteration).not.toHaveProperty('validationProtocol');
         expect(iteration).not.toHaveProperty('validationProtocolError');
