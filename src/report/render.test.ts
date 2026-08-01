@@ -440,6 +440,168 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('branch 80% &lt; 90%');
   });
 
+  it('提交漂移后保留命令事实，但成功、失败和 HEAD 不可读都明确显示结果未采用', () => {
+    const head = 'a'.repeat(40);
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T06:00:00.000Z',
+        iteration: 1, storyId: 'US-001', ok: true, total: 1, ran: 1, ms: 20,
+        accepted: false,
+      },
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T06:01:00.000Z',
+        iteration: 2, storyId: 'US-001', ok: false, total: 1, ran: 1, ms: 20,
+        accepted: false, failedCommand: 'npm test', exitCode: 1, timedOut: false,
+      },
+      {
+        type: 'tdd-gate', source: 'engine', at: '2026-08-02T06:02:00.000Z',
+        phase: 'post-builder', iteration: 3, storyId: 'US-001', ok: true,
+        policyOk: true, commandRan: true, ms: 20, accepted: false,
+      },
+      {
+        type: 'iteration', source: 'engine', at: '2026-08-02T06:03:00.000Z',
+        iteration: 3, storyId: 'US-001', builderRan: false, builderModel: null,
+        validatorRan: false, validatorModel: null, skippedValidator: false,
+        agentBlocked: false,
+        validationHeadAbort: {
+          phase: 'validator-start', reason: 'head-unreadable',
+          expectedGitHead: head, actualGitHead: null,
+          diagnostic: 'Validator 请求建立前无法读取 HEAD',
+        },
+      },
+    ])));
+    expect(html).toContain('⚠️ 已执行，结果未采用（命令通过）');
+    expect(html).toContain('⚠️ 已执行，结果未采用（命令未通过）');
+    expect(html).toContain('覆盖命令通过，结果未采用');
+    expect(html).toContain('检查链中止：提交身份不可读@validator-start');
+    expect(html).toContain('实际 unavailable');
+    expect(html).not.toContain('✅ 通过</td><td>1/1');
+  });
+
+  it('同轮后续边界才发现提交漂移时，已通过的 gate 与 TDD 也不显示绿灯', () => {
+    const head = 'a'.repeat(40);
+    const runId = '11111111-1111-4111-8111-111111111111';
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T07:00:00.000Z',
+        runId, iteration: 4, storyId: 'US-001', ok: true, total: 1, ran: 1, ms: 20,
+      },
+      {
+        type: 'tdd-gate', source: 'engine', at: '2026-08-02T07:00:01.000Z',
+        runId, phase: 'post-builder', iteration: 4, storyId: 'US-001', ok: true,
+        policyOk: true, commandRan: true, commandOk: true, ms: 20,
+      },
+      {
+        type: 'iteration', source: 'engine', at: '2026-08-02T07:00:02.000Z',
+        runId, iteration: 4, storyId: 'US-001', builderRan: false, builderModel: null,
+        validatorRan: false, validatorModel: null, skippedValidator: false,
+        agentBlocked: false,
+        validationHeadAbort: {
+          phase: 'validator-start', reason: 'head-unreadable',
+          expectedGitHead: head, actualGitHead: null, diagnostic: 'HEAD unreadable',
+        },
+      },
+    ])));
+    expect(html).toContain(
+      '<tr><td>4</td><td>US-001</td><td>⚠️ 已执行，结果未采用（命令通过）</td>',
+    );
+    expect(html).toContain(
+      '<tr><td>第 4 轮</td><td>US-001</td><td>⚠️ 流程结束，结果未采用（覆盖命令通过）</td>',
+    );
+    expect(html).not.toContain(
+      '<tr><td>4</td><td>US-001</td><td>✅ 通过</td>',
+    );
+    expect(html).not.toContain(
+      '<tr><td>第 4 轮</td><td>US-001</td><td>✅ 通过</td>',
+    );
+  });
+
+  it('coverage 成功但命令后政策复核失败时，报告不把覆盖命令写成失败', () => {
+    const html = renderReportHtml(data(ev([{
+      type: 'tdd-gate', source: 'engine', at: '2026-08-02T08:00:00.000Z',
+      phase: 'post-builder', iteration: 5, storyId: 'US-001', ok: false,
+      policyOk: false, commandRan: true, commandOk: true, ms: 20,
+      failureCode: 'policy-hash-mismatch', failedCommand: '[tdd-policy]',
+      exitCode: null, timedOut: false, diagnosticTail: 'policy changed after command',
+    }])));
+    expect(html).toContain('政策未通过');
+    expect(html).toContain('覆盖命令通过');
+    expect(html).not.toContain('覆盖命令未通过');
+  });
+
+  it('跨进程重复 iteration 编号不会把已经闭合的历史轮误标成未采用', () => {
+    const head = 'a'.repeat(40);
+    const firstRun = '11111111-1111-4111-8111-111111111111';
+    const secondRun = '22222222-2222-4222-8222-222222222222';
+    const iteration = {
+      type: 'iteration' as const, source: 'engine' as const,
+      storyId: 'US-001', builderRan: false, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+    };
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T08:10:00.000Z',
+        runId: firstRun, iteration: 1, storyId: 'US-001', ok: true, total: 1, ran: 1, ms: 20,
+      },
+      { ...iteration, runId: firstRun, at: '2026-08-02T08:10:01.000Z', iteration: 1 },
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T08:20:00.000Z',
+        runId: secondRun, iteration: 1, storyId: 'US-001', ok: true, total: 1, ran: 1, ms: 20,
+      },
+      {
+        ...iteration, runId: secondRun, at: '2026-08-02T08:20:01.000Z', iteration: 1,
+        validationHeadAbort: {
+          phase: 'validator-start' as const, reason: 'head-unreadable' as const,
+          expectedGitHead: head, actualGitHead: null, diagnostic: 'HEAD unreadable',
+        },
+      },
+    ])));
+    expect(html.match(/<td>✅ 通过<\/td><td>1\/1<\/td>/gu)).toHaveLength(1);
+    expect(html.match(/⚠️ 已执行，结果未采用（命令通过）/gu)).toHaveLength(1);
+  });
+
+  it('旧运行缺少 closing iteration 时也不会被新运行的漂移误伤', () => {
+    const head = 'a'.repeat(40);
+    const firstRun = '11111111-1111-4111-8111-111111111111';
+    const secondRun = '22222222-2222-4222-8222-222222222222';
+    const html = renderReportHtml(data(ev([
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T08:10:00.000Z',
+        runId: firstRun, iteration: 1, storyId: 'US-001', ok: true,
+        total: 1, ran: 1, ms: 20,
+      },
+      {
+        type: 'gate-run', source: 'engine', at: '2026-08-02T08:20:00.000Z',
+        runId: secondRun, iteration: 1, storyId: 'US-001', ok: true,
+        total: 1, ran: 1, ms: 20,
+      },
+      {
+        type: 'iteration', source: 'engine', at: '2026-08-02T08:20:01.000Z',
+        runId: secondRun, iteration: 1, storyId: 'US-001',
+        builderRan: false, builderModel: null, validatorRan: false, validatorModel: null,
+        skippedValidator: false, agentBlocked: false,
+        validationHeadAbort: {
+          phase: 'validator-start', reason: 'head-unreadable',
+          expectedGitHead: head, actualGitHead: null, diagnostic: 'HEAD unreadable',
+        },
+      },
+    ])));
+    expect(html.match(/<td>✅ 通过<\/td><td>1\/1<\/td>/gu)).toHaveLength(1);
+    expect(html.match(/⚠️ 已执行，结果未采用（命令通过）/gu)).toHaveLength(1);
+  });
+
+  it('状态保护覆盖总失败原因时仍展示 coverage 命令的真实失败', () => {
+    const html = renderReportHtml(data(ev([{
+      type: 'tdd-gate', source: 'engine', at: '2026-08-02T08:30:00.000Z',
+      phase: 'post-builder', iteration: 6, storyId: 'US-001', ok: false,
+      policyOk: false, commandRan: true, commandOk: false, ms: 20,
+      failureCode: 'source-scan-failed', failedCommand: '[state-ownership]',
+      exitCode: null, timedOut: false, diagnosticTail: '状态被恢复',
+    }])));
+    expect(html).toContain('覆盖命令未通过');
+    expect(html).not.toContain('覆盖命令通过</td>');
+  });
+
   it('claim 按 acIndex（1 起）挂到对应 AC 并带 agent 声明标注与免责行', () => {
     const html = renderReportHtml(data(ev([
       { type: 'screenshot-claim', source: 'validator', at: '2026-07-08T06:00:00.000Z', storyId: 'US-001', file: 'validator-us-001-pass-1.png', acIndex: 1, note: '页面打开成功' },

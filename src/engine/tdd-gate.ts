@@ -68,6 +68,8 @@ export interface TddGateResult {
   policyOk: boolean;
   /** coverageCheck 是否实际启动。 */
   commandRan: boolean;
+  /** coverageCheck 自身的结局；未启动时为 null，不与后置政策复核混写。 */
+  commandOk: boolean | null;
   failure: TddGateFailure | null;
   ms: number;
 }
@@ -609,6 +611,7 @@ export async function runTddGate(
       ok: false,
       policyOk: false,
       commandRan: false,
+      commandOk: null,
       failure: policy.failure,
       ms: Date.now() - started,
     };
@@ -624,6 +627,7 @@ export async function runTddGate(
       ok: false,
       policyOk: true,
       commandRan: true,
+      commandOk: false,
       failure: { ...commandFailure, code: 'coverage-check-failed' },
       ms: Date.now() - started,
     };
@@ -636,6 +640,7 @@ export async function runTddGate(
       ok: false,
       policyOk: false,
       commandRan: true,
+      commandOk: true,
       failure: policyAfterCommand.failure,
       ms: Date.now() - started,
     };
@@ -644,6 +649,7 @@ export async function runTddGate(
     ok: true,
     policyOk: true,
     commandRan: true,
+    commandOk: true,
     failure: null,
     ms: Date.now() - started,
   };

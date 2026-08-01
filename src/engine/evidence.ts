@@ -43,6 +43,26 @@ export type TddEvidenceFailureCode =
   | 'forbidden-pattern-added'
   | 'coverage-check-failed';
 
+export type ValidationHeadAbortPhase =
+  | 'quality-check-start'
+  | 'quality-check-finish'
+  | 'tdd-check-start'
+  | 'tdd-check-finish'
+  | 'validator-start'
+  | 'validator-finish';
+
+/** 同一提交检查链因 HEAD 变化或不可读而中止的引擎观察。 */
+export interface ValidationHeadAbortEvidence {
+  phase: ValidationHeadAbortPhase;
+  reason: 'head-changed' | 'head-unreadable';
+  expectedGitHead: string | null;
+  actualGitHead: string | null;
+  diagnostic: string;
+}
+
+/** 单次 coding-x run 的稳定身份；用于把同轮命令事实与最终 iteration 精确关联。 */
+export type EvidenceRunId = string;
+
 /**
  * evidence.jsonl 的记录 schema 单源（判别联合）。append-only、每行一条独立 JSON：
  * 坏行只损失自己（agent 写坏一行不毁全文件），行序即事件序。
@@ -52,6 +72,8 @@ export type TddEvidenceFailureCode =
  */
 export type EvidenceRecord =
   | { type: 'iteration'; source: 'engine'; at: string; iteration: number; storyId: string | null;
+      /** v0.34 起由引擎生成；旧记录缺省时不参与跨记录归因。 */
+      runId?: EvidenceRunId;
       builderRan: boolean; builderModel: string | null; validatorRan: boolean;
       validatorModel: string | null; skippedValidator: boolean; agentBlocked: boolean;
       /** agent 进程结局（异常轮语义，v0.22.0 起）；缺省=该侧未拉起或旧版本记录 */
@@ -68,6 +90,8 @@ export type EvidenceRecord =
       abortRollback?: { storyId: string };
       /** 本轮未获得验收凭证，候选 passes 已回写。 */
       validationRollback?: true;
+      /** 项目检查、TDD 或 Validator 边界的同一提交检查链中止原因。 */
+      validationHeadAbort?: ValidationHeadAbortEvidence;
       /** validator completed 且候选结果保持通过，引擎已签发验收凭证。 */
       validationReceipt?: true;
       /** 引擎对本轮结构化协议的机械判定；旧记录/未启动 Validator 时缺省。 */
@@ -99,13 +123,21 @@ export type EvidenceRecord =
         expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
       }> }
   | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
+      runId?: EvidenceRunId;
       ok: boolean; total: number; ran: number; ms: number;
+      /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
+      accepted?: false;
       failedCommand?: string; exitCode?: number | null; timedOut?: boolean;
       /** 失败命令 stdout/stderr 合并输出的尾部；有界保存。 */
       diagnosticTail?: string }
   | { type: 'tdd-gate'; source: 'engine'; at: string;
       phase: 'preflight' | 'post-builder'; iteration: number; storyId: string | null;
+      runId?: EvidenceRunId;
       ok: boolean; policyOk: boolean; commandRan: boolean; ms: number;
+      /** coverageCheck 的独立命令结局；旧记录缺省时从旧 failureCode 尽力还原。 */
+      commandOk?: boolean;
+      /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
+      accepted?: false;
       failureCode?: TddEvidenceFailureCode; failedCommand?: string;
       exitCode?: number | null; timedOut?: boolean; diagnosticTail?: string }
   | { type: 'tamper'; source: 'engine'; at: string; iteration: number; archive: string | null }
@@ -150,6 +182,15 @@ export interface EvidenceReadResult {
 
 function isRec(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function isEvidenceRunId(value: unknown): value is EvidenceRunId {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+function hasValidOptionalRunId(value: Record<string, unknown>): boolean {
+  return value.runId === undefined || isEvidenceRunId(value.runId);
 }
 
 function isRouteSource(v: unknown): v is ModelRouteSource {
@@ -218,6 +259,23 @@ function isValidationProtocolError(v: unknown): boolean {
   return isRec(v) && isValidationProtocolErrorCode(v.code) && isBoundedDiagnostic(v.diagnostic);
 }
 
+function isValidationHeadAbort(v: unknown): v is ValidationHeadAbortEvidence {
+  if (!isRec(v)
+      || (v.phase !== 'quality-check-start' && v.phase !== 'quality-check-finish'
+        && v.phase !== 'tdd-check-start' && v.phase !== 'tdd-check-finish'
+        && v.phase !== 'validator-start' && v.phase !== 'validator-finish')
+      || (v.reason !== 'head-changed' && v.reason !== 'head-unreadable')
+      || !isGitHead(v.expectedGitHead) || !isGitHead(v.actualGitHead)
+      || !isBoundedDiagnostic(v.diagnostic) || v.diagnostic.trim().length === 0) {
+    return false;
+  }
+  if (v.reason === 'head-unreadable') {
+    return v.expectedGitHead === null || v.actualGitHead === null;
+  }
+  return v.expectedGitHead !== null && v.actualGitHead !== null
+    && v.expectedGitHead !== v.actualGitHead;
+}
+
 function isTddFailureCode(v: unknown): v is TddEvidenceFailureCode {
   return v === 'invalid-config' || v === 'project-root-unreadable'
     || v === 'git-unavailable' || v === 'git-root-mismatch'
@@ -241,6 +299,7 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
   switch (v.type) {
     case 'iteration':
       return v.source === 'engine' && typeof v.iteration === 'number'
+        && hasValidOptionalRunId(v)
         && (typeof v.storyId === 'string' || v.storyId === null)
         && typeof v.builderRan === 'boolean'
         && (typeof v.builderModel === 'string' || v.builderModel === null)
@@ -259,6 +318,8 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (v.gateRejected === undefined || v.gateRejected === true)
         && (v.abortRollback === undefined || (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string'))
         && (v.validationRollback === undefined || v.validationRollback === true)
+        && (v.validationHeadAbort === undefined || (typeof v.storyId === 'string'
+          && isValidationHeadAbort(v.validationHeadAbort)))
         && (v.validationReceipt === undefined || v.validationReceipt === true)
         && !(v.validationRollback === true && v.validationReceipt === true)
         && (v.validationProtocol === undefined || v.validationProtocol === 'passed'
@@ -277,21 +338,27 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         && (v.stateValidationTamper === undefined || isStateRouteTamper(v.stateValidationTamper));
     case 'gate-run':
       return v.source === 'engine' && typeof v.iteration === 'number'
+        && hasValidOptionalRunId(v)
         && (typeof v.storyId === 'string' || v.storyId === null)
         && typeof v.ok === 'boolean' && typeof v.total === 'number'
         && typeof v.ran === 'number' && typeof v.ms === 'number'
+        && (v.accepted === undefined || v.accepted === false)
         && (v.failedCommand === undefined || typeof v.failedCommand === 'string')
         && (v.exitCode === undefined || v.exitCode === null || typeof v.exitCode === 'number')
         && (v.timedOut === undefined || typeof v.timedOut === 'boolean')
         && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
     case 'tdd-gate': {
       const base = v.source === 'engine'
+        && hasValidOptionalRunId(v)
         && (v.phase === 'preflight' || v.phase === 'post-builder')
         && Number.isSafeInteger(v.iteration) && (v.iteration as number) >= 0
         && (typeof v.storyId === 'string' || v.storyId === null)
         && typeof v.ok === 'boolean' && typeof v.policyOk === 'boolean'
         && typeof v.commandRan === 'boolean'
+        && (v.commandOk === undefined || typeof v.commandOk === 'boolean')
+        && (v.commandRan === true || v.commandOk === undefined)
         && Number.isSafeInteger(v.ms) && (v.ms as number) >= 0
+        && (v.accepted === undefined || v.accepted === false)
         && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
       if (!base) return false;
       if (v.phase === 'preflight' && (v.iteration !== 0 || v.storyId !== null || v.commandRan !== false)) {
@@ -300,20 +367,41 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
       if (v.phase === 'post-builder' && (v.iteration === 0 || typeof v.storyId !== 'string')) {
         return false;
       }
+      if (v.accepted === false && v.phase !== 'post-builder') {
+        return false;
+      }
       if (v.ok) {
         return v.policyOk === true
           && (v.phase === 'preflight' ? v.commandRan === false : v.commandRan === true)
+          && (v.commandOk === undefined || v.commandOk === true)
           && v.failureCode === undefined && v.failedCommand === undefined
           && v.exitCode === undefined && v.timedOut === undefined
           && v.diagnosticTail === undefined;
       }
-      return isTddFailureCode(v.failureCode)
+      const validFailure = isTddFailureCode(v.failureCode)
         && typeof v.failedCommand === 'string' && v.failedCommand.length > 0
         && (v.exitCode === null || typeof v.exitCode === 'number')
         && typeof v.timedOut === 'boolean'
-        && isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0
-        && !(v.policyOk === false && v.commandRan === true)
-        && !(v.phase === 'preflight' && v.policyOk === true);
+        && isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0;
+      if (!validFailure) return false;
+      if (v.phase === 'preflight') {
+        return v.policyOk === false && v.commandRan === false
+          && v.failureCode !== 'coverage-check-failed';
+      }
+      if (v.commandRan === false) {
+        return v.policyOk === false && v.failureCode !== 'coverage-check-failed';
+      }
+      if (v.commandOk !== undefined) {
+        if (v.commandOk === true) {
+          return v.policyOk === false && v.failureCode !== 'coverage-check-failed';
+        }
+        return v.policyOk
+          ? v.failureCode === 'coverage-check-failed'
+          : v.failureCode !== 'coverage-check-failed';
+      }
+      return v.policyOk
+        ? v.failureCode === 'coverage-check-failed'
+        : v.failureCode !== 'coverage-check-failed';
     }
     case 'tamper':
       return v.source === 'engine' && typeof v.iteration === 'number'

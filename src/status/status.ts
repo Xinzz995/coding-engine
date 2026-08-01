@@ -16,6 +16,7 @@ import {
   type EvidenceRecord,
   type ValidationTargetEvidence,
   type LoopValidationProtocolErrorCode,
+  type ValidationHeadAbortEvidence,
 } from '../engine/evidence.js';
 import {
   readModelRouting,
@@ -56,6 +57,10 @@ export interface StoryRecentValidation {
   stateMutation: boolean;
 }
 
+export interface StoryRecentValidationHeadAbort extends ValidationHeadAbortEvidence {
+  iteration: number;
+}
+
 export type StatusReport = (
   | { status: 'missing'; workspace: string }
   | { status: 'unparsable'; workspace: string }
@@ -68,6 +73,8 @@ export type StatusReport = (
       modelRouting: ModelRoutingReadResult;
       recentActual: Record<string, StoryRecentActual>;
       recentValidation: Record<string, StoryRecentValidation>;
+      /** 兼容手工构造的旧 StatusReport；正式收集始终提供。 */
+      recentValidationHeadAbort?: Record<string, StoryRecentValidationHeadAbort>;
       evidenceSkippedLines: number;
       evidenceUnavailable: boolean;
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
@@ -160,6 +167,24 @@ function recentValidationOf(records: EvidenceRecord[]): Record<string, StoryRece
   return recent;
 }
 
+function recentValidationHeadAbortOf(
+  records: EvidenceRecord[],
+): Record<string, StoryRecentValidationHeadAbort> {
+  const recent: Record<string, StoryRecentValidationHeadAbort> = {};
+  for (const record of records) {
+    if (record.type !== 'iteration' || record.storyId === null) continue;
+    if (!record.validationHeadAbort) {
+      delete recent[record.storyId];
+    } else {
+      recent[record.storyId] = {
+        iteration: record.iteration,
+        ...record.validationHeadAbort,
+      };
+    }
+  }
+  return recent;
+}
+
 /** 只读收集 workspace 执行状态；state.json 缺失兼容 legacy，存在但损坏则 fail-closed。 */
 function collectStatusControlled(
   workspace: string,
@@ -188,6 +213,7 @@ function collectStatusControlled(
     modelRouting: readModelRouting(prd),
     recentActual: recentActualOf(evidence.records),
     recentValidation: recentValidationOf(evidence.records),
+    recentValidationHeadAbort: recentValidationHeadAbortOf(evidence.records),
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
     stateCorrupted,
@@ -416,6 +442,16 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
         );
       }
     }
+    const headAbort = report.recentValidationHeadAbort?.[s.id];
+    if (headAbort) {
+      const expected = headAbort.expectedGitHead?.slice(0, 12) ?? 'unavailable';
+      const actual = headAbort.actualGitHead?.slice(0, 12) ?? 'unavailable';
+      const reason = headAbort.reason === 'head-unreadable' ? '提交身份不可读' : '提交身份变化';
+      lines.push(
+        `      ⚠️ 检查链中止：${reason}@${headAbort.phase}（期望 ${expected}，实际 ${actual}）` +
+          `，相关执行结果未采用 · 第${headAbort.iteration}轮`,
+      );
+    }
     for (const raw of s.notes.split('\n')) {
       const note = raw.trim();
       if (note === '') continue;
@@ -525,6 +561,7 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
     modelRouting: report.modelRouting,
     recentActual: report.recentActual,
     recentValidation: report.recentValidation,
+    recentValidationHeadAbort: report.recentValidationHeadAbort ?? {},
     evidence: {
       skippedLines: report.evidenceSkippedLines,
       unavailable: report.evidenceUnavailable,

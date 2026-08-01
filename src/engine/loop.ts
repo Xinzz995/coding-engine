@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { runAgent, type AgentKind, type RunResult } from './agent.js';
@@ -40,6 +41,8 @@ import {
   type EvidenceRecord,
   type AgentInvocationEvidence,
   type LoopValidationProtocolErrorCode,
+  type ValidationHeadAbortEvidence,
+  type ValidationHeadAbortPhase,
   type ValidationTargetEvidence,
 } from './evidence.js';
 import {
@@ -228,6 +231,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       bootResolved,
     } = startup;
     const agentCwd = projectRoot;
+    const runId = randomUUID();
 
     server = dashboard.start({
       workspace: cfg.workspace,
@@ -601,6 +605,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           type: 'iteration',
           source: 'engine',
           at: new Date().toISOString(),
+          runId,
           iteration: i,
           storyId: currentStory,
           builderRan: !validationOnly && !!builder,
@@ -648,14 +653,34 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const observed = observedGitHead ?? 'unavailable';
         return `${context}Git HEAD 与本轮检查目标不一致（期望 ${expected}，当前 ${observed}）`;
       };
+      const validationHeadAbortOf = (
+        phase: ValidationHeadAbortPhase,
+        expectedGitHead: string | null,
+        actualGitHead: string | null,
+        diagnostic: string,
+      ): ValidationHeadAbortEvidence => ({
+        phase,
+        reason:
+          expectedGitHead === null || actualGitHead === null ? 'head-unreadable' : 'head-changed',
+        expectedGitHead,
+        actualGitHead,
+        diagnostic: clipEvidenceDiagnostic(diagnostic),
+      });
       const stopForValidationHeadChange = async (
         expectedGitHead: string | null,
         context: string,
+        phase: ValidationHeadAbortPhase,
         builderOutcome?: 'completed' | 'timeout' | 'error',
         observedGitHead = readGitHead(agentCwd),
       ): Promise<boolean> => {
         const diagnostic = await observeValidationHead(expectedGitHead, context, observedGitHead);
         if (!diagnostic) return false;
+        const validationHeadAbort = validationHeadAbortOf(
+          phase,
+          expectedGitHead,
+          observedGitHead,
+          diagnostic,
+        );
         const validationRollback =
           !validationOnly && (await rollbackPendingValidation('检查期间 Git HEAD 发生变化'));
         const recovery = validationOnly
@@ -666,6 +691,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ...(builderOutcome ? { builderOutcome } : {}),
           validatorOutcome: 'skipped',
           ...(validationRollback ? { validationRollback: true as const } : {}),
+          validationHeadAbort,
         });
         dashboard.setState({
           phase: 'idle',
@@ -808,9 +834,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             const validationRollback = await rollbackPendingValidation(
               'Developer 返回后无法读取 Git HEAD',
             );
+            const headDiagnostic =
+              `Developer 返回后Git HEAD 与本轮检查目标不一致（期望 ${currentGitHead ?? 'unavailable'}，当前 unavailable）`;
             await recordIteration({
               builderOutcome: 'completed',
               ...(validationRollback ? { validationRollback: true as const } : {}),
+              validationHeadAbort: validationHeadAbortOf(
+                'quality-check-start',
+                currentGitHead,
+                null,
+                headDiagnostic,
+              ),
             });
             exitCode = 2;
             await tamperCheckBeforeExit(i);
@@ -889,7 +923,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       if (
         !agentBlocked &&
         currentStory &&
-        (await stopForValidationHeadChange(verificationHead, '项目机械检查启动前', builderOutcome))
+        (await stopForValidationHeadChange(
+          verificationHead,
+          '项目机械检查启动前',
+          'quality-check-start',
+          builderOutcome,
+        ))
       ) {
         break;
       }
@@ -959,27 +998,18 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           : '';
         const gateHeadAfter = readGitHead(agentCwd);
         const gateArtifactChanged = !verificationHead || gateHeadAfter !== verificationHead;
-        if (
-          gateArtifactChanged &&
-          (await stopForValidationHeadChange(
-            verificationHead,
-            '项目机械检查结束后',
-            builderOutcome,
-            gateHeadAfter,
-          ))
-        ) {
-          break;
-        }
         await recordEvidence({
           type: 'gate-run',
           source: 'engine',
           at: new Date().toISOString(),
+          runId,
           iteration: i,
           storyId: currentStory,
           ok: gate.ok,
           total: gate.total,
           ran: gate.ran,
           ms: gate.ms,
+          ...(gateArtifactChanged ? { accepted: false as const } : {}),
           ...(gate.failure
             ? {
                 failedCommand: gate.failure.command,
@@ -989,6 +1019,18 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               }
             : {}),
         });
+        if (
+          gateArtifactChanged &&
+          (await stopForValidationHeadChange(
+            verificationHead,
+            '项目机械检查结束后',
+            'quality-check-finish',
+            builderOutcome,
+            gateHeadAfter,
+          ))
+        ) {
+          break;
+        }
         if (commandSignals.exitCode !== null) {
           await recordIteration({
             ...(builderOutcome ? { builderOutcome } : {}),
@@ -1078,7 +1120,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // TDD 最终门禁：普通检查之后、Validator 之前重新校验受保护政策面并运行
       // coverageCheck。它不消费或信任宿主 hook 的结果。
       if (!agentBlocked && tddConfig && currentStory) {
-        if (await stopForValidationHeadChange(verificationHead, 'TDD 门禁启动前', builderOutcome)) {
+        if (
+          await stopForValidationHeadChange(
+            verificationHead,
+            'TDD 门禁启动前',
+            'tdd-check-start',
+            builderOutcome,
+          )
+        ) {
           break;
         }
         dashboard.setState({
@@ -1116,17 +1165,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           : '';
         const tddHeadAfter = readGitHead(agentCwd);
         const tddArtifactChanged = !verificationHead || tddHeadAfter !== verificationHead;
-        if (
-          tddArtifactChanged &&
-          (await stopForValidationHeadChange(
-            verificationHead,
-            'TDD 门禁结束后',
-            builderOutcome,
-            tddHeadAfter,
-          ))
-        ) {
-          break;
-        }
         await recordEvidence({
           type: 'tdd-gate',
           source: 'engine',
@@ -1137,7 +1175,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ok: tddGate.ok,
           policyOk: tddGate.policyOk,
           commandRan: tddGate.commandRan,
+          ...(tddGate.commandOk === null ? {} : { commandOk: tddGate.commandOk }),
+          runId,
           ms: tddGate.ms,
+          ...(tddArtifactChanged ? { accepted: false as const } : {}),
           ...(tddGate.failure
             ? {
                 failureCode: tddGate.failure.code,
@@ -1148,6 +1189,18 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               }
             : {}),
         });
+        if (
+          tddArtifactChanged &&
+          (await stopForValidationHeadChange(
+            verificationHead,
+            'TDD 门禁结束后',
+            'tdd-check-finish',
+            builderOutcome,
+            tddHeadAfter,
+          ))
+        ) {
+          break;
+        }
         if (commandSignals.exitCode !== null) {
           await recordIteration({
             ...(builderOutcome ? { builderOutcome } : {}),
@@ -1237,7 +1290,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       if (
         !agentBlocked &&
         currentStory &&
-        (await stopForValidationHeadChange(verificationHead, 'Validator 启动前', builderOutcome))
+        (await stopForValidationHeadChange(
+          verificationHead,
+          'Validator 启动前',
+          'validator-start',
+          builderOutcome,
+        ))
       ) {
         break;
       }
@@ -1269,6 +1327,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       let validationProtocol: 'passed' | 'failed' | 'invalid' | undefined;
       let validationTarget: ValidationTargetEvidence | undefined;
       let validationHeadFailure: string | null = null;
+      let validationHeadAbort: ValidationHeadAbortEvidence | undefined;
       let validationProtocolError:
         | {
             code: LoopValidationProtocolErrorCode;
@@ -1318,6 +1377,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             canStartValidator = false;
             validatorOutcome = 'skipped';
             validationHeadFailure = headDiagnostic;
+            validationHeadAbort = validationHeadAbortOf(
+              'validator-start',
+              verificationHead,
+              validatorHead,
+              headDiagnostic,
+            );
             console.error(`⏸️  ${headDiagnostic}；不启动 Validator`);
           } else {
             validationRequest = createValidationRequest(
@@ -1401,6 +1466,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           );
 
           if (validatorHeadDiagnostic) {
+            validationHeadAbort = validationHeadAbortOf(
+              'validator-finish',
+              verificationHead,
+              validatorHeadAfter,
+              validatorHeadDiagnostic,
+            );
             if (structuredValidation && validationRequest) {
               try {
                 await clearValidationResultWithWriter(session.writer);
@@ -1587,6 +1658,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(validatorOutcome ? { validatorOutcome } : {}),
         ...(validatorRollback ? { abortRollback: { storyId: currentStory! } } : {}),
         ...(validationRollback ? { validationRollback: true as const } : {}),
+        ...(validationHeadAbort ? { validationHeadAbort } : {}),
         ...(validationReceipt ? { validationReceipt: true as const } : {}),
         ...(validationProtocol ? { validationProtocol } : {}),
         ...(validationTarget ? { validationTarget } : {}),
