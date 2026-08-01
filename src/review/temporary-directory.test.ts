@@ -287,19 +287,22 @@ describe('ReviewTemporaryDirectory', () => {
     },
   );
 
-  it('does not chmod or remove a replacement installed at the original root path', () => {
-    const temporary = exactDomain();
-    const original = `${temporary.root}-original`;
-    renameSync(temporary.root, original);
-    mkdirSync(temporary.root, { mode: 0o711 });
-    writeFileSync(join(temporary.root, 'sentinel.txt'), 'replacement');
-    chmodSync(temporary.root, 0o711);
+  it.skipIf(process.platform === 'win32')(
+    'does not chmod or remove a replacement installed at the original root path',
+    () => {
+      const temporary = exactDomain();
+      const original = `${temporary.root}-original`;
+      renameSync(temporary.root, original);
+      mkdirSync(temporary.root, { mode: 0o711 });
+      writeFileSync(join(temporary.root, 'sentinel.txt'), 'replacement');
+      chmodSync(temporary.root, 0o711);
 
-    expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
-    expect(readFileSync(join(temporary.root, 'sentinel.txt'), 'utf8')).toBe('replacement');
-    expect(lstatSync(temporary.root).mode & 0o777).toBe(0o711);
-    expect(readFileSync(join(original, 'input.json'), 'utf8')).toBe('input\n');
-  });
+      expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
+      expect(readFileSync(join(temporary.root, 'sentinel.txt'), 'utf8')).toBe('replacement');
+      expect(lstatSync(temporary.root).mode & 0o777).toBe(0o711);
+      expect(readFileSync(join(original, 'input.json'), 'utf8')).toBe('input\n');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'never follows a same-prefix sibling link during cleanup',

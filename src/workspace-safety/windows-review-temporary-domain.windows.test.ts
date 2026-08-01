@@ -123,6 +123,18 @@ function compactWithWof(path: string): void {
   });
 }
 
+function expectWindowsRenameDenied(source: string, destination: string): void {
+  let caught: unknown;
+  try {
+    renameSync(source, destination);
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toMatchObject({ code: expect.stringMatching(/^(?:EACCES|EPERM)$/u) });
+  expect(existsSync(source)).toBe(true);
+  expect(existsSync(destination)).toBe(false);
+}
+
 describe.skipIf(process.platform !== 'win32')(
   'Windows Reviewer temporary-domain native proof',
   () => {
@@ -246,11 +258,8 @@ describe.skipIf(process.platform !== 'win32')(
       expect(readFileSync(outsideInput, 'utf8')).toBe('outside-canary\n');
     });
 
-    it('does not chmod or delete a junction installed at the frozen root path', () => {
+    it('keeps a fixed-file exact root pinned against rename until verified cleanup', () => {
       const parent = temporaryRoot('root-replacement-parent');
-      const outside = temporaryRoot('root-replacement-target');
-      const canary = join(outside, 'sentinel.txt');
-      writeFileSync(canary, 'outside-canary\n');
       const temporary = ReviewTemporaryDirectory.create({
         prefix: 'coding-x-review-windows-root-',
         projectRoot: process.cwd(),
@@ -261,21 +270,16 @@ describe.skipIf(process.platform !== 'win32')(
         files: [{ path: 'input.json', bytes: Buffer.from('input\n'), maximumBytes: 64 }],
       });
       const original = `${temporary.root}-original`;
-      renameSync(temporary.root, original);
-      symlinkSync(outside, temporary.root, 'junction');
-      expect(lstatSync(temporary.root).isSymbolicLink()).toBe(true);
 
-      expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
-      expect(readFileSync(canary, 'utf8')).toBe('outside-canary\n');
-      expect(existsSync(join(original, 'input.json'))).toBe(true);
+      expectWindowsRenameDenied(temporary.root, original);
+      expect(temporary.cleanup()).toEqual({ status: 'removed' });
+      expect(existsSync(temporary.root)).toBe(false);
     });
 
-    it('retains the original tree when the temporary parent is replaced by a junction', () => {
+    it('keeps a fixed-file exact parent pinned against rename until verified cleanup', () => {
       const container = temporaryRoot('parent-replacement-container');
       const parent = join(container, 'temporary-parent');
-      const outside = temporaryRoot('parent-replacement-target');
       mkdirSync(parent);
-      writeFileSync(join(outside, 'sentinel.txt'), 'outside-canary\n');
       const temporary = ReviewTemporaryDirectory.create({
         prefix: 'coding-x-review-windows-parent-',
         projectRoot: process.cwd(),
@@ -286,13 +290,58 @@ describe.skipIf(process.platform !== 'win32')(
         files: [{ path: 'input.json', bytes: Buffer.from('input\n'), maximumBytes: 64 }],
       });
       const originalParent = `${parent}-original`;
+
+      expectWindowsRenameDenied(parent, originalParent);
+      expect(temporary.cleanup()).toEqual({ status: 'removed' });
+      expect(existsSync(temporary.root)).toBe(false);
+    });
+
+    it('retains an empty exact domain after its root is replaced by a junction', () => {
+      const parent = temporaryRoot('empty-root-replacement-parent');
+      const outside = temporaryRoot('empty-root-replacement-target');
+      const canary = join(outside, 'sentinel.txt');
+      writeFileSync(canary, 'outside-canary\n');
+      const temporary = ReviewTemporaryDirectory.create({
+        prefix: 'coding-x-review-windows-empty-root-',
+        projectRoot: process.cwd(),
+        temporaryParent: parent,
+      });
+      temporary.sealExactTree({ files: [] });
+      const original = `${temporary.root}-original`;
+      renameSync(temporary.root, original);
+      symlinkSync(outside, temporary.root, 'junction');
+      expect(lstatSync(temporary.root).isSymbolicLink()).toBe(true);
+
+      expect(temporary.cleanup()).toMatchObject({ status: 'retained', path: temporary.root });
+      expect(readFileSync(canary, 'utf8')).toBe('outside-canary\n');
+      expect(existsSync(original)).toBe(true);
+    });
+
+    it('retains a safe-tree domain after its parent is replaced by a junction', () => {
+      const container = temporaryRoot('safe-parent-replacement-container');
+      const parent = join(container, 'temporary-parent');
+      const outside = temporaryRoot('safe-parent-replacement-target');
+      mkdirSync(parent);
+      const temporary = ReviewTemporaryDirectory.create({
+        prefix: 'coding-x-review-windows-safe-parent-',
+        projectRoot: process.cwd(),
+        temporaryParent: parent,
+      });
+      const replacementRoot = join(outside, win32.basename(temporary.root));
+      const canary = join(replacementRoot, 'sentinel.txt');
+      mkdirSync(replacementRoot);
+      writeFileSync(canary, 'outside-canary\n');
+      writeFileSync(join(temporary.root, 'status.json'), '{}\n');
+      temporary.sealSafeTree();
+      const originalParent = `${parent}-original`;
       renameSync(parent, originalParent);
       symlinkSync(outside, parent, 'junction');
       expect(lstatSync(parent).isSymbolicLink()).toBe(true);
+      expect(readFileSync(join(temporary.root, 'sentinel.txt'), 'utf8')).toBe('outside-canary\n');
 
       expect(temporary.cleanup()).toMatchObject({ status: 'retained' });
-      expect(readFileSync(join(outside, 'sentinel.txt'), 'utf8')).toBe('outside-canary\n');
-      expect(existsSync(join(originalParent, win32.basename(temporary.root), 'input.json'))).toBe(
+      expect(readFileSync(canary, 'utf8')).toBe('outside-canary\n');
+      expect(existsSync(join(originalParent, win32.basename(temporary.root), 'status.json'))).toBe(
         true,
       );
     });
