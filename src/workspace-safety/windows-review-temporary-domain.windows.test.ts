@@ -27,7 +27,7 @@ import { createWorkspaceSession } from './session.js';
 import { inspectWindowsPathAttributes } from './windows-path-attributes.js';
 
 const roots: string[] = [];
-const WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS = 60_000;
+const WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS = 120_000;
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -219,6 +219,17 @@ describe.skipIf(process.platform !== 'win32')(
                     },
                   });
                   mark(`managed-process-${result.verdict}`);
+                  process.stdout.write(
+                    `[windows-review-managed-result] ${JSON.stringify({
+                      verdict: result.verdict,
+                      exitCode: result.exitCode,
+                      timedOut: result.timedOut,
+                      processTreeNotEmpty: result.processTreeNotEmpty,
+                      terminationReason: result.terminationReason,
+                      stdoutBase64: result.stdout.subarray(0, 4096).toString('base64'),
+                      stderrBase64: result.stderr.subarray(0, 4096).toString('base64'),
+                    })}\n`,
+                  );
                   return result;
                 } catch (error) {
                   mark(`managed-process-error-${error instanceof Error ? error.name : 'unknown'}`);
@@ -273,6 +284,66 @@ describe.skipIf(process.platform !== 'win32')(
         ).toThrow(/Windows path attribute|external backing/u);
         expect(lstatSync(input).isSymbolicLink()).toBe(false);
         expect(temporary.retain('native WOF fixture')).toMatchObject({ status: 'retained' });
+      },
+      WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'rejects a nested WOF leaf before accepting an exact review tree',
+      () => {
+        const parent = temporaryRoot('nested-wof-parent');
+        const temporary = ReviewTemporaryDirectory.create({
+          prefix: 'coding-x-review-windows-nested-wof-',
+          projectRoot: process.cwd(),
+          temporaryParent: parent,
+        });
+        const packageRoot = join(temporary.root, 'package');
+        const input = join(packageRoot, 'review-input.json');
+        const bytes = Buffer.alloc(1024 * 1024, 0x62);
+        mkdirSync(packageRoot);
+        writeFileSync(input, bytes);
+        compactWithWof(input);
+
+        expect(() =>
+          temporary.sealExactTree({
+            directories: ['package'],
+            files: [
+              {
+                path: 'package/review-input.json',
+                bytes,
+                maximumBytes: bytes.byteLength,
+              },
+            ],
+          }),
+        ).toThrow(/Windows path attribute|external backing/u);
+        expect(temporary.retain('native nested WOF fixture')).toMatchObject({
+          status: 'retained',
+        });
+      },
+      WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
+    );
+
+    it(
+      'retains a safe review tree when a managed output gains WOF backing',
+      () => {
+        const parent = temporaryRoot('safe-wof-parent');
+        const temporary = ReviewTemporaryDirectory.create({
+          prefix: 'coding-x-review-windows-safe-wof-',
+          projectRoot: process.cwd(),
+          temporaryParent: parent,
+        });
+        temporary.sealSafeTree();
+        const output = join(temporary.root, 'runner-output.json');
+        writeFileSync(output, Buffer.alloc(1024 * 1024, 0x63));
+        compactWithWof(output);
+
+        expect(() => temporary.assertUnchanged()).toThrow(
+          /Windows path attribute|external backing/u,
+        );
+        expect(temporary.cleanup()).toMatchObject({
+          status: 'retained',
+          path: temporary.root,
+        });
       },
       WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
     );

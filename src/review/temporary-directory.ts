@@ -18,7 +18,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
-  assertWindowsSafetyTreeHasNoReparsePoints,
+  assertWindowsWorkspaceTreeHasNoReparsePoints,
   assertWindowsWorkspacePathAncestry,
 } from '../workspace-safety/windows-path-attributes.js';
 
@@ -27,6 +27,18 @@ const MAX_SAFE_TREE_ENTRIES = 4096;
 const MAX_SAFE_TREE_DEPTH = 32;
 const MAX_SAFE_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_SAFE_TREE_BYTES = 16 * 1024 * 1024;
+
+function assertWindowsReviewTreeHasNoReparsePoints(
+  root: string,
+  maximumEntries: number,
+  maximumDepth: number,
+): void {
+  assertWindowsWorkspaceTreeHasNoReparsePoints(root, {
+    maxBusinessEntries: maximumEntries,
+    maxSafetyEntries: maximumEntries,
+    maxDepth: maximumDepth,
+  });
+}
 
 interface DirectoryIdentity {
   readonly dev: bigint;
@@ -323,7 +335,7 @@ export class ReviewTemporaryDirectory {
         throw new ReviewTemporaryDirectoryError('Reviewer 临时域创建身份发生变化');
       }
       assertWindowsWorkspacePathAncestry(root, root);
-      assertWindowsSafetyTreeHasNoReparsePoints(root);
+      assertWindowsReviewTreeHasNoReparsePoints(root, 0, 0);
       rootDescriptor = optionalDirectoryDescriptor(root);
       return new ReviewTemporaryDirectory({
         root,
@@ -390,7 +402,11 @@ export class ReviewTemporaryDirectory {
         }
       }
       this.#assertRootIdentity();
-      assertWindowsSafetyTreeHasNoReparsePoints(this.root);
+      assertWindowsReviewTreeHasNoReparsePoints(
+        this.root,
+        MAX_EXACT_TREE_ENTRIES,
+        MAX_SAFE_TREE_DEPTH,
+      );
       const actual = listTree(this.root, MAX_EXACT_TREE_ENTRIES, MAX_SAFE_TREE_DEPTH);
       if (JSON.stringify(actual.sort()) !== JSON.stringify(all.sort())) {
         throw new ReviewTemporaryDirectoryError('Reviewer 临时域固定目录树不匹配');
@@ -446,7 +462,11 @@ export class ReviewTemporaryDirectory {
           closeDescriptor(descriptor);
         }
       }
-      assertWindowsSafetyTreeHasNoReparsePoints(this.root);
+      assertWindowsReviewTreeHasNoReparsePoints(
+        this.root,
+        MAX_EXACT_TREE_ENTRIES,
+        MAX_SAFE_TREE_DEPTH,
+      );
       this.#treeMode = 'exact';
     } catch (error) {
       this.#closeContentDescriptors();
@@ -461,7 +481,11 @@ export class ReviewTemporaryDirectory {
     this.#assertOpenAndUnsealed();
     try {
       this.#assertRootIdentity();
-      assertWindowsSafetyTreeHasNoReparsePoints(this.root);
+      assertWindowsReviewTreeHasNoReparsePoints(
+        this.root,
+        MAX_SAFE_TREE_ENTRIES,
+        MAX_SAFE_TREE_DEPTH,
+      );
       this.#assertSafeTree(this.root);
       this.#treeMode = 'safe';
     } catch (error) {
@@ -698,7 +722,7 @@ export class ReviewTemporaryDirectory {
   }
 
   #assertExactTree(useDescriptors: boolean, root: string): void {
-    assertWindowsSafetyTreeHasNoReparsePoints(root);
+    assertWindowsReviewTreeHasNoReparsePoints(root, MAX_EXACT_TREE_ENTRIES, MAX_SAFE_TREE_DEPTH);
     const expected = [
       ...this.#directories.map((entry) => entry.relativePath),
       ...this.#files.map((entry) => entry.relativePath),
@@ -757,11 +781,11 @@ export class ReviewTemporaryDirectory {
         }
       }
     }
-    assertWindowsSafetyTreeHasNoReparsePoints(root);
+    assertWindowsReviewTreeHasNoReparsePoints(root, MAX_EXACT_TREE_ENTRIES, MAX_SAFE_TREE_DEPTH);
   }
 
   #assertSafeTree(root: string): void {
-    assertWindowsSafetyTreeHasNoReparsePoints(root);
+    assertWindowsReviewTreeHasNoReparsePoints(root, MAX_SAFE_TREE_ENTRIES, MAX_SAFE_TREE_DEPTH);
     const paths = listTree(root, MAX_SAFE_TREE_ENTRIES, MAX_SAFE_TREE_DEPTH);
     let totalBytes = 0n;
     for (const relativePath of paths) {
@@ -780,7 +804,7 @@ export class ReviewTemporaryDirectory {
         throw new ReviewTemporaryDirectoryError('Reviewer 临时安全域总字节超过安全上限');
       }
     }
-    assertWindowsSafetyTreeHasNoReparsePoints(root);
+    assertWindowsReviewTreeHasNoReparsePoints(root, MAX_SAFE_TREE_ENTRIES, MAX_SAFE_TREE_DEPTH);
   }
 
   #makeVerifiedTreeRemovable(root: string): void {
