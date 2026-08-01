@@ -1,8 +1,11 @@
 import {
+  closeSync,
+  constants,
   existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -277,6 +280,58 @@ describe('workspace safety filesystem primitives', () => {
       expect(readFileSync(changedPath === 'source' ? staged : target, 'utf8')).toBe('candidate');
     },
   );
+
+  for (const changedPath of ['source', 'target'] as const) {
+    it.skipIf(process.platform === 'win32')(
+      `rejects when the linked ${changedPath} path becomes a FIFO without waiting for a writer`,
+      async () => {
+        const root = temporaryRoot(`workspace-file-install-${changedPath}-fifo-`);
+        const staged = join(root, 'marker.staged');
+        const target = join(root, 'workspace-safety.json');
+        const fifo = join(root, 'replacement.fifo');
+        const changed = changedPath === 'source' ? staged : target;
+        writeFileSync(staged, 'candidate');
+        const created = spawnSync('mkfifo', [fifo], { encoding: 'utf8', timeout: 5_000 });
+        expect(created.error).toBeUndefined();
+        expect(created.status, created.stderr).toBe(0);
+
+        let hookRan = false;
+        let fallbackTriggered = false;
+        let unblockTimer: NodeJS.Timeout | undefined;
+        const startedAt = Date.now();
+
+        try {
+          await expect(
+            installFileNoReplace(staged, target, {
+              beforeLinkedOpen: () => {
+                rmSync(changed);
+                renameSync(fifo, changed);
+                hookRan = true;
+                unblockTimer = setTimeout(() => {
+                  fallbackTriggered = true;
+                  try {
+                    const descriptor = openSync(
+                      changed,
+                      constants.O_WRONLY | constants.O_NONBLOCK,
+                    );
+                    closeSync(descriptor);
+                  } catch {
+                    // The non-blocking production read should already have rejected the FIFO.
+                  }
+                }, 2_000);
+              },
+            }),
+          ).rejects.toMatchObject({ code: 'invalid' });
+          expect(hookRan).toBe(true);
+          expect(fallbackTriggered).toBe(false);
+          expect(Date.now() - startedAt).toBeLessThan(1_000);
+        } finally {
+          if (unblockTimer) clearTimeout(unblockTimer);
+        }
+      },
+      5_000,
+    );
+  }
 
   it.each(['source', 'target'] as const)(
     'rejects when the linked %s path is replaced after validation but before staging cleanup',
