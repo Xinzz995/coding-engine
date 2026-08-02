@@ -33,6 +33,45 @@ const repository = {
 };
 
 describe('discoverQualityContract', () => {
+  it('discovers explicit Node preparation for both local clean validation and GitHub CI', () => {
+    const root = fixture({
+      'README.md': '# Node project\n',
+      'package.json': JSON.stringify({
+        engines: { node: '>=22' },
+        scripts: { test: 'node --test', build: 'node build.mjs', lint: 'eslint .' },
+      }),
+      'package-lock.json': JSON.stringify({ name: 'fixture', lockfileVersion: 3, packages: {} }),
+    });
+    const draft = discoverQualityContract(root, repository, '0.30.0');
+    expect(draft.detectedEcosystems).toEqual(['node']);
+    expect(draft.unresolvedCategories).toEqual([]);
+    expect(draft.contract.localValidation).toEqual({
+      prepare: [{
+        executable: 'npm',
+        args: ['ci'],
+        cwd: '.',
+        platforms: ['linux', 'macos', 'windows'],
+        timeoutMs: 600_000,
+      }],
+      allowedPaths: ['node_modules/**'],
+    });
+    expect(draft.contract.generatedPaths).toEqual(['dist/**', 'build/**', 'coverage/**']);
+    expect(parseQualityContract(draft.contract)).toMatchObject({ status: 'ready' });
+    const workflow = renderQualityGateWorkflow(draft.contract);
+    expect(workflow).toContain('actions/setup-node@');
+    expect(workflow).toMatch(/run: [^\n]*npm[^\n]*ci/u);
+  });
+
+  it('requires a committed npm lockfile instead of generating a mutable preparation candidate', () => {
+    const root = fixture({
+      'README.md': '# Node project\n',
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+    });
+    expect(() => discoverQualityContract(root, repository, '0.30.0')).toThrow(
+      '缺少已提交的 package-lock.json',
+    );
+  });
+
   it('discovers a Go multi-module project without introducing Node or coding-x', () => {
     const root = fixture({
       'README.md': '# Go project\n',
@@ -51,6 +90,7 @@ describe('discoverQualityContract', () => {
     expect(draft.contract.github.jobs[0].toolchains).toEqual([{
       kind: 'go', version: '1.24', cache: true, cacheDependencyPath: '**/go.sum',
     }]);
+    expect(draft.contract.localValidation).toEqual({ prepare: [], allowedPaths: [] });
 
     const contract = resolveNotApplicableReasons(draft, {
       security: '试点仓库当前没有独立安全扫描器；由仓库所有者确认。',
@@ -61,7 +101,7 @@ describe('discoverQualityContract', () => {
     expect(workflow).not.toMatch(/setup-node|\bnpm\b|coding-x.*(?:run|init)/);
   });
 
-  it('discovers a Python monorepo with module-local setup and one explicit Python toolchain', () => {
+  it('refuses to guess a Python environment that would silently depend on host packages', () => {
     const pyproject = `[build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
@@ -81,25 +121,9 @@ line-length = 100
       'packages/worker/pyproject.toml': pyproject.replace('fixture', 'worker'),
       'packages/worker/tests/test_worker.py': 'def test_worker():\n    assert True\n',
     });
-    const draft = discoverQualityContract(root, repository, '0.30.0');
-    expect(draft.detectedEcosystems).toEqual(['python']);
-    expect(draft.contract.modules).toEqual([
-      { id: 'packages-api', path: 'packages/api' },
-      { id: 'packages-worker', path: 'packages/worker' },
-    ]);
-    expect(draft.contract.github.jobs[0].toolchains).toEqual([
-      { kind: 'python', version: '3.12' },
-    ]);
-    expect(draft.contract.github.jobs[0].setup.map((command) => command.cwd)).toEqual([
-      'packages/api', 'packages/worker',
-    ]);
-    const contract = resolveNotApplicableReasons(draft, {
-      security: '试点仓库暂未配置独立依赖审计；由仓库所有者确认。',
-    });
-    expect(parseQualityContract(contract)).toMatchObject({ status: 'ready' });
-    const workflow = renderQualityGateWorkflow(contract);
-    expect(workflow).toContain('actions/setup-python@');
-    expect(workflow).not.toMatch(/setup-node|\bnpm\b|coding-x.*(?:run|init)/);
+    expect(() => discoverQualityContract(root, repository, '0.30.0')).toThrow(
+      '无法从 pyproject.toml 安全推导可重复的本地隔离环境',
+    );
   });
 
   it('refuses to invent unsupported project rules or silently accept an empty reason', () => {

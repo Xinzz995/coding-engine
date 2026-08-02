@@ -1,8 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import {
-  digestQualityContract,
-  parseQualityContract,
+  parseReviewBaseQualityContract,
   QUALITY_CONTRACT_RELATIVE_PATH,
   type QualityContract,
 } from '../quality/contract.js';
@@ -222,7 +221,7 @@ export function runUnmanagedReviewPreflight(options: {
     } catch {
       return { status: 'unverifiable', message: '默认分支质量契约不是合法 JSON' };
     }
-    const baseParsed = parseQualityContract(parsedJson);
+    const baseParsed = parseReviewBaseQualityContract(parsedJson);
     if (baseParsed.status !== 'ready') {
       return {
         status: 'unverifiable',
@@ -367,7 +366,7 @@ export function runUnmanagedReviewPreflight(options: {
         headSha,
         pullRequest,
         baseContract,
-        baseContractDigest: digestQualityContract(baseContract),
+        baseContractDigest: baseParsed.digest,
         changedFiles,
         files,
         diff,

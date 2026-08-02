@@ -12,6 +12,7 @@ export function createReviewBinding(options: {
   model: string;
   runnerVersion: string;
   storyValidationDigest: string;
+  validationEnvironmentDigest: string;
 }): ReviewBinding {
   return {
     prNumber: options.context.pullRequest.number,
@@ -23,6 +24,7 @@ export function createReviewBinding(options: {
     specDigest: digest(options.context.specs),
     engineeringStandardsDigest: digest(options.context.engineeringStandards),
     qualityContractDigest: options.context.baseContractDigest,
+    validationEnvironmentDigest: options.validationEnvironmentDigest,
     codingXVersion: options.codingXVersion,
     runner: options.runner,
     model: options.model,
@@ -36,5 +38,11 @@ export function createReviewBinding(options: {
 
 /** Stable identity used to prevent a decision from being reused by another Review context. */
 export function digestReviewBinding(binding: ReviewBinding): string {
+  if (
+    !/^sha256:[a-f0-9]{64}$/u.test(binding.storyValidationDigest) ||
+    !/^sha256:[a-f0-9]{64}$/u.test(binding.validationEnvironmentDigest)
+  ) {
+    throw new Error('schema v2 Review binding 缺少合法的双重验证摘要');
+  }
   return digest(binding);
 }

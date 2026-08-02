@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, rmSync, readFileSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readEvidence } from './evidence.js';
@@ -452,8 +452,8 @@ describe('runLoop TDD gate', { timeout: 30_000, concurrent: false }, () => {
         .map((line) => JSON.parse(line));
       expect(envs).toHaveLength(2);
       expect(envs).toEqual([
-        { workspace: resolve(workspace), projectRoot: resolve(projectRoot) },
-        { workspace: resolve(workspace), projectRoot: resolve(projectRoot) },
+        { workspace: realpathSync.native(workspace), projectRoot: resolve(projectRoot) },
+        { workspace: realpathSync.native(workspace), projectRoot: resolve(projectRoot) },
       ]);
       expect(
         readEvidence(workspace).records.find(

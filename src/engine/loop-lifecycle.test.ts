@@ -21,6 +21,7 @@ import {
   fakeCounting,
   previousFinalReview,
   validationReceiptFor,
+  TEST_VALIDATION_ENVIRONMENT_DIGEST,
 } from './loop-test-support.js';
 
 interface OwnershipViolationScenario {
@@ -295,7 +296,10 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
         passes: true,
         validated: true,
         notes: 'builder done',
-        validationReceipt: { schemaVersion: 1 },
+        validationReceipt: {
+          schemaVersion: 2,
+          validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT_DIGEST,
+        },
       });
       expect(warnings.some((line) => line.includes('待验收状态') && line.includes('US-001'))).toBe(
         false,

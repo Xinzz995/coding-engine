@@ -8,6 +8,7 @@ import {
   deriveQualityChecks,
   digestQualityContract,
   parseQualityContract,
+  parseReviewBaseQualityContract,
   qualityChecksMatchContract,
   readQualityContract,
   type QualityContract,
@@ -19,7 +20,7 @@ const CODING_ENGINE_STABLE_REFEREE_VERSION = '0.33.3';
 
 function validContract(): unknown {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     codingXVersion: '0.29.0',
     repository: {
       provider: 'github',
@@ -39,6 +40,18 @@ function validContract(): unknown {
       { id: 'api', path: 'packages/api' },
     ],
     generatedPaths: ['dist/**', 'coverage/**'],
+    localValidation: {
+      prepare: [
+        {
+          executable: 'npm',
+          args: ['ci'],
+          cwd: '.',
+          platforms: ['linux', 'macos', 'windows'],
+          timeoutMs: 600_000,
+        },
+      ],
+      allowedPaths: ['node_modules/**'],
+    },
     checks: {
       test: {
         checks: [
@@ -189,10 +202,138 @@ describe('parseQualityContract', () => {
     expect(result.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
+  it('migrates a schema 1 default-branch contract from its own trusted job setup only', () => {
+    const legacy = clone();
+    legacy.schemaVersion = 1;
+    delete legacy.localValidation;
+    const result = parseReviewBaseQualityContract(legacy);
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') return;
+    expect(result.contract.schemaVersion).toBe(2);
+    expect(result.contract.localValidation.allowedPaths).toEqual(['node_modules/**']);
+    expect(result.contract.localValidation.prepare).toHaveLength(1);
+    expect(result.contract.localValidation.prepare[0]).toMatchObject({
+      executable: 'npm',
+      args: ['ci'],
+    });
+    expect(result.digest).not.toBe(digestQualityContract(result.contract));
+  });
+
+  it('rejects an ambiguous schema 1 setup instead of trusting the candidate PR', () => {
+    const legacy = clone();
+    legacy.schemaVersion = 1;
+    delete legacy.localValidation;
+    const platform = process.platform === 'darwin'
+      ? 'macos'
+      : process.platform === 'win32'
+        ? 'windows'
+        : 'linux';
+    const samePlatform = legacy.github.jobs.find(
+      (job: Record<string, unknown>) => job.platform === platform,
+    );
+    legacy.github.jobs.push({
+      ...structuredClone(samePlatform),
+      id: 'ambiguous-setup',
+      setup: [{
+        executable: 'node', args: ['unexpected.js'], cwd: '.', platforms: [platform], timeoutMs: 1,
+      }],
+    });
+    const result = parseReviewBaseQualityContract(legacy);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') expect(result.errors.join('\n')).toContain('setup 不一致');
+  });
+
+  it('never auto-migrates a schema 1 Python referee even when its setup is empty', () => {
+    const legacy = clone();
+    legacy.schemaVersion = 1;
+    delete legacy.localValidation;
+    for (const job of legacy.github.jobs) {
+      job.toolchains = [{ kind: 'python', version: '3.12' }];
+      job.setup = [];
+    }
+    const result = parseReviewBaseQualityContract(legacy);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      expect(result.errors.join('\n')).toContain('Python setup 未声明隔离安装目录');
+    }
+  });
+
+  it('never auto-migrates schema 1 Python rules hidden on another platform', () => {
+    const legacy = clone();
+    legacy.schemaVersion = 1;
+    delete legacy.localValidation;
+    const otherPlatform = process.platform === 'linux' ? 'macos' : 'linux';
+    for (const job of legacy.github.jobs) {
+      job.toolchains = job.platform === otherPlatform
+        ? [{ kind: 'python', version: '3.12' }]
+        : [{ kind: 'node', version: '22' }];
+    }
+    const result = parseReviewBaseQualityContract(legacy);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      expect(result.errors.join('\n')).toContain('Python setup 未声明隔离安装目录');
+    }
+  });
+
+  it('rejects schema 1 migration when the old referee has no job for this platform', () => {
+    const legacy = clone();
+    legacy.schemaVersion = 1;
+    delete legacy.localValidation;
+    const otherPlatform = process.platform === 'linux' ? 'macos' : 'linux';
+    legacy.github.jobs = legacy.github.jobs.filter(
+      (job: Record<string, unknown>) => job.platform === otherPlatform,
+    );
+    const result = parseReviewBaseQualityContract(legacy);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      expect(result.errors.join('\n')).toContain('无法确定本地准备命令');
+    }
+  });
+
+  it('requires a schema 2 Python contract to declare both isolated preparation and its output directory', () => {
+    const input = clone();
+    for (const job of input.github.jobs) {
+      job.toolchains = [{ kind: 'python', version: '3.12' }];
+    }
+    input.localValidation = { prepare: [], allowedPaths: [] };
+    const result = parseQualityContract(input);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      expect(result.errors).toEqual(
+        expect.arrayContaining([
+          'Python 项目必须显式声明 localValidation.prepare 以建立隔离环境',
+          'Python 项目必须显式声明 localValidation.allowedPaths 以限定隔离环境目录',
+        ]),
+      );
+    }
+  });
+
+  it('requires local Python preparation to cover every platform that declares Python', () => {
+    const input = clone();
+    input.github.jobs[0].toolchains = [{ kind: 'python', version: '3.12' }];
+    input.localValidation.prepare = [
+      {
+        executable: 'python',
+        args: ['-m', 'venv', '.venv'],
+        cwd: '.',
+        platforms: ['macos', 'windows'],
+        timeoutMs: 60_000,
+      },
+    ];
+    input.localValidation.allowedPaths = ['.venv/**'];
+    const result = parseQualityContract(input);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      expect(result.errors).toContain(
+        'Python 项目的 localValidation.prepare 必须覆盖 linux',
+      );
+    }
+  });
+
   it.each([
     [null, '根必须是对象'],
     [{}, '缺少字段 schemaVersion'],
-    [{ ...clone(), schemaVersion: 2 }, '不支持 schemaVersion 2'],
+    [{ ...clone(), schemaVersion: 3 }, '不支持 schemaVersion 3'],
     [{ ...clone(), extra: true }, '未知字段 extra'],
   ])('rejects an invalid root: %#', (value, expected) => {
     const result = parseQualityContract(value);
@@ -214,6 +355,13 @@ describe('parseQualityContract', () => {
     ['release.notApplicable', '', 'release.notApplicable'],
     ['sources.engineeringStandards', [], 'sources.engineeringStandards'],
     ['generatedPaths', ['/absolute/**'], 'generatedPaths[0]'],
+    ['generatedPaths', ['**'], '不能允许整个项目根'],
+    ['generatedPaths', ['*/**'], '不能允许整个项目根'],
+    ['generatedPaths', ['?*/**'], '不能允许整个项目根'],
+    ['generatedPaths', ['**/*/**'], '不能允许整个项目根'],
+    ['generatedPaths', ['bundle.js'], '必须是明确目录的 /** 模式'],
+    ['localValidation.allowedPaths', ['**'], '不能允许整个项目根'],
+    ['localValidation.allowedPaths', ['node_modules'], '必须是明确目录的 /** 模式'],
     ['github.requiredChecks', [], 'github.requiredChecks'],
     ['exceptions.p1.maxDays', 0, 'exceptions.p1.maxDays'],
   ])('rejects invalid field %s', (path, value, expected) => {

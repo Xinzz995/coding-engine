@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { QualityContract } from '../quality/contract.js';
+import { validationEnvironmentDigest } from '../quality/validation-environment.js';
 import type { GitHubQualityClient } from '../quality/github.js';
 import { GITHUB_ACTIONS_APP_ID } from '../quality/github.js';
 import { buildManagedRulesetPayload } from '../quality/ruleset.js';
@@ -43,7 +44,7 @@ function writeReadyReview(workspace: string): void {
     join(workspace, 'final-review.json'),
     `${JSON.stringify(
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: 'passed',
         deliveryStatus: 'ready',
         binding: {
@@ -56,6 +57,8 @@ function writeReadyReview(workspace: string): void {
           specDigest: 'spec',
           engineeringStandardsDigest: 'standards',
           qualityContractDigest: 'contract',
+          validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
+          storyValidationDigest: STORY_VALIDATION_DIGEST,
           codingXVersion: '0.34.0',
           runner: 'codex',
           model: 'review-model',
@@ -189,7 +192,7 @@ function writeBoundReview(
       ]
     : primaryAxes;
   const state: FinalReviewState = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'passed',
     deliveryStatus: 'ready',
     binding: createReviewBinding({
@@ -200,6 +203,10 @@ function writeBoundReview(
       model: 'review-model',
       runnerVersion: 'codex 1.2.3',
       storyValidationDigest: STORY_VALIDATION_DIGEST,
+      validationEnvironmentDigest: validationEnvironmentDigest({
+        contract: context.baseContract,
+        head: context.headSha,
+      }),
     }),
     risk,
     axes,
@@ -296,8 +303,14 @@ describe('collectCurrentReviewStatus currentness binding', () => {
     writeBoundReview(workspace, context);
     const reviewPath = join(workspace, 'final-review.json');
     const legacy = JSON.parse(readFileSync(reviewPath, 'utf8')) as {
-      binding: { storyValidationDigest?: string };
+      schemaVersion: number;
+      binding: {
+        validationEnvironmentDigest?: string;
+        storyValidationDigest?: string;
+      };
     };
+    legacy.schemaVersion = 1;
+    delete legacy.binding.validationEnvironmentDigest;
     delete legacy.binding.storyValidationDigest;
     writeFileSync(reviewPath, JSON.stringify(legacy));
 
@@ -315,7 +328,7 @@ describe('collectCurrentReviewStatus currentness binding', () => {
     };
     expect(collectCurrentReviewStatus(baseOptions)).toMatchObject({
       current: false,
-      staleReasons: ['旧 Final Review 未绑定 Story 验收凭证集合'],
+      staleReasons: ['旧 Final Review schema 已失效'],
     });
 
     writeBoundReview(workspace, context);

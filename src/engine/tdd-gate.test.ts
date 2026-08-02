@@ -340,6 +340,29 @@ describe('checkTddPolicy', () => {
 });
 
 describe('runTddGate', { timeout: 30_000, concurrent: false }, () => {
+  it('ignores replace refs and binary attributes when checking forbidden additions', async () => {
+    const fixture = repo();
+    writeFileSync(join(fixture.root, '.gitattributes'), 'src/** -diff\n');
+    writeFileSync(
+      join(fixture.root, 'src', 'index.js'),
+      '/* c8 ignore next */\nexport const value = 1;\n',
+    );
+    git(fixture.root, 'add', '.');
+    git(fixture.root, 'commit', '-qm', 'attempt policy bypass');
+    const head = git(fixture.root, 'rev-parse', 'HEAD');
+    git(fixture.root, 'replace', fixture.baselineRef, head);
+
+    expect(await runManagedTddGate(fixture.config, fixture.root)).toMatchObject({
+      ok: false,
+      policyOk: false,
+      commandRan: false,
+      failure: {
+        code: 'forbidden-pattern-added',
+        outputTail: expect.stringContaining('c8 ignore'),
+      },
+    });
+  });
+
   it('runs the approved command only after policy integrity succeeds', async () => {
     const fixture = repo();
     const marker = join(fixture.root, 'coverage-ran');

@@ -63,13 +63,14 @@ function readyReview(shadow = false): ReportData['finalReview'] {
     read: {
       status: 'ready',
       state: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: 'passed',
       deliveryStatus: shadow ? 'shadow' : 'ready',
       binding: {
         prNumber: 9, targetBranch: 'main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40),
         prTitleDigest: 'title', prBodyDigest: 'body', specDigest: 'spec',
         engineeringStandardsDigest: 'standards', qualityContractDigest: 'contract',
+        validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
         codingXVersion: '0.30.0', runner: 'codex', model: 'gpt-test', runnerVersion: '1.0.0',
         reviewRulesVersion: '1.0.0', reviewRulesDigest: 'rules', riskDigest: 'risk',
         storyValidationDigest: `sha256:${'c'.repeat(64)}`,

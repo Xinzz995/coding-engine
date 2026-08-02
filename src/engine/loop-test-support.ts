@@ -32,6 +32,7 @@ import {
 import { workspaceDirectoryIdentity } from '../workspace-safety/filesystem.js';
 
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
+export const TEST_VALIDATION_ENVIRONMENT_DIGEST = `sha256:${'e'.repeat(64)}`;
 
 export const TEST_QUALITY_CONTRACT = {
   codingXVersion: CODING_X_VERSION,
@@ -41,7 +42,9 @@ export const TEST_QUALITY_CONTRACT = {
     static: { notApplicable: 'fixture' },
     security: { notApplicable: 'fixture' },
   },
-} as QualityContract;
+  generatedPaths: [],
+  localValidation: { prepare: [], allowedPaths: [] },
+} as unknown as QualityContract;
 
 export const readyQualityContract = (
   contract: QualityContract = TEST_QUALITY_CONTRACT,
@@ -190,10 +193,11 @@ export function validationReceiptFor(
   requestId = 'fixture-validator-request',
 ): ValidationReceipt {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     requestId,
     gitHead,
     acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+    validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT_DIGEST,
   };
 }
 
@@ -238,7 +242,7 @@ export function previousFinalReview(headSha: string): FinalReviewState {
   };
   const riskDigest = digest(risk);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'passed',
     deliveryStatus: 'ready',
     binding: {
@@ -251,6 +255,7 @@ export function previousFinalReview(headSha: string): FinalReviewState {
       specDigest: 'spec',
       engineeringStandardsDigest: 'standards',
       qualityContractDigest: 'contract',
+      validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
       codingXVersion: CODING_X_VERSION,
       runner: 'claude',
       model: 'review-model',
@@ -301,6 +306,8 @@ export const runLoop = (cfg: LoopConfig): Promise<number> =>
     projectRoot: cfg.projectRoot ?? resolve(cfg.workspace, '..'),
     qualityContractReader: () => readyQualityContract(),
     legacyValidatorProtocolForTests: true,
+    unsafeUseProjectRootForValidationTests: true,
+    validationEnvironmentDigestForTests: TEST_VALIDATION_ENVIRONMENT_DIGEST,
     finalReviewRunner: cfg.finalReviewRunner ?? finalReviewPass,
   });
 
@@ -332,6 +339,8 @@ export interface FakeBoundValidatorOptions {
   readonly builderCwdMarker?: string;
   readonly builderPromptMarker?: string;
   readonly environmentMarker?: string;
+  readonly validatorCwdMarker?: string;
+  readonly validatorVisibilityMarker?: string;
 }
 
 export function fakeBoundValidator(
@@ -346,7 +355,7 @@ export function fakeBoundValidator(
   writeFileSync(
     fake,
     String.raw`
-    import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+    import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
     const statePath = ${JSON.stringify(statePath)};
     let call = 1;
     try { call = Number(readFileSync(${JSON.stringify(calls)}, 'utf8')) + 1; } catch {}
@@ -369,6 +378,21 @@ export function fakeBoundValidator(
       writeFileSync(statePath, JSON.stringify(state, null, 2));
       appendFileSync(${JSON.stringify(progressPath)}, '## builder completed US-001\n');
       process.exit(0);
+    }
+    const validatorCwdMarker = ${JSON.stringify(options.validatorCwdMarker ?? null)};
+    if (validatorCwdMarker !== null) writeFileSync(validatorCwdMarker, process.cwd());
+    const validatorVisibilityMarker = ${JSON.stringify(options.validatorVisibilityMarker ?? null)};
+    if (validatorVisibilityMarker !== null) {
+      writeFileSync(validatorVisibilityMarker, JSON.stringify({
+        env: existsSync('.env'),
+        claude: existsSync('.claude'),
+        nodeModules: existsSync('node_modules'),
+        virtualEnv: process.env.VIRTUAL_ENV ?? null,
+        pythonPath: process.env.PYTHONPATH ?? null,
+        nodePath: process.env.NODE_PATH ?? null,
+        nodeOptions: process.env.NODE_OPTIONS ?? null,
+        path: process.env.PATH ?? '',
+      }));
     }
     const prompt = process.argv.at(-1) ?? '';
     const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
@@ -419,6 +443,8 @@ export function strictConfig(workspace: string, instructionsDir: string): LoopCo
     stallLimit: 3,
     qualityContractReader: () => readyQualityContract(),
     finalReviewRunner: finalReviewPass,
+    unsafeUseProjectRootForValidationTests: true,
+    validationEnvironmentDigestForTests: TEST_VALIDATION_ENVIRONMENT_DIGEST,
   };
 }
 

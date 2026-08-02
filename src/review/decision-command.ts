@@ -1,12 +1,14 @@
 import { join } from 'node:path';
 import { tryReadPrd } from '../engine/prd.js';
 import { evaluateStoryValidationReceiptSet, tryReadState } from '../engine/state.js';
+import { readTddConfig } from '../engine/tdd-gate.js';
 import {
   digestQualityContract,
   parseQualityContract,
   type QualityContract,
 } from '../quality/contract.js';
 import { type GitHubReviewReadClient } from '../quality/github.js';
+import { validationEnvironmentDigest } from '../quality/validation-environment.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
@@ -273,7 +275,23 @@ function createCurrentBindingReader(options: {
     if (!prd || !Array.isArray(prd.userStories) || !state) {
       invalid('当前 Story 验收状态无法读取；请重新运行 coding-x');
     }
-    const storyValidation = evaluateStoryValidationReceiptSet(prd, state, context.headSha);
+    const tdd = readTddConfig(prd);
+    if (tdd.status === 'invalid') {
+      invalid(`当前 TDD 配置无法验证：${tdd.error}`);
+    }
+    const tddConfig = tdd.status === 'enabled' ? tdd.config : null;
+    const expectedStoryEnvironment = validationEnvironmentDigest({
+      contract: context.baseContract,
+      head: context.headSha,
+      additionalRefs: tddConfig ? [tddConfig.baselineRef] : [],
+      additionalPolicy: { tdd: tddConfig },
+    });
+    const storyValidation = evaluateStoryValidationReceiptSet(
+      prd,
+      state,
+      context.headSha,
+      expectedStoryEnvironment,
+    );
     if (!storyValidation.valid || storyValidation.digest === null) {
       invalid('当前 Story 验收凭证集合已失效；请重新运行 coding-x');
     }
@@ -285,6 +303,10 @@ function createCurrentBindingReader(options: {
       model: options.review.binding.model,
       runnerVersion,
       storyValidationDigest: storyValidation.digest,
+      validationEnvironmentDigest: validationEnvironmentDigest({
+        contract: context.baseContract,
+        head: context.headSha,
+      }),
     });
   };
 }
@@ -315,6 +337,9 @@ export async function recordReviewDecision(
         ? '缺少当前 Final Review；请先重新运行 coding-x'
         : `Final Review 无效：${review.error}`,
     );
+  }
+  if (review.state.schemaVersion !== 2) {
+    invalid('旧 Final Review 不能记录新裁决；请重新运行 coding-x');
   }
   if (digestQualityContract(options.contract) !== review.state.binding.qualityContractDigest) {
     invalid('提供的质量契约与 Final Review 绑定不一致');

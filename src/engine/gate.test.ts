@@ -536,6 +536,59 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
     }
   });
 
+  it.runIf(process.platform !== 'win32')(
+    'rejects a source-tree argument reached through a path alias containing spaces',
+    async () => {
+      const container = mkdtempSync(join(tmpdir(), 'contract-forbidden-'));
+      const source = join(container, 'developer source');
+      const sourceAlias = join(container, 'developer source alias');
+      const validationRoot = join(container, 'validation');
+      const marker = join(validationRoot, 'must-not-run.txt');
+      mkdirSync(source);
+      mkdirSync(validationRoot);
+      writeFileSync(join(source, 'secret.txt'), 'secret');
+      symlinkSync(source, sourceAlias, 'dir');
+      const fixture = await createManagedProcessTestSession();
+      try {
+        const result = await runContractQualityChecks(
+          contractWith({
+            checks: [{
+              id: 'source-alias',
+              module: 'root',
+              command: {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.argv[1])`,
+                  join(sourceAlias, 'secret.txt'),
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos', 'windows'],
+                timeoutMs: 5_000,
+              },
+            }],
+          }),
+          validationRoot,
+          null,
+          {
+            session: fixture.session,
+            kind: 'quality-check',
+            forbiddenExecutableRoot: source,
+          },
+        );
+        expect(result).toMatchObject({
+          ok: false,
+          failure: { exitCode: null, timedOut: false },
+        });
+        expect(result.failure?.outputTail).toContain('验证命令解析到开发工作树');
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        await fixture.close();
+        rmSync(container, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.runIf(process.platform === 'win32')(
     'keeps project .cmd quality checks available outside the AI Runner boundary',
     async () => {

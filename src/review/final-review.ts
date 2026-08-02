@@ -7,6 +7,12 @@ import type { AgentKind } from '../engine/agent.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { GitHubReviewReadClient } from '../quality/github.js';
 import type { QualityContract } from '../quality/contract.js';
+import { validationEnvironmentDigest } from '../quality/validation-environment.js';
+import {
+  createCleanValidationCheckout,
+  describeCleanValidationCheckoutCleanup,
+  type CleanValidationCheckout,
+} from '../engine/clean-validation-checkout.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { workspacePathsReferToSameDirectory } from '../workspace-safety/filesystem.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
@@ -71,8 +77,7 @@ type AxisRunner = (options: {
 }) => Promise<SafeRunnerInvocation>;
 
 export type StoryValidationBindingObservation =
-  | { status: 'ready'; digest: string }
-  | { status: 'unverifiable'; message: string };
+  { status: 'ready'; digest: string } | { status: 'unverifiable'; message: string };
 
 function findingId(axis: ReviewAxis, finding: ModelReviewOutput['findings'][number]): string {
   return `RV-${axis.toUpperCase()}-${digest({
@@ -180,8 +185,7 @@ export async function runFinalReview(options: {
   storyValidationDigest: string;
   /** 在同一 workspace session 中只读重算当前 PRD/state/HEAD 的凭证集合。 */
   observeStoryValidation: () =>
-    | StoryValidationBindingObservation
-    | Promise<StoryValidationBindingObservation>;
+    StoryValidationBindingObservation | Promise<StoryValidationBindingObservation>;
   termination?: ManagedGateContext['termination'];
 }): Promise<FinalReviewOutcome> {
   const startedAt = new Date().toISOString();
@@ -279,9 +283,63 @@ export async function runFinalReview(options: {
     kind: 'final-review',
     termination: options.termination,
   };
-  const gate = await (options.gate
-    ? options.gate(context.baseContract, context.root, managedGate)
-    : runContractQualityChecks(context.baseContract.checks, context.root, undefined, managedGate));
+  let mechanicalCheckout: CleanValidationCheckout | null = null;
+  let mechanicalRoot = context.root;
+  let mechanicalValidationEnvironmentDigest = validationEnvironmentDigest({
+    contract: context.baseContract,
+    head: context.headSha,
+  });
+  let gate: ContractGateResult | null = null;
+  let mechanicalEnvironmentError: string | null = null;
+  try {
+    if (!options.gate) {
+      mechanicalCheckout = await createCleanValidationCheckout({
+        sourceRoot: context.root,
+        head: context.headSha,
+        contract: context.baseContract,
+        managed: managedGate,
+      });
+      mechanicalRoot = mechanicalCheckout.root;
+      mechanicalValidationEnvironmentDigest = mechanicalCheckout.environmentDigest;
+    }
+    gate = await (options.gate
+      ? options.gate(context.baseContract, context.root, managedGate)
+      : runContractQualityChecks(
+          context.baseContract.checks,
+          mechanicalRoot,
+          undefined,
+          mechanicalCheckout
+            ? {
+                ...managedGate,
+                environment: mechanicalCheckout.processEnvironment,
+                forbiddenExecutableRoot: context.root,
+              }
+            : managedGate,
+        ));
+    if (mechanicalCheckout) {
+      await mechanicalCheckout.assertCurrent('最终 Review 机械检查结束后');
+    }
+  } catch (error) {
+    mechanicalEnvironmentError = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (mechanicalCheckout) {
+      const cleanup = mechanicalCheckout.cleanup();
+      if (cleanup.status !== 'removed') {
+        mechanicalEnvironmentError =
+          `${mechanicalEnvironmentError ? `${mechanicalEnvironmentError}；` : ''}` +
+          `临时验证目录未能安全清理，${describeCleanValidationCheckoutCleanup(cleanup)}`;
+      }
+    }
+  }
+  if (mechanicalEnvironmentError) {
+    return {
+      exitCode: 5,
+      message: `最终 Review 的机械验证环境不可验证：${mechanicalEnvironmentError}`,
+    };
+  }
+  if (!gate) {
+    return { exitCode: 5, message: '最终 Review 的机械检查没有返回结果' };
+  }
   if (options.termination?.signal.aborted) {
     return { exitCode: 5, message: '最终 Review 已由用户中断；旧结果保持失效' };
   }
@@ -298,6 +356,7 @@ export async function runFinalReview(options: {
     status: 'passed' as const,
     headSha: context.headSha,
     qualityContractDigest: context.baseContractDigest,
+    validationEnvironmentDigest: mechanicalValidationEnvironmentDigest,
     scope: 'all-current-platform-applicable-contract-checks' as const,
   };
   const preModelStoryError = await verifyStoryValidationBinding('机械检查结束后、模型调用前：');
@@ -329,6 +388,7 @@ export async function runFinalReview(options: {
       model,
       runnerVersion,
       storyValidationDigest: options.storyValidationDigest,
+      validationEnvironmentDigest: mechanicalValidationEnvironmentDigest,
     });
   const revalidateContext = async () =>
     await (options.revalidate?.() ?? revalidateReviewContext(context, workspace, observation));
@@ -509,9 +569,7 @@ export async function runFinalReview(options: {
       stop = true;
     }
     axes.push(result);
-    return cleanupDiagnostic === undefined
-      ? { stop }
-      : { stop, diagnostic: cleanupDiagnostic };
+    return cleanupDiagnostic === undefined ? { stop } : { stop, diagnostic: cleanupDiagnostic };
   };
 
   let securityStop = await runAxis('spec');

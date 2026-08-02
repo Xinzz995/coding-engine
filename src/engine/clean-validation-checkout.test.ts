@@ -1,0 +1,674 @@
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, dirname, join, relative } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { QualityContract } from '../quality/contract.js';
+import { createManagedProcessTestSession } from './managed-process-test-support.js';
+import {
+  CleanValidationCheckoutManager,
+  createCleanValidationCheckout,
+} from './clean-validation-checkout.js';
+
+const roots: string[] = [];
+
+function repository(files: Record<string, string>): { root: string; head: () => string } {
+  const root = mkdtempSync(join(tmpdir(), 'coding-x-clean-source-'));
+  roots.push(root);
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'clean validation test'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'clean-validation@example.invalid'], { cwd: root });
+  for (const [path, contents] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), contents);
+  }
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: root });
+  return {
+    root,
+    head: () => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
+  };
+}
+
+function contract(over: Partial<QualityContract['localValidation']> = {}): QualityContract {
+  return {
+    generatedPaths: ['dist/**'],
+    localValidation: {
+      prepare: [],
+      allowedPaths: ['node_modules/**'],
+      ...over,
+    },
+  } as unknown as QualityContract;
+}
+
+const PYTHON_EXECUTABLE = (() => {
+  for (const candidate of process.platform === 'win32' ? ['python', 'py'] : ['python3', 'python']) {
+    try {
+      const executable = execFileSync(
+        candidate,
+        ['-c', 'import os,sys; print(os.path.realpath(sys.executable))'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      ).trim();
+      if (executable) return executable;
+    } catch {
+      // Try the next platform-native launcher.
+    }
+  }
+  return null;
+})();
+
+afterEach(() => {
+  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
+});
+
+describe.runIf(
+  process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32',
+)('clean validation checkout', () => {
+  it('excludes ignored developer files and accepts only declared artifact directories', async () => {
+    const source = repository({
+      '.gitignore': '.env\n.claude/\nnode_modules/\nignored-source.js\ndist/\n',
+      'source.txt': 'tracked\n',
+    });
+    writeFileSync(join(source.root, '.env'), 'DEVELOPER_SECRET=1\n');
+    mkdirSync(join(source.root, '.claude'));
+    writeFileSync(join(source.root, '.claude', 'settings.json'), '{}\n');
+    mkdirSync(join(source.root, 'node_modules'));
+    writeFileSync(join(source.root, 'node_modules', 'stale.js'), 'throw new Error("stale")\n');
+    writeFileSync(join(source.root, 'ignored-source.js'), 'export const injected = true\n');
+    const managed = await createManagedProcessTestSession();
+    try {
+      const checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      expect(relative(source.root, checkout.root).startsWith('..')).toBe(true);
+      expect(existsSync(join(checkout.root, '.env'))).toBe(false);
+      expect(existsSync(join(checkout.root, '.claude'))).toBe(false);
+      expect(existsSync(join(checkout.root, 'node_modules'))).toBe(false);
+      expect(existsSync(join(checkout.root, 'ignored-source.js'))).toBe(false);
+
+      mkdirSync(join(checkout.root, 'node_modules'));
+      writeFileSync(join(checkout.root, 'node_modules', 'fresh.js'), 'ok\n');
+      mkdirSync(join(checkout.root, 'dist'));
+      writeFileSync(join(checkout.root, 'dist', 'output.js'), 'ok\n');
+      await checkout.assertCurrent('允许产物测试');
+
+      mkdirSync(join(checkout.root, 'empty-pollution'));
+      await expect(checkout.assertCurrent('空目录污染测试')).rejects.toMatchObject({
+        code: 'artifact-boundary-violated',
+      });
+      rmSync(join(checkout.root, 'empty-pollution'), { recursive: true });
+
+      writeFileSync(join(checkout.root, 'ignored-source.js'), 'malicious\n');
+      await expect(checkout.assertCurrent('ignored 源码测试')).rejects.toMatchObject({
+        code: 'artifact-boundary-violated',
+      });
+      expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+      expect(existsSync(checkout.root)).toBe(false);
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('reports retained evidence when the checkout directory identity is replaced', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const escaped = mkdtempSync(join(tmpdir(), 'coding-x-escaped-placeholder-'));
+    rmSync(escaped, { recursive: true });
+    const managed = await createManagedProcessTestSession();
+    try {
+      const checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      const container = dirname(checkout.root);
+      renameSync(checkout.root, escaped);
+      mkdirSync(checkout.root);
+      const cleanup = checkout.cleanup();
+      expect(cleanup.status).toBe('location-unverifiable');
+      expect(realpathSync(dirname(cleanup.path))).toBe(realpathSync(dirname(container)));
+      expect(realpathSync(cleanup.path)).toBe(realpathSync(container));
+      expect(cleanup.reason).toContain('实际位置');
+      expect(existsSync(escaped)).toBe(true);
+      rmSync(escaped, { recursive: true, force: true });
+      rmSync(container, { recursive: true, force: true });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('rejects tracked changes and rebuilds instead of reusing across HEADs', async () => {
+    const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'H1\n' });
+    const managed = await createManagedProcessTestSession();
+    try {
+      const manager = new CleanValidationCheckoutManager(source.root, contract(), {
+        session: managed.session,
+        kind: 'quality-check',
+      });
+      const h1 = source.head();
+      const first = await manager.acquire(h1);
+      mkdirSync(join(first.root, 'node_modules'));
+      writeFileSync(join(first.root, 'node_modules', 'polluted.js'), 'polluted\n');
+      expect((await manager.acquire(h1)).root).toBe(first.root);
+      expect(existsSync(join(first.root, 'node_modules'))).toBe(false);
+      execFileSync('git', ['update-index', '--assume-unchanged', 'source.txt'], {
+        cwd: first.root,
+      });
+      writeFileSync(join(first.root, 'source.txt'), 'changed\n');
+      await expect(first.assertCurrent('tracked 改写测试')).rejects.toMatchObject({
+        code: 'tracked-content-changed',
+      });
+      writeFileSync(join(source.root, 'source.txt'), 'H2\n');
+      execFileSync('git', ['add', 'source.txt'], { cwd: source.root });
+      execFileSync('git', ['commit', '-q', '-m', 'H2'], { cwd: source.root });
+      const second = await manager.acquire(source.head());
+      expect(second.root).not.toBe(first.root);
+      expect(existsSync(first.root)).toBe(false);
+      expect(readFileSync(join(second.root, 'source.txt'), 'utf8')).toBe('H2\n');
+      expect(manager.dispose()).toMatchObject({ status: 'removed' });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('rejects changes to private Git policy controls before later validation stages', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const managed = await createManagedProcessTestSession();
+    try {
+      const checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      const replaceDirectory = join(checkout.root, '.git', 'refs', 'replace');
+      mkdirSync(replaceDirectory, { recursive: true });
+      writeFileSync(join(replaceDirectory, source.head()), `${source.head()}\n`);
+      await expect(checkout.assertCurrent('Git replace 攻击测试')).rejects.toMatchObject({
+        code: 'identity-changed',
+      });
+      expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('removes project-scoped process environment from preparation', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const external = mkdtempSync(join(tmpdir(), 'coding-x-external-config-'));
+    const names = [
+      'VIRTUAL_ENV',
+      'PYTHONPATH',
+      'NODE_PATH',
+      'NODE_OPTIONS',
+      'GOWORK',
+      'GOFLAGS',
+      'MAKEFILES',
+      'BABEL_CONFIG_FILE',
+      'PATH',
+    ] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    process.env.VIRTUAL_ENV = join(source.root, '.venv');
+    process.env.PYTHONPATH = source.root;
+    process.env.NODE_PATH = join(source.root, 'node_modules');
+    process.env.NODE_OPTIONS = `--require=${join(source.root, 'ignored-hook.cjs')}`;
+    process.env.GOWORK = join(external, 'old-go.work');
+    process.env.GOFLAGS = `-overlay=${join(external, 'old-overlay.json')}`;
+    process.env.MAKEFILES = join(external, 'old.mk');
+    process.env.BABEL_CONFIG_FILE = join(external, 'old-babel.json');
+    process.env.PATH = `${join(source.root, '.venv', 'bin')}${delimiter}${saved.PATH ?? ''}`;
+    const managed = await createManagedProcessTestSession();
+    let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+    try {
+      checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract({
+          prepare: [
+            {
+              executable: process.execPath,
+              args: [
+                '-e',
+                "require('node:fs').mkdirSync('dist'); require('node:fs').writeFileSync('dist/env.json', JSON.stringify({ cwd: process.cwd(), projectRoot: process.env.CODING_X_PROJECT_ROOT, virtualEnv: process.env.VIRTUAL_ENV ?? null, pythonPath: process.env.PYTHONPATH ?? null, nodePath: process.env.NODE_PATH ?? null, nodeOptions: process.env.NODE_OPTIONS ?? null, goWork: process.env.GOWORK ?? null, goFlags: process.env.GOFLAGS ?? null, makefiles: process.env.MAKEFILES ?? null, babelConfig: process.env.BABEL_CONFIG_FILE ?? null, path: process.env.PATH }))",
+              ],
+              cwd: '.',
+              platforms:
+                process.platform === 'win32'
+                  ? ['windows']
+                  : process.platform === 'darwin'
+                    ? ['macos']
+                    : ['linux'],
+              timeoutMs: 5_000,
+            },
+          ],
+        }),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      const observed = JSON.parse(
+        readFileSync(join(checkout.root, 'dist', 'env.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(observed).toMatchObject({
+        cwd: checkout.root,
+        projectRoot: checkout.root,
+        virtualEnv: null,
+        pythonPath: null,
+        nodePath: null,
+        nodeOptions: null,
+        goWork: null,
+        goFlags: null,
+        makefiles: null,
+        babelConfig: null,
+      });
+      expect(String(observed.path)).not.toContain(source.root);
+    } finally {
+      for (const name of names) {
+        const value = saved[name];
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      checkout?.cleanup();
+      await managed.close();
+      rmSync(external, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it.runIf(PYTHON_EXECUTABLE !== null)(
+    'runs an explicit Python monorepo venv contract without host project environment',
+    async () => {
+      const source = repository({
+        '.gitignore': '.coding-x-validation/\n',
+        'packages/api/pyproject.toml': '[project]\nname="api"\nversion="0.1.0"\n',
+        'packages/worker/pyproject.toml': '[project]\nname="worker"\nversion="0.1.0"\n',
+      });
+      const validationDirectory = '.coding-x-validation';
+      const venvDirectory = join(validationDirectory, 'venv');
+      const venvPython = join(
+        venvDirectory,
+        process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
+      );
+      const platform =
+        process.platform === 'win32'
+          ? 'windows'
+          : process.platform === 'darwin'
+            ? 'macos'
+            : 'linux';
+      const previousVirtualEnv = process.env.VIRTUAL_ENV;
+      const previousPythonPath = process.env.PYTHONPATH;
+      process.env.VIRTUAL_ENV = join(source.root, '.host-venv');
+      process.env.PYTHONPATH = join(source.root, 'host-python-path');
+      const managed = await createManagedProcessTestSession();
+      let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+      try {
+        checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract({
+            allowedPaths: [`${validationDirectory}/**`],
+            prepare: [
+              {
+                executable: PYTHON_EXECUTABLE!,
+                args: ['-m', 'venv', venvDirectory],
+                cwd: '.',
+                platforms: [platform],
+                timeoutMs: 60_000,
+              },
+              {
+                executable: venvPython,
+                args: [
+                  '-c',
+                  "import json,os,pathlib; pathlib.Path('.coding-x-validation/observed.json').write_text(json.dumps({'cwd': os.getcwd(), 'virtualEnv': os.environ.get('VIRTUAL_ENV'), 'pythonPath': os.environ.get('PYTHONPATH')}))",
+                ],
+                cwd: '.',
+                platforms: [platform],
+                timeoutMs: 10_000,
+              },
+            ],
+          }),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        expect(existsSync(join(checkout.root, 'packages/api/pyproject.toml'))).toBe(true);
+        expect(existsSync(join(checkout.root, 'packages/worker/pyproject.toml'))).toBe(true);
+        expect(
+          JSON.parse(
+            readFileSync(join(checkout.root, validationDirectory, 'observed.json'), 'utf8'),
+          ),
+        ).toEqual({ cwd: checkout.root, virtualEnv: null, pythonPath: null });
+        await checkout.assertCurrent('Python venv fixture');
+      } finally {
+        if (previousVirtualEnv === undefined) delete process.env.VIRTUAL_ENV;
+        else process.env.VIRTUAL_ENV = previousVirtualEnv;
+        if (previousPythonPath === undefined) delete process.env.PYTHONPATH;
+        else process.env.PYTHONPATH = previousPythonPath;
+        checkout?.cleanup();
+        await managed.close();
+      }
+    },
+    90_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects links to the developer tree but permits a prepared system interpreter link',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      mkdirSync(join(source.root, 'node_modules'));
+      writeFileSync(join(source.root, 'node_modules', 'stale.js'), 'stale\n');
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract({
+              prepare: [
+                {
+                  executable: process.execPath,
+                  args: [
+                    '-e',
+                    `require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync(${JSON.stringify(join(source.root, 'node_modules'))}, 'node_modules/stale')`,
+                  ],
+                  cwd: '.',
+                  platforms: ['linux', 'macos'],
+                  timeoutMs: 5_000,
+                },
+              ],
+            }),
+            managed: { session: managed.session, kind: 'quality-check' },
+          }),
+        ).rejects.toMatchObject({ code: 'prepare-failed' });
+
+        const prepared = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract({
+            prepare: [
+              {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  `require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync(${JSON.stringify(process.execPath)}, 'node_modules/system-node')`,
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos'],
+                timeoutMs: 5_000,
+              },
+            ],
+          }),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        expect(prepared.cleanup()).toMatchObject({ status: 'removed' });
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it('fails closed for submodules and checkout filters', async () => {
+    const filtered = repository({
+      '.gitattributes': '*.bin filter=lfs diff=lfs merge=lfs -text\n',
+      'payload.bin': 'version https://git-lfs.github.com/spec/v1\n',
+    });
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: filtered.root,
+          head: filtered.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({ code: 'unsupported-git-content' });
+
+      const pointerOnly = repository({
+        'payload.bin': [
+          'version https://git-lfs.github.com/spec/v1',
+          `oid sha256:${'0'.repeat(64)}`,
+          'size 123',
+          '',
+        ].join('\n'),
+      });
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: pointerOnly.root,
+          head: pointerOnly.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({ code: 'unsupported-git-content' });
+
+      const submodule = repository({ 'source.txt': 'root\n' });
+      const commit = submodule.head();
+      execFileSync('git', ['update-index', '--add', '--cacheinfo', `160000,${commit},vendor/sub`], {
+        cwd: submodule.root,
+      });
+      execFileSync('git', ['commit', '-q', '-m', 'gitlink'], { cwd: submodule.root });
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: submodule.root,
+          head: submodule.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({ code: 'unsupported-git-content' });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('cleans failed or source-mutating preparation without accepting the environment', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const created: string[] = [];
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract({
+            prepare: [
+              {
+                executable: process.execPath,
+                args: ['-e', 'process.exit(4)'],
+                cwd: '.',
+                platforms:
+                  process.platform === 'win32'
+                    ? ['windows']
+                    : process.platform === 'darwin'
+                      ? ['macos']
+                      : ['linux'],
+                timeoutMs: 5_000,
+              },
+            ],
+          }),
+          managed: { session: managed.session, kind: 'quality-check' },
+          onContainerCreatedForTests: (path) => created.push(path),
+        }),
+      ).rejects.toMatchObject({ code: 'prepare-failed' });
+
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract({
+            prepare: [
+              {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  "require('node:fs').writeFileSync('source.txt', 'changed by prepare\\n')",
+                ],
+                cwd: '.',
+                platforms:
+                  process.platform === 'win32'
+                    ? ['windows']
+                    : process.platform === 'darwin'
+                      ? ['macos']
+                      : ['linux'],
+                timeoutMs: 5_000,
+              },
+            ],
+          }),
+          managed: { session: managed.session, kind: 'quality-check' },
+          onContainerCreatedForTests: (path) => created.push(path),
+        }),
+      ).rejects.toMatchObject({ code: 'tracked-content-changed' });
+
+      const prepared = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract({
+          prepare: [
+            {
+              executable: process.execPath,
+              args: [
+                '-e',
+                "require('node:fs').mkdirSync('node_modules', { recursive: true }); require('node:fs').writeFileSync('node_modules/prepared.txt', 'ok\\n')",
+              ],
+              cwd: '.',
+              platforms:
+                process.platform === 'win32'
+                  ? ['windows']
+                  : process.platform === 'darwin'
+                    ? ['macos']
+                    : ['linux'],
+              timeoutMs: 5_000,
+            },
+          ],
+        }),
+        managed: { session: managed.session, kind: 'quality-check' },
+        onContainerCreatedForTests: (path) => created.push(path),
+      });
+      expect(readFileSync(join(prepared.root, 'node_modules', 'prepared.txt'), 'utf8')).toBe(
+        'ok\n',
+      );
+      expect(prepared.cleanup()).toMatchObject({ status: 'removed' });
+      expect(created).toHaveLength(3);
+      expect(created.every((path) => !existsSync(path))).toBe(true);
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it.runIf(process.platform !== 'win32')(
+    'reports an unverifiable location when preparation moves the checkout before creation fails',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      let container = '';
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract({
+              prepare: [
+                {
+                  executable: process.execPath,
+                  args: [
+                    '-e',
+                    "const fs=require('node:fs'); const cwd=process.cwd(); fs.renameSync(cwd, cwd + '-escaped'); fs.mkdirSync(cwd); process.exit(4)",
+                  ],
+                  cwd: '.',
+                  platforms: ['linux', 'macos'],
+                  timeoutMs: 5_000,
+                },
+              ],
+            }),
+            managed: { session: managed.session, kind: 'quality-check' },
+            onContainerCreatedForTests: (path) => {
+              container = path;
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: 'prepare-failed',
+          message: expect.stringContaining('实际位置无法确认'),
+        });
+        expect(existsSync(join(container, 'checkout-escaped'))).toBe(true);
+      } finally {
+        if (container) rmSync(container, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a TMPDIR alias that resolves inside the developer tree',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const sourceTemporary = join(source.root, '.local-tmp');
+      mkdirSync(sourceTemporary);
+      const aliasContainer = mkdtempSync(join(tmpdir(), 'coding-x-tmp-alias-'));
+      const alias = join(aliasContainer, 'external-looking-tmp');
+      symlinkSync(sourceTemporary, alias, 'dir');
+      const managed = await createManagedProcessTestSession();
+      const previous = process.env.TMPDIR;
+      process.env.TMPDIR = alias;
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract(),
+            managed: { session: managed.session, kind: 'quality-check' },
+          }),
+        ).rejects.toMatchObject({ code: 'invalid-source' });
+        expect(existsSync(join(sourceTemporary, 'checkout'))).toBe(false);
+      } finally {
+        if (previous === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = previous;
+        rmSync(aliasContainer, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects an external PATH entry whose Git link resolves into the developer tree',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const head = source.head();
+      const maliciousGit = join(source.root, 'developer-git');
+      const marker = join(source.root, 'developer-git-ran');
+      writeFileSync(maliciousGit, `#!/bin/sh\nprintf ran > ${JSON.stringify(marker)}\nexit 1\n`);
+      chmodSync(maliciousGit, 0o755);
+      const externalBin = mkdtempSync(join(tmpdir(), 'coding-x-external-bin-'));
+      symlinkSync(maliciousGit, join(externalBin, 'git'));
+      const managed = await createManagedProcessTestSession();
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${externalBin}${delimiter}${previousPath ?? ''}`;
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head,
+            contract: contract(),
+            managed: { session: managed.session, kind: 'quality-check' },
+          }),
+        ).rejects.toMatchObject({ code: 'invalid-source' });
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+        rmSync(externalBin, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+});

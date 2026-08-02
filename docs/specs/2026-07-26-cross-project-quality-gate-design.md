@@ -113,6 +113,7 @@ coding-engine 首版仍位于个人 GitHub 仓库。Ruleset 能可靠阻止日�
 - Spec、验收标准和工程规范来源；
 - 测试、构建、静态检查、安全检查以及每个不适用项的理由；
 - 多模块范围、适用路径、工作目录、运行系统、工具链精确版本、任务检查范围、超时和生成产物目录；
+- 项目外本地验证所需的准备命令，以及依赖/缓存可以产生的明确目录；二者必须单独确认，不能从 GitHub job setup 暗推；
 - 高风险目录、默认风险类别和项目覆盖项；
 - GitHub 必需检查名称，以及项目明确选择时才启用的代码扫描工具与阻断阈值；
 - P1 延期和紧急政策例外的模板、字段与到期规则。
@@ -123,6 +124,11 @@ coding-engine 首版仍位于个人 GitHub 仓库。Ruleset 能可靠阻止日�
 Go/Python 项目。只有确需管道或重定向时才允许显式 `shell` 与脚本内容；shell 模式必须在
 初始化时向用户展示并确认。工具链只生成 coding-x 内置且固定完整提交标识的官方 setup
 action，不允许契约注入任意 action。
+
+自动发现只在能够给出可重复准备命令时生成候选：Node 缺少已提交 lockfile 时停止；Python 的
+隔离目录、依赖锁定和跨平台解释器路径不能仅凭 `pyproject.toml` 安全推断，因此新 Python 项目
+必须通过 `init --contract` 提供人工确认的 schema-v2 本地准备和允许目录。首版没有旧 Python
+项目迁移承诺；不能把候选 PR 自己提供的迁移命令当默认分支旧裁判。
 
 PRD 中的 `qualityChecks` 由契约冻结派生，并记录契约摘要，不再要求用户维护第二份命令。
 GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式运行版本与固定版本不一致，
@@ -163,13 +169,18 @@ GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式
 每个 story 的顺序保持：
 
 1. Developer 实现；
-2. 从质量契约冻结出的机械检查；
-3. 可选 TDD 门禁；
-4. Validator 逐条验证验收标准；
-5. 引擎签发 Validator 结果。
+2. 引擎在项目外建立精确 HEAD 的临时 Git 检出，并执行契约确认的本地准备；
+3. 在该检出中执行从质量契约冻结出的机械检查；
+4. 在同一检出中执行可选 TDD 门禁；
+5. Validator 在同一检出中逐条验证验收标准，结果仍写回原 workspace；
+6. 引擎核对 HEAD、tracked tree 与允许产物边界后，签发绑定验证环境摘要的 Validator 结果。
 
 Validator 不承担工程标准或结构 Review。修复产生新提交后，受影响的 Validator 和最终
-Review 都必须重新运行。
+Review 都必须重新运行。同一运行中只有 HEAD、完整 checks、准备合同、允许目录和必要历史完全相同
+时才复用验证检出，且复用前必须清空非 tracked 内容并重跑 prepare；submodule、LFS/custom filter、
+检出身份变化、tracked 改写或越界产物一律返回不可验证。工作树质量契约不是独立信任源，正式运行
+前必须证明其规范摘要等于当前 HEAD 中已跟踪的契约。
+项目命令仍以当前用户权限运行，这个边界不等于操作系统文件系统沙箱。
 
 ### 最终 Review 前置条件
 
@@ -185,7 +196,7 @@ Review 都必须重新运行。
 
 ### 三层 Review
 
-1. 先重新执行完整机械检查；
+1. 先按 PR head 建立干净检出，使用默认分支旧质量契约准备环境并重新执行完整机械检查；
 2. Spec Review 独立比较 PR 意图、验收标准、关联规格和实际 diff；
 3. 工程标准 Review 使用 coding-x 内置跨语言底线和默认分支上的项目规范；
 4. 风险触发时执行深度结构 Review；
@@ -440,6 +451,8 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 - 缺 Spec、模型异常、格式损坏、上下文不足、关键内容不可读返回 `unverifiable`；
 - Reviewer 写文件、危险命令、秘密、MCP、hook 和插件反向测试全部失败；
 - P0、P1、人工决策与不完整延期 Issue 阻断；修复提交后 Validator/Review 重跑；
+- 开发目录中的 `.env`、`.claude`、旧依赖和 ignored 源码不进入本地验证；准备失败、tracked 改写、未允许产物、submodule/LFS/filter 均不可签发 receipt；
+- v1 receipt 即使 HEAD 相同也失效；v2 receipt 的环境摘要与当前平台、HEAD、准备和允许目录不一致时重验；
 - shadow 始终退出 7，不能转成正式通过。
 
 ### GitHub

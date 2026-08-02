@@ -18,7 +18,7 @@ const HEAD = 'b'.repeat(40);
 
 function contract(): QualityContract {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     codingXVersion: '0.34.0',
     repository: { provider: 'github', fullName: 'owner/repo', defaultBranch: 'main' },
     release: { protectedRefs: [], notApplicable: '测试仓库不发布' },
@@ -29,6 +29,7 @@ function contract(): QualityContract {
     },
     modules: [{ id: 'root', path: '.' }],
     generatedPaths: [],
+    localValidation: { prepare: [], allowedPaths: [] },
     checks: {
       test: { notApplicable: 'fixture' },
       build: { notApplicable: 'fixture' },
@@ -74,7 +75,7 @@ function reviewState(item = finding()): FinalReviewState {
   };
   const riskDigest = digest(risk);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'failed',
     deliveryStatus: 'findings',
     binding: {
@@ -87,6 +88,7 @@ function reviewState(item = finding()): FinalReviewState {
       specDigest: `sha256:${'3'.repeat(64)}`,
       engineeringStandardsDigest: `sha256:${'4'.repeat(64)}`,
       qualityContractDigest: digestQualityContract(quality),
+      validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
       codingXVersion: '0.34.0',
       runner: 'codex',
       model: 'model',

@@ -5,17 +5,19 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readQualityContract, type QualityContract } from '../quality/contract.js';
 import type { WorkspaceSession, WorkspaceWriteData } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
+import { createManagedProcessTestSession } from '../engine/managed-process-test-support.js';
 import { digestReviewBinding } from './binding.js';
 import { runFinalReview } from './final-review.js';
 import type { ReviewPreflightContext } from './preflight.js';
@@ -59,6 +61,23 @@ function workspace(): string {
   const root = mkdtempSync(join(tmpdir(), 'final-review-test-'));
   roots.push(root);
   return root;
+}
+
+function gitProject(files: Record<string, string>): { root: string; head: string } {
+  const root = workspace();
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'final review test'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'final-review@example.invalid'], { cwd: root });
+  for (const [path, contents] of Object.entries(files)) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), contents);
+  }
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: root });
+  return {
+    root,
+    head: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim(),
+  };
 }
 
 function session(workspacePath: string): WorkspaceSession {
@@ -242,6 +261,89 @@ describe('runFinalReview', () => {
     expect(result.exitCode).toBe(5);
     expect(result.message).toContain('明确模型');
   });
+
+  it('runs production mechanical checks in a clean checkout and removes it afterwards', async () => {
+    const project = gitProject({
+      '.gitignore': '.env\n.claude/\nnode_modules/\n',
+      'source.txt': 'tracked\n',
+    });
+    writeFileSync(join(project.root, '.env'), 'FINAL_REVIEW_SECRET=1\n');
+    mkdirSync(join(project.root, '.claude'));
+    writeFileSync(join(project.root, '.claude', 'settings.json'), '{}\n');
+    mkdirSync(join(project.root, 'node_modules'));
+    writeFileSync(join(project.root, 'node_modules', 'stale.js'), 'stale\n');
+    const markerRoot = workspace();
+    const marker = join(markerRoot, 'mechanical-cwd.json');
+    const projectContract = contract();
+    const platform =
+      process.platform === 'win32'
+        ? (['windows'] as const)
+        : process.platform === 'darwin'
+          ? (['macos'] as const)
+          : (['linux'] as const);
+    projectContract.generatedPaths = [];
+    projectContract.localValidation = { prepare: [], allowedPaths: [] };
+    projectContract.checks = {
+      test: {
+        checks: [{
+          id: 'clean-cwd',
+          module: 'root',
+          command: {
+            executable: process.execPath,
+            args: [
+              '-e',
+              [
+                "const fs = require('node:fs')",
+                "const hidden = ['.env', '.claude', 'node_modules'].filter((path) => fs.existsSync(path))",
+                `fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ cwd: process.cwd(), hidden }))`,
+                'if (hidden.length > 0) process.exit(9)',
+              ].join(';'),
+            ],
+            cwd: '.',
+            platforms: [...platform],
+            timeoutMs: 5_000,
+          },
+        }],
+      },
+      build: { notApplicable: 'fixture' },
+      static: { notApplicable: 'fixture' },
+      security: { notApplicable: 'fixture' },
+    };
+    const base = context();
+    const ctx = context({
+      root: project.root,
+      baseSha: project.head,
+      headSha: project.head,
+      baseContract: projectContract,
+      pullRequest: {
+        ...base.pullRequest,
+        baseSha: project.head,
+        headSha: project.head,
+      },
+      history: `${project.head}\tfixture`,
+    });
+    const managed = await createManagedProcessTestSession();
+    try {
+      const result = await runFinalReview({
+        ...options(managed.workspacePath, ctx),
+        root: project.root,
+        workspace: managed.workspacePath,
+        session: managed.session,
+        gate: undefined,
+        axisRunner: async (request) => output(request.axis),
+      });
+      expect(result.exitCode).toBe(0);
+      const observed = JSON.parse(readFileSync(marker, 'utf8')) as {
+        cwd: string;
+        hidden: string[];
+      };
+      expect(relative(project.root, observed.cwd).startsWith('..')).toBe(true);
+      expect(observed.hidden).toEqual([]);
+      expect(existsSync(observed.cwd)).toBe(false);
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
 
   it('runs spec and engineering separately and skips deep review for ordinary docs', async () => {
     const ws = workspace();

@@ -29,7 +29,7 @@ function writeReadyFinalReview(workspace: string, shadow = false): void {
   writeFileSync(
     join(workspace, 'final-review.json'),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: 'passed',
       deliveryStatus: shadow ? 'shadow' : 'ready',
       binding: {
@@ -42,6 +42,7 @@ function writeReadyFinalReview(workspace: string, shadow = false): void {
         specDigest: 'sha256:spec',
         engineeringStandardsDigest: 'sha256:standards',
         qualityContractDigest: 'sha256:contract',
+        validationEnvironmentDigest: `sha256:${'e'.repeat(64)}`,
         codingXVersion: '0.29.0',
         runner: 'codex',
         model: 'gpt-test',
@@ -97,10 +98,11 @@ const passedState = (target: ReturnType<typeof story>) => ({
   passes: true,
   validated: true,
   validationReceipt: {
-    schemaVersion: 1,
+    schemaVersion: 2,
     requestId: `request-${target.id}`,
     gitHead: CURRENT_GIT_HEAD,
     acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+    validationEnvironmentDigest: `sha256:${'e'.repeat(64)}`,
   },
   notes: '',
   retryCount: 0,

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "codingXVersion": "0.33.3",
   "repository": {
     "provider": "github",
@@ -38,6 +38,18 @@
     }
   ],
   "generatedPaths": ["dist/**", "coverage/**"],
+  "localValidation": {
+    "prepare": [
+      {
+        "executable": "npm",
+        "args": ["ci"],
+        "cwd": ".",
+        "platforms": ["linux", "macos", "windows"],
+        "timeoutMs": 600000
+      }
+    ],
+    "allowedPaths": ["node_modules/**"]
+  },
   "checks": {
     "test": {
       "checks": [

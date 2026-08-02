@@ -23,7 +23,7 @@ function state(): FinalReviewState {
   };
   const riskDigest = digest(risk);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'passed',
     deliveryStatus: 'ready',
     binding: {
@@ -36,6 +36,8 @@ function state(): FinalReviewState {
       specDigest: 'spec',
       engineeringStandardsDigest: 'standards',
       qualityContractDigest: 'contract',
+      validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
+      storyValidationDigest: `sha256:${'c'.repeat(64)}`,
       codingXVersion: '0.30.0',
       runner: 'codex',
       model: 'review-model',
@@ -95,35 +97,70 @@ async function withWorkspace(run: (workspace: string) => Promise<void>): Promise
 }
 
 describe('readFinalReviewState', () => {
-  it('continues to read an older engine-written state without a Story receipt-set digest', async () =>
+  it('reads both historical schema-v1 binding shapes without upgrading either one', async () =>
     withWorkspace(async (workspace) => {
-      await writeFinalReviewState(writer(workspace), state());
-      const read = readFinalReviewState(workspace);
-      expect(read).toMatchObject({
+      const earliest = structuredClone(state()) as unknown as {
+        schemaVersion: number;
+        binding: Record<string, unknown>;
+      };
+      earliest.schemaVersion = 1;
+      delete earliest.binding.validationEnvironmentDigest;
+      delete earliest.binding.storyValidationDigest;
+      writeFileSync(join(workspace, 'final-review.json'), JSON.stringify(earliest));
+      const earliestRead = readFinalReviewState(workspace);
+      expect(earliestRead).toMatchObject({
         status: 'ready',
         state: {
+          schemaVersion: 1,
           status: 'passed',
           deliveryStatus: 'ready',
           round: 1,
         },
       });
-      if (read.status !== 'ready') throw new Error('expected legacy Review to remain readable');
-      expect(read.state.binding.storyValidationDigest).toBeUndefined();
+      if (earliestRead.status !== 'ready') throw new Error('expected legacy Review to be readable');
+      expect(earliestRead.state.binding.storyValidationDigest).toBeUndefined();
+
+      const later = structuredClone(earliest);
+      later.binding.storyValidationDigest = `sha256:${'d'.repeat(64)}`;
+      writeFileSync(join(workspace, 'final-review.json'), JSON.stringify(later));
+      const laterRead = readFinalReviewState(workspace);
+      expect(laterRead).toMatchObject({
+        status: 'ready',
+        state: {
+          schemaVersion: 1,
+          binding: { storyValidationDigest: later.binding.storyValidationDigest },
+        },
+      });
     }));
 
-  it('round-trips a Story receipt-set digest and rejects malformed values', async () =>
+  it('round-trips a schema-v2 dual binding and rejects missing or malformed digests', async () =>
     withWorkspace(async (workspace) => {
       const current = state();
-      current.binding.storyValidationDigest = `sha256:${'c'.repeat(64)}`;
       await writeFinalReviewState(writer(workspace), current);
       expect(readFinalReviewState(workspace)).toMatchObject({
         status: 'ready',
-        state: { binding: { storyValidationDigest: current.binding.storyValidationDigest } },
+        state: {
+          schemaVersion: 2,
+          binding: {
+            storyValidationDigest: current.binding.storyValidationDigest,
+            validationEnvironmentDigest: current.binding.validationEnvironmentDigest,
+          },
+        },
       });
 
-      current.binding.storyValidationDigest = 'not-a-digest';
-      writeFileSync(join(workspace, 'final-review.json'), JSON.stringify(current));
-      expect(readFinalReviewState(workspace)).toMatchObject({ status: 'invalid' });
+      for (const key of ['storyValidationDigest', 'validationEnvironmentDigest'] as const) {
+        const missing = structuredClone(current) as unknown as {
+          binding: Record<string, unknown>;
+        };
+        delete missing.binding[key];
+        writeFileSync(join(workspace, 'final-review.json'), JSON.stringify(missing));
+        expect(readFinalReviewState(workspace)).toMatchObject({ status: 'invalid' });
+
+        const malformed = structuredClone(current);
+        malformed.binding[key] = 'not-a-digest';
+        writeFileSync(join(workspace, 'final-review.json'), JSON.stringify(malformed));
+        expect(readFinalReviewState(workspace)).toMatchObject({ status: 'invalid' });
+      }
     }));
 
   it('rejects duplicate or missing independent axes and inconsistent risk binding', async () =>
@@ -187,4 +224,21 @@ describe('readFinalReviewState', () => {
     await writeFinalReviewState(controlledWriter, state());
     expect(writes).toEqual(['final-review.md', 'final-review.json']);
   });
+
+  it('refuses to write either readable schema-v1 shape as a new Review', async () =>
+    withWorkspace(async (workspace) => {
+      const legacy = structuredClone(state()) as unknown as {
+        schemaVersion: number;
+        binding: Record<string, unknown>;
+      };
+      legacy.schemaVersion = 1;
+      delete legacy.binding.validationEnvironmentDigest;
+      for (const keepStoryDigest of [true, false]) {
+        const candidate = structuredClone(legacy);
+        if (!keepStoryDigest) delete candidate.binding.storyValidationDigest;
+        await expect(
+          writeFinalReviewState(writer(workspace), candidate as unknown as FinalReviewState),
+        ).rejects.toThrow('只允许写入当前 schema v2 Final Review');
+      }
+    }));
 });

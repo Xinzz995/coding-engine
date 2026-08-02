@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { posix, resolve } from 'node:path';
 import {
   REQUIRED_GITHUB_CHECKS,
@@ -71,6 +71,7 @@ function discoverNode(
   files: Set<string>,
   groups: Record<QualityCheckCategory, QualityCheck[]>,
   setup: QualityContract['github']['jobs'][number]['setup'],
+  localPrepare: QualityContract['localValidation']['prepare'],
   toolchains: QualityToolchain[],
 ): boolean {
   if (!files.has('package.json')) return false;
@@ -96,6 +97,12 @@ function discoverNode(
   if (files.has('pnpm-lock.yaml')) packageManager = 'pnpm';
   else if (files.has('yarn.lock')) packageManager = 'yarn';
   const locked = files.has('package-lock.json') || files.has('npm-shrinkwrap.json');
+  if (packageManager === 'npm' && !locked) {
+    throw new Error(
+      'Node 项目缺少已提交的 package-lock.json 或 npm-shrinkwrap.json；' +
+        '无法生成可重复的干净验证准备命令',
+    );
+  }
   const declaredNode = typeof engines.node === 'string'
     ? engines.node.match(/(?:^|[^0-9])(\d+)(?:\.(\d+))?/)
     : null;
@@ -108,11 +115,13 @@ function discoverNode(
     ...(locked || packageManager !== 'npm' ? { cache: packageManager as 'npm' | 'yarn' | 'pnpm' } : {}),
     ...(files.has('package-lock.json') ? { cacheDependencyPath: 'package-lock.json' } : {}),
   });
-  setup.push({
+  const install: QualityContract['localValidation']['prepare'][number] = {
     executable: packageManager,
-    args: packageManager === 'npm' ? [locked ? 'ci' : 'install'] : ['install', '--frozen-lockfile'],
+    args: packageManager === 'npm' ? ['ci'] : ['install', '--frozen-lockfile'],
     cwd: '.', platforms: [...ALL_PLATFORMS], timeoutMs: 600_000,
-  });
+  };
+  setup.push(structuredClone(install));
+  localPrepare.push(install);
 
   if (hasScript('test')) addCheck(groups, 'test', commandCheck('test', 'root', packageManager, ['test'], '.'));
   if (hasScript('build')) addCheck(groups, 'build', commandCheck('build', 'root', packageManager, ['run', 'build'], '.'));
@@ -163,61 +172,13 @@ function discoverGo(
   return true;
 }
 
-function discoverPython(
-  root: string,
-  files: string[],
-  groups: Record<QualityCheckCategory, QualityCheck[]>,
-  modules: QualityContract['modules'],
-  setup: QualityContract['github']['jobs'][number]['setup'],
-  toolchains: QualityToolchain[],
-): boolean {
+function discoverPython(files: string[]): boolean {
   const configs = files.filter((file) => posix.basename(file) === 'pyproject.toml').sort();
   if (configs.length === 0) return false;
-  const declaredVersions = new Set<string>();
-  for (const [index, file] of configs.entries()) {
-    const path = posix.dirname(file) === '.' ? '.' : posix.dirname(file);
-    const id = moduleId(path, index === 0 ? 'python' : `python-${index + 1}`);
-    if (!modules.some((module) => module.id === id)) modules.push({ id, path });
-    const text = readFileSync(resolve(root, file), 'utf8');
-    const requiresPython = text.match(/^requires-python\s*=\s*["'][^"']*?(\d+\.\d+)/m);
-    if (requiresPython) declaredVersions.add(requiresPython[1]);
-    setup.push({
-      executable: 'python', args: ['-m', 'pip', 'install', '-e', '.'], cwd: path,
-      platforms: [...ALL_PLATFORMS], timeoutMs: 600_000,
-    });
-    const hasTests = files.some((candidate) => (
-      candidate.startsWith(path === '.' ? 'tests/' : `${path}/tests/`)
-    )) || /pytest/i.test(text);
-    if (hasTests) addCheck(groups, 'test', commandCheck(`test-${id}`, id, 'python', ['-m', 'pytest'], path));
-    if (/^\s*\[build-system\]\s*$/m.test(text)) {
-      addCheck(groups, 'build', commandCheck(
-        `build-${id}`, id, 'python', ['-m', 'pip', 'wheel', '.', '--no-deps', '--wheel-dir', 'dist'], path,
-      ));
-    }
-    if (/^\s*\[tool\.ruff(?:\.|\])?/m.test(text)) {
-      addCheck(groups, 'static', commandCheck(`ruff-${id}`, id, 'python', ['-m', 'ruff', 'check', '.'], path));
-    }
-    if (/^\s*\[tool\.mypy\]\s*$/m.test(text)) {
-      addCheck(groups, 'static', commandCheck(`mypy-${id}`, id, 'python', ['-m', 'mypy', '.'], path));
-    }
-  }
-  if (declaredVersions.size > 1) {
-    throw new Error('多个 pyproject.toml 声明了不同 Python 版本；请提供按任务拆分的 --contract');
-  }
-  let pythonVersion = [...declaredVersions][0];
-  if (!pythonVersion) {
-    try {
-      const output = execFileSync('python3', ['--version'], { encoding: 'utf8' });
-      pythonVersion = output.match(/(\d+\.\d+)/)?.[1] ?? '';
-    } catch {
-      pythonVersion = '';
-    }
-  }
-  if (!pythonVersion) {
-    throw new Error('无法确定 Python 版本；请在 pyproject.toml 声明 requires-python 或提供 --contract');
-  }
-  toolchains.push({ kind: 'python', version: pythonVersion });
-  return true;
+  throw new Error(
+    '检测到 Python 项目，但无法从 pyproject.toml 安全推导可重复的本地隔离环境与依赖安装命令；' +
+      '请提供经人工确认、同时声明 localValidation.prepare 和 allowedPaths 的 --contract 文件',
+  );
 }
 
 function existingStandards(files: Set<string>): string[] {
@@ -243,15 +204,16 @@ export function discoverQualityContract(
   };
   const modules: QualityContract['modules'] = [];
   const setup: QualityContract['github']['jobs'][number]['setup'] = [];
+  const localPrepare: QualityContract['localValidation']['prepare'] = [];
   const toolchains: QualityToolchain[] = [];
   const ecosystems: string[] = [];
 
-  if (discoverNode(root, files, groups, setup, toolchains)) {
+  if (discoverNode(root, files, groups, setup, localPrepare, toolchains)) {
     modules.push({ id: 'root', path: '.' });
     ecosystems.push('node');
   }
   if (discoverGo(root, tracked, groups, modules, toolchains)) ecosystems.push('go');
-  if (discoverPython(root, tracked, groups, modules, setup, toolchains)) ecosystems.push('python');
+  if (discoverPython(tracked)) ecosystems.push('python');
   if (ecosystems.length === 0) {
     throw new Error('未发现受支持的 Node、Go 或 Python 项目；请提供经人工确认的 --contract 文件');
   }
@@ -270,9 +232,15 @@ export function discoverQualityContract(
   const specs = tracked.some((file) => file.startsWith('docs/specs/'))
     ? [{ kind: 'path' as const, path: 'docs/specs/**' }, { kind: 'pull-request' as const }]
     : [{ kind: 'pull-request' as const }];
-  const generatedPaths = ['dist', 'build', 'coverage', '.pytest_cache']
-    .filter((path) => existsSync(resolve(root, path)))
-    .map((path) => `${path}/**`);
+  const generatedPaths = [...new Set([
+    ...(ecosystems.includes('node') ? ['dist/**', 'build/**', 'coverage/**'] : []),
+    ...(ecosystems.includes('python')
+      ? ['dist/**', 'build/**', '.pytest_cache/**', '**/__pycache__/**', '**/*.egg-info/**']
+      : []),
+  ])];
+  const allowedPaths = [
+    ...(ecosystems.includes('node') ? ['node_modules/**'] : []),
+  ];
   const jobs = ALL_PLATFORMS.map((platform) => ({
     id: `${platform}-primary`,
     platform,
@@ -287,7 +255,7 @@ export function discoverQualityContract(
     detectedEcosystems: ecosystems,
     unresolvedCategories,
     contract: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       codingXVersion,
       repository: {
         provider: 'github',
@@ -302,6 +270,10 @@ export function discoverQualityContract(
       },
       modules,
       generatedPaths,
+      localValidation: {
+        prepare: localPrepare,
+        allowedPaths,
+      },
       checks,
       risk: {
         defaultCategories: [

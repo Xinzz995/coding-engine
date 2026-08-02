@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
+import { devNull } from 'node:os';
 import { isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import {
   classifyValidationOnlyGateFailure,
@@ -9,6 +10,7 @@ import {
   type ManagedGateContext,
   type ValidationOnlyFailureClassification,
 } from './gate.js';
+import { resolveExecutablePath } from './agent.js';
 import type { Prd, TddConfig, TddPolicyFile } from './prd.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 
@@ -266,7 +268,7 @@ const MANAGED_GIT_POLICY_PROBE = String.raw`
 import { spawnSync } from 'node:child_process';
 const request = JSON.parse(process.argv[1]);
 const run = (args) => {
-  const result = spawnSync('git', args, {
+  const result = spawnSync(request.git, ['--no-replace-objects', ...args], {
     cwd: process.cwd(),
     encoding: 'utf8',
     maxBuffer: ${GIT_OUTPUT_LIMIT},
@@ -288,7 +290,7 @@ if (output.prefix.ok) {
     output.baseline = run(['cat-file', '-e', request.baselineRef + '^{commit}']);
     if (output.baseline.ok) {
       output.diff = run([
-        'diff', '--no-ext-diff', '--no-color', '--unified=0', request.baselineRef,
+        'diff', '--no-ext-diff', '--no-textconv', '--text', '--no-color', '--unified=0', request.baselineRef,
         '--', ...request.sourcePathspecs,
       ]);
       if (output.diff.ok) {
@@ -307,7 +309,32 @@ async function runManagedGitPolicyProbes(
   config: TddConfig,
   managed: ManagedGateContext,
 ): Promise<ManagedGitPolicyResults> {
-  const environment = { ...process.env };
+  const environment = { ...(managed.environment ?? process.env) };
+  for (const name of Object.keys(environment)) {
+    if (name.toUpperCase().startsWith('GIT_')) delete environment[name];
+  }
+  Object.assign(environment, {
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: devNull,
+    GIT_TERMINAL_PROMPT: '0',
+    GIT_OPTIONAL_LOCKS: '0',
+    GIT_ATTR_NOSYSTEM: '1',
+  });
+  let git: string;
+  try {
+    git = realpathSync.native(
+      managed.gitExecutable ?? resolveExecutablePath('git', root, environment),
+    );
+  } catch (error) {
+    return {
+      prefix: {
+        ok: false,
+        stdout: '',
+        diagnostic: error instanceof Error ? error.message : String(error),
+        exitCode: null,
+      },
+    };
+  }
   const result = await runManagedWorkspaceProcess(managed.session, {
     kind: managed.kind,
     delegation: 'read-only-v1',
@@ -317,6 +344,7 @@ async function runManagedGitPolicyProbes(
       '--eval',
       MANAGED_GIT_POLICY_PROBE,
       JSON.stringify({
+        git,
         baselineRef: config.baselineRef,
         sourcePathspecs: config.sourcePathspecs,
       }),

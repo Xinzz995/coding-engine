@@ -46,3 +46,4 @@ scope: root
 | 27 | `/review-loop` 只生成不含 HEAD、时间和路径的一次性最小请求；`workspace record-review-decision` 在租约内重核当前 Review/finding/Issue 并由引擎填入提交与时间绑定 | ADR-021 Review 裁决入口 | 对账临时请求 schema；伪造或残留旧 head/at/path 字段被拒，Review 失效或 Issue 无效时业务记录不变 |
 | 28 | Builder/Validator 在本次 operation 内启动的服务必须在返回前终止并确认退出；用户在 operation 外预先启动的外部服务可复用且不得被误杀；禁止 `nohup`、daemonize 或跨轮后台逃逸 | ADR-021 子进程边界 | 分别运行内部临时服务与外部预启动服务：operation 后前者零残留，后者仍存活；故意后台逃逸时进入隔离而非假成功 |
 | 29 | 父进程崩溃、终止失败或未提交 mutation 不进行 pid stale 自动接管；新 writer 只能在显式 `workspace recover` 或 `resume-mutation` 完成精确恢复后进入 | ADR-021 崩溃恢复 | 制造 hard crash 与中断 mutation；重启 run/apply 必须拒绝，错误恢复身份也拒绝，精确恢复完成后才回到 ready |
+| 30 | Developer 在开发目录实现；本地准备、契约检查、TDD、Validator 和最终 Review 前机械检查只读取项目外的精确 HEAD 检出。开发目录 `.env`、`.claude`、旧依赖和 ignored 源码不可见；回执绑定验证环境，submodule/LFS/filter、tracked 改写或越界产物都不得假绿 | ADR-022 精确提交干净验证 | 在真实运行前向开发目录放入同名 ignored 干扰文件，对账 Developer cwd、Validator cwd/环境、receipt v2 摘要和临时目录清理；再分别制造准备失败与越界变更，确认不签发凭证 |

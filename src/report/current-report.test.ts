@@ -7,6 +7,7 @@ import { acceptanceHash } from '../contracts/validation-contract.js';
 import { tryReadPrd } from '../engine/prd.js';
 import { evaluateStoryValidationReceiptSet, tryReadState } from '../engine/state.js';
 import { readQualityContract, type QualityContract } from '../quality/contract.js';
+import { validationEnvironmentDigest } from '../quality/validation-environment.js';
 import { createReviewBinding } from '../review/binding.js';
 import type { ManagedReviewObservation } from '../review/managed-observation.js';
 import type { ReviewPreflightContext } from '../review/preflight.js';
@@ -25,6 +26,8 @@ afterEach(() => {
 function workspace(): string {
   const root = mkdtempSync(join(tmpdir(), 'current-report-test-'));
   roots.push(root);
+  const currentQuality = quality();
+  const head = 'b'.repeat(40);
   writeFileSync(
     join(root, 'prd.json'),
     JSON.stringify({
@@ -49,10 +52,15 @@ function workspace(): string {
         passes: true,
         validated: true,
         validationReceipt: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           requestId: 'report-test-request',
-          gitHead: 'b'.repeat(40),
+          gitHead: head,
           acceptanceHash: acceptanceHash('US-001', ['report is current']),
+          validationEnvironmentDigest: validationEnvironmentDigest({
+            contract: currentQuality.contract,
+            head,
+            additionalPolicy: { tdd: null },
+          }),
         },
         notes: '',
         retryCount: 0,
@@ -156,9 +164,19 @@ function reviewState(
   ];
   const prd = tryReadPrd(join(workspacePath, 'prd.json'));
   const runState = tryReadState(join(workspacePath, 'state.json'));
+  const expectedStoryEnvironment = validationEnvironmentDigest({
+    contract: reviewContext.baseContract,
+    head: reviewContext.headSha,
+    additionalPolicy: { tdd: null },
+  });
   const storyValidation =
     prd && runState
-      ? evaluateStoryValidationReceiptSet(prd, runState, reviewContext.headSha)
+      ? evaluateStoryValidationReceiptSet(
+          prd,
+          runState,
+          reviewContext.headSha,
+          expectedStoryEnvironment,
+        )
       : null;
   if (!storyValidation?.digest) throw new Error('expected current Story validation fixture');
   const risk = applyReviewerRequestedDeepReview(assessReviewRisk(reviewContext), primaryAxes);
@@ -170,10 +188,14 @@ function reviewState(
     model: 'review-model',
     runnerVersion: 'codex 1.2.3',
     storyValidationDigest: storyValidation.digest,
+    validationEnvironmentDigest: validationEnvironmentDigest({
+      contract: reviewContext.baseContract,
+      head: reviewContext.headSha,
+    }),
   });
   if (headOverride !== undefined) binding.headSha = headOverride;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'passed',
     deliveryStatus: 'ready',
     binding,
@@ -218,7 +240,12 @@ function session(workspacePath: string): WorkspaceSession {
 function observation(gitHead: () => string): ManagedReviewObservation {
   return {
     git: async (args) => {
-      if (args.length === 3 && args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') {
+      if (
+        args.length === 3 &&
+        args[0] === 'rev-parse' &&
+        args[1] === '--verify' &&
+        args[2] === 'HEAD'
+      ) {
         return `${gitHead()}\n`;
       }
       throw new Error('unexpected git call in deterministic seam');

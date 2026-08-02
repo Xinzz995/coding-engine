@@ -1,7 +1,8 @@
 import type { AgentKind } from '../engine/agent.js';
 import type { QualityRiskCategory } from '../quality/contract.js';
 
-export const REVIEW_STATE_SCHEMA_VERSION = 1 as const;
+export const REVIEW_STATE_SCHEMA_VERSION = 2 as const;
+export const LEGACY_REVIEW_STATE_SCHEMA_VERSION = 1 as const;
 export const REVIEW_DECISIONS_SCHEMA_VERSION = 1 as const;
 export const REVIEW_RULES_VERSION = '1.1.0';
 export const REVIEW_STATE_FILE = 'final-review.json';
@@ -43,7 +44,7 @@ export interface ReviewRiskAssessment {
   digest: string;
 }
 
-export interface ReviewBinding {
+interface ReviewBindingBase {
   prNumber: number;
   targetBranch: string;
   baseSha: string;
@@ -60,11 +61,20 @@ export interface ReviewBinding {
   reviewRulesVersion: string;
   reviewRulesDigest: string;
   riskDigest: string;
-  /**
-   * 按 PRD 顺序绑定全部非 blocked Story 的精确 Validator 凭证。
-   * 可选只为读取旧 final-review.json；新 Review 必须写入，缺失时不能保持当前。
-   */
+}
+
+/** schema v1 only remains readable so status can explain why it is stale. */
+export interface LegacyReviewBinding extends ReviewBindingBase {
+  /** The later schema-v1 shape added this field before schema v2 existed. */
   storyValidationDigest?: string;
+}
+
+/** Every schema-v2 Review binds both independent validation identities. */
+export interface ReviewBinding extends ReviewBindingBase {
+  /** Mechanical clean-checkout environment bound to the Review head. */
+  validationEnvironmentDigest: string;
+  /** Ordered, non-blocked Story Validator receipt-set identity. */
+  storyValidationDigest: string;
 }
 
 export interface ReviewAxisResult {
@@ -91,11 +101,9 @@ export interface ReviewRemoteState {
   checkedAt: string;
 }
 
-export interface FinalReviewState {
-  schemaVersion: typeof REVIEW_STATE_SCHEMA_VERSION;
+interface FinalReviewStateBase {
   status: ReviewStatus;
   deliveryStatus: 'ready' | 'findings' | 'unverifiable' | 'remote-pending' | 'shadow';
-  binding: ReviewBinding;
   risk: ReviewRiskAssessment;
   axes: ReviewAxisResult[];
   remote: ReviewRemoteState;
@@ -104,6 +112,20 @@ export interface FinalReviewState {
   startedAt: string;
   completedAt: string;
 }
+
+/** Current writable state. Engine writers must never emit schema v1. */
+export interface FinalReviewState extends FinalReviewStateBase {
+  schemaVersion: typeof REVIEW_STATE_SCHEMA_VERSION;
+  binding: ReviewBinding;
+}
+
+/** Read-only migration shape. It is always stale and cannot receive new decisions. */
+export interface LegacyFinalReviewState extends FinalReviewStateBase {
+  schemaVersion: typeof LEGACY_REVIEW_STATE_SCHEMA_VERSION;
+  binding: LegacyReviewBinding;
+}
+
+export type ReadableFinalReviewState = FinalReviewState | LegacyFinalReviewState;
 
 export type ReviewDecisionAction =
   'counterevidence' | 'p1-deferred' | 'acknowledged' | 'fix-requested';

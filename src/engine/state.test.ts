@@ -35,6 +35,7 @@ import { acceptanceHash, createValidationRequest } from './validation-protocol.j
 
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
+const ENVIRONMENT = `sha256:${'e'.repeat(64)}`;
 
 function storyIdentity(id: string, acceptanceCriteria: string[] = ['AC 1']) {
   return { id, acceptanceCriteria };
@@ -47,10 +48,11 @@ function receiptFor(
   requestId = 'request-1',
 ): ValidationReceipt {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     requestId,
     gitHead,
     acceptanceHash: acceptanceHash(id, acceptanceCriteria),
+    validationEnvironmentDigest: ENVIRONMENT,
   };
 }
 
@@ -85,18 +87,26 @@ function tempDir(): string {
 describe('parseValidationReceipt', () => {
   const valid = receiptFor('US-001');
 
-  it('accepts exactly the v1 schema', () => {
+  it('accepts exactly the v2 schema and keeps v1 readable for fail-closed migration', () => {
     expect(parseValidationReceipt(valid)).toEqual(valid);
+    expect(
+      parseValidationReceipt({
+        schemaVersion: 1,
+        requestId: valid.requestId,
+        gitHead: valid.gitHead,
+        acceptanceHash: valid.acceptanceHash,
+      }),
+    ).toMatchObject({ schemaVersion: 1 });
   });
 
   it.each([
     ['unknown key', { ...valid, extra: true }],
-    ['missing key', { schemaVersion: 1, requestId: 'request-1', gitHead: HEAD_A }],
+    ['missing key', { schemaVersion: 2, requestId: 'request-1', gitHead: HEAD_A }],
     ['empty request', { ...valid, requestId: '   ' }],
     ['bad head', { ...valid, gitHead: 'not-a-head' }],
     ['empty head', { ...valid, gitHead: '' }],
     ['bad hash', { ...valid, acceptanceHash: 'sha256:nope' }],
-    ['wrong version', { ...valid, schemaVersion: 2 }],
+    ['wrong version', { ...valid, schemaVersion: 3 }],
   ])('rejects %s', (_label, value) => {
     expect(parseValidationReceipt(value)).toBeNull();
   });
@@ -147,6 +157,34 @@ describe('tryReadState', () => {
       passes: true,
       validated: true,
       validationReceipt,
+    });
+    rmSync(dir, { recursive: true, force: true });
+  });
+  it('keeps a legacy receipt readable but never displays it as current validation', () => {
+    const dir = tempDir();
+    const file = join(dir, 'state.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: {
+            schemaVersion: 1,
+            requestId: 'legacy-request',
+            gitHead: HEAD_A,
+            acceptanceHash: acceptanceHash('US-001', ['AC 1']),
+          },
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+        },
+      }),
+    );
+    expect(tryReadState(file)?.['US-001']).toMatchObject({
+      passes: true,
+      validated: false,
+      validationReceipt: null,
     });
     rmSync(dir, { recursive: true, force: true });
   });
@@ -354,14 +392,16 @@ describe('current Validator receipt evaluation', () => {
 
   it('accepts only the exact current HEAD, Story ID and ordered AC snapshot', () => {
     const state = currentState()['US-001'];
-    expect(evaluateStoryValidation(story, state, HEAD_A).valid).toBe(true);
-    expect(isStoryPassedAt(story, state, HEAD_A)).toBe(true);
+    expect(evaluateStoryValidation(story, state, HEAD_A, ENVIRONMENT).valid).toBe(true);
+    expect(isStoryPassedAt(story, state, HEAD_A, ENVIRONMENT)).toBe(true);
 
-    expect(evaluateStoryValidation(story, state, HEAD_B)).toMatchObject({
+    expect(evaluateStoryValidation(story, state, HEAD_B, ENVIRONMENT)).toMatchObject({
       valid: false,
       reason: 'head-mismatch',
     });
-    expect(evaluateStoryValidation({ ...story, id: 'US-002' }, state, HEAD_A)).toMatchObject({
+    expect(
+      evaluateStoryValidation({ ...story, id: 'US-002' }, state, HEAD_A, ENVIRONMENT),
+    ).toMatchObject({
       valid: false,
       reason: 'acceptance-mismatch',
     });
@@ -370,18 +410,24 @@ describe('current Validator receipt evaluation', () => {
         { ...story, acceptanceCriteria: ['first', 'changed'] },
         state,
         HEAD_A,
+        ENVIRONMENT,
       ),
     ).toMatchObject({
       valid: false,
       reason: 'acceptance-mismatch',
     });
     expect(
-      evaluateStoryValidation({ ...story, acceptanceCriteria: ['second', 'first'] }, state, HEAD_A),
+      evaluateStoryValidation(
+        { ...story, acceptanceCriteria: ['second', 'first'] },
+        state,
+        HEAD_A,
+        ENVIRONMENT,
+      ),
     ).toMatchObject({
       valid: false,
       reason: 'acceptance-mismatch',
     });
-    expect(evaluateStoryValidation(story, state, 'not-a-head')).toMatchObject({
+    expect(evaluateStoryValidation(story, state, 'not-a-head', ENVIRONMENT)).toMatchObject({
       valid: false,
       reason: 'invalid-current-head',
     });
@@ -393,7 +439,111 @@ describe('current Validator receipt evaluation', () => {
       ...currentState()['US-001'],
       validationReceipt: receiptFor('US-001', criteria),
     };
-    expect(isStoryPassedAt(storyIdentity('US-002', criteria), copied, HEAD_A)).toBe(false);
+    expect(isStoryPassedAt(storyIdentity('US-002', criteria), copied, HEAD_A, ENVIRONMENT)).toBe(
+      false,
+    );
+  });
+
+  it('rejects a legacy receipt and a receipt from a different validation environment at the same HEAD', () => {
+    const current = currentState()['US-001'];
+    const legacy: RunState[string] = {
+      ...current,
+      validationReceipt: {
+        schemaVersion: 1,
+        requestId: 'request-1',
+        gitHead: HEAD_A,
+        acceptanceHash: acceptanceHash(story.id, story.acceptanceCriteria),
+      },
+    };
+    expect(evaluateStoryValidation(story, legacy, HEAD_A, ENVIRONMENT)).toMatchObject({
+      valid: false,
+      reason: 'missing-environment-binding',
+    });
+    expect(
+      evaluateStoryValidation(story, current, HEAD_A, `sha256:${'f'.repeat(64)}`),
+    ).toMatchObject({ valid: false, reason: 'environment-mismatch' });
+  });
+
+  it.each([undefined, 'not-a-digest'])(
+    'fails every Story-currentness API closed for an invalid expected environment: %s',
+    (invalidEnvironment) => {
+      const prd = contentPrd(['US-001']);
+      const state: RunState = {
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: receiptFor('US-001', []),
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      };
+      const expected = invalidEnvironment as unknown as string;
+
+      expect(
+        evaluateStoryValidation(prd.userStories[0], state['US-001'], HEAD_A, expected),
+      ).toMatchObject({ valid: false, reason: 'invalid-expected-environment' });
+      expect(isStoryPassedAt(prd.userStories[0], state['US-001'], HEAD_A, expected)).toBe(false);
+      expect(evaluateStoryValidationReceiptSet(prd, state, HEAD_A, expected)).toMatchObject({
+        valid: false,
+        digest: null,
+        receipts: [],
+        invalid: [{ storyId: 'US-001', reason: 'invalid-expected-environment' }],
+      });
+      const reconciled = reconcileValidationReceipts(prd, state, HEAD_A, expected);
+      expect(reconciled.invalidatedStoryIds).toEqual(['US-001']);
+      expect(reconciled.state['US-001']).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+      });
+      expect(selectNextStory(prd, state, HEAD_A, expected)).toEqual({
+        storyId: 'US-001',
+        mode: 'validation-only',
+      });
+      expect(allStoriesResolvedAt(prd, state, HEAD_A, expected)).toBe(false);
+    },
+  );
+
+  it('clears display-only validation and emits no digest when the expected environment is unavailable', () => {
+    const prd = contentPrd(['US-001']);
+    const state: RunState = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: receiptFor('US-001', []),
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+
+    const display = evaluateStoryValidationDisplay(prd, state, HEAD_A, null);
+    expect(display.digest).toBeNull();
+    expect(display.currentness).toMatchObject({
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: null,
+    });
+    expect(display.state['US-001']).toMatchObject({
+      passes: true,
+      validated: false,
+      validationReceipt: null,
+    });
+    expect(state['US-001'].validated).toBe(true);
+  });
+
+  it('never emits an empty receipt-set digest when every Story is blocked but the environment is invalid', () => {
+    const prd = contentPrd(['US-001']);
+    const state: RunState = {
+      'US-001': { ...INITIAL_STORY_STATE, blocked: true },
+    };
+    expect(
+      evaluateStoryValidationReceiptSet(prd, state, HEAD_A, undefined as unknown as string),
+    ).toEqual({ valid: false, digest: null, receipts: [], invalid: [] });
+    expect(allStoriesResolvedAt(prd, state, HEAD_A, undefined as unknown as string)).toBe(false);
   });
 
   it('reconciles every invalid receipt while preserving the implementation candidate and metadata', () => {
@@ -418,7 +568,7 @@ describe('current Validator receipt evaluation', () => {
         escalated: false,
       },
     };
-    const reconciled = reconcileValidationReceipts(prd, state, HEAD_B);
+    const reconciled = reconcileValidationReceipts(prd, state, HEAD_B, ENVIRONMENT);
     expect(reconciled.invalidatedStoryIds).toEqual(['US-001']);
     expect(reconciled.state['US-001']).toEqual({
       ...state['US-001'],
@@ -452,7 +602,7 @@ describe('current Validator receipt evaluation', () => {
         escalated: false,
       },
     };
-    const reconciled = reconcileValidationReceipts(prd, state, HEAD_A);
+    const reconciled = reconcileValidationReceipts(prd, state, HEAD_A, ENVIRONMENT);
     expect(reconciled.invalidatedStoryIds).toEqual(['US-001']);
     expect(reconciled.state['US-001']).toMatchObject({
       passes: true,
@@ -493,8 +643,13 @@ describe('current Validator receipt evaluation', () => {
         escalated: false,
       },
     };
-    const first = evaluateStoryValidationReceiptSet(prd, state, HEAD_A);
-    const again = evaluateStoryValidationReceiptSet(prd, structuredClone(state), HEAD_A);
+    const first = evaluateStoryValidationReceiptSet(prd, state, HEAD_A, ENVIRONMENT);
+    const again = evaluateStoryValidationReceiptSet(
+      prd,
+      structuredClone(state),
+      HEAD_A,
+      ENVIRONMENT,
+    );
     expect(first).toMatchObject({
       valid: true,
       digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
@@ -505,11 +660,15 @@ describe('current Validator receipt evaluation', () => {
 
     const resigned = structuredClone(state);
     resigned['US-001'].validationReceipt = receiptFor('US-001', [], HEAD_A, 'request-new');
-    expect(evaluateStoryValidationReceiptSet(prd, resigned, HEAD_A).digest).not.toBe(first.digest);
+    expect(evaluateStoryValidationReceiptSet(prd, resigned, HEAD_A, ENVIRONMENT).digest).not.toBe(
+      first.digest,
+    );
 
     const reordered = structuredClone(prd);
     reordered.userStories = [prd.userStories[2], prd.userStories[1], prd.userStories[0]];
-    expect(evaluateStoryValidationReceiptSet(reordered, state, HEAD_A).digest).not.toBe(first.digest);
+    expect(
+      evaluateStoryValidationReceiptSet(reordered, state, HEAD_A, ENVIRONMENT).digest,
+    ).not.toBe(first.digest);
   });
 
   it('does not issue a receipt-set digest while any non-blocked Story is stale', () => {
@@ -534,7 +693,7 @@ describe('current Validator receipt evaluation', () => {
         escalated: false,
       },
     };
-    expect(evaluateStoryValidationReceiptSet(prd, state, HEAD_A)).toMatchObject({
+    expect(evaluateStoryValidationReceiptSet(prd, state, HEAD_A, ENVIRONMENT)).toMatchObject({
       valid: false,
       digest: null,
       invalid: [{ storyId: 'US-002', reason: 'head-mismatch' }],
@@ -543,12 +702,12 @@ describe('current Validator receipt evaluation', () => {
 
   it('does not issue a digest or report convergence for empty or duplicate Story identities', () => {
     const empty = contentPrd([]);
-    expect(evaluateStoryValidationReceiptSet(empty, {}, HEAD_A)).toMatchObject({
+    expect(evaluateStoryValidationReceiptSet(empty, {}, HEAD_A, ENVIRONMENT)).toMatchObject({
       valid: false,
       digest: null,
       configurationError: 'prd.json 必须包含至少一个 Story',
     });
-    expect(allStoriesResolvedAt(empty, {}, HEAD_A)).toBe(false);
+    expect(allStoriesResolvedAt(empty, {}, HEAD_A, ENVIRONMENT)).toBe(false);
 
     const duplicate = contentPrd(['US-001', 'US-001']);
     const shared: RunState = {
@@ -562,13 +721,15 @@ describe('current Validator receipt evaluation', () => {
         escalated: false,
       },
     };
-    expect(evaluateStoryValidationReceiptSet(duplicate, shared, HEAD_A)).toMatchObject({
-      valid: false,
-      digest: null,
-      configurationError: 'userStories 包含重复 Story ID：US-001',
-    });
+    expect(evaluateStoryValidationReceiptSet(duplicate, shared, HEAD_A, ENVIRONMENT)).toMatchObject(
+      {
+        valid: false,
+        digest: null,
+        configurationError: 'userStories 包含重复 Story ID：US-001',
+      },
+    );
     const persisted = structuredClone(shared);
-    const display = evaluateStoryValidationDisplay(duplicate, shared, HEAD_A);
+    const display = evaluateStoryValidationDisplay(duplicate, shared, HEAD_A, ENVIRONMENT);
     expect(display.currentness).toEqual({
       gitHead: HEAD_A,
       current: false,
@@ -578,7 +739,7 @@ describe('current Validator receipt evaluation', () => {
     expect(mergedStories(duplicate, display.state)).toHaveLength(2);
     expect(mergedStories(duplicate, display.state).every((story) => !story.validated)).toBe(true);
     expect(shared).toEqual(persisted);
-    expect(allStoriesResolvedAt(duplicate, shared, HEAD_A)).toBe(false);
+    expect(allStoriesResolvedAt(duplicate, shared, HEAD_A, ENVIRONMENT)).toBe(false);
 
     const malformed = {
       ...contentPrd([]),
@@ -586,7 +747,7 @@ describe('current Validator receipt evaluation', () => {
     } as unknown as Prd;
     expect(initialStateFor(malformed)).toEqual({});
     expect(blankStateFor(malformed)).toEqual({});
-    const malformedDisplay = evaluateStoryValidationDisplay(malformed, {}, HEAD_A);
+    const malformedDisplay = evaluateStoryValidationDisplay(malformed, {}, HEAD_A, ENVIRONMENT);
     expect(malformedDisplay.currentness).toEqual({
       gitHead: HEAD_A,
       current: false,
@@ -674,13 +835,13 @@ describe('selectNextStory / allStoriesResolvedAt', () => {
       'US-002': { ...INITIAL_STORY_STATE },
       'US-003': candidate('US-003', true),
     };
-    expect(selectNextStory(prd, state, HEAD_A)).toEqual({
+    expect(selectNextStory(prd, state, HEAD_A, ENVIRONMENT)).toEqual({
       storyId: 'US-002',
       mode: 'implementation',
     });
 
     state['US-002'] = candidate('US-002', false);
-    expect(selectNextStory(prd, state, HEAD_A)).toEqual({
+    expect(selectNextStory(prd, state, HEAD_A, ENVIRONMENT)).toEqual({
       storyId: 'US-001',
       mode: 'validation-only',
     });
@@ -692,11 +853,11 @@ describe('selectNextStory / allStoriesResolvedAt', () => {
       'US-002': candidate('US-002', true),
       'US-003': { ...INITIAL_STORY_STATE, blocked: true },
     };
-    expect(allStoriesResolvedAt(prd, state, HEAD_A)).toBe(true);
-    expect(selectNextStory(prd, state, HEAD_A)).toBeNull();
+    expect(allStoriesResolvedAt(prd, state, HEAD_A, ENVIRONMENT)).toBe(true);
+    expect(selectNextStory(prd, state, HEAD_A, ENVIRONMENT)).toBeNull();
 
-    expect(allStoriesResolvedAt(prd, state, HEAD_B)).toBe(false);
-    expect(selectNextStory(prd, state, HEAD_B)).toEqual({
+    expect(allStoriesResolvedAt(prd, state, HEAD_B, ENVIRONMENT)).toBe(false);
+    expect(selectNextStory(prd, state, HEAD_B, ENVIRONMENT)).toEqual({
       storyId: 'US-001',
       mode: 'validation-only',
     });
@@ -861,14 +1022,14 @@ describe('validated engine ownership', () => {
   it('issues a complete request-bound receipt only for the matching passing candidate', () => {
     const story = storyIdentity('US-001', ['first', 'second']);
     const request = createValidationRequest(story, '/tmp/workspace', HEAD_A, 'request-1');
-    const issued = issueValidationReceipt(base(), story, request);
+    const issued = issueValidationReceipt(base(), story, request, ENVIRONMENT);
     expect(issued.changed).toBe(true);
     expect(validationOwnershipOf(issued.state['US-001'])).toEqual({
       validated: true,
       validationReceipt: receiptFor('US-001', ['first', 'second']),
     });
-    expect(isStoryPassedAt(story, issued.state['US-001'], HEAD_A)).toBe(true);
-    expect(issueValidationReceipt(issued.state, story, request).changed).toBe(false);
+    expect(isStoryPassedAt(story, issued.state['US-001'], HEAD_A, ENVIRONMENT)).toBe(true);
+    expect(issueValidationReceipt(issued.state, story, request, ENVIRONMENT).changed).toBe(false);
 
     // 旧入口不能再签发无身份的裸布尔结论。
     expect(issueValidationReceipt(base(), 'US-001').changed).toBe(false);
@@ -879,6 +1040,7 @@ describe('validated engine ownership', () => {
         },
         story,
         request,
+        ENVIRONMENT,
       ).changed,
     ).toBe(false);
     expect(
@@ -888,6 +1050,7 @@ describe('validated engine ownership', () => {
         },
         story,
         request,
+        ENVIRONMENT,
       ).changed,
     ).toBe(false);
   });
@@ -903,7 +1066,7 @@ describe('validated engine ownership', () => {
       { ...request, acceptanceCriteria: ['second', 'first'] },
     ];
     for (const invalid of invalidRequests) {
-      expect(issueValidationReceipt(base(), story, invalid).changed).toBe(false);
+      expect(issueValidationReceipt(base(), story, invalid, ENVIRONMENT).changed).toBe(false);
     }
   });
 
