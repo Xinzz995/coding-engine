@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -11,6 +11,7 @@ import {
 import type { FinalReviewState } from '../review/types.js';
 import { digestCandidateStoryValidationEnvironment } from './story-validation-currentness.js';
 import type { TddConfig } from './prd.js';
+import { CODING_X_VERSION } from '../version.js';
 import {
   TEST_QUALITY_DIGEST,
   TEST_QUALITY_CONTRACT,
@@ -28,6 +29,14 @@ import {
 
 function writeFinalReviewFixture(workspace: string, state: FinalReviewState): void {
   writeFileSync(join(workspace, 'final-review.json'), `${JSON.stringify(state, null, 2)}\n`);
+}
+
+function currentVersionContractFixture(): string {
+  const contract = JSON.parse(
+    readFileSync(resolve('.coding-x/quality.json'), 'utf8'),
+  ) as Record<string, unknown>;
+  contract.codingXVersion = CODING_X_VERSION;
+  return `${JSON.stringify(contract, null, 2)}\n`;
 }
 
 describe('quality contract preflight and shadow mode', () => {
@@ -381,7 +390,7 @@ describe('quality contract preflight and shadow mode', () => {
     const contractDirectory = join(project.projectRoot, '.coding-x');
     mkdirSync(contractDirectory);
     const contractPath = join(contractDirectory, 'quality.json');
-    writeFileSync(contractPath, readFileSync(resolve('.coding-x/quality.json'), 'utf8'));
+    writeFileSync(contractPath, currentVersionContractFixture());
     execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: project.projectRoot });
     execFileSync('git', ['commit', '-q', '-m', 'test: tracked quality contract'], {
       cwd: project.projectRoot,
@@ -403,8 +412,16 @@ describe('quality contract preflight and shadow mode', () => {
     const config = strictConfig(project.workspace, project.instructionsDir);
     delete config.qualityContractReader;
 
-    expect(await runProductionLoop(config)).toBe(2);
-    expect(existsSync(fake.calls)).toBe(false);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await runProductionLoop(config)).toBe(2);
+      expect(existsSync(fake.calls)).toBe(false);
+      expect(error).toHaveBeenCalledWith(
+        expect.stringContaining('工作树质量契约未绑定当前 HEAD'),
+      );
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it('allows a mismatched candidate only in shadow mode and returns 7 instead of delivery-ready', async () => {
@@ -482,7 +499,7 @@ describe('quality contract preflight and shadow mode', () => {
     const contractDirectory = join(project.projectRoot, '.coding-x');
     mkdirSync(contractDirectory);
     const contractPath = join(contractDirectory, 'quality.json');
-    const originalContract = readFileSync(resolve('.coding-x/quality.json'), 'utf8');
+    const originalContract = currentVersionContractFixture();
     writeFileSync(contractPath, originalContract);
     execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: project.projectRoot });
     execFileSync('git', ['commit', '-q', '-m', 'test: tracked quality contract'], {
