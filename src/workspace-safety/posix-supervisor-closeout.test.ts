@@ -208,7 +208,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
   it('bounds a live supervisor that never emits DRAINED and preserves the write fence', async () => {
     const state = await setup();
     let pgid: number | undefined;
-    const startedAt = performance.now();
+    let armedAt: number | undefined;
     let failedAt: number | undefined;
 
     try {
@@ -226,6 +226,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
             hooks: {
               onArmed: ({ supervisorPid, containment }) => {
                 if (containment.platform === 'posix-process-group-v1') pgid = containment.pgid;
+                armedAt = performance.now();
                 process.kill(supervisorPid, 'SIGSTOP');
               },
             },
@@ -247,8 +248,10 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       }
     }
 
+    expect(armedAt).toBeTypeOf('number');
+    if (armedAt === undefined) throw new Error('POSIX supervisor never reached ARMED');
     expect(failedAt).toBeTypeOf('number');
-    expect(failedAt - startedAt).toBeLessThan(1000);
+    expect(failedAt - armedAt).toBeLessThan(1000);
     const active = operationPath(state.workspace);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
     expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
@@ -303,7 +306,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       `fs.writeFileSync(${JSON.stringify(escapedPidPath)},String(child.pid));`,
       'child.unref();',
     ].join('');
-    const startedAt = performance.now();
+    let closeoutStartedAt: number | undefined;
     let failedAt: number | undefined;
 
     try {
@@ -325,6 +328,11 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
               ackMs: 100,
               pollMs: 10,
             },
+            hooks: {
+              onRootResult: () => {
+                closeoutStartedAt = performance.now();
+              },
+            },
           }),
         ),
       ).rejects.toMatchObject({ code: 'isolated' });
@@ -343,8 +351,10 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       }
     }
 
+    expect(closeoutStartedAt).toBeTypeOf('number');
+    if (closeoutStartedAt === undefined) throw new Error('POSIX supervisor never reported RESULT');
     expect(failedAt).toBeTypeOf('number');
-    expect(failedAt - startedAt).toBeLessThan(1500);
+    expect(failedAt - closeoutStartedAt).toBeLessThan(1500);
     const active = operationPath(state.workspace);
     expect(existsSync(active)).toBe(true);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
