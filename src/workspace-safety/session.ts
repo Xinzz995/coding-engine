@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { lstat, unlink } from 'node:fs/promises';
+import { lstat, mkdir, unlink } from 'node:fs/promises';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import {
   assertWritableFileTarget,
   ensureSafeParentDirectory,
   pathExists,
   readExactFile,
+  readStableOrdinaryDirectoryIdentity,
   replaceFileFromStaging,
   resolveWorkspaceRelativePath,
   writeNewFile,
@@ -17,6 +18,7 @@ export type WorkspaceSessionState = 'open' | 'closing' | 'closed' | 'isolated' |
 
 export interface WorkspaceSessionHooks {
   readonly afterTempCreated?: (path: string) => void | Promise<void>;
+  readonly beforeDirectoryCommit?: (path: string) => void | Promise<void>;
   readonly beforeRemoveCommit?: (path: string) => void | Promise<void>;
 }
 
@@ -195,6 +197,53 @@ export class WorkspaceWriter {
 
   get workspacePath(): string {
     return this.session.lease.workspace.path;
+  }
+
+  ensureDirectory(relativePath: string): Promise<void> {
+    return this.session.withExclusiveAction(async (lease) => {
+      assertOrdinaryWriterPath(relativePath);
+      await lease.verify();
+      const target = resolveWorkspaceRelativePath(lease.workspace.path, relativePath);
+      await ensureSafeParentDirectory(lease.workspace.path, target);
+
+      if (await pathExists(target)) {
+        const before = await readStableOrdinaryDirectoryIdentity(
+          target,
+          `workspace 目录目标 ${relativePath}`,
+        );
+        await lease.verify();
+        await readStableOrdinaryDirectoryIdentity(
+          target,
+          `workspace 目录目标 ${relativePath}`,
+          before,
+        );
+        return;
+      }
+
+      await this.session.hooks.beforeDirectoryCommit?.(target);
+      await lease.verify();
+      try {
+        await mkdir(target, { mode: 0o700 });
+      } catch (error) {
+        if (fileSystemErrorCode(error) === 'EEXIST') {
+          throw new WorkspaceSafetyError(
+            'lease-lost',
+            `workspace 目录目标在创建前发生冲突：${relativePath}`,
+          );
+        }
+        throw error;
+      }
+      const created = await readStableOrdinaryDirectoryIdentity(
+        target,
+        `workspace 目录目标 ${relativePath}`,
+      );
+      await lease.verify();
+      await readStableOrdinaryDirectoryIdentity(
+        target,
+        `workspace 目录目标 ${relativePath}`,
+        created,
+      );
+    });
   }
 
   writeFile(relativePath: string, data: WorkspaceWriteData): Promise<void> {
