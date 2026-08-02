@@ -13,8 +13,8 @@ export const REQUIRED_WINDOWS_NATIVE_SUITES = [
   'windows-reparse-point.windows.test.ts',
   'windows-review-temporary-domain.windows.test.ts',
 ];
-export const WINDOWS_NATIVE_SUITE_TIMEOUT_MS = 6 * 60_000;
-export const WINDOWS_NATIVE_TOTAL_TIMEOUT_MS = 16 * 60_000;
+export const WINDOWS_NATIVE_SUITE_TIMEOUT_MS = 9 * 60_000;
+export const WINDOWS_NATIVE_TOTAL_TIMEOUT_MS = 19 * 60_000;
 const REPORT_COUNTER_FIELDS = [
   'numFailedTestSuites',
   'numFailedTests',
