@@ -361,6 +361,55 @@ describe.runIf(
   );
 
   it.runIf(process.platform !== 'win32')(
+    'rejects an external directory link before later validation can write through it',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const external = mkdtempSync(join(tmpdir(), 'coding-x-external-artifact-'));
+      roots.push(external);
+      const escaped = join(external, 'escaped.txt');
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          (async () => {
+            const checkout = await createCleanValidationCheckout({
+              sourceRoot: source.root,
+              head: source.head(),
+              contract: contract({
+                prepare: [
+                  {
+                    executable: process.execPath,
+                    args: [
+                      '-e',
+                      `require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync(${JSON.stringify(external)}, 'node_modules/external', 'dir')`,
+                    ],
+                    cwd: '.',
+                    platforms: ['linux', 'macos'],
+                    timeoutMs: 5_000,
+                  },
+                ],
+              }),
+              managed: { session: managed.session, kind: 'quality-check' },
+            });
+            try {
+              writeFileSync(
+                join(checkout.root, 'node_modules', 'external', 'escaped.txt'),
+                'escape\n',
+              );
+              await checkout.assertCurrent('外部目录链接写入测试');
+            } finally {
+              checkout.cleanup();
+            }
+          })(),
+        ).rejects.toMatchObject({ code: 'artifact-boundary-violated' });
+        expect(existsSync(escaped)).toBe(false);
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'rejects links to the developer tree but permits a prepared system interpreter link',
     async () => {
       const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
@@ -409,7 +458,58 @@ describe.runIf(
           }),
           managed: { session: managed.session, kind: 'quality-check' },
         });
+        await prepared.assertCurrent('外部普通文件链接复核');
+        rmSync(join(prepared.root, 'node_modules', 'system-node'));
+        symlinkSync(process.execPath, join(prepared.root, 'node_modules', 'system-node'));
+        await expect(prepared.assertCurrent('外部普通文件链接替换后')).rejects.toMatchObject({
+          code: 'artifact-boundary-violated',
+        });
         expect(prepared.cleanup()).toMatchObject({ status: 'removed' });
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'invalidates a prepared external file link when its target is written',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const external = mkdtempSync(join(tmpdir(), 'coding-x-external-file-'));
+      roots.push(external);
+      const target = join(external, 'tool');
+      writeFileSync(target, 'original\n');
+      const managed = await createManagedProcessTestSession();
+      try {
+        const checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract({
+            prepare: [
+              {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  `require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync(${JSON.stringify(target)}, 'node_modules/tool')`,
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos'],
+                timeoutMs: 5_000,
+              },
+            ],
+          }),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        try {
+          await checkout.assertCurrent('外部普通文件链接写入前');
+          writeFileSync(join(checkout.root, 'node_modules', 'tool'), 'changed\n');
+          await expect(checkout.assertCurrent('外部普通文件链接写入后')).rejects.toMatchObject({
+            code: 'artifact-boundary-violated',
+          });
+        } finally {
+          expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+        }
       } finally {
         await managed.close();
       }

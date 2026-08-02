@@ -27,6 +27,8 @@ ADR-015 把 Validator 结果绑定到 Git HEAD 与验收标准，ADR-021 又保�
   working-tree encoding；首版不静默降级复制工作树；
 - 每个阶段前后机械核对 detached HEAD、index/tracked tree 与新增/ignored 产物边界；项目生成物和
   本地依赖只能出现在契约的明确目录模式中；
+- 允许目录的基路径必须是字面目录，不能用 glob 扩大边界；prepare 产生的项目外目录链接一律拒绝，
+  Python venv 等确需的项目外普通文件链接只在大小有界时冻结链接及目标身份与内容，后续逐阶段复核；
 - 同一 Story 的机械检查、TDD 与 Validator 共用检出；Validator 通过后先安全清理再签 receipt，后续
   Story 或下次运行重建。管理器内部若复用仍先清空非 tracked 内容并重跑 prepare；
 - Validator receipt v2 额外绑定验证环境摘要。v1 receipt 保持可读以便安全迁移，但不能成为当前通过。

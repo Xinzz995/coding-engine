@@ -1,8 +1,15 @@
+import { createHash } from 'node:crypto';
 import {
+  constants as fsConstants,
+  closeSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readlinkSync,
+  readSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -31,6 +38,7 @@ const MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_VALIDATION_TREE_ENTRIES = 200_000;
 const MAX_GIT_CONTROL_ENTRIES = 20_000;
 const MAX_GIT_CONTROL_BYTES = 32 * 1024 * 1024;
+const MAX_EXTERNAL_LINK_FILE_BYTES = 256 * 1024 * 1024;
 
 export type CleanValidationCheckoutErrorCode =
   | 'invalid-source'
@@ -56,6 +64,21 @@ interface DirectoryIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
   readonly uid: bigint;
+}
+
+interface ExternalFileStatIdentity extends DirectoryIdentity {
+  readonly mode: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
+}
+
+interface ExternalFileLinkIdentity {
+  readonly resolvedPath: string;
+  readonly link: ExternalFileStatIdentity;
+  readonly linkTargetDigest: string;
+  readonly target: ExternalFileStatIdentity;
+  readonly targetDigest: string;
 }
 
 export interface CleanValidationCheckoutOptions {
@@ -137,9 +160,157 @@ function sameFileIdentity(left: DirectoryIdentity, right: BigIntStats): boolean 
   );
 }
 
+function externalFileStatIdentity(info: BigIntStats): ExternalFileStatIdentity {
+  return {
+    dev: info.dev,
+    ino: info.ino,
+    uid: info.uid,
+    mode: info.mode,
+    size: info.size,
+    mtimeNs: info.mtimeNs,
+    ctimeNs: info.ctimeNs,
+  };
+}
+
+function sameExternalFileStat(left: ExternalFileStatIdentity, right: BigIntStats): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.uid === right.uid &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function sameExternalFileStatIdentity(
+  left: ExternalFileStatIdentity,
+  right: ExternalFileStatIdentity,
+): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.uid === right.uid &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+function sameExternalFileLink(
+  left: ExternalFileLinkIdentity,
+  right: ExternalFileLinkIdentity,
+): boolean {
+  return (
+    left.resolvedPath === right.resolvedPath &&
+    sameExternalFileStatIdentity(left.link, right.link) &&
+    left.linkTargetDigest === right.linkTargetDigest &&
+    sameExternalFileStatIdentity(left.target, right.target) &&
+    left.targetDigest === right.targetDigest
+  );
+}
+
 function pathInside(parent: string, candidate: string): boolean {
   const value = relative(resolve(parent), resolve(candidate));
   return value === '' || (!value.startsWith(`..${sep}`) && value !== '..' && !isAbsolute(value));
+}
+
+function snapshotExternalFileLink(
+  linkPath: string,
+  resolvedPath: string,
+  relativePath: string,
+  context: string,
+): ExternalFileLinkIdentity {
+  let descriptor: number | null = null;
+  try {
+    const linkBefore = lstatSync(linkPath, { bigint: true });
+    if (!linkBefore.isSymbolicLink()) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}外部普通文件链接身份发生变化：${relativePath}`,
+      );
+    }
+    const linkTargetBefore = readlinkSync(linkPath, { encoding: 'buffer' });
+    const targetPathBefore = lstatSync(resolvedPath, { bigint: true });
+    if (!targetPathBefore.isFile() || targetPathBefore.isSymbolicLink()) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}验证检出只允许链接到项目外普通文件：${relativePath}`,
+      );
+    }
+    if (targetPathBefore.size > BigInt(MAX_EXTERNAL_LINK_FILE_BYTES)) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}外部普通文件链接超过 ${MAX_EXTERNAL_LINK_FILE_BYTES} bytes：${relativePath}`,
+      );
+    }
+    const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW;
+    descriptor = openSync(resolvedPath, fsConstants.O_RDONLY | noFollow);
+    const openedBefore = fstatSync(descriptor, { bigint: true });
+    if (
+      !openedBefore.isFile() ||
+      !sameExternalFileStat(externalFileStatIdentity(targetPathBefore), openedBefore)
+    ) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}外部普通文件链接目标无法绑定：${relativePath}`,
+      );
+    }
+    const digest = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    const size = Number(openedBefore.size);
+    let offset = 0;
+    while (offset < size) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        0,
+        Math.min(buffer.byteLength, size - offset),
+        offset,
+      );
+      if (count <= 0) {
+        throw new CleanValidationCheckoutError(
+          'artifact-boundary-violated',
+          `${context}读取外部普通文件链接时提前结束：${relativePath}`,
+        );
+      }
+      digest.update(buffer.subarray(0, count));
+      offset += count;
+    }
+    const openedAfter = fstatSync(descriptor, { bigint: true });
+    const targetPathAfter = lstatSync(resolvedPath, { bigint: true });
+    const linkAfter = lstatSync(linkPath, { bigint: true });
+    const linkTargetAfter = readlinkSync(linkPath, { encoding: 'buffer' });
+    if (
+      !sameExternalFileStat(externalFileStatIdentity(openedBefore), openedAfter) ||
+      !sameExternalFileStat(externalFileStatIdentity(openedBefore), targetPathAfter) ||
+      !sameExternalFileStat(externalFileStatIdentity(linkBefore), linkAfter) ||
+      !linkTargetBefore.equals(linkTargetAfter) ||
+      realpathSync.native(linkPath) !== resolvedPath
+    ) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}外部普通文件链接在核对期间发生变化：${relativePath}`,
+      );
+    }
+    return {
+      resolvedPath,
+      link: externalFileStatIdentity(linkBefore),
+      linkTargetDigest: createHash('sha256').update(linkTargetBefore).digest('hex'),
+      target: externalFileStatIdentity(openedBefore),
+      targetDigest: digest.digest('hex'),
+    };
+  } catch (error) {
+    if (error instanceof CleanValidationCheckoutError) throw error;
+    throw new CleanValidationCheckoutError(
+      'artifact-boundary-violated',
+      `${context}无法冻结外部普通文件链接：${relativePath}`,
+    );
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+  }
 }
 
 const PROJECT_PROCESS_ENVIRONMENT_KEYS = new Set([
@@ -700,11 +871,12 @@ function assertSafeArtifactTopology(
   context: string,
   options: {
     readonly capturePreparedExternalLinks: boolean;
-    readonly permittedExternalLinks: ReadonlyMap<string, string>;
+    readonly permittedExternalLinks: ReadonlyMap<string, ExternalFileLinkIdentity>;
   },
-): Map<string, string> {
+): Map<string, ExternalFileLinkIdentity> {
   const directoryPatterns = patterns.map((pattern) => pattern.slice(0, -3));
-  const capturedExternalLinks = new Map<string, string>();
+  const capturedExternalLinks = new Map<string, ExternalFileLinkIdentity>();
+  const observedExternalLinks = new Set<string>();
   let entries = 0;
   const visit = (directory: string, prefix = ''): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -742,12 +914,26 @@ function assertSafeArtifactTopology(
             );
           }
           if (options.capturePreparedExternalLinks && artifactAllowed(path, patterns)) {
-            capturedExternalLinks.set(path, resolved);
-          } else if (options.permittedExternalLinks.get(path) !== resolved) {
-            throw new CleanValidationCheckoutError(
-              'artifact-boundary-violated',
-              `${context}验证检出含未经准备阶段确认的外部链接：${path}`,
+            capturedExternalLinks.set(
+              path,
+              snapshotExternalFileLink(target, resolved, path, context),
             );
+          } else {
+            const permitted = options.permittedExternalLinks.get(path);
+            if (!permitted) {
+              throw new CleanValidationCheckoutError(
+                'artifact-boundary-violated',
+                `${context}验证检出含未经准备阶段确认的外部链接：${path}`,
+              );
+            }
+            const observed = snapshotExternalFileLink(target, resolved, path, context);
+            if (!sameExternalFileLink(permitted, observed)) {
+              throw new CleanValidationCheckoutError(
+                'artifact-boundary-violated',
+                `${context}外部普通文件链接身份或内容发生变化：${path}`,
+              );
+            }
+            observedExternalLinks.add(path);
           }
         }
         continue;
@@ -762,6 +948,17 @@ function assertSafeArtifactTopology(
     }
   };
   visit(root);
+  if (!options.capturePreparedExternalLinks) {
+    const missing = [...options.permittedExternalLinks.keys()].filter(
+      (path) => !observedExternalLinks.has(path),
+    );
+    if (missing.length > 0) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}准备阶段确认的外部普通文件链接缺失或改变：${missing.slice(0, 20).join('、')}`,
+      );
+    }
+  }
   return capturedExternalLinks;
 }
 
@@ -932,7 +1129,7 @@ export async function createCleanValidationCheckout(
       ...options.contract.generatedPaths,
       ...options.contract.localValidation.allowedPaths,
     ];
-    let permittedExternalLinks = new Map<string, string>();
+    let permittedExternalLinks = new Map<string, ExternalFileLinkIdentity>();
 
     const assertCurrent = async (
       context: string,

@@ -431,6 +431,10 @@ function allowedArtifactPath(value: unknown, path: string, errors: string[]): bo
     errors.push(`${path} 不能允许整个项目根`);
     return false;
   }
+  if (/[*?[\]{}]/u.test(directory)) {
+    errors.push(`${path} 的基目录必须是字面路径，不能包含 glob 元字符`);
+    return false;
+  }
   return repoPath(directory, path, errors);
 }
 
