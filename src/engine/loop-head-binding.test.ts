@@ -8,6 +8,7 @@ import {
   currentRepoTdd,
   fakeBoundValidator,
   fakeCounting,
+  FAKE_RUNNER_INPUT_SOURCE,
   readyQualityContract,
   runLoop as runLegacyLoop,
   setup,
@@ -68,7 +69,7 @@ function writeHeadAdvancingValidator(
     import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
     import { execFileSync } from 'node:child_process';
     import { join } from 'node:path';
-    const prompt = process.argv.at(-1) ?? '';
+    ${FAKE_RUNNER_INPUT_SOURCE}
     const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
     const jsonAt = prompt.indexOf('{', markerAt);
     const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);
@@ -118,7 +119,7 @@ function writeBuilderThenHeadAdvancingValidator(fixture: ReturnType<typeof setup
     import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
     import { execFileSync } from 'node:child_process';
     import { join } from 'node:path';
-    const prompt = process.argv.at(-1) ?? '';
+    ${FAKE_RUNNER_INPUT_SOURCE}
     const statePath = join(process.env.CODING_X_WORKSPACE, 'state.json');
     const progressPath = join(process.env.CODING_X_WORKSPACE, 'progress.md');
     const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');

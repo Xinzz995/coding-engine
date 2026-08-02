@@ -1,6 +1,12 @@
 import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
+import { createRunnerInvocation } from '../review/runner-invocation.js';
+import {
+  describeReviewTemporaryRetention,
+  ReviewTemporaryDirectoryError,
+  type ReviewTemporaryCleanupResult,
+} from '../review/temporary-directory.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import type { OperationDelegationScope } from '../workspace-safety/operation.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
@@ -165,19 +171,18 @@ export function resolveBinary(
   return environment.CODING_X_CLAUDE_BIN ?? 'claude';
 }
 
-export function buildAgentArgs(
+export function buildManagedAgentArgs(
   kind: AgentKind,
-  prompt: string,
   model?: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const bin = resolveBinary(kind, environment);
   const modelArgs = model ? ['--model', model] : [];
   if (kind === 'codex') {
-    return [bin, 'exec', '--dangerously-bypass-approvals-and-sandbox', ...modelArgs, prompt];
+    return [bin, 'exec', '--dangerously-bypass-approvals-and-sandbox', ...modelArgs, '-'];
   }
-  if (kind === 'cursor') return [bin, '-p', '--force', ...modelArgs, prompt];
-  return [bin, '--print', '--dangerously-skip-permissions', ...modelArgs, prompt];
+  if (kind === 'cursor') return [bin, '-p', '--force', ...modelArgs];
+  return [bin, '--print', '--dangerously-skip-permissions', ...modelArgs];
 }
 
 export interface RunResult {
@@ -193,12 +198,37 @@ export interface RunResult {
   terminationReason?: SupervisorTerminationReason | null;
 }
 
+export function agentTemporaryRetentionFailure(
+  failure: unknown,
+  cleanup: Exclude<ReviewTemporaryCleanupResult, { readonly status: 'removed' }>,
+): Error {
+  const retentionMessage = `Agent Runner 临时域${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`;
+  if (failure instanceof WorkspaceSafetyError) {
+    const preserved = new WorkspaceSafetyError(
+      failure.code,
+      `${failure.message}；${retentionMessage}`,
+    );
+    Object.defineProperty(preserved, 'cause', { value: failure, configurable: true });
+    return preserved;
+  }
+  const wrapped = new ReviewTemporaryDirectoryError(
+    retentionMessage +
+      (failure === undefined
+        ? ''
+        : `；原始失败：${failure instanceof Error ? failure.message : '非 Error 失败'}`),
+  );
+  if (failure instanceof Error) {
+    Object.defineProperty(wrapped, 'cause', { value: failure, configurable: true });
+  }
+  return wrapped;
+}
+
 function pathWithin(parent: string, candidate: string): boolean {
   const value = relative(realpathSync.native(parent), realpathSync.native(candidate));
   return value === '' || (!value.startsWith(`..${sep}`) && value !== '..' && !isAbsolute(value));
 }
 
-export function runAgent(opts: {
+export async function runAgent(opts: {
   kind: AgentKind;
   prompt: string;
   cwd: string;
@@ -225,7 +255,7 @@ export function runAgent(opts: {
     ...(opts.inheritProcessEnvironment === false ? {} : process.env),
     ...opts.env,
   };
-  const argv = buildAgentArgs(opts.kind, opts.prompt, opts.model, environment);
+  const argv = buildManagedAgentArgs(opts.kind, opts.model, environment);
 
   let executable: string;
   let args: string[];
@@ -245,36 +275,83 @@ export function runAgent(opts: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`\n❌ Agent 错误: ${message}`);
-    return Promise.resolve({
+    return {
       timedOut: false,
       exitCode: 1,
       durationMs: 0,
       outputTail: message.slice(-EVIDENCE_DIAGNOSTIC_CHARS),
       processTreeNotEmpty: false,
       terminationReason: null,
-    });
-  }
-  return runManagedWorkspaceProcess(opts.managed.session, {
-    ...opts.managed.operation,
-    executable,
-    args,
-    cwd,
-    environment: environmentEntries(environment),
-    timeoutMs: opts.timeoutMs,
-    termination: opts.managed.termination,
-  }).then((result) => {
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
-    const outputTail = Buffer.concat([result.stdout, result.stderr])
-      .toString('utf8')
-      .slice(-EVIDENCE_DIAGNOSTIC_CHARS);
-    return {
-      timedOut: result.timedOut,
-      exitCode: result.processTreeNotEmpty ? 1 : result.exitCode,
-      durationMs: result.durationMs,
-      outputTail,
-      processTreeNotEmpty: result.processTreeNotEmpty,
-      terminationReason: result.terminationReason,
     };
-  });
+  }
+
+  let invocation: ReturnType<typeof createRunnerInvocation>;
+  try {
+    invocation = createRunnerInvocation({
+      runner: opts.kind,
+      executable,
+      args,
+      cwd,
+      prompt: opts.prompt,
+      projectRoot: opts.cwd,
+      prefix: 'coding-x-agent-invocation-',
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const failure = new WorkspaceSafetyError(
+      error instanceof ReviewTemporaryDirectoryError ? 'isolated' : 'invalid',
+      `Agent Runner 受保护调用无法建立：${message}`,
+    );
+    if (error instanceof Error) {
+      Object.defineProperty(failure, 'cause', { value: error, configurable: true });
+    }
+    throw failure;
+  }
+
+  let result: Awaited<ReturnType<typeof runManagedWorkspaceProcess>> | undefined;
+  let failure: unknown;
+  try {
+    invocation.temporary.prepareManagedUse();
+    invocation.temporary.beginManagedUse();
+    result = await runManagedWorkspaceProcess(opts.managed.session, {
+      ...opts.managed.operation,
+      executable: resolveExecutablePath(process.execPath, cwd, environment),
+      args: [invocation.proxyPath, invocation.configPath],
+      cwd,
+      environment: environmentEntries(environment),
+      timeoutMs: opts.timeoutMs,
+      termination: opts.managed.termination,
+    });
+    if (result.processTreeNotEmpty) {
+      throw new WorkspaceSafetyError(
+        'isolated',
+        'Agent Runner 根进程退出时仍有后代进程；workspace 与临时域都必须保留',
+      );
+    }
+    invocation.temporary.confirmManagedUseSettled();
+  } catch (error) {
+    failure = error;
+  }
+
+  const cleanup = invocation.cleanup();
+  if (cleanup.status !== 'removed') {
+    throw agentTemporaryRetentionFailure(failure, cleanup);
+  }
+  if (failure instanceof Error) throw failure;
+  if (failure !== undefined) throw new Error('Agent Runner 返回了非 Error 失败');
+  if (result === undefined) throw new Error('Agent Runner 未返回受管进程结果');
+
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  const outputTail = Buffer.concat([result.stdout, result.stderr])
+    .toString('utf8')
+    .slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+  return {
+    timedOut: result.timedOut,
+    exitCode: result.processTreeNotEmpty ? 1 : result.exitCode,
+    durationMs: result.durationMs,
+    outputTail,
+    processTreeNotEmpty: result.processTreeNotEmpty,
+    terminationReason: result.terminationReason,
+  };
 }
