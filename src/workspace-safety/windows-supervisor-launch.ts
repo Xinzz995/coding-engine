@@ -45,7 +45,11 @@ export const DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS: WindowsSupervisorTimeouts = Ob
   handshakeMs: 120_000,
   naturalDrainMs: 5000,
   terminateMs: 5000,
-  ackMs: 5000,
+  // DRAINED already proves that the Job is empty. This last phase only verifies the bound
+  // receipt, closes the supervisor, and settles the operation, but those disk-backed checks can
+  // exceed five seconds on a loaded hosted Windows runner. Keep one bounded absolute deadline
+  // with enough headroom for that proof instead of treating scheduler variance as contamination.
+  ackMs: 30_000,
   pollMs: 25,
 });
 

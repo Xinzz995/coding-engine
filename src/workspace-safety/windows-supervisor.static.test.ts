@@ -69,7 +69,7 @@ describe('fixed Windows Job supervisor assets', () => {
       handshakeMs: 120_000,
       naturalDrainMs: 5000,
       terminateMs: 5000,
-      ackMs: 5000,
+      ackMs: 30_000,
       pollMs: 25,
     });
     expect(launch.assets.executablePath).toBe(launch.command);
