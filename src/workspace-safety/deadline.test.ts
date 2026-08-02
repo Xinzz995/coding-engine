@@ -70,6 +70,34 @@ describe('MonotonicDeadline', () => {
     ).rejects.toThrow(/phase timed out/u);
   });
 
+  it('settles only once when an operation completes after the absolute deadline', async () => {
+    let complete!: (value: string) => void;
+    const pending = new Promise<string>((resolve) => {
+      complete = resolve;
+    });
+    const deadline = MonotonicDeadline.after(10);
+    const observed = deadline.run(
+      () => pending,
+      () => new Error('phase timed out'),
+    );
+    let settlements = 0;
+    void observed.then(
+      () => {
+        settlements += 1;
+      },
+      () => {
+        settlements += 1;
+      },
+    );
+
+    await expect(observed).rejects.toThrow(/phase timed out/u);
+    complete('late success');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(settlements).toBe(1);
+  });
+
   it('allows a termination transition to tighten but never extend an existing deadline', () => {
     const clock = new FakeClock();
     const deadline = MonotonicDeadline.after(100, clock);

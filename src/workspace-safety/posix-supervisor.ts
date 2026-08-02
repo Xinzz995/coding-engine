@@ -479,7 +479,7 @@ class PosixSupervisorProcess {
     label: string,
   ): Promise<Extract<ProtocolEvent, { type: T }>> {
     return deadline.run(
-      () => this.nextAny(expected, Math.max(1, deadline.remainingMs())),
+      () => this.nextAny(expected, null),
       () => posixDeadlineError(label),
     );
   }
