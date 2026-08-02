@@ -23,9 +23,10 @@ coding-x 同时是一个会被下游项目使用的工具。候选版本若直�
 
 1. coding-x 在本地执行 Spec、工程标准和风险触发的深度结构 Review；
 2. GitHub 只执行目标项目原生机械检查，用受保护 PR 和不可跳过的 `quality-gate` 阻断交付；
-3. 发布先构建一个没有 npm 身份的固定候选 tarball，依次完成 coding-engine、Go 和 Python
-   Dogfood；验证通过后才显式提升到 npm stage，人工批准后再移动稳定标签并创建 Git 标签与
-   Release（候选与 staging 的进一步拆分见 ADR-019）。
+3. 发布先构建一个没有 npm 身份的固定候选 tarball，依次完成 coding-engine 以及 Go/Python
+   跨语言合成试点 Dogfood；验证通过后才显式提升到 npm stage，人工批准后再移动稳定标签并
+   创建 Git 标签与 Release（候选与 staging 的进一步拆分见 ADR-019）。这些试点证明通用协议和
+   原生 CI，不冒充真实业务下游证明。
 
 GitHub 不调用模型，也不证明本地 Review。`.coding-x/quality.json` 成为项目质量规则唯一来源，
 派生 PRD 检查快照和原生 CI。缺契约、schema 不兼容或正式运行版本不匹配时 fail closed。
@@ -69,11 +70,20 @@ Spec Reviewer 只判断仓库改动是否满足行为意图，不负责证明本
 首次正式自托管并合并。之后稳定版 N 评估候选 N+1，发布后再通过旧规则审查 Policy PR 更新
 固定版本。
 
-Go 多模块和 Python Monorepo 外部仓库在试点收口时经 owner 确认作为公开试点，并不代表通用
-能力只支持公开仓库。私有仓库仍必须先探测账户套餐和 Ruleset 权限；能力不足时初始化停止，
-不得降级为只有 CI 的弱门禁。
+稳定裁判固定 N、候选实际为 N+1 时，候选还必须能够按新版本的安全协议准备一个新 workspace。
+这条桥只开放给 `doctor --shadow` 和 `workspace apply-prd --shadow`：前者在其余检查全部健康时
+返回明确的 shadow 状态与退出码 7；后者仍在同一受管 mutation 中重核契约、摘要、检查快照、
+Git HEAD、源 PRD、TDD 与租约，只放宽精确版本差异，并以 `applied-shadow`/7 返回。普通 doctor、
+普通 apply-prd 和其他子命令仍拒绝版本不一致或不支持的 `--shadow`。Story Validator 凭证的环境
+摘要同时绑定实际 coding-x 版本与 formal/shadow 模式，因此候选结果不能被正式模式或另一候选
+版本复用；切换后保留实现候选，但必须重跑 Validator 与最终 Review。
 
-完整 `doctor` 回答“当前运行版本能否作为正式裁判”，因此正式版本不匹配必须继续失败。
+Go 多模块和 Python Monorepo 外部仓库是公开的合成试点，并不代表真实业务使用已经完成，也不
+代表通用能力只支持公开仓库。私有仓库仍必须先探测账户套餐和 Ruleset 权限；能力不足时初始化
+停止，不得降级为只有 CI 的弱门禁。真实业务下游证明保留为独立后续事项。
+
+普通 `doctor` 回答“当前运行版本能否作为正式裁判”，因此正式版本不匹配必须继续失败；显式
+`doctor --shadow` 只回答“该固定候选能否继续准备非交付 Dogfood”，健康时也返回 7。
 GitHub 和候选暂存不得把这个结论冒充仓库机械健康；coding-engine 单独运行只检查真实文档、
 契约结构和契约生成文件的仓库测试。首次 0.33.1 明确使用一次性的“机械 CI + owner 人工
 Bootstrap”，不绕过 doctor，也不声称完成正式本地 AI Review。受保护 main 上的 0.29.0

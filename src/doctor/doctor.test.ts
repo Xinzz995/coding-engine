@@ -609,6 +609,62 @@ describe('runDoctor quality contract check', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  it('classifies a healthy explicit shadow check as non-deliverable with exit 7', () => {
+    const root = mkdtempSync(join(tmpdir(), 'doc-gate-shadow-'));
+    try {
+      mkdirSync(join(root, 'docs'));
+      const digest = writeQualityContract(root, '9.9.9');
+      const report = runDoctorWithQuality(root, { local: true, shadow: true });
+      expect(report.quality).toMatchObject({
+        status: 'shadow',
+        digest,
+        expectedVersion: '9.9.9',
+        actualVersion: CODING_X_VERSION,
+        issues: [],
+      });
+      const rendered = renderDoctorReport(report);
+      expect(rendered.exitCode).toBe(7);
+      expect(rendered.text).toContain('不能表示可交付');
+      expect(rendered.text).toContain('候选检查完成');
+      expect(rendered.text).not.toContain('全部通过');
+      const json = renderDoctorJson(report);
+      expect(json.exitCode).toBe(7);
+      expect(JSON.parse(json.text)).toMatchObject({
+        quality: { status: 'shadow', expectedVersion: '9.9.9', actualVersion: CODING_X_VERSION },
+      });
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it('keeps shadow non-deliverable on a matching version and does not hide other failures', () => {
+    const healthyRoot = mkdtempSync(join(tmpdir(), 'doc-gate-shadow-match-'));
+    const brokenRoot = mkdtempSync(join(tmpdir(), 'doc-gate-shadow-broken-'));
+    try {
+      writeQualityContract(healthyRoot);
+      const healthy = runDoctorWithQuality(healthyRoot, { local: true, shadow: true });
+      expect(healthy.docsFound).toBe(false);
+      expect(healthy.quality.status).toBe('shadow');
+      expect(renderDoctorReport(healthy).exitCode).toBe(7);
+
+      const digest = writeQualityContract(brokenRoot, '9.9.9');
+      mkdirSync(join(brokenRoot, '.workspace'));
+      writeFileSync(join(brokenRoot, '.workspace', 'prd.json'), JSON.stringify({
+        project: 'p', branchName: 'b', description: 'd', userStories: [],
+        qualityContractDigest: digest,
+        qualityChecks: ['not-derived'],
+      }));
+      const broken = runDoctorWithQuality(brokenRoot, { local: true, shadow: true });
+      expect(broken.quality.status).toBe('shadow');
+      expect(broken.quality.issues).not.toHaveLength(0);
+      const rendered = renderDoctorReport(broken);
+      expect(rendered.exitCode).toBe(1);
+      expect(rendered.text).toContain('Shadow Dogfood');
+      expect(rendered.text).toContain('完整派生快照');
+    } finally {
+      rmSync(healthyRoot, { recursive: true, force: true });
+      rmSync(brokenRoot, { recursive: true, force: true });
+    }
+  });
+
   it('emits one machine-readable object with the same exit decision', () => {
     const root = mkdtempSync(join(tmpdir(), 'doc-gate-json-'));
     try {

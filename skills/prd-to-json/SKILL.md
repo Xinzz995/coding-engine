@@ -19,6 +19,28 @@ npx coding-x workspace apply-prd --input <request-file> --workspace <workspace-d
 
 由 coding-x 在一个受保护的短会话中核对输入、重跑需要的 TDD 基线、归档旧运行并原子应用候选。
 
+## 固定候选的 Shadow Dogfood 分支
+
+只有用户明确提供一个固定候选包或候选 CLI，并明确要求做 Shadow Dogfood 时，才使用本分支。把
+该候选入口的**绝对路径**记作 `<candidate-cli>`（例如
+`node /absolute/tool-root/node_modules/coding-x/dist/cli.js`），从初始化、doctor、apply 到后续 run
+始终使用同一个入口；不得中途换回 `npx coding-x`、全局安装或另一个候选。
+
+1. 新 workspace 先运行 `<candidate-cli> workspace init --workspace <workspace-dir>`；workspace 已安全
+   初始化时只读返回 ready。`workspace init` 不加 `--shadow`。
+2. 运行 `<candidate-cli> doctor --shadow --json --workspace <workspace-dir>`。该命令即使健康也必须
+   返回 7；同时 JSON 中 `quality.status` 必须为 `shadow`、固定版本和候选实际版本必须清楚、所有
+   其他检查必须无错误。退出 1/2 或任何非版本问题都必须停止；不能把 `--shadow` 理解成忽略错误。
+3. 其余派生规则与正式路径完全相同。最终只运行
+   `<candidate-cli> workspace apply-prd --shadow --json --input <request-file> --workspace <workspace-dir>`；
+   成功必须同时得到退出 7 和 `status=applied-shadow`。
+4. 后续仍用同一个 `<candidate-cli>` 执行 `--shadow` run。Shadow 的 PRD、Validator 凭证、Review 和
+   status 永远不能转成正式通过；稳定版本正式运行时必须重新验证。
+
+不要用 shell 的普通 `&&` 或只看非零退出码判断上述两条 Shadow 命令；分别保存 stdout 与退出码，
+再同时核对结构化状态。没有固定候选、没有用户明确选择 Shadow，或当前是正常项目使用时，继续走
+本文其余位置的正式 `npx coding-x` 路径，版本不一致仍立即停止。
+
 ## 首先固定 workspace 参数
 
 1. 用户已经给出 `--workspace` 时，保留其原始参数值；不得改写、规范化、拼接或换成 `.workspace`。
@@ -102,8 +124,9 @@ skill 不预检、删除、修复或接管 workspace 租约。能否写入只由
 转换前运行 `npx coding-x doctor --json --workspace <workspace-dir>`，读取
 `.coding-x/quality.json` 的状态和规范化摘要：
 
-1. 契约缺失、非法、schema 过新或固定 coding-x 版本不匹配时立即停止，引导用户先运行
-   `coding-x init`；不得退回 PRD 自带命令，也不得编造项目检查。
+1. 正式路径中，契约缺失、非法、schema 过新或固定 coding-x 版本不匹配时立即停止，引导用户先
+   运行 `coding-x init`；不得退回 PRD 自带命令，也不得编造项目检查。只有上方明确的固定候选
+   Shadow 分支接受 `quality.status=shadow`，并且仍要求其他检查全部通过。
 2. 把 doctor 返回的 `quality.digest` 原样写入顶层 `qualityContractDigest`。
 3. 把 doctor 返回的 `quality.derivedChecks` 原样写入顶层 `qualityChecks`。这是机器派生快照，
    不能让用户或模型重新输入、改写、删减，也不能从旧 PRD 复用。
@@ -429,7 +452,8 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
 8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
-9. **质量契约绑定**：doctor 必须确认契约有效且版本匹配；顶层写入
+9. **质量契约绑定**：正式路径的 doctor 必须确认契约有效且版本匹配；固定候选 Shadow 分支必须
+   得到 `quality.status=shadow`、退出 7 且没有其他错误；两条路径都在顶层写入
    `qualityContractDigest`，并把 `quality.derivedChecks` 原样写入结构化 `qualityChecks`；
    不得写 0.29 及更早版本的 shell 字符串数组
 10. **tdd 门禁（可选）**：只在用户明确启用、一次确认完整政策且真实基线通过后写入；否则省略整个字段
@@ -690,6 +714,9 @@ prd/state/progress 的 `sha256:<hex>`，再按 `schemaVersion`、固定 domain
 npx coding-x workspace apply-prd --input <request-file> --workspace <workspace-dir>
 ```
 
+固定候选 Shadow 分支改用前文已经冻结的同一 `<candidate-cli>`，并增加 `--shadow --json`；成功判据
+是退出 7 且 `status=applied-shadow`。不得把候选命令用于正式应用，也不得把正式命令混进候选链。
+
 `<workspace-dir>` 必须与最初选定值逐字相同。命令失败时不得改成直接写 workspace、手动归档或删
 租约；根据错误修正源输入并重新生成完整请求。命令完成后删除系统临时目录，不把请求当作长期
 状态或交付证据。临时目录和文件应使用仅当前用户可读写的权限。
@@ -714,8 +741,10 @@ npx coding-x workspace apply-prd --input <request-file> --workspace <workspace-d
 - [ ] 没有 story 依赖于后面的 story
 - [ ] story 不含任何状态字段（passes/validated/notes/retryCount/blocked/escalated 均不出现，状态归 state.json）
 - [ ] 顶层 `sourcePrd` 已填（源为仓库内文件时），`description` 末尾带【溯源】仲裁段
-- [ ] `npx coding-x doctor --json --workspace <workspace-dir>` 确认质量契约有效且固定版本匹配；顶层
-  `qualityContractDigest` 等于 doctor 当前摘要；结构化 `qualityChecks` 与
+- [ ] 正式路径由 `npx coding-x doctor --json --workspace <workspace-dir>` 确认质量契约有效且固定
+  版本匹配；固定候选 Shadow 分支从初始化到 apply 使用同一个绝对候选入口，doctor 同时满足退出 7、
+  `quality.status=shadow` 和其他检查无错误；顶层 `qualityContractDigest` 等于 doctor 当前摘要；
+  结构化 `qualityChecks` 与
   `doctor.quality.derivedChecks` 逐字段一致，没有旧 shell 字符串数组
 - [ ] tdd 已配置时：用户明确选择启用并确认新项目或存量项目；`coverageCheck`、阈值和零测试政策已确认；`sourcePathspecs` 与覆盖范围一致；完整 `baselineRef` 可达；每个政策文件在 Git 根内且 `sha256` 与当前字节匹配；禁止标记已按目标工具确认；真实基线留给 apply 在租约内重跑
 - [ ] tdd 已配置且将使用 Cursor Agent 时：已提醒用户显式运行 `npx coding-x hooks cursor install` 与 `npx coding-x hooks cursor status`；转换过程未自动安装
@@ -726,7 +755,8 @@ npx coding-x workspace apply-prd --input <request-file> --workspace <workspace-d
 - [ ] 已在会话中输出转换对照表
 - [ ] 同功能再派生时，state 候选已按 id、难度与初始路由精确调整，blocked 路由重试已由用户选择；progress 候选为 null
 - [ ] 请求绑定最终源字节、两次一致的 Git HEAD、两次一致的质量摘要和完整候选摘要，且不含调用方选择的 workspace 路径或归档动作
-- [ ] 最终只通过 `workspace apply-prd` 应用；失败时没有直接写 workspace 或降低校验
+- [ ] 最终只通过 `workspace apply-prd` 应用；Shadow 分支同时核对退出 7 与
+  `status=applied-shadow`；失败时没有直接写 workspace 或降低校验
 
 apply 成功即表示候选已经过严格解析并原子应用，不再追加 `coding-x repair` 作为常规步骤。只有以后
 文件确实损坏、且 workspace 状态允许时，才按 CLI 错误提示单独运行 repair。

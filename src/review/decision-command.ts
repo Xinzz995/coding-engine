@@ -253,6 +253,10 @@ function createCurrentBindingReader(options: {
       projectRoot: options.root,
       workspace: options.session.lease.workspace.path,
       session: options.session,
+      runtimeIdentity: {
+        mode: options.review.shadow ? 'shadow' : 'formal',
+        actualCodingXVersion: CODING_X_VERSION,
+      },
       ...(options.termination ? { termination: options.termination } : {}),
     });
     if (storyBefore.status !== 'ready' || storyBefore.storyValidationDigest === null) {
@@ -296,6 +300,10 @@ function createCurrentBindingReader(options: {
       projectRoot: options.root,
       workspace: options.session.lease.workspace.path,
       session: options.session,
+      runtimeIdentity: {
+        mode: options.review.shadow ? 'shadow' : 'formal',
+        actualCodingXVersion: CODING_X_VERSION,
+      },
       ...(options.termination ? { termination: options.termination } : {}),
     });
     if (storyAfter.status !== 'ready' || storyAfter.storyValidationDigest === null) {

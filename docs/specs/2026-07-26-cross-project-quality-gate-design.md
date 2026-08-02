@@ -1,7 +1,7 @@
 ---
 title: "coding-engine 与 coding-x 双层质量门禁设计"
 status: done
-updated: 2026-07-28
+updated: 2026-08-02
 scope: root
 ---
 
@@ -98,7 +98,10 @@ coding-engine 首版仍位于个人 GitHub 仓库。Ruleset 能可靠阻止日�
   进入最终 Review；
 - `coding-x --shadow`：只用于候选版本 Dogfood，最终固定返回 shadow 结局，不能表示可交付；
 - `/review-loop`：让用户处理 findings、授权修复、提交反证或登记延期；
-- `coding-x doctor`：只读检查契约、固定版本、GitHub 规则、CI 和例外漂移；
+- `coding-x doctor`：只读检查契约、固定版本、GitHub 规则、CI 和例外漂移；显式
+  `doctor --shadow` 只供固定候选准备，其他检查全部健康时返回 shadow/7，不能表示正式可用；
+- `coding-x workspace apply-prd --shadow`：只供固定候选在新安全 workspace 原子应用 PRD；仍
+  重核所有输入和 TDD，只放宽候选与固定裁判的版本差异，成功返回 `applied-shadow`/7；
 - `coding-x status` / `report`：分开显示实现验证、本地 Review 和远端交付状态。
 
 ## 项目质量契约
@@ -133,7 +136,9 @@ action，不允许契约注入任意 action。
 PRD 中的 `qualityChecks` 由契约冻结派生，并记录契约摘要，不再要求用户维护第二份命令。
 GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式运行版本与固定版本不一致，
 都在启动任何 agent 前返回配置错误。只有 `--shadow` 能允许候选版本在不签发正式结果的
-前提下运行。
+前提下运行或准备新 workspace；`--shadow` 只允许用于 run、doctor 和 workspace apply-prd，
+其他子命令不能静默忽略它。Story 验收环境摘要绑定实际 coding-x 版本与 formal/shadow 模式，
+因此同一提交上的 shadow 凭证在正式模式或另一候选版本中自动过期，只保留实现候选并重验。
 
 ### 初始化状态机
 
@@ -369,8 +374,9 @@ PR/base/head、评审轮次和状态。
 普通告警达到 error 时阻断。
 
 仓库机械健康只检查 coding-engine 的真实文档、质量契约和契约生成文件，不比较候选运行版本，
-也不产生可交付结论。完整 `doctor` 始终保留精确版本判断；GitHub 与候选暂存不得通过接受
-shadow 或忽略非零退出码来绕过它。首次稳定 Bootstrap 实际使用 0.33.1；0.33.0 的多轮候选
+也不产生可交付结论。普通 `doctor` 始终保留精确版本判断；`doctor --shadow` 的 7 只表示候选
+准备检查完成。GitHub 与候选暂存不得通过接受 shadow 或忽略非零退出码来绕过正式判断。首次稳定
+Bootstrap 实际使用 0.33.1；0.33.0 的多轮候选
 在 npm stage 后发现产品问题，不可变候选无法吸收修复，因此没有成为正式裁判。0.33.1 使用
 一次性的机械 CI 和 owner 人工 Bootstrap，不声称完成正式本地 AI Review；受保护 main 上的
 0.29.0 只可独立复核仓库健康。0.33.1 发布并由独立 Policy PR #76 固定后，本次 0.33.1
@@ -383,7 +389,8 @@ shadow 或忽略非零退出码来绕过它。首次稳定 Bootstrap 实际使�
 1. 版本更新通过受保护 PR 合并到 `main`；
 2. 无发布身份的候选构建流程从精确 main 提交执行全部检查，保存固定 tarball、提交和
    SHA-256；
-3. coding-engine、Go、Python 都安装该 tarball，以 `--shadow` 运行候选能力；
+3. coding-engine 和 Go/Python 合成试点都安装该 tarball；先用同一候选 CLI 的绝对路径执行
+   shadow doctor 与 shadow apply-prd，再以 `--shadow` 运行候选能力；
 4. 三仓验证通过后，维护者选择候选运行；独立流程回读成功状态并要求候选仍是当前 main；
 5. npm OIDC Trusted Publisher 只允许 staged publish，把同一个候选暂存到 `next`；
 6. npm 返回的 SHA-1/SHA-512 必须与候选一致，并记录 candidate run、stage run 和 stage ID；
@@ -409,7 +416,8 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 
 ### 稳定版裁判
 
-质量契约固定精确版本。正式模式只有版本一致才运行；不一致只能拒绝或显式 shadow。首次
+质量契约固定精确版本。正式模式只有版本一致才运行；不一致只能拒绝或走上述显式 shadow
+准备/运行路径。shadow 结果绑定实际候选版本和模式，不能晋升为正式凭证。首次
 稳定裁判是 0.33.1，由现有机械 CI 和 owner 人工 Bootstrap 裁决；0.33.0 没有成为正式裁判。
 0.33.1 发布后，旧规则审查的 Policy PR #76 将固定版本更新为 0.33.1，正式自托管从本次
 0.33.1 PR 开始。之后稳定版 N 正式评估候选 N+1；N+1 发布后，再用旧规则审查的 Policy PR
@@ -453,8 +461,10 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 - Reviewer 写文件、危险命令、秘密、MCP、hook 和插件反向测试全部失败；
 - P0、P1、人工决策与不完整延期 Issue 阻断；修复提交后 Validator/Review 重跑；
 - 开发目录中的 `.env`、`.claude`、旧依赖和 ignored 源码不进入本地验证；准备失败、tracked 改写、未允许产物、submodule/LFS/filter 均不可签发 receipt；
-- v1 receipt 即使 HEAD 相同也失效；v2 receipt 的环境摘要与当前平台、HEAD、准备和允许目录不一致时重验；
-- shadow 始终退出 7，不能转成正式通过。
+- v1 receipt 即使 HEAD 相同也失效；v2 receipt 的环境摘要与当前平台、HEAD、准备、允许目录、
+  实际 coding-x 版本或 formal/shadow 模式不一致时重验；
+- shadow doctor、apply-prd 和最终运行健康时均退出 7，不能转成正式通过；其余错误不被降级。
+- shadow apply-prd 的持久 mutation 记录保留候选身份；中断恢复也只能得到 shadow/7。
 
 ### GitHub
 
@@ -469,5 +479,5 @@ Release。发布任务还必须确认标签提交属于受保护 main。
 - `latest` 在三个公开精确版本冒烟前不变；npm、标签、Release 与候选制品绑定同一发布提交，
   该提交属于受保护 `main` 的历史；当前 `main` 可在发布后继续通过受保护 PR 向前演进；
 - 回退演练能恢复前一个稳定版本；
-- Go 和 Python GitHub CI 不安装 Node 或 coding-x；两个外部仓库是 owner 确认的公开试点；
-- 三个真实 PR 已完成；Bootstrap Issue #44 已在事实收口 PR #78 合并后的最终回读完成后关闭。
+- Go 和 Python GitHub CI 不安装 Node 或 coding-x；两个外部仓库是 owner 确认的公开合成试点；
+- Bootstrap 的三个 PR 已完成；它们证明协议和跨语言 CI，不声称已经完成真实业务下游验证。

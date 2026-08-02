@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { acceptanceHash } from '../contracts/validation-contract.js';
+import { CODING_X_VERSION } from '../version.js';
 import type { QualityContract, QualityContractReadResult } from '../quality/contract.js';
 import type { Prd } from './prd.js';
 import type { RunState } from './state.js';
@@ -13,6 +14,10 @@ import {
 const HEAD = 'a'.repeat(40);
 const QUALITY_DIGEST = `sha256:${'b'.repeat(64)}`;
 const OTHER_QUALITY_DIGEST = `sha256:${'c'.repeat(64)}`;
+const FORMAL_RUNTIME = {
+  mode: 'formal',
+  actualCodingXVersion: CODING_X_VERSION,
+} as const;
 
 const contract = {
   checks: {
@@ -81,6 +86,7 @@ function input(overrides: Partial<Parameters<typeof evaluateStoryValidationCurre
     contract,
     headSha: HEAD,
     tddConfig: null,
+    runtimeIdentity: FORMAL_RUNTIME,
     platform: 'linux',
   });
   return {
@@ -91,6 +97,7 @@ function input(overrides: Partial<Parameters<typeof evaluateStoryValidationCurre
     workingContract: readyContract(),
     trackedContract: readyContract(),
     platform: 'linux' as const,
+    runtimeIdentity: FORMAL_RUNTIME,
     ...overrides,
   };
 }
@@ -115,6 +122,7 @@ describe('evaluateStoryValidationCurrentness', () => {
       contract,
       headSha: HEAD,
       tddConfig: null,
+      runtimeIdentity: FORMAL_RUNTIME,
       platform: 'linux',
     });
     const mechanical = digestFinalReviewMechanicalEnvironment({
@@ -126,8 +134,57 @@ describe('evaluateStoryValidationCurrentness', () => {
     expect(candidate).not.toBe(mechanical);
     expect(candidateStoryValidationEnvironmentPolicy(null)).toEqual({
       additionalRefs: [],
-      additionalPolicy: { domain: 'story-validation-v1', tdd: null },
+      additionalPolicy: { domain: 'story-validation-v2', tdd: null },
     });
+  });
+
+  it('separates formal, shadow, and candidate-version receipt environments', () => {
+    const digestFor = (mode: 'formal' | 'shadow', actualCodingXVersion: string) =>
+      digestCandidateStoryValidationEnvironment({
+        contract,
+        headSha: HEAD,
+        tddConfig: null,
+        platform: 'linux',
+        runtimeIdentity: { mode, actualCodingXVersion },
+      });
+    const formal = digestFor('formal', '0.34.0');
+    const shadow = digestFor('shadow', '0.34.0');
+    const nextShadow = digestFor('shadow', '0.35.0');
+
+    expect(formal).not.toBe(shadow);
+    expect(shadow).not.toBe(nextShadow);
+    expect(digestFor('shadow', '0.34.0')).toBe(shadow);
+  });
+
+  it('expires a shadow receipt in formal mode and in another candidate version', () => {
+    const shadowRuntime = { mode: 'shadow', actualCodingXVersion: '0.34.0' } as const;
+    const shadowDigest = digestCandidateStoryValidationEnvironment({
+      contract,
+      headSha: HEAD,
+      tddConfig: null,
+      platform: 'linux',
+      runtimeIdentity: shadowRuntime,
+    });
+    const original = input({ state: state(shadowDigest), runtimeIdentity: shadowRuntime });
+    expect(evaluateStoryValidationCurrentness(original)).toMatchObject({
+      status: 'ready',
+      display: { currentness: { current: true } },
+    });
+
+    for (const runtimeIdentity of [
+      FORMAL_RUNTIME,
+      { mode: 'shadow', actualCodingXVersion: '0.35.0' } as const,
+    ]) {
+      const evaluated = evaluateStoryValidationCurrentness({ ...original, runtimeIdentity });
+      expect(evaluated).toMatchObject({
+        status: 'ready',
+        storyValidationDigest: null,
+        display: {
+          currentness: { current: false, invalidStoryIds: ['US-001'] },
+          state: { 'US-001': { passes: true, validated: false, validationReceipt: null } },
+        },
+      });
+    }
   });
 
   it.each([

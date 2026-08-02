@@ -14,7 +14,7 @@ import {
   type WorkspaceSafetyDiskReason,
 } from './disk-evaluator.js';
 import { pathExists } from './filesystem.js';
-import { readCanonicalMutationDomain } from './mutation-domain.js';
+import { readCanonicalMutationDomain, type MutationDomain } from './mutation-domain.js';
 import {
   acquireMutationRecoveryAttempt,
   installMutationRecoveryDomain,
@@ -75,7 +75,7 @@ export type WorkspaceRecoveryFailureCode =
 
 export interface WorkspaceRecoverySuccess {
   readonly ok: true;
-  readonly exitCode: 0;
+  readonly exitCode: 0 | 7;
   readonly command: WorkspaceRecoveryCommand;
   readonly mode: WorkspaceRecoveryMode;
   readonly message: string;
@@ -83,6 +83,7 @@ export interface WorkspaceRecoverySuccess {
   readonly targetArchive: string;
   readonly archivePath: string;
   readonly rebootMode?: SameHostRebootRecoveryMode;
+  readonly runtimeMode?: 'formal' | 'shadow';
 }
 
 export interface WorkspaceRecoveryFailure {
@@ -121,10 +122,11 @@ function success(
   mode: WorkspaceRecoveryMode,
   completion: RecoveryCompletion,
   rebootMode?: SameHostRebootRecoveryMode,
+  runtimeMode?: 'formal' | 'shadow',
 ): WorkspaceRecoverySuccess {
   return {
     ok: true,
-    exitCode: 0,
+    exitCode: runtimeMode === 'shadow' ? 7 : 0,
     command,
     mode,
     message: SUCCESS_MESSAGE[command],
@@ -132,6 +134,7 @@ function success(
     targetArchive: completion.targetArchive,
     archivePath: completion.archivePath,
     ...(rebootMode ? { rebootMode } : {}),
+    ...(runtimeMode ? { runtimeMode } : {}),
   };
 }
 
@@ -279,7 +282,7 @@ function evaluationError(
   };
 }
 
-async function hasCanonicalMutation(workspacePath: string): Promise<boolean> {
+async function canonicalMutation(workspacePath: string): Promise<MutationDomain | null> {
   const context = await loadRecoveryContext(workspacePath);
   const mutationPath = join(
     context.records.workspace.path,
@@ -287,12 +290,16 @@ async function hasCanonicalMutation(workspacePath: string): Promise<boolean> {
     ACTIVE_LEASE_DIR,
     MUTATION_DIR,
   );
-  if (!(await pathExists(mutationPath))) return false;
-  await readCanonicalMutationDomain({
+  if (!(await pathExists(mutationPath))) return null;
+  return await readCanonicalMutationDomain({
     workspace: context.records.workspace,
     expectedOwner: context.sourceOwner,
   });
-  return true;
+}
+
+function mutationRuntimeMode(domain: MutationDomain): 'formal' | 'shadow' | undefined {
+  if (domain.state.kind === 'apply-prd-shadow-v1') return 'shadow';
+  return domain.state.kind === 'apply-prd-v1' ? 'formal' : undefined;
 }
 
 function isPotentialSameHostReboot(evaluation: WorkspaceSafetyDiskEvaluation): boolean {
@@ -402,7 +409,7 @@ async function startRecoverable(
       await finalizeWithCommandSignal(createBootstrapRecoverySession(handle), options),
     );
   }
-  if (await hasCanonicalMutation(workspacePath)) {
+  if ((await canonicalMutation(workspacePath)) !== null) {
     return wrongCommand(
       'recover',
       evaluation,
@@ -504,12 +511,22 @@ async function continueMutation(
       '当前记录不是 mutation 恢复；请使用 workspace recover。',
     );
   }
+  const mutation = await canonicalMutation(workspacePath);
+  if (mutation === null) {
+    return wrongCommand(
+      'resume-mutation',
+      evaluation,
+      '当前记录不是 mutation 恢复；请使用 workspace recover。',
+    );
+  }
   throwIfInterrupted(options);
   const handle = await acquireMutationRecoveryAttempt({ workspacePath });
   return success(
     'resume-mutation',
     'mutation-resume',
     await finalizeWithCommandSignal(createMutationRecoverySession(handle), options),
+    undefined,
+    mutationRuntimeMode(mutation),
   );
 }
 
@@ -534,7 +551,8 @@ export async function runWorkspaceResumeMutation(
       return await continueMutation(options, evaluation);
     }
     if (evaluation.classification === 'recoverable') {
-      if (!(await hasCanonicalMutation(options.workspacePath))) {
+      const mutation = await canonicalMutation(options.workspacePath);
+      if (mutation === null) {
         return wrongCommand(
           'resume-mutation',
           evaluation,
@@ -549,6 +567,8 @@ export async function runWorkspaceResumeMutation(
         'resume-mutation',
         'mutation-resume',
         await finalizeWithCommandSignal(createMutationRecoverySession(handle), options),
+        undefined,
+        mutationRuntimeMode(mutation),
       );
     }
     return rejectionFor('resume-mutation', evaluation);

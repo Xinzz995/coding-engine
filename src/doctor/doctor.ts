@@ -68,6 +68,8 @@ export interface DoctorOptions {
   modelConfigPath?: string;
   /** 实际 coding-x 版本；生产缺省构建内版本。 */
   actualVersion?: string;
+  /** 候选 Dogfood 只读巡检；即使全部健康也固定返回非交付状态 7。 */
+  shadow?: boolean;
   /** 独立单元测试可关闭本项；CLI 不设置，生产始终要求质量契约。 */
   requireQualityContract?: boolean;
   /** 只核对本地契约与生成物，不查询 GitHub。 */
@@ -81,8 +83,10 @@ export interface DoctorOptions {
 export interface QualityContractCheckResult {
   contractPath: string;
   prdPath: string;
-  status: 'skipped' | 'missing' | 'invalid' | 'version-mismatch' | 'ready';
+  status: 'skipped' | 'missing' | 'invalid' | 'version-mismatch' | 'shadow' | 'ready';
   digest: string | null;
+  expectedVersion: string | null;
+  actualVersion: string | null;
   /** prd-to-json 应原样写入 prd.json.qualityChecks 的机器派生快照。 */
   derivedChecks: FrozenQualityChecks | null;
   configuredChecks: number;
@@ -471,6 +475,8 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
     prdPath: prdRel,
     status: requireQuality ? 'missing' : 'skipped',
     digest: null,
+    expectedVersion: null,
+    actualVersion: null,
     derivedChecks: null,
     configuredChecks: 0,
     notApplicableCategories: [],
@@ -498,7 +504,7 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
       const runtime = assessQualityRuntime(
         contractRead.contract,
         options.actualVersion ?? CODING_X_VERSION,
-        false,
+        options.shadow ?? false,
       );
       const categories = ['test', 'build', 'static', 'security'] as const;
       const configuredChecks = categories.reduce((count, category) => {
@@ -510,13 +516,20 @@ export function runDoctor(root: string, options: DoctorOptions = {}): DoctorRepo
       ));
       quality = {
         ...quality,
-        status: runtime.mode === 'formal' ? 'ready' : 'version-mismatch',
+        status:
+          runtime.mode === 'formal'
+            ? 'ready'
+            : runtime.mode === 'shadow'
+              ? 'shadow'
+              : 'version-mismatch',
         digest: contractRead.digest,
+        expectedVersion: runtime.expectedVersion,
+        actualVersion: runtime.actualVersion,
         derivedChecks: deriveQualityChecks(contractRead.contract),
         configuredChecks,
         notApplicableCategories,
       };
-      if (runtime.mode !== 'formal') {
+      if (runtime.mode === 'version-mismatch') {
         quality.issues.push({
           file: contractRel,
           message: `固定版本 ${runtime.expectedVersion} 与当前版本 ${runtime.actualVersion} 不一致`,
@@ -707,8 +720,28 @@ function renderQualityLines(result: QualityContractCheckResult): string[] {
     lines.push('  ℹ️  本次独立检查未启用质量契约校验');
     return lines;
   }
+  if (result.status === 'shadow') {
+    lines.push(
+      `  🧪 固定版本 ${result.expectedVersion}，当前候选 ${result.actualVersion}；` +
+        '本次只可准备 Shadow Dogfood，不能表示可交付',
+    );
+  }
   if (result.issues.length > 0) {
     for (const issue of result.issues) lines.push(`  ❌ ${issue.file}：${issue.message}`);
+    return lines;
+  }
+  if (result.status === 'shadow') {
+    lines.push(
+      `  ℹ️  已声明 ${result.configuredChecks} 项机械检查，摘要 ${result.digest}`,
+    );
+    if (result.notApplicableCategories.length > 0) {
+      lines.push(`  ℹ️  明确不适用：${result.notApplicableCategories.join('、')}`);
+    }
+    if (!result.prdFound) {
+      lines.push(`  ℹ️  未找到 ${result.prdPath}：当前没有待运行 PRD，无需核对摘要`);
+    } else {
+      lines.push(`  ✅ ${result.prdPath} 已绑定当前契约摘要`);
+    }
     return lines;
   }
   lines.push(
@@ -831,7 +864,7 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
           : ['', ...renderWorkspaceSafetyStatusLines(report.workspaceSafety)]),
         '', ...renderWorkspaceGitLines(report.workspaceGit),
       ].join('\n'),
-      exitCode: total === 0 ? 0 : 1,
+      exitCode: total === 0 ? (report.quality.status === 'shadow' ? 7 : 0) : 1,
     };
   }
   const fm = report.frontmatter!;
@@ -880,8 +913,18 @@ export function renderDoctorReport(report: DoctorReport): { text: string; exitCo
   const total = fm.issues.length + fresh.issues.length + idx.issues.length + links.issues.length
     + report.modelCatalog.issues.length + report.tdd.issues.length + report.quality.issues.length
     + report.delivery.issues.length + workspaceSafetyIssues;
-  lines.push('', total === 0 ? '✅ 全部通过' : `❌ 共发现 ${total} 个问题`);
-  return { text: lines.join('\n'), exitCode: total === 0 ? 0 : 1 };
+  lines.push(
+    '',
+    total === 0
+      ? report.quality.status === 'shadow'
+        ? '🧪 候选检查完成，但不能表示可交付'
+        : '✅ 全部通过'
+      : `❌ 共发现 ${total} 个问题`,
+  );
+  return {
+    text: lines.join('\n'),
+    exitCode: total === 0 ? (report.quality.status === 'shadow' ? 7 : 0) : 1,
+  };
 }
 
 /** 机器读取与人类报告共享同一退出判定；stdout 只包含一个 JSON 对象。 */

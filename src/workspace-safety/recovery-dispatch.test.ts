@@ -138,7 +138,9 @@ async function sameHostRebootWorkspace(): Promise<string> {
   return root;
 }
 
-async function interruptedMutation(): Promise<string> {
+async function interruptedMutation(
+  kind: 'generic-v1' | 'apply-prd-shadow-v1' = 'generic-v1',
+): Promise<string> {
   const root = await readyWorkspace();
   writeFileSync(join(root, 'state.json'), 'before');
   writeFileSync(join(root, 'obsolete.txt'), 'obsolete');
@@ -150,7 +152,7 @@ async function interruptedMutation(): Promise<string> {
   const session = createWorkspaceSession(lease);
   await expect(
     runWorkspaceMutation(session, {
-      kind: 'generic-v1',
+      kind,
       writes: [{ path: 'state.json', data: 'after' }],
       deletes: ['obsolete.txt'],
       archivePaths: ['state.json'],
@@ -315,6 +317,38 @@ describe('workspace recovery dispatch', () => {
       classification: 'ready',
     });
   }, 30_000);
+
+  it.each(['recoverable', 'recovering'] as const)(
+    'preserves the non-delivery exit when resuming an interrupted shadow apply from %s state',
+    async (classification) => {
+      const root = await interruptedMutation('apply-prd-shadow-v1');
+      if (classification === 'recovering') {
+        await installMutationRecoveryDomainWithAuthority({
+          workspacePath: root,
+          identity: deadIdentity(),
+          probeSourceOwner: () => 'dead',
+        });
+      }
+      expect(await evaluateWorkspaceSafetyDisk({ workspacePath: root })).toMatchObject({
+        classification,
+      });
+
+      const resumed = await runWorkspaceResumeMutation({ workspacePath: root });
+
+      expect(resumed).toMatchObject({
+        ok: true,
+        exitCode: 7,
+        command: 'resume-mutation',
+        mode: 'mutation-resume',
+        runtimeMode: 'shadow',
+      });
+      expect(readFileSync(join(root, 'state.json'), 'utf8')).toBe('after');
+      expect(await evaluateWorkspaceSafetyDisk({ workspacePath: root })).toMatchObject({
+        classification: 'ready',
+      });
+    },
+    30_000,
+  );
 
   it('re-acquires a dead installed mutation attempt and performs the exact resume', async () => {
     const root = await interruptedMutation();

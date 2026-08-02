@@ -220,15 +220,19 @@ export async function writeCurrentReportWithSession(options: {
     throw new Error('手动报告的 workspace 与受控会话不一致');
   }
   const adapters = { ...CURRENT_REPORT_ADAPTERS, ...options.adapters };
+  const read = adapters.readReview(workspace);
   const storyObservationOptions = {
     projectRoot: options.projectRoot,
     workspace,
     session: options.session,
+    runtimeIdentity: {
+      mode: read.status === 'ready' && read.state.shadow ? 'shadow' as const : 'formal' as const,
+      actualCodingXVersion: options.codingXVersion ?? CODING_X_VERSION,
+    },
     ...(options.termination === undefined ? {} : { termination: options.termination }),
   };
   const initialStoryObservation = await adapters.observeStoryValidation(storyObservationOptions);
   let storyObservation = initialStoryObservation;
-  const read = adapters.readReview(workspace);
   let currentReview: CurrentReviewStatus;
   let reviewContextHead: string | null = null;
   let reviewContext: ReviewPreflightContext | null = null;

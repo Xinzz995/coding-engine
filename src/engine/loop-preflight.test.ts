@@ -9,12 +9,16 @@ import {
   type QualityContractReadResult,
 } from '../quality/contract.js';
 import type { FinalReviewState } from '../review/types.js';
-import { digestCandidateStoryValidationEnvironment } from './story-validation-currentness.js';
+import {
+  bindStoryValidationRuntimeIdentity,
+  digestCandidateStoryValidationEnvironment,
+} from './story-validation-currentness.js';
 import type { TddConfig } from './prd.js';
 import { CODING_X_VERSION } from '../version.js';
 import {
   TEST_QUALITY_DIGEST,
   TEST_QUALITY_CONTRACT,
+  TEST_VALIDATION_ENVIRONMENT_DIGEST,
   readyQualityContract,
   setup,
   story,
@@ -175,11 +179,13 @@ describe('quality contract preflight and shadow mode', () => {
       contract: TEST_QUALITY_CONTRACT,
       headSha: head,
       tddConfig: oldTdd as unknown as TddConfig,
+      runtimeIdentity: { mode: 'formal', actualCodingXVersion: CODING_X_VERSION },
     });
     const newEnvironment = digestCandidateStoryValidationEnvironment({
       contract: TEST_QUALITY_CONTRACT,
       headSha: head,
       tddConfig: newTdd as unknown as TddConfig,
+      runtimeIdentity: { mode: 'formal', actualCodingXVersion: CODING_X_VERSION },
     });
     expect(newEnvironment).not.toBe(oldEnvironment);
     const receipt = validationReceiptFor(target, head);
@@ -437,7 +443,10 @@ describe('quality contract preflight and shadow mode', () => {
           retryCount: 0,
           blocked: false,
           escalated: false,
-          validationReceipt: validationReceiptFor(target, head()),
+          validationReceipt: validationReceiptFor(target, head(), 'fixture-validator-request', {
+            mode: 'shadow',
+            actualCodingXVersion: CODING_X_VERSION,
+          }),
         },
       }),
     );
@@ -450,6 +459,61 @@ describe('quality contract preflight and shadow mode', () => {
       }),
     ).toBe(7);
   });
+
+  it.each([
+    {
+      name: 'shadow receipt is reused by formal mode',
+      oldRuntime: { mode: 'shadow', actualCodingXVersion: CODING_X_VERSION } as const,
+      nextRuntime: { mode: 'formal', actualCodingXVersion: CODING_X_VERSION } as const,
+      shadow: false,
+      expectedExit: 0,
+    },
+    {
+      name: 'shadow receipt is reused by another candidate version',
+      oldRuntime: { mode: 'shadow', actualCodingXVersion: '0.34.0' } as const,
+      nextRuntime: { mode: 'shadow', actualCodingXVersion: '0.35.0' } as const,
+      shadow: true,
+      expectedExit: 7,
+    },
+  ])('revalidates instead of allowing $name', async ({ oldRuntime, nextRuntime, shadow, expectedExit }) => {
+    const target = story({ acceptanceCriteria: ['still works'] });
+    const project = setupGitProject([target]);
+    const head = project.head();
+    const oldReceipt = validationReceiptFor(target, head, 'old-runtime-receipt', oldRuntime);
+    writeFileSync(join(project.workspace, 'state.json'), JSON.stringify({
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: oldReceipt,
+        notes: 'candidate stays',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    }));
+    const fake = fakeBoundValidator(project.workspace, 'passed');
+    const calls = join(project.projectRoot, 'bound-calls.txt');
+    writeFileSync(calls, '1');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    expect(await runProductionLoop({
+      ...strictConfig(project.workspace, project.instructionsDir),
+      projectRoot: project.projectRoot,
+      shadow,
+      actualVersion: nextRuntime.actualCodingXVersion,
+    })).toBe(expectedExit);
+    expect(readFileSync(calls, 'utf8')).toBe('2');
+    const state = JSON.parse(readFileSync(join(project.workspace, 'state.json'), 'utf8')) as Record<
+      string,
+      { validationReceipt: { validationEnvironmentDigest: string } }
+    >;
+    expect(state['US-001']?.validationReceipt.validationEnvironmentDigest).toBe(
+      bindStoryValidationRuntimeIdentity(TEST_VALIDATION_ENVIRONMENT_DIGEST, nextRuntime),
+    );
+    expect(state['US-001']?.validationReceipt.validationEnvironmentDigest).not.toBe(
+      oldReceipt.validationEnvironmentDigest,
+    );
+  }, 30_000);
 
   it('rejects a legacy command array or a snapshot that differs from the contract in formal mode', async () => {
     const { workspace, instructionsDir } = setup([story()], {

@@ -134,6 +134,20 @@ describe('parseCliArgs', () => {
   });
   it('parses --shadow as an explicit non-delivery run mode', () => {
     expect(parseCliArgs(['codex', '--shadow']).shadow).toBe(true);
+    expect(parseCliArgs(['doctor', '--shadow']).shadow).toBe(true);
+    expect(
+      parseCliArgs(['workspace', 'apply-prd', '--input', '/tmp/request.json', '--shadow']).shadow,
+    ).toBe(true);
+    for (const args of [
+      ['init', '--shadow'],
+      ['repair', '--shadow'],
+      ['status', '--shadow'],
+      ['report', '--shadow'],
+      ['workspace', 'init', '--shadow'],
+      ['workspace', 'recover', '--shadow'],
+    ]) {
+      expect(() => parseCliArgs(args)).toThrow('--shadow 只能用于');
+    }
   });
   it('recognizes the repair subcommand', () => {
     expect(parseCliArgs(['repair']).command).toBe('repair');
@@ -532,6 +546,28 @@ describe('main — doctor JSON', () => {
         quality: {
           status: 'ready',
           digest: expect.stringMatching(/^sha256:/),
+        },
+      });
+
+      const shadowSource = { ...source, codingXVersion: '9.9.9' };
+      const shadowParsed = parseQualityContract(shadowSource);
+      if (shadowParsed.status !== 'ready') {
+        throw new Error(`invalid shadow doctor fixture: ${shadowParsed.status}`);
+      }
+      writeFileSync(join(root, '.coding-x', 'quality.json'), JSON.stringify(shadowSource));
+      for (const [relativePath, content] of Object.entries(
+        renderManagedGitHubFiles(shadowParsed.contract),
+      )) {
+        writeFileSync(join(root, relativePath), content);
+      }
+      expect(await main(['doctor', '--local', '--shadow', '--json'])).toBe(7);
+      expect(logSpy).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(String(logSpy.mock.calls[1][0]))).toMatchObject({
+        schemaVersion: 1,
+        quality: {
+          status: 'shadow',
+          expectedVersion: '9.9.9',
+          actualVersion: CODING_X_VERSION,
         },
       });
     } finally {

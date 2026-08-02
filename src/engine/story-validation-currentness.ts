@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { RunState, StoryState } from '../contracts/run-state-contract.js';
 import { isGitHead, isSha256Digest } from '../contracts/validation-contract.js';
 import {
@@ -17,8 +18,14 @@ import {
 } from './state.js';
 import { readTddConfig, type TddConfigReadResult } from './tdd-gate.js';
 
-export const STORY_VALIDATION_ENVIRONMENT_DOMAIN = 'story-validation-v1' as const;
+export const STORY_VALIDATION_ENVIRONMENT_DOMAIN = 'story-validation-v2' as const;
 export const FINAL_REVIEW_MECHANICAL_ENVIRONMENT_DOMAIN = 'final-review-mechanical-v1' as const;
+export type StoryValidationRuntimeMode = 'formal' | 'shadow';
+
+export interface StoryValidationRuntimeIdentity {
+  readonly mode: StoryValidationRuntimeMode;
+  readonly actualCodingXVersion: string;
+}
 
 export function candidateStoryValidationEnvironmentPolicy(tddConfig: TddConfig | null): {
   additionalRefs: string[];
@@ -54,9 +61,11 @@ export interface StoryValidationCurrentnessInput {
   workingContract: QualityContractReadResult;
   trackedContract: QualityContractReadResult;
   platform: QualityPlatform;
+  /** Validator 凭证必须绑定签发它的实际引擎版本与正式/候选模式。 */
+  runtimeIdentity: StoryValidationRuntimeIdentity;
   /** 受管观察会把本次严格解析结果传入，避免纯裁决与撕裂核验使用两种 TDD 解释。 */
   tddRead?: TddConfigReadResult;
-  /** @internal 只兼容 Loop 的固定摘要测试夹具；正式调用必须省略。 */
+  /** @internal 只兼容 Loop 的机械环境摘要夹具；运行版本与模式仍在其后强制绑定。 */
   storyValidationEnvironmentDigestForTests?: string;
 }
 
@@ -161,15 +170,40 @@ export function digestCandidateStoryValidationEnvironment(options: {
   contract: Pick<QualityContract, 'checks' | 'generatedPaths' | 'localValidation'>;
   headSha: string;
   tddConfig: TddConfig | null;
+  runtimeIdentity: StoryValidationRuntimeIdentity;
   platform?: QualityPlatform;
 }): string {
   const policy = candidateStoryValidationEnvironmentPolicy(options.tddConfig);
-  return validationEnvironmentDigest({
+  const baseDigest = validationEnvironmentDigest({
     contract: options.contract,
     head: options.headSha,
     ...(options.platform ? { platform: options.platform } : {}),
     ...policy,
   });
+  return bindStoryValidationRuntimeIdentity(baseDigest, options.runtimeIdentity);
+}
+
+/**
+ * Test seams and clean-checkout observations can supply the mechanical environment digest directly,
+ * but they can never bypass the runtime identity that separates candidate and formal receipts.
+ */
+export function bindStoryValidationRuntimeIdentity(
+  environmentDigest: string,
+  identity: StoryValidationRuntimeIdentity,
+): string {
+  if (!isSha256Digest(environmentDigest)) {
+    throw new Error('Story 验收机械环境摘要非法');
+  }
+  if (identity.actualCodingXVersion.trim() === '') {
+    throw new Error('Story 验收实际 coding-x 版本不能为空');
+  }
+  const canonical = JSON.stringify({
+    domain: STORY_VALIDATION_ENVIRONMENT_DOMAIN,
+    environmentDigest,
+    mode: identity.mode,
+    actualCodingXVersion: identity.actualCodingXVersion,
+  });
+  return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
 
 /** 默认分支旧契约裁决的机械 Final Review 环境；禁止拿它核对 Story 凭证。 */
@@ -327,14 +361,18 @@ export function evaluateStoryValidationCurrentness(
         '测试注入的 Story 验收环境摘要非法',
       );
     }
-    const storyValidationEnvironmentDigest =
+    const mechanicalEnvironmentDigest =
       input.storyValidationEnvironmentDigestForTests ??
-      digestCandidateStoryValidationEnvironment({
+      validationEnvironmentDigest({
         contract: tracked.contract,
-        headSha: input.headSha,
-        tddConfig,
+        head: input.headSha,
         platform: input.platform,
+        ...candidateStoryValidationEnvironmentPolicy(tddConfig),
       });
+    const storyValidationEnvironmentDigest = bindStoryValidationRuntimeIdentity(
+      mechanicalEnvironmentDigest,
+      input.runtimeIdentity,
+    );
     const receiptSet = evaluateStoryValidationReceiptSet(
       input.prd,
       input.state,
