@@ -55,6 +55,21 @@ describe('MonotonicDeadline', () => {
     expect(started).toBe(false);
   });
 
+  it('rejects a successful operation that synchronously crosses the absolute deadline', async () => {
+    const clock = new FakeClock();
+    const deadline = MonotonicDeadline.after(10, clock);
+
+    await expect(
+      deadline.run(
+        () => {
+          clock.value = 10;
+          return 'late success';
+        },
+        () => new Error('phase timed out'),
+      ),
+    ).rejects.toThrow(/phase timed out/u);
+  });
+
   it('allows a termination transition to tighten but never extend an existing deadline', () => {
     const clock = new FakeClock();
     const deadline = MonotonicDeadline.after(100, clock);

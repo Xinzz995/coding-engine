@@ -371,16 +371,22 @@ async function drainNormally() {
   cleanupStarted = true;
   const deadline = beginCloseout(true);
   const naturalDeadline = Math.min(deadline, deadlineAfter(timeouts.naturalDrainMs));
-  let naturallyDrained = false;
-  while (parentConnected && !terminalCause && remainingDeadlineMs(naturalDeadline) > 0) {
+  const containmentIsNaturallyDrained = () => {
     if (stdoutEof && stderrEof) {
       const members = groupMembers(launcherPgid);
-      if (members.length === 1 && members[0] === launcher.pid) {
-        naturallyDrained = true;
-        break;
-      }
+      return members.length === 1 && members[0] === launcher.pid;
     }
+    return false;
+  };
+  let naturallyDrained = containmentIsNaturallyDrained();
+  while (
+    !naturallyDrained &&
+    parentConnected &&
+    !terminalCause &&
+    remainingDeadlineMs(naturalDeadline) > 0
+  ) {
     await delay(Math.min(timeouts.pollMs, remainingDeadlineMs(naturalDeadline)));
+    naturallyDrained = containmentIsNaturallyDrained();
   }
   if (terminalCause) {
     await terminateContainment(deadline);

@@ -221,6 +221,41 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 15_000);
 
+  it('performs an immediate natural-drain observation when the configured grace is zero', async () => {
+    const setupState = await setup();
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target('process.exit(0)', setupState.workspace),
+          commandTimeoutMs: 2000,
+          timeouts: {
+            naturalDrainMs: 0,
+            termMs: 100,
+            killMs: 3000,
+            ackMs: 1000,
+            pollMs: 20,
+          },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      leftover: false,
+      receipt: { drainReason: 'natural' },
+    });
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 15_000);
+
   it('preserves large stdout and stderr across multiple bounded OUTPUT events', async () => {
     const setupState = await setup();
     const stdoutBytes = 96 * 1024 + 17;

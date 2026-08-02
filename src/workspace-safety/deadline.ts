@@ -68,13 +68,23 @@ export class MonotonicDeadline {
     }
 
     return await new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(timeoutError()), remaining);
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(timeoutError());
+      }, remaining);
       void pending.then(
         (value) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
-          resolve(value);
+          if (this.expired) reject(timeoutError());
+          else resolve(value);
         },
         (error: unknown) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
           reject(error instanceof Error ? error : new Error(String(error)));
         },
