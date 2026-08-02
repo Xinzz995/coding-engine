@@ -2,9 +2,10 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readGitHead } from '../engine/validation-protocol.js';
 import { readQualityContract } from '../quality/contract.js';
+import { CODING_X_VERSION } from '../version.js';
 import { digestBytes } from './filesystem.js';
 import { createIdentityProbe } from './identity.js';
 import { readCanonicalMutationDomain, verifyMutationArchive } from './mutation-domain.js';
@@ -23,20 +24,24 @@ import {
 } from './workspace-authority-test-seam.js';
 
 const roots: string[] = [];
-const QUALITY = (() => {
-  const quality = readQualityContract(process.cwd());
+type ReadyQuality = Extract<ReturnType<typeof readQualityContract>, { readonly status: 'ready' }>;
+
+let QUALITY: ReadyQuality;
+let QUALITY_DIGEST: string;
+let HEAD: string;
+let APPLY_OPTIONS: { readonly projectRoot: string };
+
+beforeEach(() => {
+  const project = gitProject();
+  const quality = readQualityContract(project.root);
   if (quality.status !== 'ready') {
     throw new Error(`quality fixture unavailable: ${quality.status}`);
   }
-  return quality;
-})();
-const QUALITY_DIGEST = QUALITY.digest;
-const HEAD = (() => {
-  const head = readGitHead(process.cwd());
-  if (head === null) throw new Error('Git HEAD fixture unavailable');
-  return head;
-})();
-const APPLY_OPTIONS = { projectRoot: process.cwd() } as const;
+  QUALITY = quality;
+  QUALITY_DIGEST = quality.digest;
+  HEAD = project.head;
+  APPLY_OPTIONS = { projectRoot: project.root };
+});
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -103,16 +108,18 @@ function gitProject(): { readonly root: string; readonly head: string } {
   const root = mkdtempSync(join(tmpdir(), 'workspace-product-project-'));
   roots.push(root);
   mkdirSync(join(root, '.coding-x'), { recursive: true });
-  writeFileSync(
-    join(root, '.coding-x', 'quality.json'),
-    readFileSync(join(process.cwd(), '.coding-x', 'quality.json')),
-  );
+  const contract = JSON.parse(
+    readFileSync(join(process.cwd(), '.coding-x', 'quality.json'), 'utf8'),
+  ) as Record<string, unknown>;
+  contract.codingXVersion = CODING_X_VERSION;
+  writeFileSync(join(root, '.coding-x', 'quality.json'), `${JSON.stringify(contract, null, 2)}\n`);
   writeFileSync(join(root, 'source.txt'), '# source PRD\n');
+  writeFileSync(join(root, 'README.md'), '# different source\n');
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'coding-x test'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'coding-x-test@example.invalid'], { cwd: root });
   execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: root });
-  execFileSync('git', ['add', '.coding-x/quality.json', 'source.txt'], { cwd: root });
+  execFileSync('git', ['add', '.coding-x/quality.json', 'source.txt', 'README.md'], { cwd: root });
   execFileSync('git', ['commit', '-q', '-m', 'test: baseline'], { cwd: root });
   return {
     root,

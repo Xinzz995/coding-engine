@@ -55,11 +55,23 @@ function currentQualitySnapshot(): {
   };
 }
 
-function committedStatusProject(): string {
+function committedStatusProject(codingXVersion?: string): string {
   const source = join(process.cwd(), '.coding-x', 'quality.json');
   const root = mkdtempSync(join(tmpdir(), 'status-project-'));
   mkdirSync(join(root, '.coding-x'), { recursive: true });
-  writeFileSync(join(root, '.coding-x', 'quality.json'), readFileSync(source));
+  const sourceBytes = readFileSync(source);
+  if (codingXVersion === undefined) {
+    writeFileSync(join(root, '.coding-x', 'quality.json'), sourceBytes);
+  } else {
+    const parsed = JSON.parse(sourceBytes.toString('utf8')) as unknown;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('repository quality contract fixture must be an object');
+    }
+    writeFileSync(
+      join(root, '.coding-x', 'quality.json'),
+      JSON.stringify({ ...(parsed as Record<string, unknown>), codingXVersion }),
+    );
+  }
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'status fixture'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'status@example.invalid'], { cwd: root });
@@ -1183,53 +1195,60 @@ describe('main — workspace commands', () => {
     const root = mkdtempSync(join(tmpdir(), 'cli-workspace-apply-'));
     const workspace = join(root, 'ws');
     const input = join(root, 'request.json');
-    const quality = readQualityContract(process.cwd());
-    if (quality.status !== 'ready')
-      throw new Error(`quality fixture unavailable: ${quality.status}`);
-    const head = readGitHead(process.cwd());
-    if (head === null) throw new Error('Git HEAD fixture unavailable');
-    const qualityDigest = quality.digest;
-    const source = '# accepted spec\n';
-    const candidate = {
-      prd: JSON.stringify({
-        project: 'fixture',
-        branchName: 'feature/fixture',
-        description: 'fixture',
-        qualityContractDigest: qualityDigest,
-        qualityChecks: quality.contract.checks,
-        userStories: [],
-      }),
-      state: null,
-      progress: '# Progress\n',
-    };
-    await bootstrapWorkspace({ workspacePath: workspace });
-    writeFileSync(
-      input,
-      JSON.stringify({
-        schemaVersion: 1,
-        mode: 'replace-feature',
-        source: { bytes: source, digest: digestBytes(Buffer.from(source)) },
-        git: { expectedHead: head, currentHead: head },
-        quality: { expectedDigest: qualityDigest, currentDigest: qualityDigest },
-        candidate: {
-          ...candidate,
-          digest: applyPrdV1CandidateDigest('replace-feature', candidate),
-        },
-      }),
-    );
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const project = committedStatusProject(CODING_X_VERSION);
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(project);
     try {
-      expect(
-        await main(['workspace', 'apply-prd', '--workspace', workspace, '--input', input]),
-      ).toBe(0);
-      expect(JSON.parse(readFileSync(join(workspace, 'prd.json'), 'utf8'))).toMatchObject({
-        branchName: 'feature/fixture',
-      });
-      expect(readFileSync(join(workspace, 'progress.md'), 'utf8')).toBe('# Progress\n');
-      expect(existsSync(join(workspace, 'engine.lock', 'lease'))).toBe(false);
+      const quality = readQualityContract(project);
+      if (quality.status !== 'ready')
+        throw new Error(`quality fixture unavailable: ${quality.status}`);
+      const head = readGitHead(project);
+      if (head === null) throw new Error('Git HEAD fixture unavailable');
+      const qualityDigest = quality.digest;
+      const source = '# accepted spec\n';
+      const candidate = {
+        prd: JSON.stringify({
+          project: 'fixture',
+          branchName: 'feature/fixture',
+          description: 'fixture',
+          qualityContractDigest: qualityDigest,
+          qualityChecks: quality.contract.checks,
+          userStories: [],
+        }),
+        state: null,
+        progress: '# Progress\n',
+      };
+      await bootstrapWorkspace({ workspacePath: workspace });
+      writeFileSync(
+        input,
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: 'replace-feature',
+          source: { bytes: source, digest: digestBytes(Buffer.from(source)) },
+          git: { expectedHead: head, currentHead: head },
+          quality: { expectedDigest: qualityDigest, currentDigest: qualityDigest },
+          candidate: {
+            ...candidate,
+            digest: applyPrdV1CandidateDigest('replace-feature', candidate),
+          },
+        }),
+      );
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        expect(
+          await main(['workspace', 'apply-prd', '--workspace', workspace, '--input', input]),
+        ).toBe(0);
+        expect(JSON.parse(readFileSync(join(workspace, 'prd.json'), 'utf8'))).toMatchObject({
+          branchName: 'feature/fixture',
+        });
+        expect(readFileSync(join(workspace, 'progress.md'), 'utf8')).toBe('# Progress\n');
+        expect(existsSync(join(workspace, 'engine.lock', 'lease'))).toBe(false);
+      } finally {
+        logSpy.mockRestore();
+      }
     } finally {
-      logSpy.mockRestore();
+      cwdSpy.mockRestore();
       rmSync(root, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
     }
   });
 
