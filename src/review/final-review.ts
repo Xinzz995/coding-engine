@@ -70,6 +70,10 @@ type AxisRunner = (options: {
   termination?: ManagedGateContext['termination'];
 }) => Promise<SafeRunnerInvocation>;
 
+export type StoryValidationBindingObservation =
+  | { status: 'ready'; digest: string }
+  | { status: 'unverifiable'; message: string };
+
 function findingId(axis: ReviewAxis, finding: ModelReviewOutput['findings'][number]): string {
   return `RV-${axis.toUpperCase()}-${digest({
     axis,
@@ -172,6 +176,12 @@ export async function runFinalReview(options: {
     contract: QualityContract,
   ) => ReviewRemoteState | Promise<ReviewRemoteState>;
   revalidate?: () => ReviewContextRevalidation | Promise<ReviewContextRevalidation>;
+  /** loop 在进入 Review 前冻结的精确 Story 凭证集合摘要。 */
+  storyValidationDigest: string;
+  /** 在同一 workspace session 中只读重算当前 PRD/state/HEAD 的凭证集合。 */
+  observeStoryValidation: () =>
+    | StoryValidationBindingObservation
+    | Promise<StoryValidationBindingObservation>;
   termination?: ManagedGateContext['termination'];
 }): Promise<FinalReviewOutcome> {
   const startedAt = new Date().toISOString();
@@ -236,6 +246,24 @@ export async function runFinalReview(options: {
   // 先使旧结果失效，再进入本轮任何可失败环节。否则同一 head 上的机械
   // 检查回归、裁决文件损坏或 Runner 中断可能让 status 继续读到旧的绿色结果。
   await invalidateFinalReviewState(options.session.writer);
+  const verifyStoryValidationBinding = async (phase: string): Promise<string | null> => {
+    if (!/^sha256:[a-f0-9]{64}$/u.test(options.storyValidationDigest)) {
+      return `${phase}Story 验收凭证集合摘要非法；本轮 Review 已作废`;
+    }
+    try {
+      const observed = await options.observeStoryValidation();
+      if (observed.status !== 'ready') {
+        return `${phase}Story 验收凭证集合无法验证：${observed.message}`;
+      }
+      return observed.digest === options.storyValidationDigest
+        ? null
+        : `${phase}Story 验收凭证集合发生变化；本轮 Review 已作废`;
+    } catch (error) {
+      return `${phase}Story 验收凭证集合无法验证：${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+  };
   let decisions;
   try {
     decisions = readReviewDecisions(workspace);
@@ -272,6 +300,8 @@ export async function runFinalReview(options: {
     qualityContractDigest: context.baseContractDigest,
     scope: 'all-current-platform-applicable-contract-checks' as const,
   };
+  const preModelStoryError = await verifyStoryValidationBinding('机械检查结束后、模型调用前：');
+  if (preModelStoryError) return { exitCode: 5, message: preModelStoryError };
 
   let runnerVersion: string;
   try {
@@ -298,6 +328,7 @@ export async function runFinalReview(options: {
       runner: options.runner,
       model,
       runnerVersion,
+      storyValidationDigest: options.storyValidationDigest,
     });
   const revalidateContext = async () =>
     await (options.revalidate?.() ?? revalidateReviewContext(context, workspace, observation));
@@ -340,6 +371,8 @@ export async function runFinalReview(options: {
       failures: [error instanceof Error ? error.message : String(error)],
     };
   }
+  const postProbeStoryError = await verifyStoryValidationBinding('Runner 隔离探测结束后：');
+  if (postProbeStoryError) return { exitCode: 5, message: postProbeStoryError };
   if (!probe.ok) {
     const summary = `Runner 隔离反测未通过：${probe.failures.join('；')}`;
     if (options.session.state !== 'open') {
@@ -381,6 +414,8 @@ export async function runFinalReview(options: {
       shadow: options.shadow ?? false,
       startedAt,
     });
+    const prePersistStoryError = await verifyStoryValidationBinding('最终 Review 状态落盘前：');
+    if (prePersistStoryError) return { exitCode: 5, message: prePersistStoryError };
     const persistenceError = await persistState(state);
     if (persistenceError !== null) return { exitCode: 5, message: persistenceError };
     return stateOutcome(state);
@@ -487,6 +522,8 @@ export async function runFinalReview(options: {
   if (risk.triggered && !securityStop.stop && !options.termination?.signal.aborted) {
     securityStop = await runAxis('deep');
   }
+  const postModelStoryError = await verifyStoryValidationBinding('Reviewer 模型结束后：');
+  if (postModelStoryError) return { exitCode: 5, message: postModelStoryError };
   if (options.termination?.signal.aborted && securityStop.stop) {
     return {
       exitCode: 5,
@@ -538,6 +575,8 @@ export async function runFinalReview(options: {
       shadow: options.shadow ?? false,
       startedAt,
     });
+    const prePersistStoryError = await verifyStoryValidationBinding('最终 Review 状态落盘前：');
+    if (prePersistStoryError) return { exitCode: 5, message: prePersistStoryError };
     const persistenceError = await persistState(state);
     if (persistenceError !== null) {
       return { exitCode: 5, message: `${summary}；${persistenceError}` };
@@ -611,6 +650,8 @@ export async function runFinalReview(options: {
     shadow,
     startedAt,
   });
+  const prePersistStoryError = await verifyStoryValidationBinding('最终 Review 状态落盘前：');
+  if (prePersistStoryError) return { exitCode: 5, message: prePersistStoryError };
   const persistenceError = await persistState(state);
   if (persistenceError !== null) return { exitCode: 5, message: persistenceError };
   return stateOutcome(state);

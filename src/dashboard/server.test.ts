@@ -3,7 +3,15 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
-import { setState, buildApiResponse, start, configureWorkspace } from './server.js';
+import { execFileSync } from 'node:child_process';
+import { acceptanceHash } from '../engine/validation-protocol.js';
+import {
+  setState,
+  buildApiResponse,
+  start,
+  configureWorkspace,
+  evaluateDashboardReviewCompletion,
+} from './server.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -46,6 +54,18 @@ type DashboardStory = {
   blocked: boolean;
 };
 
+type DashboardStoryValidation = {
+  gitHead: string | null;
+  current: boolean;
+  invalidStoryIds: string[];
+  configurationError: string | null;
+};
+
+type DashboardReviewCompletion = {
+  current: boolean;
+  reason: string | null;
+};
+
 const dashboardAssets = [
   {
     label: '普通页',
@@ -65,7 +85,7 @@ function readDashboardAsset(file: string): string {
   return readFileSync(join(process.cwd(), 'assets', 'dashboard', file), 'utf-8');
 }
 
-function extractStateFunction(html: string, name: string): string {
+function extractInlineFunction(html: string, name: string): string {
   const source = html.match(
     new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}`),
   );
@@ -77,16 +97,54 @@ function dashboardState(
   asset: (typeof dashboardAssets)[number],
   story: DashboardStory,
   currentStory: string | null = null,
+  storyValidation: DashboardStoryValidation | null = {
+    gitHead: 'a'.repeat(40),
+    current: true,
+    invalidStoryIds: [],
+    configurationError: null,
+  },
 ): string {
-  const source = extractStateFunction(readDashboardAsset(asset.file), asset.stateFunction);
+  const html = readDashboardAsset(asset.file);
+  const passedSource = extractInlineFunction(html, 'isStoryPassed');
+  const stateSource = extractInlineFunction(html, asset.stateFunction);
   const invocation = asset.currentStoryArgument
-    ? `(${source})(story, currentStory)`
-    : `(${source})(story)`;
-  return runInNewContext(invocation, {
+    ? `${asset.stateFunction}(story, currentStory, storyValidation)`
+    : `${asset.stateFunction}(story, storyValidation)`;
+  return runInNewContext(`${passedSource}\n${stateSource}\n${invocation}`, {
     story,
     currentStory,
+    storyValidation,
     getRuntime: () => ({ current_story: currentStory }),
   }) as string;
+}
+
+function dashboardPassedCount(
+  asset: (typeof dashboardAssets)[number],
+  stories: DashboardStory[],
+  storyValidation: DashboardStoryValidation | null,
+): number {
+  const html = readDashboardAsset(asset.file);
+  const passedSource = extractInlineFunction(html, 'isStoryPassed');
+  const countSource = extractInlineFunction(html, 'countPassedStories');
+  return runInNewContext(
+    `${passedSource}\n${countSource}\ncountPassedStories(stories, storyValidation)`,
+    { stories, storyValidation },
+  ) as number;
+}
+
+function dashboardEffectivePhase(
+  asset: (typeof dashboardAssets)[number],
+  runtimePhase: string,
+  stateCorrupted: boolean,
+  storyValidation: DashboardStoryValidation | null,
+  reviewCompletion: DashboardReviewCompletion | null = { current: true, reason: null },
+): string {
+  const html = readDashboardAsset(asset.file);
+  const phaseSource = extractInlineFunction(html, 'effectiveDashboardPhase');
+  return runInNewContext(
+    `${phaseSource}\neffectiveDashboardPhase(runtimePhase, stateCorrupted, storyValidation, reviewCompletion)`,
+    { runtimePhase, stateCorrupted, storyValidation, reviewCompletion },
+  ) as string;
 }
 
 describe.each(dashboardAssets)('$label dashboard published-state contract', (asset) => {
@@ -109,18 +167,93 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
     expect(dashboardState(asset, story())).toBe('pending');
   });
 
-  it('将待验收标记为「待引擎验收」，且完成计数必须同时要求 passes 与 validated', () => {
+  it('将待验收标记为「待引擎验收」，并真实消费 Story 验收评估结果', () => {
     const html = readDashboardAsset(asset.file);
     expect(html).toMatch(/awaiting\s*:\s*(?:\{[^}]*label\s*:\s*)?['"]待引擎验收['"]/);
-    expect(html).toMatch(
-      /stories\.filter\(s\s*=>\s*!s\.blocked\s*&&\s*s\.passes\s*===\s*true\s*&&\s*s\.validated\s*===\s*true\)\.length/,
-    );
+    const green = story({ passes: true, validated: true });
+    const current: DashboardStoryValidation = {
+      gitHead: 'a'.repeat(40),
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    };
+    expect(dashboardState(asset, green, null, current)).toBe('passed');
+    expect(dashboardPassedCount(asset, [green], current)).toBe(1);
+
+    const invalidIdentity = {
+      ...current,
+      current: false,
+      invalidStoryIds: ['US-001'],
+    };
+    expect(dashboardState(asset, green, null, invalidIdentity)).toBe('awaiting');
+    expect(dashboardPassedCount(asset, [green], invalidIdentity)).toBe(0);
+
+    const configurationError = {
+      ...current,
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    };
+    expect(dashboardState(asset, green, null, configurationError)).toBe('awaiting');
+    expect(dashboardPassedCount(asset, [green], configurationError)).toBe(0);
+    expect(dashboardState(asset, green, null, null)).toBe('awaiting');
+    expect(dashboardPassedCount(asset, [green], null)).toBe(0);
+
+    const anotherStoryIsStale = {
+      ...current,
+      current: false,
+      invalidStoryIds: ['US-002'],
+    };
+    expect(dashboardState(asset, green, null, anotherStoryIsStale)).toBe('passed');
+    expect(html.match(/countPassedStories\(stories, storyValidation\)/g)).toHaveLength(2);
+    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    if (asset.currentStoryArgument) {
+      expect(html).toContain(
+        'renderStories(data.stories, data.runtime.current_story, data.storyValidation);',
+      );
+      expect(html).toContain('renderProgress(data.stories, data.storyValidation);');
+    } else {
+      expect(html).toContain('const storyValidation = dashboardData.storyValidation;');
+      expect(html).toContain('const passedCount = countPassedStories(stories, storyValidation);');
+    }
   });
 
   it('state 损坏时展示 fail-closed 警告', () => {
     const html = readDashboardAsset(asset.file);
     expect(html).toContain('state.json 已损坏');
     expect(html).toContain('stateCorrupted');
+  });
+
+  it('只有当前验收状态才能显示绿色完成阶段', () => {
+    const current: DashboardStoryValidation = {
+      gitHead: 'a'.repeat(40),
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    };
+    expect(dashboardEffectivePhase(asset, 'done', false, current)).toBe('done');
+    expect(
+      dashboardEffectivePhase(asset, 'done', false, {
+        ...current,
+        current: false,
+        invalidStoryIds: ['US-001'],
+      }),
+    ).toBe('error');
+    expect(
+      dashboardEffectivePhase(asset, 'done', false, {
+        ...current,
+        configurationError: 'Story 集合非法',
+      }),
+    ).toBe('error');
+    expect(dashboardEffectivePhase(asset, 'done', false, null)).toBe('error');
+    expect(dashboardEffectivePhase(asset, 'done', true, current)).toBe('error');
+    expect(
+      dashboardEffectivePhase(asset, 'done', false, current, {
+        current: false,
+        reason: '最终 Review 对应的 Story 验收凭证集合已变化',
+      }),
+    ).toBe('error');
+    expect(dashboardEffectivePhase(asset, 'validating', false, null)).toBe('validating');
+    expect(dashboardEffectivePhase(asset, 'blocked', false, current, null)).toBe('blocked');
+    expect(dashboardEffectivePhase(asset, 'shadow', false, current, null)).toBe('shadow');
   });
 
   it('展示统一的 workspace 安全分类、摘要与处理提示', () => {
@@ -133,6 +266,39 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
 });
 
 describe('buildApiResponse', () => {
+  it('只有绑定当前 HEAD 和整组 Story 凭证的可交付 Review 才保持完成态', () => {
+    const head = 'a'.repeat(40);
+    const receiptSet = `sha256:${'b'.repeat(64)}`;
+    const ready = {
+      status: 'ready',
+      state: {
+        status: 'passed',
+        deliveryStatus: 'ready',
+        shadow: false,
+        binding: { headSha: head, storyValidationDigest: receiptSet },
+      },
+    } as unknown as Parameters<typeof evaluateDashboardReviewCompletion>[0];
+
+    expect(evaluateDashboardReviewCompletion(ready, head, receiptSet)).toEqual({
+      current: true,
+      reason: null,
+    });
+    expect(
+      evaluateDashboardReviewCompletion(ready, head, `sha256:${'c'.repeat(64)}`),
+    ).toMatchObject({
+      current: false,
+      reason: '最终 Review 对应的 Story 验收凭证集合已变化',
+    });
+    expect(evaluateDashboardReviewCompletion(ready, 'd'.repeat(40), receiptSet)).toMatchObject({
+      current: false,
+      reason: '最终 Review 对应的提交已变化',
+    });
+    expect(evaluateDashboardReviewCompletion({ status: 'missing' }, head, receiptSet)).toEqual({
+      current: false,
+      reason: '最终 Review 尚未完成',
+    });
+  });
+
   it('reflects state + workspace files', () => {
     const ws = tempWorkspace();
     configureWorkspace(ws, 50);
@@ -147,6 +313,329 @@ describe('buildApiResponse', () => {
     expect(r.stories[0].passes).toBe(true); // 状态来自 state.json
     expect(r.stories[0].validated).toBe(false); // 旧 passed state 只保留实现候选
     expect(r.logs).toContain('US-001');
+  });
+
+  it('非法空 Story 集合不能显示为当前验收结果', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-empty-stories-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'initial\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'initial');
+    const head = git('rev-parse', 'HEAD');
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'empty-stories',
+        branchName: 'feature/empty',
+        description: 'd',
+        userStories: [],
+      }),
+    );
+    writeFileSync(join(ws, 'state.json'), '{}');
+    writeFileSync(join(ws, 'progress.md'), '');
+
+    configureWorkspace(ws, 50, root);
+    expect(buildApiResponse().storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'prd.json 必须包含至少一个 Story',
+    });
+  });
+
+  it('非法 Story 元素不会让 dashboard API 崩溃，而是返回配置错误', () => {
+    const ws = tempWorkspace();
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'malformed-stories',
+        branchName: 'feature/malformed',
+        description: 'd',
+        userStories: [null],
+      }),
+    );
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+
+    configureWorkspace(ws, 50, process.cwd());
+    const response = buildApiResponse();
+    expect(response.stories).toEqual([]);
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'userStories[0] 的 Story ID 非法',
+    });
+  });
+
+  it('userStories 不是数组时 dashboard API 返回配置错误而不是 500', () => {
+    const ws = tempWorkspace();
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'non-array-stories',
+        branchName: 'feature/non-array',
+        description: 'd',
+        userStories: {},
+      }),
+    );
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+
+    configureWorkspace(ws, 50, process.cwd());
+    const response = buildApiResponse();
+    expect(response.stories).toEqual([]);
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'prd.json 必须包含至少一个 Story',
+    });
+  });
+
+  it('重复 Story ID 时 API 撤销全部绿灯、暴露配置错误且不改写状态文件', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-duplicate-stories-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'initial\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'initial');
+    const head = git('rev-parse', 'HEAD');
+    const duplicateStory = {
+      id: 'US-001',
+      title: 'duplicate',
+      description: 'd',
+      acceptanceCriteria: ['ac'],
+      priority: 1,
+    };
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'duplicate-stories',
+        branchName: 'feature/duplicate',
+        description: 'd',
+        userStories: [duplicateStory, { ...duplicateStory }],
+      }),
+    );
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'duplicate-dashboard-receipt',
+          gitHead: head,
+          acceptanceHash: acceptanceHash('US-001', ['ac']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+    writeFileSync(join(ws, 'progress.md'), '');
+
+    configureWorkspace(ws, 50, root);
+    const response = buildApiResponse();
+    expect(response.stories).toHaveLength(2);
+    expect(response.stories.every((item) => item.passes && !item.validated)).toBe(true);
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    });
+    expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
+  });
+
+  it('按项目当前 HEAD 只在内存中撤销过期的 Validator 绿灯', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-head-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'first\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'first');
+    const receiptHead = git('rev-parse', 'HEAD');
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'head-currentness',
+        branchName: 'feature/head',
+        description: 'd',
+        userStories: [
+          {
+            id: 'US-001',
+            title: 't',
+            description: 'd',
+            acceptanceCriteria: ['ac'],
+            priority: 1,
+          },
+        ],
+      }),
+    );
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'dashboard-receipt',
+          gitHead: receiptHead,
+          acceptanceHash: acceptanceHash('US-001', ['ac']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+    writeFileSync(join(ws, 'progress.md'), '');
+    writeFileSync(join(root, 'tracked.txt'), 'second\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'second');
+    const currentHead = git('rev-parse', 'HEAD');
+
+    configureWorkspace(ws, 50, root);
+    const response = buildApiResponse();
+
+    expect(response.stories[0]).toMatchObject({ passes: true, validated: false });
+    expect(response.storyValidation).toEqual({
+      gitHead: currentHead,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: null,
+    });
+    expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
+  });
+
+  it('混合 Story 对账时只撤销过期项，保留当前项和普通未完成项', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-mixed-head-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'first\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'first');
+    const oldHead = git('rev-parse', 'HEAD');
+    writeFileSync(join(root, 'tracked.txt'), 'second\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'second');
+    const currentHead = git('rev-parse', 'HEAD');
+    const stories = [
+      { id: 'US-001', title: 'stale', description: 'd', acceptanceCriteria: ['ac-1'], priority: 1 },
+      { id: 'US-002', title: 'current', description: 'd', acceptanceCriteria: ['ac-2'], priority: 2 },
+      { id: 'US-003', title: 'unfinished', description: 'd', acceptanceCriteria: ['ac-3'], priority: 3 },
+    ];
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'mixed-head-currentness',
+        branchName: 'feature/mixed-head',
+        description: 'd',
+        userStories: stories,
+      }),
+    );
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'stale-dashboard-receipt',
+          gitHead: oldHead,
+          acceptanceHash: acceptanceHash('US-001', ['ac-1']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-002': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'current-dashboard-receipt',
+          gitHead: currentHead,
+          acceptanceHash: acceptanceHash('US-002', ['ac-2']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-003': {
+        passes: false,
+        validated: false,
+        validationReceipt: null,
+        notes: 'ordinary unfinished',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+    writeFileSync(join(ws, 'progress.md'), '');
+
+    configureWorkspace(ws, 50, root);
+    const response = buildApiResponse();
+
+    expect(response.stories.map(({ id, passes, validated, validationReceipt }) => ({
+      id,
+      passes,
+      validated,
+      validationReceipt,
+    }))).toEqual([
+      { id: 'US-001', passes: true, validated: false, validationReceipt: null },
+      {
+        id: 'US-002',
+        passes: true,
+        validated: true,
+        validationReceipt: persisted['US-002'].validationReceipt,
+      },
+      { id: 'US-003', passes: false, validated: false, validationReceipt: null },
+    ]);
+    expect(response.storyValidation).toEqual({
+      gitHead: currentHead,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: null,
+    });
+    expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
   it('falls back to legacy in-story state when state.json is absent (v0.4 workspace)', () => {

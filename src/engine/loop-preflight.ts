@@ -12,7 +12,7 @@ import {
   type ModelPreflightResult,
 } from './model-preflight.js';
 import { createManagedPrdGuard } from './prd-guard.js';
-import type { Prd } from './prd.js';
+import { validatePrdStorySet, type Prd } from './prd.js';
 import {
   allStoriesResolvedAt,
   blankStateFor,
@@ -101,6 +101,13 @@ export async function runLoopPreflight(
   }
 
   const bootPrd = (await guard.read()).prd;
+  if (bootPrd) {
+    const storySet = validatePrdStorySet(bootPrd);
+    if (!storySet.valid) {
+      console.error(`❌ PRD Story 集合无效：${storySet.message}`);
+      return { status: 'failed', exitCode: 2 };
+    }
+  }
   // 正式运行必须先绑定一个非空提交身份。这个检查发生在 state 创建/迁移、模型目录读取
   // 和任何 Agent 启动之前；失败时不得改变既有 Story 状态。
   const bootGitHead = readGitHead(projectRoot);

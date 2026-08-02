@@ -14,6 +14,7 @@ import {
   restoreValidationOwnership,
   validationOwnershipOf,
   issueValidationReceipt,
+  evaluateStoryValidationReceiptSet,
   reconcileValidationReceipts,
   rollbackUnvalidatedPass,
   tryReadEngineOwnedFields,
@@ -61,7 +62,11 @@ import {
   type QualityContractReadResult,
 } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
-import { runFinalReview } from '../review/final-review.js';
+import {
+  runFinalReview,
+  type StoryValidationBindingObservation,
+} from '../review/final-review.js';
+import { invalidateFinalReviewState } from '../review/state.js';
 import type { FinalReviewOutcome } from '../review/types.js';
 import type { CurrentReviewStatus } from '../review/status.js';
 import { runLoopPreflight } from './loop-preflight.js';
@@ -122,6 +127,10 @@ export interface LoopConfig {
     codingXVersion: string;
     shadow: boolean;
     timeoutMs: number;
+    storyValidationDigest: string;
+    observeStoryValidation: () =>
+      | StoryValidationBindingObservation
+      | Promise<StoryValidationBindingObservation>;
     termination?: {
       signal: AbortSignal;
       reason: Exclude<SupervisorTerminationReason, 'timeout'>;
@@ -236,6 +245,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     server = dashboard.start({
       workspace: cfg.workspace,
       maxIterations: cfg.maxIterations,
+      projectRoot,
       port: cfg.port,
     });
     await server.ready;
@@ -362,6 +372,32 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
       const blocked = blockedConvergedExit(prd, current.state);
       if (blocked !== null) return blocked;
+      const initialStoryValidation = evaluateStoryValidationReceiptSet(
+        prd,
+        current.state,
+        current.gitHead,
+      );
+      if (!initialStoryValidation.valid || initialStoryValidation.digest === null) {
+        console.error('❌ 进入最终 Review 前无法生成当前 Story 验收凭证集合摘要');
+        return 1;
+      }
+      const observeStoryValidation = () => {
+        const observedHead = readGitHead(projectRoot);
+        const observedState = tryReadState(statePath);
+        if (!observedHead || !observedState) {
+          return {
+            status: 'unverifiable' as const,
+            message: !observedHead ? '当前 Git HEAD 不可读取' : 'state.json 不可读取',
+          };
+        }
+        const observed = evaluateStoryValidationReceiptSet(prd, observedState, observedHead);
+        return observed.valid && observed.digest !== null
+          ? { status: 'ready' as const, digest: observed.digest }
+          : {
+              status: 'unverifiable' as const,
+              message: `Story 凭证已过期：${observed.invalid.map((item) => item.storyId).join('、')}`,
+            };
+      };
       console.log('\n🔎 全部 story 已验证，开始针对当前 PR 最新提交执行本地最终 Review。');
       const finalReview = await (cfg.finalReviewRunner ?? runFinalReview)({
         root: projectRoot,
@@ -373,8 +409,21 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         codingXVersion: cfg.actualVersion ?? CODING_X_VERSION,
         shadow: cfg.shadow ?? false,
         timeoutMs: cfg.valTimeoutMs,
+        storyValidationDigest: initialStoryValidation.digest,
+        observeStoryValidation,
         termination: commandSignals.termination,
       });
+      if (finalReview.state !== undefined) {
+        const accepted = observeStoryValidation();
+        if (
+          accepted.status !== 'ready' ||
+          accepted.digest !== initialStoryValidation.digest
+        ) {
+          await invalidateFinalReviewState(session.writer);
+          console.error('⏸️  loop 接受最终 Review 前 Story 验收凭证集合已变化；本轮结果已作废');
+          return 5;
+        }
+      }
       reportCurrentReview =
         finalReview.state === undefined
           ? undefined
@@ -392,9 +441,43 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       );
       return finalReview.exitCode;
     };
+    const phaseAfterResolvedRun = (resolvedExitCode: number): dashboard.Phase => {
+      if (resolvedExitCode === 0) return 'done';
+      if (resolvedExitCode === 7) return 'shadow';
+      if (resolvedExitCode >= 3 && resolvedExitCode <= 6) return 'blocked';
+      return 'error';
+    };
+    const completeResolvedRunWithDashboard = async (
+      prd: Prd,
+      state: RunState,
+    ): Promise<number> => {
+      dashboard.setState({
+        phase: 'validating',
+        model: null,
+        routeSource: null,
+        storyDifficulty: null,
+      });
+      try {
+        const resolvedExitCode = await completeResolvedRun(prd, state);
+        dashboard.setState({
+          phase: phaseAfterResolvedRun(resolvedExitCode),
+          model: null,
+          routeSource: null,
+          storyDifficulty: null,
+        });
+        return resolvedExitCode;
+      } catch (error) {
+        dashboard.setState({
+          phase: 'error',
+          model: null,
+          routeSource: null,
+          storyDifficulty: null,
+        });
+        throw error;
+      }
+    };
     if (bootResolved) {
-      dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-      exitCode = await completeResolvedRun(bootPrd, bootState);
+      exitCode = await completeResolvedRunWithDashboard(bootPrd, bootState);
     }
     for (
       let i = 1;
@@ -875,13 +958,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           // 重跑的终轮在 evidence 时间线上是空洞（其余所有退出路径都恰写一条）。
           await recordIteration({ builderOutcome: 'completed', noop: true });
           await tamperCheckBeforeExit(i);
-          dashboard.setState({
-            phase: 'done',
-            model: null,
-            routeSource: null,
-            storyDifficulty: null,
-          });
-          exitCode = await completeResolvedRun(before, beforeState);
+          exitCode = await completeResolvedRunWithDashboard(before, beforeState);
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
@@ -1732,13 +1809,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         afterGitHead &&
         allStoriesResolvedAt(after, afterState, afterGitHead)
       ) {
-        dashboard.setState({
-          phase: 'done',
-          model: null,
-          routeSource: null,
-          storyDifficulty: null,
-        });
-        exitCode = await completeResolvedRun(after, afterState);
+        exitCode = await completeResolvedRunWithDashboard(after, afterState);
         break;
       }
     }
@@ -1767,6 +1838,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       const reportOptions: ReportOptions = {
         ...(closeRead.prd === null ? {} : { trustedPrd: closeRead.prd }),
         ...(reportCurrentReview === undefined ? {} : { currentReview: reportCurrentReview }),
+        currentGitHead: readGitHead(projectRoot),
       };
       const report = await writeReportWithWriter(session.writer, new Date(), reportOptions);
       if (report.status === 'written') {

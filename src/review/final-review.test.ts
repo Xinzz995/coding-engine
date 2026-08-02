@@ -148,6 +148,7 @@ const readyRemote: ReviewRemoteState = {
   rulesetErrors: [],
   checkedAt: '2026-07-26T00:00:00.000Z',
 };
+const STORY_VALIDATION_DIGEST = `sha256:${'c'.repeat(64)}`;
 
 function output(axis: ReviewAxis, mode: 'passed' | 'p1' | 'unverifiable' | 'p2' = 'passed') {
   if (mode === 'unverifiable')
@@ -208,6 +209,11 @@ function options(ws: string, ctx: ReviewPreflightContext) {
     probe: probe as typeof import('./runner.js').probeRunnerIsolation,
     remote: () => readyRemote,
     revalidate: () => ({ ok: true as const }),
+    storyValidationDigest: STORY_VALIDATION_DIGEST,
+    observeStoryValidation: () => ({
+      status: 'ready' as const,
+      digest: STORY_VALIDATION_DIGEST,
+    }),
   };
 }
 
@@ -422,6 +428,68 @@ describe('runFinalReview', () => {
     expect(result.exitCode).toBe(5);
     expect(result.message).toContain('本轮 Review 已作废');
     expect(result.state).toBeUndefined();
+  });
+
+  it('does not call a Reviewer model when the Story receipt set changes after mechanical checks', async () => {
+    const ws = workspace();
+    let modelCalls = 0;
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      observeStoryValidation: () => ({
+        status: 'ready',
+        digest: `sha256:${'d'.repeat(64)}`,
+      }),
+      axisRunner: async (request) => {
+        modelCalls += 1;
+        return output(request.axis);
+      },
+    });
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('机械检查结束后、模型调用前');
+    expect(modelCalls).toBe(0);
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('discards all model results when the Story receipt set changes after the axes finish', async () => {
+    const ws = workspace();
+    let observations = 0;
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      observeStoryValidation: () => {
+        observations += 1;
+        return {
+          status: 'ready' as const,
+          digest:
+            observations < 3 ? STORY_VALIDATION_DIGEST : `sha256:${'d'.repeat(64)}`,
+        };
+      },
+      axisRunner: async (request) => output(request.axis),
+    });
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('Reviewer 模型结束后');
+    expect(observations).toBe(3);
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('refuses to persist a green Review when the Story receipt set changes after remote checks', async () => {
+    const ws = workspace();
+    let observations = 0;
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      observeStoryValidation: () => {
+        observations += 1;
+        return {
+          status: 'ready' as const,
+          digest:
+            observations < 4 ? STORY_VALIDATION_DIGEST : `sha256:${'e'.repeat(64)}`,
+        };
+      },
+      axisRunner: async (request) => output(request.axis),
+    });
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('最终 Review 状态落盘前');
+    expect(observations).toBe(4);
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
   });
 
   it('invalidates model results when the PR changes during the final remote query', async () => {

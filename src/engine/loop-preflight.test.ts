@@ -23,6 +23,44 @@ function writeFinalReviewFixture(workspace: string, state: FinalReviewState): vo
 }
 
 describe('quality contract preflight and shadow mode', () => {
+  it.each([
+    ['empty', []],
+    ['duplicate ID', [story(), story()]],
+  ] as const)(
+    'rejects an %s Story set before state, agent, model, or Final Review',
+    async (_label, stories) => {
+      const { workspace, instructionsDir } = setup([...stories]);
+      const fake = fakeCounting(workspace);
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+      let modelCalls = 0;
+      let reviewCalls = 0;
+
+      const code = await runProductionLoop({
+        ...strictConfig(workspace, instructionsDir),
+        modelCatalog: async () => {
+          modelCalls += 1;
+          return {
+            status: 'available',
+            runner: 'claude',
+            source: 'global-config',
+            configPath: 'x',
+            models: [],
+          };
+        },
+        finalReviewRunner: async () => {
+          reviewCalls += 1;
+          return { exitCode: 0, message: 'must not run' };
+        },
+      });
+
+      expect(code).toBe(2);
+      expect(existsSync(join(workspace, 'state.json'))).toBe(false);
+      expect(existsSync(fake.calls)).toBe(false);
+      expect(modelCalls).toBe(0);
+      expect(reviewCalls).toBe(0);
+    },
+  );
+
   it('stops before state mutation, model lookup or any agent when Git HEAD is unavailable', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const statePath = join(workspace, 'state.json');

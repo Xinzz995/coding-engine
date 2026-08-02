@@ -63,6 +63,44 @@ export interface Prd {
   userStories: Story[];
 }
 
+export type PrdStorySetValidation =
+  | { valid: true }
+  | { valid: false; message: string };
+
+/**
+ * 正式循环用于判定 Story 集合是否能作为唯一执行身份。这里只收紧集合与 ID；
+ * 更完整的内容约束仍由 PRD 生成链和各消费协议负责。
+ */
+export function validatePrdStorySet(prd: Prd): PrdStorySetValidation {
+  const rawStories = (prd as unknown as { userStories?: unknown }).userStories;
+  if (!Array.isArray(rawStories) || rawStories.length === 0) {
+    return { valid: false, message: 'prd.json 必须包含至少一个 Story' };
+  }
+  const stories = rawStories as unknown[];
+  const seen = new Set<string>();
+  for (let index = 0; index < stories.length; index += 1) {
+    const value: unknown = stories[index];
+    const id =
+      typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? (value as Record<string, unknown>).id
+        : undefined;
+    if (
+      typeof id !== 'string' ||
+      id.length === 0 ||
+      id.trim() !== id ||
+      /[\0\r\n]/u.test(id)
+    ) {
+      return { valid: false, message: `userStories[${index}] 的 Story ID 非法` };
+    }
+    const key = id.toLocaleLowerCase('en-US');
+    if (seen.has(key)) {
+      return { valid: false, message: `userStories 包含重复 Story ID：${id}` };
+    }
+    seen.add(key);
+  }
+  return { valid: true };
+}
+
 export function tryReadPrd(path: string): Prd | null {
   try {
     return JSON.parse(readFileSync(path, 'utf-8')) as Prd;

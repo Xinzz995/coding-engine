@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +18,7 @@ import { observeCurrentReviewRunnerVersion } from './runner-version-observation.
 import type { FinalReviewState, ReviewAxisResult } from './types.js';
 
 const roots: string[] = [];
+const STORY_VALIDATION_DIGEST = `sha256:${'c'.repeat(64)}`;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -198,6 +199,7 @@ function writeBoundReview(
       runner: 'codex',
       model: 'review-model',
       runnerVersion: 'codex 1.2.3',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
     }),
     risk,
     axes,
@@ -288,6 +290,46 @@ describe('Runner version currentness observation', () => {
 });
 
 describe('collectCurrentReviewStatus currentness binding', () => {
+  it('旧 Review 可读取但会失效，当前凭证集合摘要变化也会失效', () => {
+    const workspace = temporaryDirectory('review-status-story-binding-');
+    const context = reviewContext();
+    writeBoundReview(workspace, context);
+    const reviewPath = join(workspace, 'final-review.json');
+    const legacy = JSON.parse(readFileSync(reviewPath, 'utf8')) as {
+      binding: { storyValidationDigest?: string };
+    };
+    delete legacy.binding.storyValidationDigest;
+    writeFileSync(reviewPath, JSON.stringify(legacy));
+
+    const baseOptions = {
+      workspace,
+      projectRoot: '/project',
+      codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
+      runnerVersionObservation: {
+        status: 'ready' as const,
+        runner: 'codex' as const,
+        version: 'codex 1.2.3',
+      },
+      preflight: () => ({ status: 'ready' as const, context }),
+    };
+    expect(collectCurrentReviewStatus(baseOptions)).toMatchObject({
+      current: false,
+      staleReasons: ['旧 Final Review 未绑定 Story 验收凭证集合'],
+    });
+
+    writeBoundReview(workspace, context);
+    expect(
+      collectCurrentReviewStatus({
+        ...baseOptions,
+        storyValidationDigest: `sha256:${'d'.repeat(64)}`,
+      }),
+    ).toMatchObject({
+      current: false,
+      staleReasons: ['Story 验收凭证集合 已变化'],
+    });
+  });
+
   it('fails closed without a project root or supervised Runner observation', () => {
     const workspace = temporaryDirectory('review-status-currentness-');
     const context = reviewContext();
@@ -301,6 +343,7 @@ describe('collectCurrentReviewStatus currentness binding', () => {
       workspace,
       projectRoot: '/project',
       codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
       preflight: () => ({ status: 'ready', context }),
     });
     expect(missingObservation.current).toBe(false);
@@ -316,6 +359,7 @@ describe('collectCurrentReviewStatus currentness binding', () => {
       workspace,
       projectRoot: '/project',
       codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
       runnerVersionObservation: { status: 'ready', runner: 'codex', version: 'codex 2.0.0' },
       preflight: () => ({ status: 'ready', context }),
     });
@@ -333,6 +377,7 @@ describe('collectCurrentReviewStatus currentness binding', () => {
       workspace,
       projectRoot: '/project',
       codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
       runnerVersionObservation: { status: 'ready', runner: 'codex', version: 'codex 1.2.3' },
       preflight: () => ({ status: 'ready', context }),
     });
@@ -376,6 +421,7 @@ describe('collectCurrentReviewStatus currentness binding', () => {
       client,
       refreshRemote: true,
       codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
       runnerVersionObservation: { status: 'ready', runner: 'codex', version: 'codex 1.2.3' },
       preflight: () => ({ status: 'ready', context }),
       revalidate: (_current, _workspace, _client) => {
@@ -417,6 +463,12 @@ describe('collectCurrentReviewStatus currentness binding', () => {
       evidenceSkippedLines: 0,
       evidenceUnavailable: false,
       stateCorrupted: false,
+      storyValidation: {
+        gitHead: context.headSha,
+        current: true,
+        invalidStoryIds: [],
+        configurationError: null,
+      },
       finalReview: result,
     } as unknown as StatusReport);
     expect(rendered.exitCode).toBe(6);

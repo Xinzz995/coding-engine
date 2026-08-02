@@ -60,16 +60,22 @@ export function readModelRouting(prd: Prd | null): ModelRoutingReadResult {
 
   const stories = Array.isArray(prd.userStories) ? prd.userStories : [];
   const errors: string[] = [];
-  for (const story of stories) {
-    const raw = story as Story & Record<string, unknown>;
-    if (hasOwn(raw, 'model')) errors.push(oldSchemaMessage(`userStories[${story.id}].model`));
+  const readableStories: Array<Story & Record<string, unknown>> = [];
+  for (let index = 0; index < stories.length; index += 1) {
+    const value: unknown = stories[index];
+    if (!isRecord(value)) {
+      errors.push(`userStories[${index}] 形状非法：必须是对象`);
+      continue;
+    }
+    const raw = value as Story & Record<string, unknown>;
+    readableStories.push(raw);
+    if (hasOwn(raw, 'model')) errors.push(oldSchemaMessage(`userStories[${raw.id}].model`));
   }
 
   if (prd.models === undefined) {
-    for (const story of stories) {
-      const raw = story as Story & Record<string, unknown>;
+    for (const raw of readableStories) {
       if (hasOwn(raw, 'difficulty') || hasOwn(raw, 'difficultyReason')) {
-        errors.push(`userStories[${story.id}] 含 difficulty/difficultyReason，但顶层 models 缺失；请补全路由或移除半套配置`);
+        errors.push(`userStories[${raw.id}] 含 difficulty/difficultyReason，但顶层 models 缺失；请补全路由或移除半套配置`);
       }
     }
     return errors.length > 0
@@ -118,7 +124,7 @@ export function readModelRouting(prd: Prd | null): ModelRoutingReadResult {
   if (!isNonEmptyString(rawModels.validator)) errors.push('models.validator 必须是非空模型标识');
   if (!isNonEmptyString(rawModels.escalation)) errors.push('models.escalation 必须是非空模型标识');
 
-  for (const story of stories) {
+  for (const story of readableStories) {
     if (!isDifficulty(story.difficulty)) {
       errors.push(`userStories[${story.id}].difficulty 必须是 low、medium 或 high`);
     }

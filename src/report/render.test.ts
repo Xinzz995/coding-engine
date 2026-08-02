@@ -29,6 +29,12 @@ function data(over: Partial<ReportData> = {}): ReportData {
       },
     ],
     stateCorrupted: false,
+    storyValidation: {
+      gitHead: 'b'.repeat(40),
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    },
     progress: '',
     reviews: [],
     tamperedArchives: [],
@@ -66,6 +72,7 @@ function readyReview(shadow = false): ReportData['finalReview'] {
         engineeringStandardsDigest: 'standards', qualityContractDigest: 'contract',
         codingXVersion: '0.30.0', runner: 'codex', model: 'gpt-test', runnerVersion: '1.0.0',
         reviewRulesVersion: '1.0.0', reviewRulesDigest: 'rules', riskDigest: 'risk',
+        storyValidationDigest: `sha256:${'c'.repeat(64)}`,
       },
       risk: {
         triggered: false, categories: [], reasons: [], changedFiles: ['src/a.ts'],
@@ -150,6 +157,87 @@ describe('renderReportHtml', () => {
     expect(renderReportHtml(data({
       stories: [{ ...s, passes: false, blocked: false }],
     }))).toContain('进行中');
+  });
+
+  it('当前 HEAD 不可读取或凭证过期时不会展示 Story 完成绿灯', () => {
+    const unavailable = renderReportHtml(
+      data({
+        storyValidation: {
+          gitHead: null,
+          current: false,
+          invalidStoryIds: ['US-001'],
+          configurationError: null,
+        },
+      }),
+    );
+    expect(unavailable).toContain('当前 Git HEAD 不可读取');
+    expect(unavailable).not.toContain('Story 验证完成');
+
+    const stale = renderReportHtml(
+      data({
+        storyValidation: {
+          gitHead: 'c'.repeat(40),
+          current: false,
+          invalidStoryIds: ['US-001'],
+          configurationError: null,
+        },
+      }),
+    );
+    expect(stale).toContain('Story 验收凭证已过期：US-001');
+    expect(stale).not.toContain('Story 验证完成');
+  });
+
+  it('配置错误即使与 current=true 错误组合也会由渲染边界撤销绿灯', () => {
+    const html = renderReportHtml(
+      data({
+        storyValidation: {
+          gitHead: 'c'.repeat(40),
+          current: true,
+          invalidStoryIds: [],
+          configurationError: 'userStories 包含重复 Story ID：US-001',
+        },
+      }),
+    );
+    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    expect(html).toContain('🟨 待引擎验收');
+    expect(html).not.toContain('✅ 通过');
+  });
+
+  it('只让过期 Story 失去验收状态，保留同一报告中仍有效的 Story', () => {
+    const first = data().stories[0];
+    const second = {
+      ...first,
+      id: 'US-002',
+      title: '第二个',
+      acceptanceCriteria: ['仍然有效'],
+    };
+    const html = renderReportHtml(
+      data({
+        prd: {
+          ...data().prd,
+          userStories: [
+            data().prd.userStories[0],
+            {
+              id: 'US-002',
+              title: '第二个',
+              description: 'd',
+              acceptanceCriteria: ['仍然有效'],
+              priority: 2,
+            },
+          ],
+        },
+        stories: [first, second],
+        storyValidation: {
+          gitHead: 'c'.repeat(40),
+          current: false,
+          invalidStoryIds: ['US-001'],
+          configurationError: null,
+        },
+      }),
+    );
+
+    expect(html).toMatch(/US-001 第一个 <span class="badge pending">🟨 待引擎验收<\/span>/u);
+    expect(html).toMatch(/US-002 第二个 <span class="badge ok">✅ 通过<\/span>/u);
   });
 
   it('把 Story、本地 Review 和 GitHub 交付分开显示', () => {

@@ -28,6 +28,7 @@ export function collectCurrentReviewStatus(options: {
   refreshRemote?: boolean;
   codingXVersion?: string;
   runnerVersionObservation?: RunnerVersionObservation;
+  storyValidationDigest?: string | null;
   /** @internal Deterministic currentness seam; production performs the full preflight. */
   preflight?: () => ReviewPreflightResult;
   /** @internal Deterministic end-of-refresh seam; production performs full context revalidation. */
@@ -68,6 +69,9 @@ export function collectCurrentReviewStatus(options: {
     ...(options.runnerVersionObservation === undefined
       ? {}
       : { runnerVersionObservation: options.runnerVersionObservation }),
+    ...(options.storyValidationDigest === undefined
+      ? {}
+      : { storyValidationDigest: options.storyValidationDigest }),
   });
   if (!evaluated.current || !options.refreshRemote) return evaluated;
   const refreshedRemote = evaluateReviewRemoteState({

@@ -3,7 +3,14 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
-import { readDisplayState, mergedStories, type StoryView } from '../engine/state.js';
+import {
+  evaluateStoryValidationDisplay,
+  readDisplayState,
+  mergedStories,
+  type StoryView,
+  type StoryValidationDisplayCurrentness,
+} from '../engine/state.js';
+import { readGitHead } from '../engine/validation-protocol.js';
 import { readProgress } from '../engine/progress.js';
 import {
   readModelRouting,
@@ -15,8 +22,52 @@ import {
   inspectWorkspaceSafetyStatus,
   type WorkspaceSafetyStatusSnapshot,
 } from '../workspace-safety/status.js';
+import { readFinalReviewState, type ReviewStateRead } from '../review/state.js';
 
-export type Phase = 'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'error';
+export type Phase =
+  | 'idle'
+  | 'developing'
+  | 'gating'
+  | 'validating'
+  | 'done'
+  | 'blocked'
+  | 'shadow'
+  | 'error';
+
+export interface DashboardReviewCompletion {
+  current: boolean;
+  reason: string | null;
+}
+
+/**
+ * Dashboard-only local completion check. It does not claim full remote Review currentness; it only
+ * prevents a completed runtime from outliving its exact HEAD/Story receipt-set binding.
+ */
+export function evaluateDashboardReviewCompletion(
+  read: ReviewStateRead,
+  currentGitHead: string | null,
+  storyValidationDigest: string | null,
+): DashboardReviewCompletion {
+  if (read.status === 'missing') return { current: false, reason: '最终 Review 尚未完成' };
+  if (read.status === 'invalid') {
+    return { current: false, reason: `最终 Review 状态不可读取：${read.error}` };
+  }
+  if (!currentGitHead) return { current: false, reason: '当前 Git HEAD 不可读取' };
+  if (!storyValidationDigest) {
+    return { current: false, reason: '当前 Story 验收凭证集合无法验证' };
+  }
+  const review = read.state;
+  if (review.binding.headSha !== currentGitHead) {
+    return { current: false, reason: '最终 Review 对应的提交已变化' };
+  }
+  if (review.binding.storyValidationDigest !== storyValidationDigest) {
+    return { current: false, reason: '最终 Review 对应的 Story 验收凭证集合已变化' };
+  }
+  if (review.status !== 'passed' || review.deliveryStatus !== 'ready' || review.shadow) {
+    return { current: false, reason: '最终 Review 尚未产生可交付结论' };
+  }
+  return { current: true, reason: null };
+}
 
 interface State {
   iteration: number;
@@ -43,9 +94,15 @@ const state: State = {
   startedAt: null,
 };
 let workspaceDir = '.workspace';
+let projectRootDir = process.cwd();
 
-export function configureWorkspace(workspace: string, maxIterations: number): void {
+export function configureWorkspace(
+  workspace: string,
+  maxIterations: number,
+  projectRoot = process.cwd(),
+): void {
   workspaceDir = workspace;
+  projectRootDir = projectRoot;
   state.maxIterations = maxIterations;
   state.iteration = 0;
   state.phase = 'idle';
@@ -93,6 +150,9 @@ export interface ApiResponse {
   stories: StoryView[];
   /** state.json 存在但损坏；stories 已按未验证状态 fail-closed。 */
   stateCorrupted: boolean;
+  storyValidation: StoryValidationDisplayCurrentness;
+  /** 仅核对本地完成结果与当前 HEAD/Story 凭证集合；完整远端当前性由 status/report 展示。 */
+  reviewCompletion: DashboardReviewCompletion;
   modelRouting: ModelRoutingReadResult;
   logs: string;
   /** 只读安全观察；null 仅供尚未迁移的同步测试/调用方兼容。 */
@@ -102,10 +162,22 @@ export interface ApiResponse {
 function buildApiResponseForWorkspace(
   workspace: string,
   workspaceSafety: WorkspaceSafetyStatusSnapshot | null,
+  projectRoot: string,
 ): ApiResponse {
   const elapsed = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0;
   const prd = tryReadPrd(join(workspace, 'prd.json'));
   const displayState = prd ? readDisplayState(join(workspace, 'state.json'), prd) : null;
+  const currentGitHead = readGitHead(projectRoot);
+  const storyValidation =
+    prd && displayState
+      ? evaluateStoryValidationDisplay(prd, displayState.state, currentGitHead)
+      : null;
+  const currentState = storyValidation?.state ?? null;
+  const reviewCompletion = evaluateDashboardReviewCompletion(
+    readFinalReviewState(workspace),
+    currentGitHead,
+    storyValidation?.digest ?? null,
+  );
   const logs = readProgress(join(workspace, 'progress.md'));
   return {
     runtime: {
@@ -122,8 +194,15 @@ function buildApiResponseForWorkspace(
     project: prd?.project ?? '',
     branchName: prd?.branchName ?? '',
     sourcePrd: prd?.sourcePrd ?? '',
-    stories: prd && displayState ? mergedStories(prd, displayState.state) : [],
+    stories: prd && currentState ? mergedStories(prd, currentState) : [],
     stateCorrupted: displayState?.stateCorrupted ?? false,
+    storyValidation: storyValidation?.currentness ?? {
+      gitHead: currentGitHead,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'prd.json 缺失或无法解析，Story 验收无法验证',
+    },
+    reviewCompletion,
     modelRouting: readModelRouting(prd),
     logs,
     workspaceSafety,
@@ -132,14 +211,15 @@ function buildApiResponseForWorkspace(
 
 /** Existing synchronous view remains byte-for-byte read-only and exposes no guessed safety state. */
 export function buildApiResponse(): ApiResponse {
-  return buildApiResponseForWorkspace(workspaceDir, null);
+  return buildApiResponseForWorkspace(workspaceDir, null, projectRootDir);
 }
 
 /** Production dashboard view; captures one workspace path and reads its real safety state. */
 export async function buildApiResponseWithWorkspaceSafety(): Promise<ApiResponse> {
   const workspace = workspaceDir;
+  const projectRoot = projectRootDir;
   const workspaceSafety = await inspectWorkspaceSafetyStatus(workspace);
-  return buildApiResponseForWorkspace(workspace, workspaceSafety);
+  return buildApiResponseForWorkspace(workspace, workspaceSafety, projectRoot);
 }
 
 function defaultPublicDir(): string {
@@ -149,10 +229,11 @@ function defaultPublicDir(): string {
 export function start(opts: {
   workspace: string;
   maxIterations: number;
+  projectRoot?: string;
   port?: number;
   publicDir?: string;
 }): { close(): void; address(): { port: number }; ready: Promise<{ port: number }> } {
-  configureWorkspace(opts.workspace, opts.maxIterations);
+  configureWorkspace(opts.workspace, opts.maxIterations, opts.projectRoot);
   const publicDir = opts.publicDir ?? defaultPublicDir();
   const requestedPort = opts.port ?? 7331;
 

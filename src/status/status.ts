@@ -7,7 +7,10 @@ import {
   getCurrentStoryId,
   type StoryView,
   isStoryPassed,
+  evaluateStoryValidationDisplay,
+  type StoryValidationDisplayCurrentness,
 } from '../engine/state.js';
+import { readGitHead } from '../engine/validation-protocol.js';
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
 import {
@@ -61,6 +64,8 @@ export interface StoryRecentValidationHeadAbort extends ValidationHeadAbortEvide
   iteration: number;
 }
 
+export type StoryValidationCurrentness = StoryValidationDisplayCurrentness;
+
 export type StatusReport = (
   | { status: 'missing'; workspace: string }
   | { status: 'unparsable'; workspace: string }
@@ -79,6 +84,7 @@ export type StatusReport = (
       evidenceUnavailable: boolean;
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
       stateCorrupted: boolean;
+      storyValidation: StoryValidationCurrentness;
       finalReview: CurrentReviewStatus;
     }
 ) & {
@@ -107,6 +113,8 @@ interface StatusCollectionOptions {
   readonly projectRoot?: string;
   readonly client?: GitHubQualityClient;
   readonly refreshRemote?: boolean;
+  /** @internal Deterministic Story-currentness seam; production reads projectRoot HEAD. */
+  readonly currentGitHead?: string | null;
 }
 
 interface ControlledStatusCollectionOptions extends StatusCollectionOptions {
@@ -197,6 +205,12 @@ function collectStatusControlled(
   if (prd === null || !Array.isArray(prd.userStories)) return { status: 'unparsable', workspace };
   const statePath = join(workspace, 'state.json');
   const { state, stateCorrupted } = readDisplayState(statePath, prd);
+  const currentGitHead =
+    options.currentGitHead === undefined
+      ? readGitHead(options.projectRoot ?? process.cwd())
+      : options.currentGitHead;
+  const storyValidation = evaluateStoryValidationDisplay(prd, state, currentGitHead);
+  const currentState = storyValidation.state;
   let evidence: ReturnType<typeof readEvidence> = { records: [], skippedLines: 0 };
   let evidenceUnavailable = false;
   try {
@@ -207,8 +221,8 @@ function collectStatusControlled(
   return {
     status: 'ok',
     prd,
-    stories: mergedStories(prd, state),
-    currentStoryId: getCurrentStoryId(prd, state),
+    stories: mergedStories(prd, currentState),
+    currentStoryId: getCurrentStoryId(prd, currentState),
     latestProgress: latestProgressTitle(readProgress(join(workspace, 'progress.md'))),
     modelRouting: readModelRouting(prd),
     recentActual: recentActualOf(evidence.records),
@@ -217,11 +231,13 @@ function collectStatusControlled(
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
     stateCorrupted,
+    storyValidation: storyValidation.currentness,
     finalReview: collectCurrentReviewStatus({
       workspace,
       ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
       ...(options.client ? { client: options.client } : {}),
       refreshRemote: options.refreshRemote ?? false,
+      storyValidationDigest: storyValidation.digest,
       ...(options.runnerVersionObservation
         ? { runnerVersionObservation: options.runnerVersionObservation }
         : {}),
@@ -358,6 +374,19 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     lines.push('❌ workspace 安全状态未就绪，不能表示可交付');
     return { text: lines.join('\n'), exitCode: 2 };
   }
+  if (report.storyValidation.configurationError !== null) {
+    lines.push(
+      `❌ PRD Story 集合配置错误，验收无法验证：${report.storyValidation.configurationError}`,
+      '',
+    );
+  } else if (report.storyValidation.gitHead === null) {
+    lines.push('⚠️ 当前 Git HEAD 不可读取，Story 验收结果均按待重验显示', '');
+  } else if (!report.storyValidation.current) {
+    lines.push(
+      `⚠️ Story 验收凭证已过期，共 ${report.storyValidation.invalidStoryIds.length} 个 Story 待重验`,
+      '',
+    );
+  }
   const review = report.finalReview;
   if (review.read.status === 'missing') {
     lines.push('🔎 本地最终 Review：尚未运行', '');
@@ -468,6 +497,9 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   }
   if (report.evidenceUnavailable)
     lines.push('⚠️ evidence.jsonl 当前不可读，最近实际路由可能不完整');
+  if (report.storyValidation.configurationError !== null) {
+    return { text: lines.join('\n'), exitCode: 2 };
+  }
   // 空 story 列表不算全绿：status 的退出码用作 CI 门禁，对退化的 prd.json 必须保守
   if (total === 0) {
     lines.push('', '⚠️ prd.json 中没有任何 story');
@@ -567,10 +599,14 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
       unavailable: report.evidenceUnavailable,
     },
     finalReview: report.finalReview,
+    storyValidation: report.storyValidation,
     ...(report.workspaceSafety === undefined ? {} : { workspaceSafety: report.workspaceSafety }),
     summary,
   };
   if (report.workspaceSafety !== undefined && report.workspaceSafety.status !== 'ready') {
+    return { text: JSON.stringify(view, null, 2), exitCode: 2 };
+  }
+  if (report.storyValidation.configurationError !== null) {
     return { text: JSON.stringify(view, null, 2), exitCode: 2 };
   }
   // 与人类可读模式同一保守语义：空 story 列表不算全绿

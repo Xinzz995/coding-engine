@@ -60,6 +60,11 @@ export interface ReviewBinding {
   reviewRulesVersion: string;
   reviewRulesDigest: string;
   riskDigest: string;
+  /**
+   * 按 PRD 顺序绑定全部非 blocked Story 的精确 Validator 凭证。
+   * 可选只为读取旧 final-review.json；新 Review 必须写入，缺失时不能保持当前。
+   */
+  storyValidationDigest?: string;
 }
 
 export interface ReviewAxisResult {

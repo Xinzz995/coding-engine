@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { collectReport, parseScreenshotEntry, writeReport } from './report.js';
 import { appendEvidence } from '../engine/evidence.js';
 import { previousFinalReview } from '../engine/loop-test-support.js';
+import { acceptanceHash } from '../engine/validation-protocol.js';
+import { tryReadPrd } from '../engine/prd.js';
+import { evaluateStoryValidationReceiptSet, tryReadState } from '../engine/state.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => { cleanup.forEach((f) => f()); cleanup = []; });
@@ -58,10 +61,36 @@ describe('collectReport ok 收集', () => {
   it('没有可信当前性观察时不把保存的 Review 当作当前结果，且拒绝观察后的状态替换', () => {
     const dir = ws();
     writePrd(dir, [story('US-001')]);
-    const first = previousFinalReview('b'.repeat(40));
+    const head = 'b'.repeat(40);
+    writeFileSync(
+      join(dir, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: {
+            schemaVersion: 1,
+            requestId: 'report-observation',
+            gitHead: head,
+            acceptanceHash: acceptanceHash('US-001', ['ac of US-001']),
+          },
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const prd = tryReadPrd(join(dir, 'prd.json'));
+    const state = tryReadState(join(dir, 'state.json'));
+    if (!prd || !state) throw new Error('expected current report fixture');
+    const storyValidation = evaluateStoryValidationReceiptSet(prd, state, head);
+    if (!storyValidation.digest) throw new Error('expected current Story validation digest');
+    const first = previousFinalReview(head);
+    first.binding.storyValidationDigest = storyValidation.digest;
     writeFileSync(join(dir, 'final-review.json'), `${JSON.stringify(first)}\n`);
 
-    const unobserved = collectReport(dir, new Date());
+    const unobserved = collectReport(dir, new Date(), { currentGitHead: head });
     if (unobserved.status !== 'ok') throw new Error('expected ok');
     expect(unobserved.data.finalReview).toMatchObject({
       current: false,
@@ -74,15 +103,37 @@ describe('collectReport ok 收集', () => {
       staleReasons: [],
       refreshedRemote: first.remote,
     };
-    const current = collectReport(dir, new Date(), { currentReview: observed });
+    const current = collectReport(dir, new Date(), {
+      currentReview: observed,
+      currentGitHead: head,
+    });
     if (current.status !== 'ok') throw new Error('expected ok');
     expect(current.data.finalReview.current).toBe(true);
+
+    const reissued = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8')) as Record<
+      string,
+      { validationReceipt: { requestId: string } }
+    >;
+    reissued['US-001'].validationReceipt.requestId = 'report-observation-reissued';
+    writeFileSync(join(dir, 'state.json'), JSON.stringify(reissued));
+    const replacedReceipt = collectReport(dir, new Date(), {
+      currentReview: observed,
+      currentGitHead: head,
+    });
+    if (replacedReceipt.status !== 'ok') throw new Error('expected ok');
+    expect(replacedReceipt.data.finalReview).toMatchObject({
+      current: false,
+      staleReasons: [expect.stringContaining('凭证集合已变化')],
+    });
 
     writeFileSync(
       join(dir, 'final-review.json'),
       `${JSON.stringify(previousFinalReview('c'.repeat(40)))}\n`,
     );
-    const replaced = collectReport(dir, new Date(), { currentReview: observed });
+    const replaced = collectReport(dir, new Date(), {
+      currentReview: observed,
+      currentGitHead: head,
+    });
     if (replaced.status !== 'ok') throw new Error('expected ok');
     expect(replaced.data.finalReview).toMatchObject({
       current: false,
@@ -148,6 +199,115 @@ describe('collectReport ok 收集', () => {
     expect(src.data.stories[0]).toMatchObject({
       passes: false, validated: false, notes: '', retryCount: 0, blocked: false, escalated: false,
     });
+  });
+
+  it('按调用方观察的当前 HEAD 只在报告内撤销过期绿灯', () => {
+    const dir = ws();
+    const target = story('US-001');
+    const oldHead = 'a'.repeat(40);
+    const nextHead = 'b'.repeat(40);
+    writePrd(dir, [target]);
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'stale-report-receipt',
+          gitHead: oldHead,
+          acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(dir, 'state.json'), JSON.stringify(persisted));
+
+    const src = collectReport(dir, new Date(), { currentGitHead: nextHead });
+    if (src.status !== 'ok') throw new Error('expected ok');
+    expect(src.data.stories[0]).toMatchObject({ passes: true, validated: false });
+    expect(src.data.storyValidation).toEqual({
+      gitHead: nextHead,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: null,
+    });
+    expect(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))).toEqual(persisted);
+  });
+
+  it('混合 Story 对账时只撤销过期项，保留当前项和普通未完成项', () => {
+    const dir = ws();
+    const stories = [story('US-001'), story('US-002'), story('US-003')];
+    const oldHead = 'a'.repeat(40);
+    const currentHead = 'b'.repeat(40);
+    writePrd(dir, stories);
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'stale-report-receipt',
+          gitHead: oldHead,
+          acceptanceHash: acceptanceHash('US-001', ['ac of US-001']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-002': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'current-report-receipt',
+          gitHead: currentHead,
+          acceptanceHash: acceptanceHash('US-002', ['ac of US-002']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-003': {
+        passes: false,
+        validated: false,
+        validationReceipt: null,
+        notes: 'ordinary unfinished',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(dir, 'state.json'), JSON.stringify(persisted));
+
+    const src = collectReport(dir, new Date(), { currentGitHead: currentHead });
+    if (src.status !== 'ok') throw new Error('expected ok');
+    expect(src.data.stories.map(({ id, passes, validated, validationReceipt }) => ({
+      id,
+      passes,
+      validated,
+      validationReceipt,
+    }))).toEqual([
+      { id: 'US-001', passes: true, validated: false, validationReceipt: null },
+      {
+        id: 'US-002',
+        passes: true,
+        validated: true,
+        validationReceipt: persisted['US-002'].validationReceipt,
+      },
+      { id: 'US-003', passes: false, validated: false, validationReceipt: null },
+    ]);
+    expect(src.data.storyValidation).toEqual({
+      gitHead: currentHead,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: null,
+    });
+    expect(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
   it('screenshots 子目录被忽略', () => {
@@ -236,6 +396,80 @@ describe('writeReport', () => {
     const html = readFileSync(join(dir, 'report.html'), 'utf-8');
     expect(html).toContain('状态不可验证');
     expect(html).not.toContain('全部通过');
+  });
+
+  it('非法空 Story 集合不能显示为当前验收结果', () => {
+    const dir = ws();
+    writePrd(dir, []);
+    const result = collectReport(dir, new Date(), { currentGitHead: 'a'.repeat(40) });
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.data.storyValidation).toEqual({
+      gitHead: 'a'.repeat(40),
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'prd.json 必须包含至少一个 Story',
+    });
+  });
+
+  it('非法 Story 元素不会让报告崩溃，而是输出无法验证的配置错误', () => {
+    const dir = ws();
+    const head = 'a'.repeat(40);
+    writePrd(dir, [null]);
+    const result = collectReport(dir, new Date(), { currentGitHead: head });
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.data.stories).toEqual([]);
+    expect(result.data.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'userStories[0] 的 Story ID 非法',
+    });
+    expect(() => writeReport(dir, new Date(), { currentGitHead: head })).not.toThrow();
+    expect(readFileSync(join(dir, 'report.html'), 'utf8')).toContain(
+      'PRD Story 集合配置错误，验收无法验证',
+    );
+  });
+
+  it('重复 Story ID 时报告数据和 HTML 都撤销全部绿灯且不改写状态文件', () => {
+    const dir = ws();
+    const head = 'a'.repeat(40);
+    const target = story('US-001');
+    writePrd(dir, [target, { ...target }]);
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'duplicate-report-receipt',
+          gitHead: head,
+          acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(dir, 'state.json'), JSON.stringify(persisted));
+
+    const result = collectReport(dir, new Date(), { currentGitHead: head });
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.data.stories).toHaveLength(2);
+    expect(result.data.stories.every((item) => item.passes && !item.validated)).toBe(true);
+    expect(result.data.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    });
+
+    writeReport(dir, new Date(), { currentGitHead: head });
+    const html = readFileSync(join(dir, 'report.html'), 'utf8');
+    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    expect(html).not.toContain('Story 验证完成');
+    expect(html).not.toContain('✅ 通过');
+    expect(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
   it('原子写失败时保留上一份完整 report.html', () => {
