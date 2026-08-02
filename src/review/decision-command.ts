@@ -1,3 +1,6 @@
+import { join } from 'node:path';
+import { tryReadPrd } from '../engine/prd.js';
+import { evaluateStoryValidationReceiptSet, tryReadState } from '../engine/state.js';
 import {
   digestQualityContract,
   parseQualityContract,
@@ -265,6 +268,15 @@ function createCurrentBindingReader(options: {
       options.observation,
     );
     if (!revalidated.ok) invalid(revalidated.message);
+    const prd = tryReadPrd(join(options.session.lease.workspace.path, 'prd.json'));
+    const state = tryReadState(join(options.session.lease.workspace.path, 'state.json'));
+    if (!prd || !Array.isArray(prd.userStories) || !state) {
+      invalid('当前 Story 验收状态无法读取；请重新运行 coding-x');
+    }
+    const storyValidation = evaluateStoryValidationReceiptSet(prd, state, context.headSha);
+    if (!storyValidation.valid || storyValidation.digest === null) {
+      invalid('当前 Story 验收凭证集合已失效；请重新运行 coding-x');
+    }
     return createReviewBinding({
       context,
       risk: options.review.risk,
@@ -272,6 +284,7 @@ function createCurrentBindingReader(options: {
       runner: options.review.binding.runner,
       model: options.review.binding.model,
       runnerVersion,
+      storyValidationDigest: storyValidation.digest,
     });
   };
 }

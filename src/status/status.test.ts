@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { collectStatus, renderStatusReport, renderStatusJson } from './status.js';
 import { digest } from '../review/common.js';
-import { acceptanceHash } from '../engine/validation-protocol.js';
+import { acceptanceHash, readGitHead } from '../engine/validation-protocol.js';
 import type {
   WorkspaceSafetyStatus,
   WorkspaceSafetyStatusSnapshot,
@@ -13,6 +13,9 @@ import type {
 function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), 'status-ws-'));
 }
+
+const CURRENT_GIT_HEAD = readGitHead(process.cwd());
+if (CURRENT_GIT_HEAD === null) throw new Error('status tests require a Git HEAD');
 
 function writeReadyFinalReview(workspace: string, shadow = false): void {
   const risk = {
@@ -96,7 +99,7 @@ const passedState = (target: ReturnType<typeof story>) => ({
   validationReceipt: {
     schemaVersion: 1,
     requestId: `request-${target.id}`,
-    gitHead: 'a'.repeat(40),
+    gitHead: CURRENT_GIT_HEAD,
     acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
   },
   notes: '',
@@ -199,6 +202,99 @@ describe('collectStatus', () => {
       expect(report.stories[1].retryCount).toBe(2);
       expect(report.stories[2].blocked).toBe(true);
       expect(report.stateCorrupted).toBe(false);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('只在内存中撤销不属于当前 HEAD 的旧绿灯', () => {
+    const ws = makeWorkspace();
+    try {
+      const target = PRD.userStories[0];
+      const oldHead = 'a'.repeat(40);
+      const nextHead = 'b'.repeat(40);
+      const persisted = {
+        'US-001': {
+          ...passedState(target),
+          validationReceipt: { ...passedState(target).validationReceipt, gitHead: oldHead },
+        },
+      };
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [target] }));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+
+      const report = collectStatus(ws, { currentGitHead: nextHead });
+      if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
+      expect(report.stories[0]).toMatchObject({ passes: true, validated: false });
+      expect(report.storyValidation).toEqual({
+        gitHead: nextHead,
+        current: false,
+        invalidStoryIds: ['US-001'],
+      });
+      expect(renderStatusReport(report)).toMatchObject({ exitCode: 1 });
+      expect(renderStatusReport(report).text).toContain('验收凭证已过期');
+      expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('混合 Story 对账时只撤销过期项，保留当前项和普通未完成项', () => {
+    const ws = makeWorkspace();
+    try {
+      const oldHead = 'a'.repeat(40);
+      const currentHead = 'b'.repeat(40);
+      const [staleStory, currentStory] = PRD.userStories;
+      const persisted = {
+        'US-001': {
+          ...passedState(staleStory),
+          validationReceipt: {
+            ...passedState(staleStory).validationReceipt,
+            gitHead: oldHead,
+          },
+        },
+        'US-002': {
+          ...passedState(currentStory),
+          validationReceipt: {
+            ...passedState(currentStory).validationReceipt,
+            gitHead: currentHead,
+          },
+        },
+        'US-003': {
+          passes: false,
+          validated: false,
+          validationReceipt: null,
+          notes: 'ordinary unfinished',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      };
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+
+      const report = collectStatus(ws, { currentGitHead: currentHead });
+      if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
+      expect(report.stories.map(({ id, passes, validated, validationReceipt }) => ({
+        id,
+        passes,
+        validated,
+        validationReceipt,
+      }))).toEqual([
+        { id: 'US-001', passes: true, validated: false, validationReceipt: null },
+        {
+          id: 'US-002',
+          passes: true,
+          validated: true,
+          validationReceipt: persisted['US-002'].validationReceipt,
+        },
+        { id: 'US-003', passes: false, validated: false, validationReceipt: null },
+      ]);
+      expect(report.storyValidation).toEqual({
+        gitHead: currentHead,
+        current: false,
+        invalidStoryIds: ['US-001'],
+      });
+      expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }

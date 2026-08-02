@@ -20,6 +20,7 @@ import {
   type RunState,
   parseValidationReceipt,
   evaluateStoryValidation,
+  evaluateStoryValidationReceiptSet,
   isStoryPassedAt,
   reconcileValidationReceipts,
   restoreValidationOwnership,
@@ -458,6 +459,114 @@ describe('current Validator receipt evaluation', () => {
       validationReceipt: null,
     });
     expect(reconciled.state['US-002']).toBe(state['US-002']);
+  });
+
+  it('binds the ordered non-blocked Story receipt set including each request ID', () => {
+    const prd = contentPrd(['US-001', 'US-002', 'US-003']);
+    const state: RunState = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: receiptFor('US-001', [], HEAD_A, 'request-a'),
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-002': {
+        passes: false,
+        validated: false,
+        validationReceipt: null,
+        notes: '',
+        retryCount: 0,
+        blocked: true,
+        escalated: false,
+      },
+      'US-003': {
+        passes: true,
+        validated: true,
+        validationReceipt: receiptFor('US-003', [], HEAD_A, 'request-c'),
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    const first = evaluateStoryValidationReceiptSet(prd, state, HEAD_A);
+    const again = evaluateStoryValidationReceiptSet(prd, structuredClone(state), HEAD_A);
+    expect(first).toMatchObject({
+      valid: true,
+      digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      receipts: [{ storyId: 'US-001' }, { storyId: 'US-003' }],
+      invalid: [],
+    });
+    expect(again.digest).toBe(first.digest);
+
+    const resigned = structuredClone(state);
+    resigned['US-001'].validationReceipt = receiptFor('US-001', [], HEAD_A, 'request-new');
+    expect(evaluateStoryValidationReceiptSet(prd, resigned, HEAD_A).digest).not.toBe(first.digest);
+
+    const reordered = structuredClone(prd);
+    reordered.userStories = [prd.userStories[2], prd.userStories[1], prd.userStories[0]];
+    expect(evaluateStoryValidationReceiptSet(reordered, state, HEAD_A).digest).not.toBe(first.digest);
+  });
+
+  it('does not issue a receipt-set digest while any non-blocked Story is stale', () => {
+    const prd = contentPrd(['US-001', 'US-002']);
+    const state: RunState = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: receiptFor('US-001', [], HEAD_A),
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-002': {
+        passes: true,
+        validated: true,
+        validationReceipt: receiptFor('US-002', [], HEAD_B),
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    expect(evaluateStoryValidationReceiptSet(prd, state, HEAD_A)).toMatchObject({
+      valid: false,
+      digest: null,
+      invalid: [{ storyId: 'US-002', reason: 'head-mismatch' }],
+    });
+  });
+
+  it('does not issue a digest or report convergence for empty or duplicate Story identities', () => {
+    const empty = contentPrd([]);
+    expect(evaluateStoryValidationReceiptSet(empty, {}, HEAD_A)).toMatchObject({
+      valid: false,
+      digest: null,
+      configurationError: 'prd.json 必须包含至少一个 Story',
+    });
+    expect(allStoriesResolvedAt(empty, {}, HEAD_A)).toBe(false);
+
+    const duplicate = contentPrd(['US-001', 'US-001']);
+    const shared: RunState = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: receiptFor('US-001', [], HEAD_A),
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    expect(evaluateStoryValidationReceiptSet(duplicate, shared, HEAD_A)).toMatchObject({
+      valid: false,
+      digest: null,
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    });
+    expect(allStoriesResolvedAt(duplicate, shared, HEAD_A)).toBe(false);
   });
 });
 

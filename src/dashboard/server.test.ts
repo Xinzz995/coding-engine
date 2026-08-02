@@ -3,6 +3,8 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
+import { execFileSync } from 'node:child_process';
+import { acceptanceHash } from '../engine/validation-protocol.js';
 import { setState, buildApiResponse, start, configureWorkspace } from './server.js';
 
 let cleanup: Array<() => void> = [];
@@ -147,6 +149,174 @@ describe('buildApiResponse', () => {
     expect(r.stories[0].passes).toBe(true); // 状态来自 state.json
     expect(r.stories[0].validated).toBe(false); // 旧 passed state 只保留实现候选
     expect(r.logs).toContain('US-001');
+  });
+
+  it('按项目当前 HEAD 只在内存中撤销过期的 Validator 绿灯', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-head-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'first\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'first');
+    const receiptHead = git('rev-parse', 'HEAD');
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'head-currentness',
+        branchName: 'feature/head',
+        description: 'd',
+        userStories: [
+          {
+            id: 'US-001',
+            title: 't',
+            description: 'd',
+            acceptanceCriteria: ['ac'],
+            priority: 1,
+          },
+        ],
+      }),
+    );
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'dashboard-receipt',
+          gitHead: receiptHead,
+          acceptanceHash: acceptanceHash('US-001', ['ac']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+    writeFileSync(join(ws, 'progress.md'), '');
+    writeFileSync(join(root, 'tracked.txt'), 'second\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'second');
+    const currentHead = git('rev-parse', 'HEAD');
+
+    configureWorkspace(ws, 50, root);
+    const response = buildApiResponse();
+
+    expect(response.stories[0]).toMatchObject({ passes: true, validated: false });
+    expect(response.storyValidation).toEqual({
+      gitHead: currentHead,
+      current: false,
+      invalidStoryIds: ['US-001'],
+    });
+    expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
+  });
+
+  it('混合 Story 对账时只撤销过期项，保留当前项和普通未完成项', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-mixed-head-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'first\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'first');
+    const oldHead = git('rev-parse', 'HEAD');
+    writeFileSync(join(root, 'tracked.txt'), 'second\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'second');
+    const currentHead = git('rev-parse', 'HEAD');
+    const stories = [
+      { id: 'US-001', title: 'stale', description: 'd', acceptanceCriteria: ['ac-1'], priority: 1 },
+      { id: 'US-002', title: 'current', description: 'd', acceptanceCriteria: ['ac-2'], priority: 2 },
+      { id: 'US-003', title: 'unfinished', description: 'd', acceptanceCriteria: ['ac-3'], priority: 3 },
+    ];
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'mixed-head-currentness',
+        branchName: 'feature/mixed-head',
+        description: 'd',
+        userStories: stories,
+      }),
+    );
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'stale-dashboard-receipt',
+          gitHead: oldHead,
+          acceptanceHash: acceptanceHash('US-001', ['ac-1']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-002': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'current-dashboard-receipt',
+          gitHead: currentHead,
+          acceptanceHash: acceptanceHash('US-002', ['ac-2']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+      'US-003': {
+        passes: false,
+        validated: false,
+        validationReceipt: null,
+        notes: 'ordinary unfinished',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+    writeFileSync(join(ws, 'progress.md'), '');
+
+    configureWorkspace(ws, 50, root);
+    const response = buildApiResponse();
+
+    expect(response.stories.map(({ id, passes, validated, validationReceipt }) => ({
+      id,
+      passes,
+      validated,
+      validationReceipt,
+    }))).toEqual([
+      { id: 'US-001', passes: true, validated: false, validationReceipt: null },
+      {
+        id: 'US-002',
+        passes: true,
+        validated: true,
+        validationReceipt: persisted['US-002'].validationReceipt,
+      },
+      { id: 'US-003', passes: false, validated: false, validationReceipt: null },
+    ]);
+    expect(response.storyValidation).toEqual({
+      gitHead: currentHead,
+      current: false,
+      invalidStoryIds: ['US-001'],
+    });
+    expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
   it('falls back to legacy in-story state when state.json is absent (v0.4 workspace)', () => {

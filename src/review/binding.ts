@@ -11,6 +11,7 @@ export function createReviewBinding(options: {
   runner: ReviewBinding['runner'];
   model: string;
   runnerVersion: string;
+  storyValidationDigest: string;
 }): ReviewBinding {
   return {
     prNumber: options.context.pullRequest.number,
@@ -29,6 +30,7 @@ export function createReviewBinding(options: {
     reviewRulesVersion: REVIEW_RULES_VERSION,
     reviewRulesDigest: REVIEW_RULES_DIGEST,
     riskDigest: options.risk.digest,
+    storyValidationDigest: options.storyValidationDigest,
   };
 }
 

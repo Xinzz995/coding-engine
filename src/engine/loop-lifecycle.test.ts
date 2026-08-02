@@ -534,6 +534,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       const code = await runProductionLoop({
         ...strictConfig(project.workspace, project.instructionsDir),
         finalReviewRunner: async (options) => {
+          review.binding.storyValidationDigest = options.storyValidationDigest;
           // Production runFinalReview persists this exact state through the active run session
           // before returning it to the loop; mirror that boundary instead of returning a claim.
           await options.session.writer.writeFile(
@@ -551,6 +552,40 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       expect(readFileSync(join(project.workspace, 'report.html'), 'utf-8')).toContain(
         '本地 Review 与 GitHub 交付条件已就绪',
       );
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rejects a Final Review when the Story receipt set changes before loop acceptance', async () => {
+    const project = setup([story()]);
+    const fake = fakeBoundValidator(project.workspace, 'passed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runProductionLoop({
+        ...strictConfig(project.workspace, project.instructionsDir),
+        finalReviewRunner: async (options) => {
+          const review = previousFinalReview(project.head());
+          review.binding.storyValidationDigest = options.storyValidationDigest;
+          await options.session.writer.writeFile(
+            'final-review.json',
+            `${JSON.stringify(review)}\n`,
+          );
+          const state = JSON.parse(
+            readFileSync(join(project.workspace, 'state.json'), 'utf8'),
+          ) as Record<string, { validationReceipt: { requestId: string } }>;
+          state['US-001'].validationReceipt.requestId = 'resigned-after-review';
+          await options.session.writer.writeFile('state.json', JSON.stringify(state, null, 2));
+          return { exitCode: 0, message: 'stale fixture review', state: review };
+        },
+      });
+
+      expect(code).toBe(5);
+      expect(existsSync(join(project.workspace, 'final-review.json'))).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(project.workspace, 'state.json'), 'utf8'))['US-001']
+          .validationReceipt.requestId,
+      ).toBe('resigned-after-review');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }

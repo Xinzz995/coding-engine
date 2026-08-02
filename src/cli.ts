@@ -433,6 +433,7 @@ export async function runDashboard(
   const server = dashboard.start({
     workspace: opts.workspace,
     maxIterations: 0,
+    projectRoot: process.cwd(),
     port: opts.port,
   });
   const address = await server.ready;

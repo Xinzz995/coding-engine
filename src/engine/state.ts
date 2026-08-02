@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
 import { join } from 'node:path';
-import type { Prd, Story } from './prd.js';
+import { validatePrdStorySet, type Prd, type Story } from './prd.js';
 import {
   parseRunStateBytes,
   type RunState,
@@ -247,6 +248,58 @@ export function isStoryPassedAt(
   currentGitHead: string,
 ): boolean {
   return evaluateStoryValidation(story, state, currentGitHead).valid;
+}
+
+export interface StoryValidationReceiptSetEntry {
+  storyId: string;
+  receipt: ValidationReceipt;
+}
+
+export interface StoryValidationReceiptSetEvaluation {
+  valid: boolean;
+  /** 全部非 blocked Story 当前时才存在；精确包含 PRD 顺序与 request ID。 */
+  digest: string | null;
+  receipts: StoryValidationReceiptSetEntry[];
+  invalid: Array<{ storyId: string; reason: StoryValidationInvalidReason }>;
+  /** PRD Story 集合本身无法形成唯一身份时存在。 */
+  configurationError?: string;
+}
+
+/**
+ * Final Review 与只读展示共用的 Story 集合当前性判断。摘要按 PRD 顺序编码完整凭证，
+ * 因而同一 HEAD 上重新签发 request ID 也会让旧 Review 失效。
+ */
+export function evaluateStoryValidationReceiptSet(
+  prd: Prd,
+  state: RunState,
+  currentGitHead: string,
+): StoryValidationReceiptSetEvaluation {
+  const storySet = validatePrdStorySet(prd);
+  if (!storySet.valid) {
+    return {
+      valid: false,
+      digest: null,
+      receipts: [],
+      invalid: [],
+      configurationError: storySet.message,
+    };
+  }
+  const receipts: StoryValidationReceiptSetEntry[] = [];
+  const invalid: StoryValidationReceiptSetEvaluation['invalid'] = [];
+  for (const story of prd.userStories) {
+    const current = storyStateOf(state, story.id);
+    if (current.blocked) continue;
+    const evaluation = evaluateStoryValidation(story, current, currentGitHead);
+    if (!evaluation.valid) {
+      invalid.push({ storyId: story.id, reason: evaluation.reason });
+      continue;
+    }
+    receipts.push({ storyId: story.id, receipt: evaluation.receipt });
+  }
+  if (invalid.length > 0) return { valid: false, digest: null, receipts, invalid };
+  const canonical = JSON.stringify(receipts);
+  const digest = `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
+  return { valid: true, digest, receipts, invalid: [] };
 }
 
 /**
@@ -583,6 +636,7 @@ export function selectNextStory(
 }
 
 export function allStoriesResolvedAt(prd: Prd, state: RunState, currentGitHead: string): boolean {
+  if (!validatePrdStorySet(prd).valid) return false;
   return prd.userStories.every((story) => {
     const current = storyStateOf(state, story.id);
     return current.blocked || isStoryPassedAt(story, current, currentGitHead);

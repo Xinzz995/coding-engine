@@ -44,6 +44,8 @@ export function evaluateCurrentReviewStatus(options: {
   runnerVersionObservation?: RunnerVersionObservation;
   codingXVersion?: string;
   refreshedRemote?: ReviewRemoteState;
+  /** 当前 PRD/state/HEAD 计算出的 Story 凭证集合摘要；null 表示当前集合不可验证。 */
+  storyValidationDigest?: string | null;
 }): CurrentReviewStatus {
   const { read, context } = options;
   if (read.status !== 'ready') return { read, current: false, staleReasons: [] };
@@ -64,6 +66,15 @@ export function evaluateCurrentReviewStatus(options: {
   compare('coding-x 版本', saved.codingXVersion, options.codingXVersion ?? CODING_X_VERSION);
   compare('Review 规则版本', saved.reviewRulesVersion, REVIEW_RULES_VERSION);
   compare('Review 规则', saved.reviewRulesDigest, REVIEW_RULES_DIGEST);
+  if (saved.storyValidationDigest === undefined) {
+    staleReasons.push('旧 Final Review 未绑定 Story 验收凭证集合');
+  } else if (options.storyValidationDigest === undefined) {
+    staleReasons.push('Story 验收凭证集合未经过当前性核对');
+  } else if (options.storyValidationDigest === null) {
+    staleReasons.push('当前 Story 验收凭证集合无法验证');
+  } else {
+    compare('Story 验收凭证集合', saved.storyValidationDigest, options.storyValidationDigest);
+  }
   const currentRisk = applyReviewerRequestedDeepReview(assessReviewRisk(context), read.state.axes);
   compare('风险判断', saved.riskDigest, currentRisk.digest);
   const runnerStaleReason = runnerVersionStaleReason(saved, options.runnerVersionObservation);

@@ -3,7 +3,13 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
-import { readDisplayState, mergedStories, type StoryView } from '../engine/state.js';
+import {
+  readDisplayState,
+  reconcileValidationReceipts,
+  mergedStories,
+  type StoryView,
+} from '../engine/state.js';
+import { readGitHead } from '../engine/validation-protocol.js';
 import { readProgress } from '../engine/progress.js';
 import {
   readModelRouting,
@@ -43,9 +49,15 @@ const state: State = {
   startedAt: null,
 };
 let workspaceDir = '.workspace';
+let projectRootDir = process.cwd();
 
-export function configureWorkspace(workspace: string, maxIterations: number): void {
+export function configureWorkspace(
+  workspace: string,
+  maxIterations: number,
+  projectRoot = process.cwd(),
+): void {
   workspaceDir = workspace;
+  projectRootDir = projectRoot;
   state.maxIterations = maxIterations;
   state.iteration = 0;
   state.phase = 'idle';
@@ -93,6 +105,12 @@ export interface ApiResponse {
   stories: StoryView[];
   /** state.json 存在但损坏；stories 已按未验证状态 fail-closed。 */
   stateCorrupted: boolean;
+  storyValidation: {
+    gitHead: string | null;
+    /** true 表示没有持久绿灯失效，不表示全部 Story 已完成。 */
+    current: boolean;
+    invalidStoryIds: string[];
+  };
   modelRouting: ModelRoutingReadResult;
   logs: string;
   /** 只读安全观察；null 仅供尚未迁移的同步测试/调用方兼容。 */
@@ -102,10 +120,17 @@ export interface ApiResponse {
 function buildApiResponseForWorkspace(
   workspace: string,
   workspaceSafety: WorkspaceSafetyStatusSnapshot | null,
+  projectRoot: string,
 ): ApiResponse {
   const elapsed = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0;
   const prd = tryReadPrd(join(workspace, 'prd.json'));
   const displayState = prd ? readDisplayState(join(workspace, 'state.json'), prd) : null;
+  const currentGitHead = readGitHead(projectRoot);
+  const reconciledStoryValidation =
+    prd && displayState
+      ? reconcileValidationReceipts(prd, displayState.state, currentGitHead ?? '')
+      : null;
+  const currentState = reconciledStoryValidation?.state ?? null;
   const logs = readProgress(join(workspace, 'progress.md'));
   return {
     runtime: {
@@ -122,8 +147,16 @@ function buildApiResponseForWorkspace(
     project: prd?.project ?? '',
     branchName: prd?.branchName ?? '',
     sourcePrd: prd?.sourcePrd ?? '',
-    stories: prd && displayState ? mergedStories(prd, displayState.state) : [],
+    stories: prd && currentState ? mergedStories(prd, currentState) : [],
     stateCorrupted: displayState?.stateCorrupted ?? false,
+    storyValidation: {
+      gitHead: currentGitHead,
+      current:
+        currentGitHead !== null &&
+        reconciledStoryValidation !== null &&
+        reconciledStoryValidation.invalidatedStoryIds.length === 0,
+      invalidStoryIds: reconciledStoryValidation?.invalidatedStoryIds ?? [],
+    },
     modelRouting: readModelRouting(prd),
     logs,
     workspaceSafety,
@@ -132,14 +165,15 @@ function buildApiResponseForWorkspace(
 
 /** Existing synchronous view remains byte-for-byte read-only and exposes no guessed safety state. */
 export function buildApiResponse(): ApiResponse {
-  return buildApiResponseForWorkspace(workspaceDir, null);
+  return buildApiResponseForWorkspace(workspaceDir, null, projectRootDir);
 }
 
 /** Production dashboard view; captures one workspace path and reads its real safety state. */
 export async function buildApiResponseWithWorkspaceSafety(): Promise<ApiResponse> {
   const workspace = workspaceDir;
+  const projectRoot = projectRootDir;
   const workspaceSafety = await inspectWorkspaceSafetyStatus(workspace);
-  return buildApiResponseForWorkspace(workspace, workspaceSafety);
+  return buildApiResponseForWorkspace(workspace, workspaceSafety, projectRoot);
 }
 
 function defaultPublicDir(): string {
@@ -149,10 +183,11 @@ function defaultPublicDir(): string {
 export function start(opts: {
   workspace: string;
   maxIterations: number;
+  projectRoot?: string;
   port?: number;
   publicDir?: string;
 }): { close(): void; address(): { port: number }; ready: Promise<{ port: number }> } {
-  configureWorkspace(opts.workspace, opts.maxIterations);
+  configureWorkspace(opts.workspace, opts.maxIterations, opts.projectRoot);
   const publicDir = opts.publicDir ?? defaultPublicDir();
   const requestedPort = opts.port ?? 7331;
 

@@ -1,7 +1,7 @@
 ---
 title: Validator 凭证持续绑定与最终提交收敛
-status: active
-updated: 2026-07-30
+status: done
+updated: 2026-08-02
 scope: root
 ---
 
@@ -115,7 +115,7 @@ Review binding 保存该摘要。旧 Review 缺少摘要时仍可作为历史记
    patterns 中明确标注的目标规则改为已验证事实；在此之前不宣称当前程序具备该能力。
 7. 先运行定向失败回归，再运行格式、静态检查、类型检查、全量测试、构建和成品 CLI 冒烟。
 
-## 计划测试范围
+## 验证范围
 
 - `src/engine/state.test.ts`：结构、签发、失效、legacy、摘要、相同 AC 的跨 Story 凭证置换与 AC 调序。
 - `src/engine/gate.test.ts`：validation-only 对门禁非零与不可验证结果的分类不改变普通轮行为。
@@ -129,7 +129,9 @@ Review binding 保存该摘要。旧 Review 缺少摘要时仍可作为历史记
 - `src/review/final-review.test.ts`、`src/review/state.test.ts`、`src/review/status.test.ts`：摘要绑定与前后失效。
 - `src/status/status.test.ts`、`src/report/*.test.ts`、`src/dashboard/server.test.ts`：展示不复活旧绿灯。
 
-这些是计划验证范围，不代表已经实现或已经通过；完成时必须以实际命令输出和测试结果更新证据。
+上述范围已实现。2026-08-02 收口时，凭证集合摘要、Final Review 多边界复核、旧 Review 兼容失效、
+loop 接受竞态以及 status/report/dashboard 当前 HEAD 下的内存撤销均有定向回归；类型、静态检查和
+差异格式检查同时通过。实际命令结果仍以对应 PR 的 CI 记录为共享证据。
 
 ## 黄金原则对照
 
@@ -142,4 +144,4 @@ Review binding 保存该摘要。旧 Review 缺少摘要时仍可作为历史记
 | 5. 假绿率与恢复         | 适用。先固定无 Final Review、多 Story H1→H2、legacy 缺凭证和 Story ID/AC 变化四类失败，再验证 validation-only 恢复。 | 失败/成功成对回归；对账模型调用次数、非零退出与最终状态 |
 
 预期价值指标是减少“旧 Validator 结论仍显示绿色”的假绿，并减少仅因证据过期导致的 Builder 重复
-调用。实施前不存在需要用户补充裁决的范围项；任何超出“明确不做”的需求必须另建计划。
+调用。实施中没有新增需要用户补充裁决的范围项；任何超出“明确不做”的需求必须另建计划。

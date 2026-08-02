@@ -164,8 +164,18 @@ ${renderGallery(shots, anyClaims ? new Set(claims.map((c) => c.file)) : null)}
 </section>`;
 }
 
-function renderImplementationBanner(stories: StoryView[], stateCorrupted: boolean): string {
+function renderImplementationBanner(
+  stories: StoryView[],
+  stateCorrupted: boolean,
+  storyValidation: ReportData['storyValidation'],
+): string {
   if (stateCorrupted) return '<div class="banner blocked">❌ 状态不可验证：state.json 已损坏</div>';
+  if (storyValidation.gitHead === null) {
+    return '<div class="banner blocked">❌ 当前 Git HEAD 不可读取，Story 验收结果均需重验</div>';
+  }
+  if (!storyValidation.current) {
+    return `<div class="banner blocked">❌ Story 验收凭证已过期：${text(storyValidation.invalidStoryIds.join('、'))}</div>`;
+  }
   const total = stories.length;
   if (total === 0) return '<div class="banner blocked">⚠️ prd.json 中没有任何 story</div>';
   const passed = stories.filter(isStoryPassed).length;
@@ -653,7 +663,16 @@ export function renderReportHtml(data: ReportData): string {
   // 其他调用方直接构造 ReportData 时把损坏态与通过态组合成假绿报告。
   const stories = data.stateCorrupted
     ? data.stories.map((story) => ({ ...story, ...INITIAL_STORY_STATE }))
-    : data.stories;
+    : data.storyValidation.current
+      ? data.stories
+      : (() => {
+          const invalid = new Set(data.storyValidation.invalidStoryIds);
+          const invalidateAll = data.storyValidation.gitHead === null || invalid.size === 0;
+          return data.stories.map((story) =>
+            invalidateAll || invalid.has(story.id)
+              ? { ...story, validated: false, validationReceipt: null }
+              : story);
+        })();
   const byStory = new Map<string, ScreenshotEntry[]>();
   for (const s of data.screenshots) {
     if (s.storyId === null) continue;
@@ -699,7 +718,7 @@ export function renderReportHtml(data: ReportData): string {
 <main>
 <header class="card">
 <h1>${title}</h1>
-${renderImplementationBanner(stories, data.stateCorrupted)}
+${renderImplementationBanner(stories, data.stateCorrupted, data.storyValidation)}
 <div class="meta-line">分支：<code>${text(prd.branchName)}</code>${prd.sourcePrd ? ` · 源 PRD：<code>${text(prd.sourcePrd)}</code>` : ''}</div>
 <div class="meta-line">生成时间：${formatStamp(data.generatedAt)} · workspace：<code>${text(data.workspace)}</code></div>
 ${prdSource}

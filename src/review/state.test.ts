@@ -95,13 +95,35 @@ async function withWorkspace(run: (workspace: string) => Promise<void>): Promise
 }
 
 describe('readFinalReviewState', () => {
-  it('round-trips a complete engine-written state', async () =>
+  it('continues to read an older engine-written state without a Story receipt-set digest', async () =>
     withWorkspace(async (workspace) => {
       await writeFinalReviewState(writer(workspace), state());
+      const read = readFinalReviewState(workspace);
+      expect(read).toMatchObject({
+        status: 'ready',
+        state: {
+          status: 'passed',
+          deliveryStatus: 'ready',
+          round: 1,
+        },
+      });
+      if (read.status !== 'ready') throw new Error('expected legacy Review to remain readable');
+      expect(read.state.binding.storyValidationDigest).toBeUndefined();
+    }));
+
+  it('round-trips a Story receipt-set digest and rejects malformed values', async () =>
+    withWorkspace(async (workspace) => {
+      const current = state();
+      current.binding.storyValidationDigest = `sha256:${'c'.repeat(64)}`;
+      await writeFinalReviewState(writer(workspace), current);
       expect(readFinalReviewState(workspace)).toMatchObject({
         status: 'ready',
-        state: { status: 'passed', deliveryStatus: 'ready', round: 1 },
+        state: { binding: { storyValidationDigest: current.binding.storyValidationDigest } },
       });
+
+      current.binding.storyValidationDigest = 'not-a-digest';
+      writeFileSync(join(workspace, 'final-review.json'), JSON.stringify(current));
+      expect(readFinalReviewState(workspace)).toMatchObject({ status: 'invalid' });
     }));
 
   it('rejects duplicate or missing independent axes and inconsistent risk binding', async () =>

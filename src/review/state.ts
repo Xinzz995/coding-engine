@@ -164,9 +164,19 @@ function binding(value: unknown): ReviewBinding {
     'reviewRulesVersion',
     'reviewRulesDigest',
     'riskDigest',
-  ]);
+  ], ['storyValidationDigest']);
   if (!['claude', 'codex', 'cursor'].includes(String(item.runner)))
     throw new Error('binding.runner 非法');
+  const storyValidationDigest =
+    item.storyValidationDigest === undefined
+      ? undefined
+      : string(item.storyValidationDigest, 'binding.storyValidationDigest');
+  if (
+    storyValidationDigest !== undefined &&
+    !/^sha256:[a-f0-9]{64}$/u.test(storyValidationDigest)
+  ) {
+    throw new Error('binding.storyValidationDigest 非法');
+  }
   return {
     prNumber: integer(item.prNumber, 'binding.prNumber', 1),
     targetBranch: string(item.targetBranch, 'binding.targetBranch'),
@@ -187,6 +197,7 @@ function binding(value: unknown): ReviewBinding {
     reviewRulesVersion: string(item.reviewRulesVersion, 'binding.reviewRulesVersion'),
     reviewRulesDigest: string(item.reviewRulesDigest, 'binding.reviewRulesDigest'),
     riskDigest: string(item.riskDigest, 'binding.riskDigest'),
+    ...(storyValidationDigest === undefined ? {} : { storyValidationDigest }),
   };
 }
 

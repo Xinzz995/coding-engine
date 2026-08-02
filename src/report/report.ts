@@ -2,7 +2,13 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
-import { readDisplayState, mergedStories, type StoryView } from '../engine/state.js';
+import {
+  evaluateStoryValidationReceiptSet,
+  readDisplayState,
+  reconcileValidationReceipts,
+  mergedStories,
+  type StoryView,
+} from '../engine/state.js';
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import { readProgress } from '../engine/progress.js';
 import { readEvidence, type EvidenceRecord } from '../engine/evidence.js';
@@ -30,6 +36,13 @@ export interface ReportData {
   stories: StoryView[];
   /** state.json 存在但解析失败——报告内警示 */
   stateCorrupted: boolean;
+  /** 报告生成瞬间，Story 验收凭证相对于已观察 Git HEAD 的当前性。 */
+  storyValidation: {
+    gitHead: string | null;
+    /** true 表示没有持久绿灯失效，不表示全部 Story 已完成。 */
+    current: boolean;
+    invalidStoryIds: string[];
+  };
   progress: string;
   reviews: { filename: string; content: string }[];
   tamperedArchives: string[];
@@ -58,13 +71,34 @@ export interface ReportOptions {
    * 只有两者完全一致才采用，避免观察后 workspace 被另一轮操作替换。
    */
   currentReview?: CurrentReviewStatus;
+  /** 由受控调用方观察的当前 Git HEAD；缺失或 null 时报告按不可验证处理。 */
+  currentGitHead?: string | null;
 }
 
 function reportReviewStatus(
   read: ReturnType<typeof readFinalReviewState>,
   observed: CurrentReviewStatus | undefined,
+  storyValidationDigest: string | null,
 ): CurrentReviewStatus {
-  if (observed !== undefined && isDeepStrictEqual(observed.read, read)) return observed;
+  if (observed !== undefined && isDeepStrictEqual(observed.read, read)) {
+    if (read.status !== 'ready' || !observed.current) return observed;
+    const savedDigest = read.state.binding.storyValidationDigest;
+    const staleReason =
+      savedDigest === undefined
+        ? '旧 Final Review 未绑定 Story 验收凭证集合'
+        : storyValidationDigest === null
+          ? '当前 Story 验收凭证集合无法验证'
+          : savedDigest !== storyValidationDigest
+            ? 'Story 验收凭证集合已变化'
+            : null;
+    return staleReason === null
+      ? observed
+      : {
+          ...observed,
+          current: false,
+          staleReasons: [...observed.staleReasons, staleReason],
+        };
+  }
   return {
     read,
     current: false,
@@ -114,6 +148,14 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
   if (prd === null || !Array.isArray(prd.userStories)) return { status: 'unparsable', workspace };
   const statePath = join(workspace, 'state.json');
   const { state, stateCorrupted } = readDisplayState(statePath, prd);
+  const currentGitHead = options.currentGitHead ?? null;
+  const storyValidation = evaluateStoryValidationReceiptSet(prd, state, currentGitHead ?? '');
+  const reconciledStoryValidation = reconcileValidationReceipts(
+    prd,
+    state,
+    currentGitHead ?? '',
+  );
+  const currentState = reconciledStoryValidation.state;
   const rootFiles = listFiles(workspace);
   const reviews: { filename: string; content: string }[] = [];
   for (const filename of rootFiles.filter((n) => /^review-.*\.md$/.test(n)).sort()) {
@@ -129,14 +171,24 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
       generatedAt: now,
       prd,
       prdSource,
-      stories: mergedStories(prd, state),
+      stories: mergedStories(prd, currentState),
       stateCorrupted,
+      storyValidation: {
+        gitHead: currentGitHead,
+        current:
+          currentGitHead !== null && reconciledStoryValidation.invalidatedStoryIds.length === 0,
+        invalidStoryIds: reconciledStoryValidation.invalidatedStoryIds,
+      },
       progress: readProgress(join(workspace, 'progress.md')),
       reviews,
       tamperedArchives: rootFiles.filter((n) => /^prd\.tampered-.*\.json$/.test(n)).sort(),
       screenshots: listFiles(join(workspace, 'screenshots')).sort().map((f) => parseScreenshotEntry(f, storyIds)),
       evidence: readEvidence(workspace),
-      finalReview: reportReviewStatus(readFinalReviewState(workspace), options.currentReview),
+      finalReview: reportReviewStatus(
+        readFinalReviewState(workspace),
+        options.currentReview,
+        storyValidation.digest,
+      ),
     },
   };
 }

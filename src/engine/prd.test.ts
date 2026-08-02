@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { tryReadPrd, type Prd } from './prd.js';
+import { tryReadPrd, validatePrdStorySet, type Prd } from './prd.js';
 
 function makePrd(stories: Array<Partial<Prd['userStories'][number]>>): Prd {
   return {
@@ -31,5 +31,27 @@ describe('tryReadPrd', () => {
     writeFileSync(file, JSON.stringify({ ...makePrd([{ id: 'US-001' }]), sourcePrd: 'docs/prds/prd-x.md' }));
     expect(tryReadPrd(file)?.sourcePrd).toBe('docs/prds/prd-x.md');
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('validatePrdStorySet', () => {
+  it('rejects an empty Story set', () => {
+    expect(validatePrdStorySet(makePrd([]))).toEqual({
+      valid: false,
+      message: 'prd.json 必须包含至少一个 Story',
+    });
+  });
+
+  it('rejects duplicate Story IDs case-insensitively', () => {
+    expect(validatePrdStorySet(makePrd([{ id: 'US-001' }, { id: 'us-001' }]))).toEqual({
+      valid: false,
+      message: 'userStories 包含重复 Story ID：us-001',
+    });
+  });
+
+  it('accepts a non-empty set of unique Story IDs', () => {
+    expect(validatePrdStorySet(makePrd([{ id: 'US-001' }, { id: 'US-002' }]))).toEqual({
+      valid: true,
+    });
   });
 });

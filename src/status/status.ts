@@ -7,7 +7,10 @@ import {
   getCurrentStoryId,
   type StoryView,
   isStoryPassed,
+  evaluateStoryValidationReceiptSet,
+  reconcileValidationReceipts,
 } from '../engine/state.js';
+import { readGitHead } from '../engine/validation-protocol.js';
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
 import {
@@ -61,6 +64,14 @@ export interface StoryRecentValidationHeadAbort extends ValidationHeadAbortEvide
   iteration: number;
 }
 
+export interface StoryValidationCurrentness {
+  gitHead: string | null;
+  /** true 表示没有持久绿灯因当前 HEAD/PRD 失效，不表示全部 Story 已完成。 */
+  current: boolean;
+  /** 本次只读对账实际撤销验收的 Story；普通未完成项不在其中。 */
+  invalidStoryIds: string[];
+}
+
 export type StatusReport = (
   | { status: 'missing'; workspace: string }
   | { status: 'unparsable'; workspace: string }
@@ -79,6 +90,7 @@ export type StatusReport = (
       evidenceUnavailable: boolean;
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
       stateCorrupted: boolean;
+      storyValidation: StoryValidationCurrentness;
       finalReview: CurrentReviewStatus;
     }
 ) & {
@@ -107,6 +119,8 @@ interface StatusCollectionOptions {
   readonly projectRoot?: string;
   readonly client?: GitHubQualityClient;
   readonly refreshRemote?: boolean;
+  /** @internal Deterministic Story-currentness seam; production reads projectRoot HEAD. */
+  readonly currentGitHead?: string | null;
 }
 
 interface ControlledStatusCollectionOptions extends StatusCollectionOptions {
@@ -197,6 +211,21 @@ function collectStatusControlled(
   if (prd === null || !Array.isArray(prd.userStories)) return { status: 'unparsable', workspace };
   const statePath = join(workspace, 'state.json');
   const { state, stateCorrupted } = readDisplayState(statePath, prd);
+  const currentGitHead =
+    options.currentGitHead === undefined
+      ? readGitHead(options.projectRoot ?? process.cwd())
+      : options.currentGitHead;
+  const storyValidationSet = evaluateStoryValidationReceiptSet(
+    prd,
+    state,
+    currentGitHead ?? '',
+  );
+  const reconciledStoryValidation = reconcileValidationReceipts(
+    prd,
+    state,
+    currentGitHead ?? '',
+  );
+  const currentState = reconciledStoryValidation.state;
   let evidence: ReturnType<typeof readEvidence> = { records: [], skippedLines: 0 };
   let evidenceUnavailable = false;
   try {
@@ -207,8 +236,8 @@ function collectStatusControlled(
   return {
     status: 'ok',
     prd,
-    stories: mergedStories(prd, state),
-    currentStoryId: getCurrentStoryId(prd, state),
+    stories: mergedStories(prd, currentState),
+    currentStoryId: getCurrentStoryId(prd, currentState),
     latestProgress: latestProgressTitle(readProgress(join(workspace, 'progress.md'))),
     modelRouting: readModelRouting(prd),
     recentActual: recentActualOf(evidence.records),
@@ -217,11 +246,18 @@ function collectStatusControlled(
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
     stateCorrupted,
+    storyValidation: {
+      gitHead: currentGitHead,
+      current:
+        currentGitHead !== null && reconciledStoryValidation.invalidatedStoryIds.length === 0,
+      invalidStoryIds: reconciledStoryValidation.invalidatedStoryIds,
+    },
     finalReview: collectCurrentReviewStatus({
       workspace,
       ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
       ...(options.client ? { client: options.client } : {}),
       refreshRemote: options.refreshRemote ?? false,
+      storyValidationDigest: storyValidationSet.digest,
       ...(options.runnerVersionObservation
         ? { runnerVersionObservation: options.runnerVersionObservation }
         : {}),
@@ -357,6 +393,14 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   if (report.workspaceSafety !== undefined && report.workspaceSafety.status !== 'ready') {
     lines.push('❌ workspace 安全状态未就绪，不能表示可交付');
     return { text: lines.join('\n'), exitCode: 2 };
+  }
+  if (report.storyValidation.gitHead === null) {
+    lines.push('⚠️ 当前 Git HEAD 不可读取，Story 验收结果均按待重验显示', '');
+  } else if (!report.storyValidation.current) {
+    lines.push(
+      `⚠️ Story 验收凭证已过期，共 ${report.storyValidation.invalidStoryIds.length} 个 Story 待重验`,
+      '',
+    );
   }
   const review = report.finalReview;
   if (review.read.status === 'missing') {
@@ -567,6 +611,7 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
       unavailable: report.evidenceUnavailable,
     },
     finalReview: report.finalReview,
+    storyValidation: report.storyValidation,
     ...(report.workspaceSafety === undefined ? {} : { workspaceSafety: report.workspaceSafety }),
     summary,
   };

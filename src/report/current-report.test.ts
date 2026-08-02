@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CODING_X_VERSION } from '../version.js';
 import { acceptanceHash } from '../contracts/validation-contract.js';
+import { tryReadPrd } from '../engine/prd.js';
+import { evaluateStoryValidationReceiptSet, tryReadState } from '../engine/state.js';
 import { readQualityContract, type QualityContract } from '../quality/contract.js';
 import { createReviewBinding } from '../review/binding.js';
 import type { ManagedReviewObservation } from '../review/managed-observation.js';
@@ -129,6 +131,7 @@ function readyRemote(): ReviewRemoteState {
 
 function reviewState(
   reviewContext: ReviewPreflightContext,
+  workspacePath: string,
   headOverride?: string,
 ): FinalReviewState {
   const primaryAxes: ReviewAxisResult[] = [
@@ -151,6 +154,13 @@ function reviewState(
       attempts: 1,
     },
   ];
+  const prd = tryReadPrd(join(workspacePath, 'prd.json'));
+  const runState = tryReadState(join(workspacePath, 'state.json'));
+  const storyValidation =
+    prd && runState
+      ? evaluateStoryValidationReceiptSet(prd, runState, reviewContext.headSha)
+      : null;
+  if (!storyValidation?.digest) throw new Error('expected current Story validation fixture');
   const risk = applyReviewerRequestedDeepReview(assessReviewRisk(reviewContext), primaryAxes);
   const binding = createReviewBinding({
     context: reviewContext,
@@ -159,6 +169,7 @@ function reviewState(
     runner: 'codex',
     model: 'review-model',
     runnerVersion: 'codex 1.2.3',
+    storyValidationDigest: storyValidation.digest,
   });
   if (headOverride !== undefined) binding.headSha = headOverride;
   return {
@@ -204,9 +215,12 @@ function session(workspacePath: string): WorkspaceSession {
   } as unknown as WorkspaceSession;
 }
 
-function observation(): ManagedReviewObservation {
+function observation(gitHead: () => string): ManagedReviewObservation {
   return {
-    git: async () => {
+    git: async (args) => {
+      if (args.length === 3 && args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') {
+        return `${gitHead()}\n`;
+      }
       throw new Error('unexpected git call in deterministic seam');
     },
     github: {} as ManagedReviewObservation['github'],
@@ -216,8 +230,14 @@ function observation(): ManagedReviewObservation {
 function adapters(options: {
   reviewContext: ReviewPreflightContext;
   revalidate?: () => Promise<{ ok: true } | { ok: false; message: string }>;
+  gitHead?: string | (() => string);
 }) {
-  const createObservation = vi.fn(() => observation());
+  const configuredGitHead = options.gitHead;
+  const currentGitHead =
+    typeof configuredGitHead === 'function'
+      ? configuredGitHead
+      : () => configuredGitHead ?? options.reviewContext.headSha;
+  const createObservation = vi.fn(() => observation(currentGitHead));
   const readVersion = vi.fn(async (_options: { session: WorkspaceSession }) => 'codex 1.2.3');
   const remote = vi.fn(async () => readyRemote());
   return {
@@ -242,6 +262,25 @@ function adapters(options: {
 }
 
 describe('managed manual report currentness', () => {
+  it('reports current Story receipts even when Final Review has not run yet', async () => {
+    const ws = workspace();
+    const q = quality();
+    const ctx = context(q.contract, q.digest);
+
+    await writeCurrentReportWithSession({
+      session: session(ws),
+      workspace: ws,
+      projectRoot: process.cwd(),
+      refreshRemote: false,
+      adapters: adapters({ reviewContext: ctx }).value,
+    });
+
+    const html = readFileSync(join(ws, 'report.html'), 'utf8');
+    expect(html).toContain('Story 验证完成 1/1');
+    expect(html).toContain('本地最终 Review 尚未运行');
+    expect(html).not.toContain('当前 Git HEAD 不可读取');
+  });
+
   it('accepts an alias only after proving it names the session workspace', async () => {
     const ws = workspace();
     const aliasParent = workspace();
@@ -249,7 +288,7 @@ describe('managed manual report currentness', () => {
     symlinkSync(ws, alias, process.platform === 'win32' ? 'junction' : 'dir');
     const q = quality();
     const ctx = context(q.contract, q.digest);
-    writeReview(ws, reviewState(ctx));
+    writeReview(ws, reviewState(ctx, ws));
 
     await expect(
       writeCurrentReportWithSession({
@@ -268,7 +307,7 @@ describe('managed manual report currentness', () => {
     const ws = workspace();
     const q = quality();
     const ctx = context(q.contract, q.digest);
-    writeReview(ws, reviewState(ctx));
+    writeReview(ws, reviewState(ctx, ws));
     const activeSession = session(ws);
     const fake = adapters({ reviewContext: ctx });
 
@@ -299,7 +338,7 @@ describe('managed manual report currentness', () => {
     const ws = workspace();
     const q = quality();
     const ctx = context(q.contract, q.digest);
-    writeReview(ws, reviewState(ctx));
+    writeReview(ws, reviewState(ctx, ws));
     const fake = adapters({
       reviewContext: ctx,
       revalidate: async () => ({ ok: false, message: '评审期间本地 HEAD 发生变化' }),
@@ -318,11 +357,41 @@ describe('managed manual report currentness', () => {
     expect(html).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
   });
 
+  it('uses the final managed HEAD for both Story receipts and Review currentness', async () => {
+    const ws = workspace();
+    const q = quality();
+    const ctx = context(q.contract, q.digest);
+    writeReview(ws, reviewState(ctx, ws));
+    let finalHead = ctx.headSha;
+    const fake = adapters({
+      reviewContext: ctx,
+      gitHead: () => finalHead,
+      revalidate: async () => {
+        finalHead = 'c'.repeat(40);
+        return { ok: true };
+      },
+    });
+
+    await writeCurrentReportWithSession({
+      session: session(ws),
+      workspace: ws,
+      projectRoot: process.cwd(),
+      refreshRemote: true,
+      adapters: fake.value,
+    });
+
+    const html = readFileSync(join(ws, 'report.html'), 'utf8');
+    expect(html).toContain('报告收口前当前 Git HEAD 已变化');
+    expect(html).toContain('Story 验收凭证已过期：US-001');
+    expect(html).not.toContain('Story 验证完成 1/1');
+    expect(html).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
+  });
+
   it('revalidates the context after the final Runner observation changes the repository', async () => {
     const ws = workspace();
     const q = quality();
     const ctx = context(q.contract, q.digest);
-    writeReview(ws, reviewState(ctx));
+    writeReview(ws, reviewState(ctx, ws));
     let changedDuringFinalRunner = false;
     const fake = adapters({
       reviewContext: ctx,
@@ -349,15 +418,47 @@ describe('managed manual report currentness', () => {
     expect(html).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
   });
 
+  it('never renders delivery-ready when the Validator receipt set changes during final revalidation', async () => {
+    const ws = workspace();
+    const q = quality();
+    const ctx = context(q.contract, q.digest);
+    writeReview(ws, reviewState(ctx, ws));
+    const fake = adapters({
+      reviewContext: ctx,
+      revalidate: async () => {
+        const statePath = join(ws, 'state.json');
+        const state = JSON.parse(readFileSync(statePath, 'utf8')) as Record<
+          string,
+          { validationReceipt: { requestId: string } }
+        >;
+        state['US-001'].validationReceipt.requestId = 'reissued-during-report';
+        writeFileSync(statePath, JSON.stringify(state));
+        return { ok: true };
+      },
+    });
+
+    await writeCurrentReportWithSession({
+      session: session(ws),
+      workspace: ws,
+      projectRoot: process.cwd(),
+      refreshRemote: true,
+      adapters: fake.value,
+    });
+
+    const html = readFileSync(join(ws, 'report.html'), 'utf8');
+    expect(html).toContain('Story 验收凭证集合 已变化');
+    expect(html).not.toContain('本地 Review 与 GitHub 交付条件已就绪');
+  });
+
   it('never renders green when final-review binding is replaced after currentness observation', async () => {
     const ws = workspace();
     const q = quality();
     const ctx = context(q.contract, q.digest);
-    writeReview(ws, reviewState(ctx));
+    writeReview(ws, reviewState(ctx, ws));
     const fake = adapters({
       reviewContext: ctx,
       revalidate: async () => {
-        writeReview(ws, reviewState(ctx, 'c'.repeat(40)));
+        writeReview(ws, reviewState(ctx, ws, 'c'.repeat(40)));
         return { ok: true };
       },
     });
@@ -379,7 +480,7 @@ describe('managed manual report currentness', () => {
     const ws = workspace();
     const q = quality();
     const ctx = context(q.contract, q.digest);
-    writeReview(ws, reviewState(ctx));
+    writeReview(ws, reviewState(ctx, ws));
     const fake = adapters({ reviewContext: ctx });
     const failure = new WorkspaceSafetyError('lease-lost', 'report lease changed');
     fake.readVersion.mockRejectedValue(failure);
