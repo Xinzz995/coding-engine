@@ -5,7 +5,13 @@ import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
 import { execFileSync } from 'node:child_process';
 import { acceptanceHash } from '../engine/validation-protocol.js';
-import { setState, buildApiResponse, start, configureWorkspace } from './server.js';
+import {
+  setState,
+  buildApiResponse,
+  start,
+  configureWorkspace,
+  evaluateDashboardReviewCompletion,
+} from './server.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -53,6 +59,11 @@ type DashboardStoryValidation = {
   current: boolean;
   invalidStoryIds: string[];
   configurationError: string | null;
+};
+
+type DashboardReviewCompletion = {
+  current: boolean;
+  reason: string | null;
 };
 
 const dashboardAssets = [
@@ -119,6 +130,21 @@ function dashboardPassedCount(
     `${passedSource}\n${countSource}\ncountPassedStories(stories, storyValidation)`,
     { stories, storyValidation },
   ) as number;
+}
+
+function dashboardEffectivePhase(
+  asset: (typeof dashboardAssets)[number],
+  runtimePhase: string,
+  stateCorrupted: boolean,
+  storyValidation: DashboardStoryValidation | null,
+  reviewCompletion: DashboardReviewCompletion | null = { current: true, reason: null },
+): string {
+  const html = readDashboardAsset(asset.file);
+  const phaseSource = extractInlineFunction(html, 'effectiveDashboardPhase');
+  return runInNewContext(
+    `${phaseSource}\neffectiveDashboardPhase(runtimePhase, stateCorrupted, storyValidation, reviewCompletion)`,
+    { runtimePhase, stateCorrupted, storyValidation, reviewCompletion },
+  ) as string;
 }
 
 describe.each(dashboardAssets)('$label dashboard published-state contract', (asset) => {
@@ -196,6 +222,40 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
     expect(html).toContain('stateCorrupted');
   });
 
+  it('只有当前验收状态才能显示绿色完成阶段', () => {
+    const current: DashboardStoryValidation = {
+      gitHead: 'a'.repeat(40),
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    };
+    expect(dashboardEffectivePhase(asset, 'done', false, current)).toBe('done');
+    expect(
+      dashboardEffectivePhase(asset, 'done', false, {
+        ...current,
+        current: false,
+        invalidStoryIds: ['US-001'],
+      }),
+    ).toBe('error');
+    expect(
+      dashboardEffectivePhase(asset, 'done', false, {
+        ...current,
+        configurationError: 'Story 集合非法',
+      }),
+    ).toBe('error');
+    expect(dashboardEffectivePhase(asset, 'done', false, null)).toBe('error');
+    expect(dashboardEffectivePhase(asset, 'done', true, current)).toBe('error');
+    expect(
+      dashboardEffectivePhase(asset, 'done', false, current, {
+        current: false,
+        reason: '最终 Review 对应的 Story 验收凭证集合已变化',
+      }),
+    ).toBe('error');
+    expect(dashboardEffectivePhase(asset, 'validating', false, null)).toBe('validating');
+    expect(dashboardEffectivePhase(asset, 'blocked', false, current, null)).toBe('blocked');
+    expect(dashboardEffectivePhase(asset, 'shadow', false, current, null)).toBe('shadow');
+  });
+
   it('展示统一的 workspace 安全分类、摘要与处理提示', () => {
     const html = readDashboardAsset(asset.file);
     expect(html).toContain('workspaceSafety');
@@ -206,6 +266,39 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
 });
 
 describe('buildApiResponse', () => {
+  it('只有绑定当前 HEAD 和整组 Story 凭证的可交付 Review 才保持完成态', () => {
+    const head = 'a'.repeat(40);
+    const receiptSet = `sha256:${'b'.repeat(64)}`;
+    const ready = {
+      status: 'ready',
+      state: {
+        status: 'passed',
+        deliveryStatus: 'ready',
+        shadow: false,
+        binding: { headSha: head, storyValidationDigest: receiptSet },
+      },
+    } as unknown as Parameters<typeof evaluateDashboardReviewCompletion>[0];
+
+    expect(evaluateDashboardReviewCompletion(ready, head, receiptSet)).toEqual({
+      current: true,
+      reason: null,
+    });
+    expect(
+      evaluateDashboardReviewCompletion(ready, head, `sha256:${'c'.repeat(64)}`),
+    ).toMatchObject({
+      current: false,
+      reason: '最终 Review 对应的 Story 验收凭证集合已变化',
+    });
+    expect(evaluateDashboardReviewCompletion(ready, 'd'.repeat(40), receiptSet)).toMatchObject({
+      current: false,
+      reason: '最终 Review 对应的提交已变化',
+    });
+    expect(evaluateDashboardReviewCompletion({ status: 'missing' }, head, receiptSet)).toEqual({
+      current: false,
+      reason: '最终 Review 尚未完成',
+    });
+  });
+
   it('reflects state + workspace files', () => {
     const ws = tempWorkspace();
     configureWorkspace(ws, 50);
@@ -282,6 +375,33 @@ describe('buildApiResponse', () => {
       current: false,
       invalidStoryIds: [],
       configurationError: 'userStories[0] 的 Story ID 非法',
+    });
+  });
+
+  it('userStories 不是数组时 dashboard API 返回配置错误而不是 500', () => {
+    const ws = tempWorkspace();
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'non-array-stories',
+        branchName: 'feature/non-array',
+        description: 'd',
+        userStories: {},
+      }),
+    );
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+
+    configureWorkspace(ws, 50, process.cwd());
+    const response = buildApiResponse();
+    expect(response.stories).toEqual([]);
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'prd.json 必须包含至少一个 Story',
     });
   });
 

@@ -22,8 +22,52 @@ import {
   inspectWorkspaceSafetyStatus,
   type WorkspaceSafetyStatusSnapshot,
 } from '../workspace-safety/status.js';
+import { readFinalReviewState, type ReviewStateRead } from '../review/state.js';
 
-export type Phase = 'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'error';
+export type Phase =
+  | 'idle'
+  | 'developing'
+  | 'gating'
+  | 'validating'
+  | 'done'
+  | 'blocked'
+  | 'shadow'
+  | 'error';
+
+export interface DashboardReviewCompletion {
+  current: boolean;
+  reason: string | null;
+}
+
+/**
+ * Dashboard-only local completion check. It does not claim full remote Review currentness; it only
+ * prevents a completed runtime from outliving its exact HEAD/Story receipt-set binding.
+ */
+export function evaluateDashboardReviewCompletion(
+  read: ReviewStateRead,
+  currentGitHead: string | null,
+  storyValidationDigest: string | null,
+): DashboardReviewCompletion {
+  if (read.status === 'missing') return { current: false, reason: '最终 Review 尚未完成' };
+  if (read.status === 'invalid') {
+    return { current: false, reason: `最终 Review 状态不可读取：${read.error}` };
+  }
+  if (!currentGitHead) return { current: false, reason: '当前 Git HEAD 不可读取' };
+  if (!storyValidationDigest) {
+    return { current: false, reason: '当前 Story 验收凭证集合无法验证' };
+  }
+  const review = read.state;
+  if (review.binding.headSha !== currentGitHead) {
+    return { current: false, reason: '最终 Review 对应的提交已变化' };
+  }
+  if (review.binding.storyValidationDigest !== storyValidationDigest) {
+    return { current: false, reason: '最终 Review 对应的 Story 验收凭证集合已变化' };
+  }
+  if (review.status !== 'passed' || review.deliveryStatus !== 'ready' || review.shadow) {
+    return { current: false, reason: '最终 Review 尚未产生可交付结论' };
+  }
+  return { current: true, reason: null };
+}
 
 interface State {
   iteration: number;
@@ -107,6 +151,8 @@ export interface ApiResponse {
   /** state.json 存在但损坏；stories 已按未验证状态 fail-closed。 */
   stateCorrupted: boolean;
   storyValidation: StoryValidationDisplayCurrentness;
+  /** 仅核对本地完成结果与当前 HEAD/Story 凭证集合；完整远端当前性由 status/report 展示。 */
+  reviewCompletion: DashboardReviewCompletion;
   modelRouting: ModelRoutingReadResult;
   logs: string;
   /** 只读安全观察；null 仅供尚未迁移的同步测试/调用方兼容。 */
@@ -127,6 +173,11 @@ function buildApiResponseForWorkspace(
       ? evaluateStoryValidationDisplay(prd, displayState.state, currentGitHead)
       : null;
   const currentState = storyValidation?.state ?? null;
+  const reviewCompletion = evaluateDashboardReviewCompletion(
+    readFinalReviewState(workspace),
+    currentGitHead,
+    storyValidation?.digest ?? null,
+  );
   const logs = readProgress(join(workspace, 'progress.md'));
   return {
     runtime: {
@@ -151,6 +202,7 @@ function buildApiResponseForWorkspace(
       invalidStoryIds: [],
       configurationError: 'prd.json 缺失或无法解析，Story 验收无法验证',
     },
+    reviewCompletion,
     modelRouting: readModelRouting(prd),
     logs,
     workspaceSafety,

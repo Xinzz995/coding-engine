@@ -48,6 +48,11 @@ function displayableStoryId(value: unknown): string | null {
   return value.id;
 }
 
+function rawStoryValues(prd: Prd): unknown[] {
+  const stories = (prd as unknown as { userStories?: unknown }).userStories;
+  return Array.isArray(stories) ? stories : [];
+}
+
 export function tryReadState(path: string): RunState | null {
   try {
     const parsed = parseRunStateBytes(readFileSync(path));
@@ -117,7 +122,7 @@ function legacyStateOf(story: Story): StoryState {
 
 export function initialStateFor(prd: Prd): RunState {
   const state: RunState = {};
-  for (const value of prd.userStories as unknown[]) {
+  for (const value of rawStoryValues(prd)) {
     const id = displayableStoryId(value);
     if (id === null) continue;
     state[id] = legacyStateOf(value as Story);
@@ -128,7 +133,7 @@ export function initialStateFor(prd: Prd): RunState {
 // 运行期回退用：不读 story 上的 legacy 字段（防止已迁移的旧状态“复活”），全部按初始值。
 export function blankStateFor(prd: Prd): RunState {
   const state: RunState = {};
-  for (const value of prd.userStories as unknown[]) {
+  for (const value of rawStoryValues(prd)) {
     const id = displayableStoryId(value);
     if (id === null) continue;
     state[id] = INITIAL_STORY_STATE;
@@ -373,7 +378,7 @@ export function evaluateStoryValidationDisplay(
     let next = state;
     const invalidStoryIds = [
       ...new Set(
-        (prd.userStories as unknown[])
+        rawStoryValues(prd)
           .map(displayableStoryId)
           .filter((storyId): storyId is string => storyId !== null),
       ),
@@ -734,7 +739,7 @@ export function allStoriesResolvedAt(prd: Prd, state: RunState, currentGitHead: 
 // 只读合并（不落盘）：state 为 null 时回退读 story 上的旧格式字段。
 // 消费方区分缺失/损坏时应先走 readDisplayState，避免损坏态复活 legacy 字段。
 export function mergedStories(prd: Prd, state: RunState | null): StoryView[] {
-  return (prd.userStories as unknown[]).flatMap((value) => {
+  return rawStoryValues(prd).flatMap((value) => {
     const id = displayableStoryId(value);
     if (id === null) return [];
     const story = value as Story;

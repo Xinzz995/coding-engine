@@ -441,9 +441,43 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       );
       return finalReview.exitCode;
     };
+    const phaseAfterResolvedRun = (resolvedExitCode: number): dashboard.Phase => {
+      if (resolvedExitCode === 0) return 'done';
+      if (resolvedExitCode === 7) return 'shadow';
+      if (resolvedExitCode >= 3 && resolvedExitCode <= 6) return 'blocked';
+      return 'error';
+    };
+    const completeResolvedRunWithDashboard = async (
+      prd: Prd,
+      state: RunState,
+    ): Promise<number> => {
+      dashboard.setState({
+        phase: 'validating',
+        model: null,
+        routeSource: null,
+        storyDifficulty: null,
+      });
+      try {
+        const resolvedExitCode = await completeResolvedRun(prd, state);
+        dashboard.setState({
+          phase: phaseAfterResolvedRun(resolvedExitCode),
+          model: null,
+          routeSource: null,
+          storyDifficulty: null,
+        });
+        return resolvedExitCode;
+      } catch (error) {
+        dashboard.setState({
+          phase: 'error',
+          model: null,
+          routeSource: null,
+          storyDifficulty: null,
+        });
+        throw error;
+      }
+    };
     if (bootResolved) {
-      dashboard.setState({ phase: 'done', model: null, routeSource: null, storyDifficulty: null });
-      exitCode = await completeResolvedRun(bootPrd, bootState);
+      exitCode = await completeResolvedRunWithDashboard(bootPrd, bootState);
     }
     for (
       let i = 1;
@@ -924,13 +958,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           // 重跑的终轮在 evidence 时间线上是空洞（其余所有退出路径都恰写一条）。
           await recordIteration({ builderOutcome: 'completed', noop: true });
           await tamperCheckBeforeExit(i);
-          dashboard.setState({
-            phase: 'done',
-            model: null,
-            routeSource: null,
-            storyDifficulty: null,
-          });
-          exitCode = await completeResolvedRun(before, beforeState);
+          exitCode = await completeResolvedRunWithDashboard(before, beforeState);
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
@@ -1781,13 +1809,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         afterGitHead &&
         allStoriesResolvedAt(after, afterState, afterGitHead)
       ) {
-        dashboard.setState({
-          phase: 'done',
-          model: null,
-          routeSource: null,
-          storyDifficulty: null,
-        });
-        exitCode = await completeResolvedRun(after, afterState);
+        exitCode = await completeResolvedRunWithDashboard(after, afterState);
         break;
       }
     }

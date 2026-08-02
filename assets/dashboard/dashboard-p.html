@@ -274,6 +274,7 @@ const FALLBACK = {
   runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus", route_source: "difficulty", story_difficulty: "medium", runner: "claude" },
   stateCorrupted: false,
   storyValidation: { gitHead: "0000000000000000000000000000000000000000", current: true, invalidStoryIds: [], configurationError: null },
+  reviewCompletion: { current: false, reason: "演示数据不代表真实完成结果" },
   modelRouting: { status: "disabled", config: null, errors: [] },
   workspaceSafety: null
 };
@@ -384,8 +385,18 @@ function formatElapsed(sec) {
 
 const stateLabel = { active:'进行中', passed:'已通过', failed:'未通过', blocked:'已阻塞', awaiting:'待引擎验收', pending:'待执行' };
 const stateColor = { active:'#4a9eff', passed:'#4ade80', failed:'#f87171', blocked:'#fb923c', awaiting:'#c084fc', pending:'#6b7280' };
-const phaseEmoji = { idle:'⏸', developing:'🤖', validating:'🔍', done:'✅', error:'❌' };
-const phaseText = { idle:'等待启动', developing:'开发中', validating:'验证中', done:'全部完成', error:'出现错误' };
+const phaseEmoji = { idle:'⏸', developing:'🤖', validating:'🔍', done:'✅', blocked:'⏸', shadow:'🧪', error:'❌' };
+const phaseText = { idle:'等待启动', developing:'开发中', validating:'验证中', done:'全部完成', blocked:'等待处理', shadow:'影子验证完成', error:'出现错误' };
+
+function effectiveDashboardPhase(runtimePhase, stateCorrupted, storyValidation, reviewCompletion) {
+  const validationUnavailable = stateCorrupted || !storyValidation
+    || Boolean(storyValidation.configurationError)
+    || storyValidation.current !== true;
+  const completionUnavailable = !reviewCompletion || reviewCompletion.current !== true;
+  return runtimePhase === 'done' && (validationUnavailable || completionUnavailable)
+    ? 'error'
+    : runtimePhase;
+}
 
 // ═══════ CHARACTER ANIMATION ═══════
 const IDLE_ACTIONS = ['coffee','stretch','walk'];
@@ -510,9 +521,15 @@ function render() {
   const stories = getStories();
   const runtime = getRuntime();
   const storyValidation = dashboardData.storyValidation;
+  const effectivePhase = effectiveDashboardPhase(
+    runtime.phase,
+    dashboardData.stateCorrupted,
+    storyValidation,
+    dashboardData.reviewCompletion,
+  );
   const passedCount = countPassedStories(stories, storyValidation);
   const pct = stories.length ? Math.round((passedCount / stories.length) * 100) : 0;
-  const isActive = runtime.phase === 'developing' || runtime.phase === 'validating';
+  const isActive = effectivePhase === 'developing' || effectivePhase === 'validating';
   const routing = dashboardData.modelRouting;
   const routeConfig = dashboardData.stateCorrupted
     ? '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair'
@@ -540,7 +557,7 @@ function render() {
       </div>
     </div>
     <div class="hud-right">
-      <span class="hud-phase">${phaseEmoji[runtime.phase]||'⏸'} ${phaseText[runtime.phase]||'等待启动'}${actualRoute}${isActive ? '<span class="loading-dots"></span>' : ''}</span>
+      <span class="hud-phase">${phaseEmoji[effectivePhase]||'⏸'} ${effectivePhase === 'error' && runtime.phase === 'done' ? '验收未完成' : phaseText[effectivePhase]||'等待启动'}${actualRoute}${isActive ? '<span class="loading-dots"></span>' : ''}</span>
       <span class="hud-meta">${routeConfig} · Round ${runtime.iteration}/${runtime.max_iterations} · ${formatElapsed(runtime.elapsed)}</span>
     </div>
   </div>`;

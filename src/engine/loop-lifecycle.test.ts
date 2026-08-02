@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { writeFileSync, rmSync, readFileSync, realpathSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
@@ -10,6 +10,7 @@ import {
 } from '../workspace-safety/types.js';
 import { readEvidence } from './evidence.js';
 import { runLoop as runProductionLoop } from './loop.js';
+import * as dashboard from '../dashboard/server.js';
 import {
   setup,
   story,
@@ -19,6 +20,7 @@ import {
   fakeBoundValidator,
   fakeCounting,
   previousFinalReview,
+  validationReceiptFor,
 } from './loop-test-support.js';
 
 interface OwnershipViolationScenario {
@@ -560,6 +562,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
   it('rejects a Final Review when the Story receipt set changes before loop acceptance', async () => {
     const project = setup([story()]);
     const fake = fakeBoundValidator(project.workspace, 'passed');
+    const dashboardState = vi.spyOn(dashboard, 'setState');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       const code = await runProductionLoop({
@@ -581,13 +584,60 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       });
 
       expect(code).toBe(5);
+      expect(dashboardState).toHaveBeenLastCalledWith({
+        phase: 'blocked',
+        model: null,
+        routeSource: null,
+        storyDifficulty: null,
+      });
       expect(existsSync(join(project.workspace, 'final-review.json'))).toBe(false);
       expect(
         JSON.parse(readFileSync(join(project.workspace, 'state.json'), 'utf8'))['US-001']
           .validationReceipt.requestId,
       ).toBe('resigned-after-review');
     } finally {
+      dashboardState.mockRestore();
       delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it.each([
+    { exitCode: 6, phase: 'blocked', name: '等待远端' },
+    { exitCode: 7, phase: 'shadow', name: '影子验证完成' },
+    { exitCode: 1, phase: 'error', name: '执行失败' },
+  ] as const)('将最终 Review 的$name显示为准确阶段', async ({ exitCode, phase }) => {
+    const target = story({ acceptanceCriteria: ['works'] });
+    const project = setup([target]);
+    writeFileSync(
+      join(project.workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: validationReceiptFor(target, project.head()),
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const dashboardState = vi.spyOn(dashboard, 'setState');
+    try {
+      expect(
+        await runProductionLoop({
+          ...strictConfig(project.workspace, project.instructionsDir),
+          finalReviewRunner: async () => ({ exitCode, message: 'fixture outcome' }),
+        }),
+      ).toBe(exitCode);
+      expect(dashboardState).toHaveBeenLastCalledWith({
+        phase,
+        model: null,
+        routeSource: null,
+        storyDifficulty: null,
+      });
+    } finally {
+      dashboardState.mockRestore();
     }
   });
 
