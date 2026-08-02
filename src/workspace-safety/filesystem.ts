@@ -42,6 +42,11 @@ export interface WorkspaceDirectoryIdentitySource {
   readonly ino: bigint;
 }
 
+export interface StableOrdinaryDirectoryIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
 export interface StableReadHooks {
   readonly afterOpen?: () => void | Promise<void>;
   readonly afterRead?: () => void | Promise<void>;
@@ -155,6 +160,30 @@ export async function pathExists(path: string): Promise<boolean> {
     if (errorCode(error) === 'ENOENT') return false;
     throw error;
   }
+}
+
+export async function readStableOrdinaryDirectoryIdentity(
+  target: string,
+  label: string,
+  before?: StableOrdinaryDirectoryIdentity,
+): Promise<StableOrdinaryDirectoryIdentity> {
+  let current;
+  try {
+    current = await lstat(target);
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') {
+      throw safetyError('lease-lost', `${label} 在确认期间消失`, error);
+    }
+    throw error;
+  }
+  if (current.isSymbolicLink() || !current.isDirectory()) {
+    throw safetyError(before ? 'lease-lost' : 'invalid', `${label} 不是稳定的普通目录`);
+  }
+  assertNoWindowsReparsePoints([target]);
+  if (before && (current.dev !== before.dev || current.ino !== before.ino)) {
+    throw safetyError('lease-lost', `${label} 在确认期间发生变化`);
+  }
+  return { dev: current.dev, ino: current.ino };
 }
 
 export async function canonicalizeWorkspaceDirectory(

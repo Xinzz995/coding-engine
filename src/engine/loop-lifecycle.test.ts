@@ -1,5 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { writeFileSync, rmSync, readFileSync, realpathSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  realpathSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
 import {
@@ -73,6 +81,33 @@ const ownershipViolationScenarios: readonly OwnershipViolationScenario[] = [
 ];
 
 describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
+  it('prepares the delegated screenshot directory on a fresh first run', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    rmSync(join(workspace, 'screenshots'), { recursive: true });
+    const fake = fakeBoundValidator(workspace, 'passed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(0);
+      expect(existsSync(join(workspace, 'screenshots'))).toBe(true);
+      expect(
+        JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({ passes: true, validated: true });
+      expect(
+        readdirSync(workspace, { recursive: true })
+          .map(String)
+          .some(
+            (path) =>
+              path === QUARANTINE_FILE ||
+              path.endsWith(`/${QUARANTINE_FILE}`) ||
+              path.endsWith(`\\${QUARANTINE_FILE}`),
+          ),
+      ).toBe(false);
+      expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('implements two Stories first, then revalidates the stale earlier candidate at the final HEAD', async () => {
     const first = story({ id: 'US-001', acceptanceCriteria: ['first works'] });
     const second = story({ id: 'US-002', acceptanceCriteria: ['second works'], priority: 2 });

@@ -1,5 +1,6 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -70,6 +71,39 @@ afterEach(() => {
 });
 
 describe('WorkspaceSession and WorkspaceWriter', () => {
+  it('creates an ordinary delegated directory idempotently and rejects unsafe targets', async () => {
+    const workspace = temporaryWorkspace();
+    const outside = temporaryWorkspace('workspace-session-directory-outside-');
+    const session = await openSession(workspace);
+
+    await session.writer.ensureDirectory('screenshots');
+    await session.writer.ensureDirectory('screenshots');
+    expect(existsSync(join(workspace, 'screenshots'))).toBe(true);
+
+    writeFileSync(join(workspace, 'not-a-directory'), 'file');
+    await expect(session.writer.ensureDirectory('not-a-directory')).rejects.toMatchObject({
+      code: 'invalid',
+    });
+
+    mkdirSync(join(outside, 'nested'));
+    symlinkSync(
+      join(outside, 'nested'),
+      join(workspace, 'linked-directory'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await expect(session.writer.ensureDirectory('linked-directory')).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    await expect(session.writer.ensureDirectory('../escape')).rejects.toMatchObject({
+      code: 'invalid',
+    });
+    await expect(session.writer.ensureDirectory('ENGINE.LOCK/escape')).rejects.toMatchObject({
+      code: 'invalid',
+    });
+
+    await session.close();
+  });
+
   it('serializes append and remove actions while preserving exact append order', async () => {
     const workspace = temporaryWorkspace();
     const session = await openSession(workspace);
@@ -167,6 +201,45 @@ describe('WorkspaceSession and WorkspaceWriter', () => {
 
     await expect(remove).rejects.toMatchObject({ code: 'lease-lost' });
     expect(readFileSync(join(workspace, 'validation-result.json'), 'utf8')).toBe('keep');
+    await current.release();
+  });
+
+  it('rechecks ownership immediately before creating a delegated directory', async () => {
+    const workspace = temporaryWorkspace();
+    let allowCreate!: () => void;
+    const createBarrier = new Promise<void>((resolve) => {
+      allowCreate = resolve;
+    });
+    let createReached!: () => void;
+    const createReady = new Promise<void>((resolve) => {
+      createReached = resolve;
+    });
+    const session = await openSession(workspace, {
+      hooks: {
+        beforeDirectoryCommit: async () => {
+          createReached();
+          await createBarrier;
+        },
+      },
+    });
+    const create = session.writer.ensureDirectory('screenshots');
+    await createReady;
+
+    const protocolRoot = join(workspace, PROTOCOL_ROOT_DIR);
+    renameSync(
+      join(protocolRoot, ACTIVE_LEASE_DIR),
+      join(protocolRoot, INCIDENTS_DIR, 'simulated-stale-directory-owner'),
+    );
+    const current = await acquireWorkspaceLease({
+      workspacePath: workspace,
+      identity: identity(3),
+      ownerId: OWNER_B,
+      command: 'run',
+    });
+    allowCreate();
+
+    await expect(create).rejects.toMatchObject({ code: 'lease-lost' });
+    expect(existsSync(join(workspace, 'screenshots'))).toBe(false);
     await current.release();
   });
 

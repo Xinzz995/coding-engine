@@ -338,6 +338,10 @@ export async function runLoopPreflight(
     : structuredClone(qualityRead.contract.checks);
   // 所有启动预检均成功后才落盘对账结果。预检失败时 Story 候选、凭证与 retry
   // 必须保持原样；parsedBootState=null 代表既有文件损坏，也不覆盖诊断现场。
+  // Agent 的 add-only 截图权限必须锚定到引擎先建立的普通目录，不能让 Agent 自己
+  // 创建目录或靠人工准备。全新 workspace apply-prd 后尚无该目录，因此在首轮
+  // operation 基线扫描前由当前受认证 session 幂等建立。
+  await session.writer.ensureDirectory('screenshots');
   if (bootState && (!stateExisted || parsedBootState)) {
     await session.writer.writeFile('state.json', JSON.stringify(bootState, null, 2));
   }
