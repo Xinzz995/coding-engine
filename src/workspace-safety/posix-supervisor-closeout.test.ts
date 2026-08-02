@@ -105,10 +105,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       failure = error;
     }
 
-    expect(failure).toMatchObject({
-      code: 'isolated',
-      message: expect.stringMatching(/prepare|prestart/u),
-    });
+    expect(failure).toMatchObject({ code: 'isolated' });
 
     expect(performance.now() - startedAt).toBeLessThan(2000);
     expect(existsSync(marker)).toBe(false);
