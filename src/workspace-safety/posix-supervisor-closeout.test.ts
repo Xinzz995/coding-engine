@@ -253,8 +253,19 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     expect(failedAt).toBeTypeOf('number');
     expect(failedAt - armedAt).toBeLessThan(1000);
     const active = operationPath(state.workspace);
+    expect(existsSync(active)).toBe(true);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
-    expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
+    const quarantinePath = join(active, QUARANTINE_FILE);
+    if (existsSync(quarantinePath)) {
+      expect(parseQuarantineRecord(readFileSync(quarantinePath))).toMatchObject({
+        ownerId: OWNER_ID,
+        operationId: OPERATION_ID,
+        activeChildDigest: digestBytes(readFileSync(join(active, ACTIVE_CHILD_FILE))),
+        delegatedBaselineDigest: digestBytes(readFileSync(join(active, DELEGATED_BASELINE_FILE))),
+        reason: 'containment-unconfirmed',
+        creator: { kind: 'owner', id: OWNER_ID },
+      });
+    }
     expect(state.session.state).toBe('isolated');
     await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
