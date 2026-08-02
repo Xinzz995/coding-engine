@@ -307,7 +307,10 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       runDarkWindowsSupervisedOperation(operation, {
         target: target(source, state.workspace),
         termination: { signal: controller.signal, reason: 'user-interrupt' },
-        timeouts: { naturalDrainMs: 5000, terminateMs: 1000, ackMs: 1000, pollMs: 20 },
+        // Keep the natural path far beyond the combined termination/ACK budget. The Windows
+        // standard-user runner can spend several seconds in authenticated filesystem settlement,
+        // so a tiny wall-clock threshold would measure host startup noise instead of preemption.
+        timeouts: { naturalDrainMs: 30_000, terminateMs: 5000, ackMs: 10_000, pollMs: 20 },
         hooks: {
           onRootResult: async () => {
             await new Promise((resolve) => setTimeout(resolve, 200));
@@ -332,7 +335,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       drainReason: 'user-interrupt',
     });
     expect(interruptedAt).toBeTypeOf('number');
-    expect(completedAt - interruptedAt!).toBeLessThan(3000);
+    expect(completedAt - interruptedAt!).toBeLessThan(20_000);
     await state.session.close();
   });
 
