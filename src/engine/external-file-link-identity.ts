@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
@@ -6,6 +7,7 @@ import {
   InlineProgramTransportError,
 } from '../workspace-safety/inline-program.js';
 import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
+import { readDarwinMountTable } from '../workspace-safety/darwin-mount-table-transport.js';
 
 export interface ExternalFileStatIdentity {
   readonly dev: bigint;
@@ -64,29 +66,28 @@ const LINUX_MAGIC_OR_REMOTE_FILE_SYSTEMS = new Set<bigint>([
   0x564cn, // NCP
 ]);
 
-// Darwin 的 statfs.type 使用系统 mount type。只拒绝已知动态、magic 或远程语义，
-// APFS/HFS、tmpfs 及其他本地卷不需要与验证检出位于同一设备。
-const DARWIN_MAGIC_OR_REMOTE_FILE_SYSTEMS = new Set<bigint>([
-  2n, // NFS
-  7n, // fdesc
-  11n, // kernfs
-  12n, // procfs
-  13n, // AFS
-  19n, // devfs
-  20n, // WebDAV
-  22n, // AFP
-  24n, // CIFS
-  25n, // FUSE/other network providers
+const DARWIN_ORDINARY_LOCAL_FILE_SYSTEMS = new Set([
+  'apfs',
+  'cd9660',
+  'exfat',
+  'hfs',
+  'msdos',
+  'tmpfs',
+  'udf',
 ]);
 
-/** @internal 导出给平台 magic 回归测试；未知类型不靠猜测拒绝。 */
+/** @internal 导出给平台 magic 回归测试；Darwin 数字类型一律不能作为放行依据。 */
 export function isExternalFileSystemMagicOrRemote(
   platform: NodeJS.Platform,
   type: bigint,
 ): boolean {
   if (platform === 'linux') return LINUX_MAGIC_OR_REMOTE_FILE_SYSTEMS.has(type);
-  if (platform === 'darwin') return DARWIN_MAGIC_OR_REMOTE_FILE_SYSTEMS.has(type);
+  if (platform === 'darwin') return true;
   return false;
+}
+
+function digestDarwinMountTable(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 /**
@@ -96,6 +97,7 @@ export function isExternalFileSystemMagicOrRemote(
 export class ExternalFileLinkSnapshotBudget {
   readonly #deadline: number;
   readonly #targets = new Set<string>();
+  #darwinMountTableDigest: string | undefined;
   #links = 0;
   #uniqueTargetBytes = 0;
 
@@ -154,6 +156,37 @@ export class ExternalFileLinkSnapshotBudget {
     this.#uniqueTargetBytes += bytes;
     return true;
   }
+
+  darwinMountTableDigest(): string | null {
+    if (process.platform !== 'darwin') return null;
+    this.checkpoint();
+    try {
+      this.#darwinMountTableDigest ??= digestDarwinMountTable(readDarwinMountTable());
+    } catch (error) {
+      throw new ExternalFileLinkSnapshotBudgetError(
+        `macOS mount 表无法建立稳定快照：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.checkpoint();
+    return this.#darwinMountTableDigest;
+  }
+
+  assertDarwinMountTableCurrent(): void {
+    if (process.platform !== 'darwin' || this.#darwinMountTableDigest === undefined) return;
+    this.checkpoint();
+    let current: string;
+    try {
+      current = digestDarwinMountTable(readDarwinMountTable());
+    } catch (error) {
+      throw new ExternalFileLinkSnapshotBudgetError(
+        `macOS mount 表无法复核：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (current !== this.#darwinMountTableDigest) {
+      throw new ExternalFileLinkSnapshotBudgetError('macOS mount 表在外部链接核对期间发生变化');
+    }
+    this.checkpoint();
+  }
 }
 
 export type ManagedExternalFileLinkSnapshot =
@@ -190,16 +223,20 @@ export interface ManagedExternalFileLinkSnapshotOptions {
 const EXTERNAL_FILE_LINK_READER = String.raw`
 'use strict';
 const crypto = require('node:crypto');
+const childProcess = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const linuxRejected = new Set([${[...LINUX_MAGIC_OR_REMOTE_FILE_SYSTEMS]
   .map((value) => `0x${value.toString(16)}n`)
   .join(',')}]);
-const darwinRejected = new Set([${[...DARWIN_MAGIC_OR_REMOTE_FILE_SYSTEMS]
-  .map((value) => `${value.toString()}n`)
+const darwinOrdinaryLocal = new Set([${[...DARWIN_ORDINARY_LOCAL_FILE_SYSTEMS]
+  .map((value) => JSON.stringify(value))
   .join(',')}]);
-
+const darwinMountExecutable = '/sbin/mount';
+const maxDarwinMountTableBytes = 4 * 1024 * 1024;
+const maxDarwinMountEntries = 65536;
+const maxDarwinMountPathChars = 32767;
 function fail(message) {
   throw new Error(message);
 }
@@ -237,13 +274,88 @@ function decodedLinkTarget(target) {
   return { bytes, text };
 }
 
-function rejectedFileSystem(type) {
-  if (process.platform === 'linux') return linuxRejected.has(type);
-  if (process.platform === 'darwin') return darwinRejected.has(type);
-  return true;
+function readDarwinMountTableBytes() {
+  const executable = fs.realpathSync.native(darwinMountExecutable);
+  const info = fs.lstatSync(executable, { bigint: true });
+  if (
+    !info.isFile() || info.isSymbolicLink() || info.nlink !== 1n || info.uid !== 0n ||
+    (info.mode & 0o22n) !== 0n
+  ) fail('fixed macOS mount executable identity is not trusted');
+  return childProcess.execFileSync(executable, [], {
+    encoding: 'buffer',
+    env: { LANG: 'C', LC_ALL: 'C', PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+    maxBuffer: maxDarwinMountTableBytes,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 4000,
+    windowsHide: true,
+  });
 }
 
-function resolveWithoutMagicLinks(original) {
+function parseDarwinMountTable(bytes) {
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) fail('macOS mount table is not valid UTF-8');
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  if (lines.length === 0 || lines.length > maxDarwinMountEntries) {
+    fail('macOS mount table entry count is invalid');
+  }
+  const entries = lines.map((line) => {
+    const optionsAt = line.lastIndexOf(' (');
+    const delimiter = line.indexOf(' on ');
+    if (
+      optionsAt < 0 || !line.endsWith(')') || delimiter <= 0 ||
+      delimiter !== line.lastIndexOf(' on ') || delimiter + 4 >= optionsAt
+    ) fail('macOS mount table line is ambiguous');
+    const mountPath = line.slice(delimiter + 4, optionsAt);
+    if (
+      mountPath.length === 0 || mountPath.length > maxDarwinMountPathChars ||
+      mountPath.includes('\0') || !path.posix.isAbsolute(mountPath)
+    ) fail('macOS mount table path is invalid');
+    const fields = line.slice(optionsAt + 2, -1).split(', ');
+    if (fields.length === 0 || fields.some((field) => field.length === 0)) {
+      fail('macOS mount table options are invalid');
+    }
+    const type = fields[0].toLowerCase();
+    const options = new Set(fields.slice(1));
+    return {
+      path: path.posix.normalize(mountPath),
+      safe: options.has('local') && !options.has('fskit') && darwinOrdinaryLocal.has(type),
+    };
+  });
+  const uniquePaths = new Set(entries.map((entry) => entry.path));
+  if (uniquePaths.size !== entries.length) fail('macOS mount table has duplicate mount paths');
+  for (const entry of entries) {
+    if (entry.safe) entry.runtimeType = fs.statfsSync(entry.path, { bigint: true }).type;
+  }
+  return entries;
+}
+
+function assertSupportedFileSystem(current, darwinMounts) {
+  if (process.platform === 'linux') {
+    const type = fs.statfsSync(current, { bigint: true }).type;
+    if (linuxRejected.has(type)) {
+      fail('external link crosses a magic, virtual or remote filesystem: ' + current);
+    }
+    return;
+  }
+  if (process.platform === 'darwin') {
+    let selected;
+    for (const mount of darwinMounts) {
+      if (!pathInside(mount.path, current)) continue;
+      if (selected === undefined || mount.path.length > selected.path.length) selected = mount;
+    }
+    if (
+      selected === undefined || !selected.safe || selected.runtimeType === undefined ||
+      fs.statfsSync(current, { bigint: true }).type !== selected.runtimeType
+    ) {
+      fail('external link crosses a magic, virtual or remote filesystem: ' + current);
+    }
+    return;
+  }
+  fail('external link filesystem classification is unsupported');
+}
+
+function resolveWithoutMagicLinks(original, darwinMounts) {
   const first = decodedLinkTarget(original).text;
   let pendingPath = path.isAbsolute(first)
     ? path.resolve(first)
@@ -256,10 +368,7 @@ function resolveWithoutMagicLinks(original) {
     let restarted = false;
     for (let index = 0; index < components.length; index += 1) {
       current = path.join(current, components[index]);
-      const fileSystemType = fs.statfsSync(current, { bigint: true }).type;
-      if (rejectedFileSystem(fileSystemType)) {
-        fail('external link crosses a magic, virtual or remote filesystem: ' + current);
-      }
+      assertSupportedFileSystem(current, darwinMounts);
       const info = fs.lstatSync(current, { bigint: true });
       if (!info.isSymbolicLink()) continue;
       linkDepth += 1;
@@ -285,10 +394,28 @@ let descriptor;
 try {
   snapshot: {
   const request = JSON.parse(Buffer.from(process.argv[1], 'base64url').toString('utf8'));
+  if (
+    request.darwinMountTableDigest !== null &&
+    (typeof request.darwinMountTableDigest !== 'string' || !/^[0-9a-f]{64}$/.test(request.darwinMountTableDigest))
+  ) fail('trusted macOS mount table digest is invalid');
+  let darwinMounts = [];
+  let assertDarwinMountTableCurrent = () => {};
+  if (process.platform === 'darwin') {
+    if (request.darwinMountTableDigest === null) fail('trusted macOS mount table is unavailable');
+    const expectedDigest = request.darwinMountTableDigest;
+    const readCurrent = () => {
+      const bytes = readDarwinMountTableBytes();
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (digest !== expectedDigest) fail('macOS mount table changed during external link review');
+      return bytes;
+    };
+    darwinMounts = parseDarwinMountTable(readCurrent());
+    assertDarwinMountTableCurrent = () => { readCurrent(); };
+  }
   const linkBefore = fs.lstatSync(request.linkPath, { bigint: true });
   if (!linkBefore.isSymbolicLink()) fail('external link identity changed before resolution');
   const linkTargetBefore = decodedLinkTarget(request.linkPath).bytes;
-  const resolvedPath = resolveWithoutMagicLinks(request.linkPath);
+  const resolvedPath = resolveWithoutMagicLinks(request.linkPath, darwinMounts);
   const scope = pathInside(request.checkoutRoot, resolvedPath)
     ? 'internal'
     : pathInside(request.sourceRoot, resolvedPath)
@@ -301,8 +428,9 @@ try {
     if (
       !same(identity(linkBefore), linkAfter) ||
       !linkTargetBefore.equals(linkTargetAfter) ||
-      resolveWithoutMagicLinks(request.linkPath) !== resolvedPath
+      resolveWithoutMagicLinks(request.linkPath, darwinMounts) !== resolvedPath
     ) fail('link changed while classifying');
+    assertDarwinMountTableCurrent();
     process.stdout.write(JSON.stringify({ schemaVersion: 1, scope, resolvedPath }));
     break snapshot;
   }
@@ -353,10 +481,11 @@ try {
     !same(identity(targetBefore), targetAfter) ||
     !same(identity(linkBefore), linkAfter) ||
     !linkTargetBefore.equals(linkTargetAfter) ||
-    resolveWithoutMagicLinks(request.linkPath) !== resolvedPath
+    resolveWithoutMagicLinks(request.linkPath, darwinMounts) !== resolvedPath
   ) {
     fail('external file identity changed while reading');
   }
+  assertDarwinMountTableCurrent();
   process.stdout.write(JSON.stringify({
     schemaVersion: 1,
     scope: 'external',
@@ -457,6 +586,7 @@ export async function snapshotManagedExternalFileLink(
       checkoutRoot: options.checkoutRoot,
       sourceRoot: options.sourceRoot,
       maxFileBytes: options.maxFileBytes,
+      darwinMountTableDigest: options.budget.darwinMountTableDigest(),
     }),
     'utf8',
   ).toString('base64url');

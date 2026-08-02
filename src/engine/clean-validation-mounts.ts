@@ -14,6 +14,22 @@ const MAX_MOUNT_TABLE_BYTES = 4 * 1024 * 1024;
 const MAX_MOUNT_ENTRIES = 65_536;
 const MAX_MOUNT_PATH_CHARS = 32_767;
 
+const DARWIN_ORDINARY_LOCAL_FILE_SYSTEMS = new Set([
+  'apfs',
+  'cd9660',
+  'exfat',
+  'hfs',
+  'msdos',
+  'tmpfs',
+  'udf',
+]);
+
+interface DarwinMountEntry {
+  readonly path: string;
+  readonly type: string;
+  readonly options: ReadonlySet<string>;
+}
+
 export class CleanValidationMountProofError extends Error {
   constructor(message: string) {
     super(message);
@@ -101,7 +117,7 @@ export function parseLinuxMountInfoForTests(bytes: Uint8Array): string[] {
   if (lines.length === 0 || lines.length > MAX_MOUNT_ENTRIES) {
     throw invalid('Linux mountinfo 条目数不在支持范围内');
   }
-  return lines.map((line) => {
+  const entries = lines.map((line) => {
     const separator = line.indexOf(' - ');
     if (separator < 0 || separator !== line.lastIndexOf(' - ')) {
       throw invalid('Linux mountinfo 行无法唯一解析');
@@ -112,10 +128,11 @@ export function parseLinuxMountInfoForTests(bytes: Uint8Array): string[] {
     }
     return supportedPosixMountPath(decodeLinuxMountField(fields[4]), 'Linux mountinfo');
   });
+  return entries;
 }
 
 /** @internal 只供平台解析回归测试；任何格式歧义都必须 fail-closed。 */
-export function parseDarwinMountOutputForTests(bytes: Uint8Array): string[] {
+function parseDarwinMountEntries(bytes: Uint8Array): DarwinMountEntry[] {
   const text = Buffer.from(bytes).toString('utf8');
   if (!Buffer.from(text, 'utf8').equals(Buffer.from(bytes))) {
     throw invalid('macOS mount 输出不是有效 UTF-8');
@@ -125,7 +142,7 @@ export function parseDarwinMountOutputForTests(bytes: Uint8Array): string[] {
   if (lines.length === 0 || lines.length > MAX_MOUNT_ENTRIES) {
     throw invalid('macOS mount 条目数不在支持范围内');
   }
-  return lines.map((line) => {
+  const entries = lines.map((line) => {
     const options = line.lastIndexOf(' (');
     const delimiter = line.indexOf(' on ');
     if (
@@ -137,8 +154,57 @@ export function parseDarwinMountOutputForTests(bytes: Uint8Array): string[] {
     ) {
       throw invalid('macOS mount 行无法唯一解析');
     }
-    return supportedPosixMountPath(line.slice(delimiter + 4, options), 'macOS mount');
+    const fields = line.slice(options + 2, -1).split(', ');
+    if (fields.length === 0 || fields.some((field) => field.length === 0)) {
+      throw invalid('macOS mount 选项不完整');
+    }
+    return {
+      path: supportedPosixMountPath(line.slice(delimiter + 4, options), 'macOS mount'),
+      type: fields[0],
+      options: new Set(fields.slice(1)),
+    };
   });
+  const uniquePaths = new Set(entries.map((entry) => entry.path));
+  if (uniquePaths.size !== entries.length) throw invalid('macOS mount 含重复挂载路径');
+  return entries;
+}
+
+/** @internal 只供平台解析回归测试；任何格式歧义都必须 fail-closed。 */
+export function parseDarwinMountOutputForTests(bytes: Uint8Array): string[] {
+  return parseDarwinMountEntries(bytes).map((entry) => entry.path);
+}
+
+function isTrustedLocalDarwinMount(entry: DarwinMountEntry): boolean {
+  const type = entry.type.toLowerCase();
+  return (
+    entry.options.has('local') &&
+    !entry.options.has('fskit') &&
+    DARWIN_ORDINARY_LOCAL_FILE_SYSTEMS.has(type)
+  );
+}
+
+/** @internal 只供证明本地卷筛选不依赖易变的 Darwin f_type 编号。 */
+export function parseTrustedLocalDarwinMountPathsForTests(bytes: Uint8Array): string[] {
+  return parseDarwinMountEntries(bytes)
+    .filter(isTrustedLocalDarwinMount)
+    .map((entry) => entry.path);
+}
+
+/** @internal 只供最长挂载点分类回归；未知或非普通本地卷一律拒绝。 */
+export function isPathOnTrustedLocalDarwinMountForTests(
+  bytes: Uint8Array,
+  target: string,
+): boolean {
+  const candidate = supportedPosixMountPath(target, 'macOS 目标');
+  let selected: DarwinMountEntry | undefined;
+  for (const entry of parseDarwinMountEntries(bytes)) {
+    const child = posix.relative(entry.path, candidate);
+    if (child !== '' && (child === '..' || child.startsWith('../') || posix.isAbsolute(child))) {
+      continue;
+    }
+    if (selected === undefined || entry.path.length > selected.path.length) selected = entry;
+  }
+  return selected !== undefined && isTrustedLocalDarwinMount(selected);
 }
 
 /** @internal 只供包含关系回归；root 自身被覆盖也属于必须拒绝的挂载点。 */

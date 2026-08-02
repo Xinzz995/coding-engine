@@ -939,6 +939,17 @@ async function assertSafeArtifactTopology(
       );
     }
   }
+  try {
+    externalLinkBudget.assertDarwinMountTableCurrent();
+  } catch (error) {
+    if (error instanceof ExternalFileLinkSnapshotBudgetError) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}${error.message}`,
+      );
+    }
+    throw error;
+  }
   return capturedExternalLinks;
 }
 
