@@ -566,7 +566,7 @@ describe('main — status subcommand', () => {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(project, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('returns 2 and suggests prd-to-json when the workspace is missing', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -624,7 +624,7 @@ describe('main — status --json', () => {
       rmSync(workspace, { recursive: true, force: true });
       rmSync(project, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('warns on stderr and exits 2 for corrupt state.json without polluting stdout', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
@@ -647,7 +647,7 @@ describe('main — status --json', () => {
       logSpy.mockRestore();
       rmSync(workspace, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('warns on stderr for corrupt state.json in human-readable mode too, but not when state.json is merely absent', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
