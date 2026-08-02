@@ -302,20 +302,22 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       'process.exit(0);',
     ].join('');
 
-    const startedAt = performance.now();
+    let interruptedAt: number | undefined;
     const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
       runDarkWindowsSupervisedOperation(operation, {
         target: target(source, state.workspace),
         termination: { signal: controller.signal, reason: 'user-interrupt' },
-        timeouts: { naturalDrainMs: 5000, terminateMs: 1000, pollMs: 20 },
+        timeouts: { naturalDrainMs: 5000, terminateMs: 1000, ackMs: 1000, pollMs: 20 },
         hooks: {
           onRootResult: async () => {
             await new Promise((resolve) => setTimeout(resolve, 200));
+            interruptedAt = performance.now();
             controller.abort();
           },
         },
       }),
     );
+    const completedAt = performance.now();
 
     expect(outcome).toMatchObject({
       verdict: 'terminated',
@@ -324,8 +326,13 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       signal: null,
       leftover: false,
     });
-    expect(outcome.receipt.drainReason).toBe('user-interrupt');
-    expect(performance.now() - startedAt).toBeLessThan(3000);
+    expect(controller.signal.aborted).toBe(true);
+    expect(outcome.receipt).toMatchObject({
+      proof: 'windows-job-zero-and-pipes-eof-v1',
+      drainReason: 'user-interrupt',
+    });
+    expect(interruptedAt).toBeTypeOf('number');
+    expect(completedAt - interruptedAt!).toBeLessThan(3000);
     await state.session.close();
   });
 
