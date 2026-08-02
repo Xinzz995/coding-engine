@@ -4,20 +4,18 @@ import { runWorkspaceOperationControlled, type OperationDelegationScope } from '
 import { readDarkPosixHelperBundle, runDarkPosixSupervisedOperation } from './posix-supervisor.js';
 import type { WorkspaceSession } from './session.js';
 import type { SupervisorTerminationReason } from './supervisor-protocol.js';
+import {
+  mapManagedTimeoutsToPosix,
+  mapManagedTimeoutsToWindows,
+  type ManagedSupervisorTimeouts,
+} from './supervisor-timeouts.js';
 import { WorkspaceSafetyError } from './types.js';
 import {
   readDarkWindowsHelperBundle,
   runDarkWindowsSupervisedOperation,
 } from './windows-supervisor.js';
 
-export interface ManagedSupervisorTimeouts {
-  readonly handshakeMs?: number;
-  readonly naturalDrainMs?: number;
-  readonly termMs?: number;
-  readonly killMs?: number;
-  readonly ackMs?: number;
-  readonly pollMs?: number;
-}
+export type { ManagedSupervisorTimeouts } from './supervisor-timeouts.js';
 
 export type ManagedWorkspaceProcessOptions = OperationDelegationScope & {
   readonly executable: string;
@@ -119,14 +117,14 @@ export async function runManagedWorkspaceProcess(
           target,
           commandTimeoutMs: options.timeoutMs,
           termination: options.termination,
-          timeouts: options.supervisorTimeouts,
+          timeouts: mapManagedTimeoutsToWindows(options.supervisorTimeouts),
         });
       }
       return await runDarkPosixSupervisedOperation(operation, {
         target,
         commandTimeoutMs: options.timeoutMs,
         termination: options.termination,
-        timeouts: options.supervisorTimeouts,
+        timeouts: mapManagedTimeoutsToPosix(options.supervisorTimeouts),
       });
     },
   );

@@ -131,8 +131,7 @@ describe.runIf(
       timeoutMs: 50,
       supervisorTimeouts: {
         naturalDrainMs: 10,
-        termMs: 100,
-        killMs: 3_000,
+        terminateDrainMs: 3_000,
         pollMs: 10,
       },
     });

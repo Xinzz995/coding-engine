@@ -256,6 +256,21 @@ owned-idle 并写有界失败证据；
 后确认最多 5 秒。三段预算独立于项目命令 timeout，并计入调用 duration；timeout、signal 和父进程
 断链不等待自然收口，直接进入终止。测试用事件 barrier 命中每个边界，不靠固定 sleep 猜结果。
 
+Issue #118 进一步收紧这些数字的含义：监督器生命周期只有准备、命令、终止/排空、ACK/最终退出
+四个阶段。每个阶段在首次进入时创建一次基于单调时钟的绝对截止点；同一阶段内的 DATA/START 等
+控制消息发送、事件、hook、TERM→KILL 升级、集合清空、pipes EOF、回执处理、ACK、supervisor 退出
+与输出关闭都只能消费同一份剩余预算，不能因收到 BOUND、ARMED、RESULT 等中间事件重新取得完整
+时限。自然排空与必要的强制收口属于同一次 closeout：阶段切换动作不延长总截止点。项目命令的
+`timeoutMs` 仍只从 START 成功送达后开始；准备等待不得提前消耗它。
+
+父进程的公开配置只暴露平台中立的 `prepareMs`、`naturalDrainMs`、`terminateDrainMs`、
+`ackExitMs` 和 `pollMs`，再显式翻译到 POSIX 与 Windows adapter。POSIX TERM 宽限是总终止预算内的
+平台私有子边界；Windows 不接收也不静默忽略 POSIX 专用公共字段。超时后只有已经安装且严格绑定的
+empty-containment receipt 可以作为证据保留；缺 DRAINED、ACK 后 supervisor 不退出、输出不关闭或
+最终身份无法确认都必须保留 operation 隔离并返回不可验证，不能把“已经发出 kill”当作收口成功。
+这里的有界保证要求操作系统调度与事件循环仍能推进；同步内核调用永久不返回、内核失效和断电仍
+属于本 ADR 已声明的不保证范围。
+
 因此 0.34.0 不再允许 Agent 通过 `nohup ... &` 留下跨轮 dev server。Agent 可以在本轮临时启动
 服务，但返回前必须关闭；用户在 coding-x 之外预先启动、且不属于本次 containment 的服务仍可
 复用。若未来需要跨轮服务，必须另行设计引擎拥有、可诊断、可收口的服务生命周期，不能让进程

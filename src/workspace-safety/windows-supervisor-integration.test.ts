@@ -76,6 +76,14 @@ function operationPath(workspace: string): string {
   return join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
 }
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  while (!predicate()) {
+    if (performance.now() >= deadline) throw new Error('condition timed out');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
 
 windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => {
@@ -194,6 +202,64 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     await state.session.close();
   });
 
+  it('returns after a canonical operation step times out without queueing closeout behind it', async () => {
+    const state = await setup();
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-windows-operation-deadline-'));
+    roots.push(controlRoot);
+    const marker = join(controlRoot, 'must-not-run.txt');
+    const startedAt = performance.now();
+    let releaseLateStep = (): void => undefined;
+    const lateStep = new Promise<void>((resolve) => {
+      releaseLateStep = resolve;
+    });
+    let confirmLateCommit = (): void => undefined;
+    const lateCommit = new Promise<void>((resolve) => {
+      confirmLateCommit = resolve;
+    });
+
+    await expect(
+      runWorkspaceOperation(
+        state.session,
+        operationOptions({
+          beforeActiveCommit: (activeState) =>
+            activeState === 'prepared-bound' ? lateStep : Promise.resolve(),
+          afterActiveCommitted: (activeState) => {
+            if (activeState === 'prepared-bound') confirmLateCommit();
+          },
+        }),
+        (operation) =>
+          runDarkWindowsSupervisedOperation(operation, {
+            target: target(
+              `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran')`,
+              state.workspace,
+            ),
+            timeouts: { handshakeMs: 1000, terminateMs: 300, ackMs: 100, pollMs: 10 },
+          }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'isolated',
+      message: expect.stringMatching(/prepare binding deadline/u),
+    });
+
+    expect(performance.now() - startedAt).toBeLessThan(7000);
+    expect(state.session.state).toBe('isolated');
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(operationPath(state.workspace))).toBe(true);
+    expect(existsSync(join(operationPath(state.workspace), PRESTART_ABORT_FILE))).toBe(false);
+    expect(existsSync(join(operationPath(state.workspace), QUARANTINE_FILE))).toBe(false);
+    releaseLateStep();
+    await lateCommit;
+    expect(state.session.state).toBe('isolated');
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(operationPath(state.workspace))).toBe(true);
+    expect(
+      readdirSync(
+        join(state.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, 'settled-operations'),
+      ),
+    ).toHaveLength(0);
+    await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
+  });
+
   it('times out and drains a stubborn root plus descendant', async () => {
     const state = await setup();
     const descendant = 'setInterval(() => {}, 1000)';
@@ -223,6 +289,114 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       proof: 'windows-job-zero-and-pipes-eof-v1',
       drainReason: 'timeout',
     });
+    await state.session.close();
+  });
+
+  it('honors a user interrupt that arrives while a completed root is naturally draining', async () => {
+    const state = await setup();
+    const controller = new AbortController();
+    const descendant = 'setInterval(() => {}, 1000)';
+    const source = [
+      "const {spawn}=require('node:child_process');",
+      `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:['ignore',1,2]});`,
+      'process.exit(0);',
+    ].join('');
+
+    let interruptedAt: number | undefined;
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(source, state.workspace),
+        termination: { signal: controller.signal, reason: 'user-interrupt' },
+        // Keep the natural path far beyond the combined termination/ACK budget. The Windows
+        // standard-user runner can spend several seconds in authenticated filesystem settlement,
+        // so a tiny wall-clock threshold would measure host startup noise instead of preemption.
+        timeouts: { naturalDrainMs: 30_000, terminateMs: 5000, ackMs: 10_000, pollMs: 20 },
+        hooks: {
+          onRootResult: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            interruptedAt = performance.now();
+            controller.abort();
+          },
+        },
+      }),
+    );
+    const completedAt = performance.now();
+
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'user-interrupt',
+      code: null,
+      signal: null,
+      leftover: false,
+    });
+    expect(controller.signal.aborted).toBe(true);
+    expect(outcome.receipt).toMatchObject({
+      proof: 'windows-job-zero-and-pipes-eof-v1',
+      drainReason: 'user-interrupt',
+    });
+    expect(interruptedAt).toBeTypeOf('number');
+    expect(completedAt - interruptedAt!).toBeLessThan(20_000);
+    await state.session.close();
+  });
+
+  it('accepts a natural receipt that wins before a late user interrupt', async () => {
+    const state = await setup();
+    const controller = new AbortController();
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target('process.exit(0)', state.workspace),
+        termination: { signal: controller.signal, reason: 'user-interrupt' },
+        timeouts: { naturalDrainMs: 5000, terminateMs: 1000, ackMs: 10_000, pollMs: 20 },
+        hooks: {
+          onRootResult: async () => {
+            await waitUntil(
+              () => existsSync(join(operationPath(state.workspace), DRAINED_RECEIPT_FILE)),
+              5000,
+            );
+            controller.abort();
+          },
+        },
+      }),
+    );
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      terminationReason: null,
+      code: 0,
+      signal: null,
+      leftover: false,
+    });
+    expect(outcome.receipt.drainReason).toBe('natural');
+    await state.session.close();
+  });
+
+  it('keeps a timely RESULT successful when natural drain finishes after the command deadline', async () => {
+    const state = await setup();
+    const descendant = 'setTimeout(() => process.exit(0), 5000)';
+    const source = [
+      "const {spawn}=require('node:child_process');",
+      `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{detached:true,stdio:['ignore',1,2]});`,
+      'process.exit(0);',
+    ].join('');
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(source, state.workspace),
+        commandTimeoutMs: 3000,
+        timeouts: { naturalDrainMs: 7000, terminateMs: 5000, pollMs: 20 },
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      terminationReason: null,
+      code: 0,
+      signal: null,
+      leftover: false,
+    });
+    expect(outcome.receipt.drainReason).toBe('natural');
     await state.session.close();
   });
 

@@ -35,6 +35,8 @@
              Link="WindowsSupervisorProgram.cs" />
     <Compile Include="../../assets/workspace-safety/WindowsJobSupervisor.cs"
              Link="WindowsJobSupervisor.cs" />
+    <Compile Include="../../assets/workspace-safety/WindowsJobDeadlines.cs"
+             Link="WindowsJobDeadlines.cs" />
     <Compile Include="../../assets/workspace-safety/WindowsJobProcess.cs"
              Link="WindowsJobProcess.cs" />
     <Compile Include="../../assets/workspace-safety/WindowsJobAuthority.cs"
