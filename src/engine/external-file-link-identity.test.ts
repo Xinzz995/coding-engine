@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -91,7 +99,13 @@ describe('external file link snapshot budget', () => {
       mkdirSync(checkoutRoot);
       mkdirSync(sourceRoot);
       const linkPath = join(checkoutRoot, 'runtime');
-      symlinkSync(process.platform === 'linux' ? '/proc/self/exe' : '/dev/fd/1', linkPath);
+      const magicTarget =
+        process.platform === 'linux'
+          ? '/proc/self/exe'
+          : existsSync('/DEV/fd/1')
+            ? '/DEV/fd/1'
+            : '/dev/fd/1';
+      symlinkSync(magicTarget, linkPath);
       const managed = await createManagedProcessTestSession();
       try {
         const budget = new ExternalFileLinkSnapshotBudget({
@@ -278,7 +292,8 @@ describe('external file link snapshot budget', () => {
     expect(isExternalFileSystemMagicOrRemote('linux', 0xef53n)).toBe(false);
     expect(isExternalFileSystemMagicOrRemote('linux', 0x01021994n)).toBe(false);
     expect(isExternalFileSystemMagicOrRemote('darwin', 19n)).toBe(true);
-    expect(isExternalFileSystemMagicOrRemote('darwin', 26n)).toBe(false);
+    expect(isExternalFileSystemMagicOrRemote('darwin', 25n)).toBe(true);
+    expect(isExternalFileSystemMagicOrRemote('darwin', 26n)).toBe(true);
     expect(isExternalFileSystemMagicOrRemote('freebsd', 0x9fa0n)).toBe(false);
   });
 });

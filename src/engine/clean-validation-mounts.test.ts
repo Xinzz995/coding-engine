@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   assertCleanValidationTreeHasNoMountPoints,
   assertNoMountedPathsAtOrBelowForTests,
+  isPathOnTrustedLocalDarwinMountForTests,
   parseDarwinMountOutputForTests,
+  parseTrustedLocalDarwinMountPathsForTests,
   parseLinuxMountInfoForTests,
 } from './clean-validation-mounts.js';
 
@@ -62,6 +64,40 @@ describe('clean validation mount proof', () => {
     expect(() => parseDarwinMountOutputForTests(Buffer.from('not mount output\n'))).toThrow(
       /无法证明/u,
     );
+  });
+
+  it('derives trusted local Darwin volumes from names and local flags, not f_type numbers', () => {
+    const table = Buffer.from(
+      [
+        '/dev/disk3s1s1 on / (apfs, sealed, local, read-only)',
+        'devfs on /dev (devfs, local, nobrowse)',
+        'map auto_home on /System/Volumes/Data/home (autofs, automounted)',
+        'server:/share on /Volumes/share (nfs)',
+        'fuse-t on /Volumes/tool (macfuse, local)',
+        'kit-t on /Volumes/kit (apfs, local, fskit)',
+        'synth on /Volumes/synth (synthfs, local)',
+        '/dev/disk4s1 on /Volumes/portable (exfat, local)',
+        '',
+      ].join('\n'),
+    );
+    expect(parseTrustedLocalDarwinMountPathsForTests(table)).toEqual([
+      '/',
+      '/Volumes/portable',
+    ]);
+    expect(isPathOnTrustedLocalDarwinMountForTests(table, '/private/tmp/tool')).toBe(true);
+    expect(isPathOnTrustedLocalDarwinMountForTests(table, '/Volumes/portable/tool')).toBe(true);
+    expect(isPathOnTrustedLocalDarwinMountForTests(table, '/Volumes/share/tool')).toBe(false);
+    expect(isPathOnTrustedLocalDarwinMountForTests(table, '/Volumes/kit/tool')).toBe(false);
+    expect(isPathOnTrustedLocalDarwinMountForTests(table, '/Volumes/synth/tool')).toBe(false);
+    expect(isPathOnTrustedLocalDarwinMountForTests(table, '/dev/fd/1')).toBe(false);
+    expect(isPathOnTrustedLocalDarwinMountForTests(table, '/Volumes/share-sibling/tool')).toBe(
+      true,
+    );
+    expect(() =>
+      parseDarwinMountOutputForTests(
+        Buffer.from('/dev/disk1 on / (apfs, local)\n/dev/disk2 on / (apfs, local)\n'),
+      ),
+    ).toThrow(/重复挂载路径/u);
   });
 
   it('rejects the root and true descendants without confusing a same-prefix sibling', () => {
