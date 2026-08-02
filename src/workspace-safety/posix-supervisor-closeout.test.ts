@@ -81,15 +81,16 @@ function settledOperationPath(workspace: string): string {
 }
 
 describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout', () => {
-  it('bounds one absolute prepare phase when the live supervisor stops after BOUND', async () => {
+  it('bounds one absolute prepare phase and proves or quarantines prestart closeout', async () => {
     const state = await setup();
     const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-prepare-deadline-'));
     roots.push(controlRoot);
     const marker = join(controlRoot, 'must-not-run.txt');
     const startedAt = performance.now();
 
-    await expect(
-      runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+    let failure: unknown;
+    try {
+      await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
         runDarkPosixSupervisedOperation(operation, {
           target: target(marker, state.workspace),
           timeouts: { handshakeMs: 100, termMs: 50, killMs: 300, ackMs: 100, pollMs: 10 },
@@ -99,13 +100,36 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
             },
           },
         }),
-      ),
-    ).rejects.toMatchObject({ code: 'isolated', message: expect.stringMatching(/prepare/u) });
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: 'isolated',
+      message: expect.stringMatching(/prepare|prestart/u),
+    });
 
     expect(performance.now() - startedAt).toBeLessThan(2000);
     expect(existsSync(marker)).toBe(false);
-    expect(existsSync(operationPath(state.workspace))).toBe(false);
-    await state.session.close();
+    const active = operationPath(state.workspace);
+    if (existsSync(active)) {
+      expect(parseQuarantineRecord(readFileSync(join(active, QUARANTINE_FILE))).reason).toBe(
+        'containment-unconfirmed',
+      );
+    } else {
+      const abort = parsePrestartAbortRecord(
+        readFileSync(join(settledOperationPath(state.workspace), PRESTART_ABORT_FILE)),
+      );
+      expect(abort.reason).toBe('setup-failed');
+      if (abort.proof === 'supervisor-never-bound-v1') {
+        expect(abort.prestartDrainedDigest).toBeNull();
+      } else {
+        expect(abort.proof).toBe('supervisor-prestart-empty-v1');
+        expect(abort.prestartDrainedDigest).toMatch(/^sha256:[a-f0-9]{64}$/u);
+      }
+      await state.session.close();
+    }
   });
 
   it('bounds a live supervisor that never emits DRAINED and preserves quarantine', async () => {
@@ -178,7 +202,10 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
           },
         }),
       ),
-    ).rejects.toMatchObject({ code: 'isolated', message: expect.stringMatching(/post-drain|ACK|exit/u) });
+    ).rejects.toMatchObject({
+      code: 'isolated',
+      message: expect.stringMatching(/post-drain|ACK|exit/u),
+    });
 
     expect(performance.now() - startedAt).toBeLessThan(3000);
     const active = operationPath(state.workspace);
@@ -213,7 +240,14 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
               environment: [],
             },
             commandTimeoutMs: 2000,
-            timeouts: { handshakeMs: 2000, naturalDrainMs: 50, termMs: 50, killMs: 300, ackMs: 100, pollMs: 10 },
+            timeouts: {
+              handshakeMs: 2000,
+              naturalDrainMs: 50,
+              termMs: 50,
+              killMs: 300,
+              ackMs: 100,
+              pollMs: 10,
+            },
           }),
         ),
       ).rejects.toMatchObject({ code: 'isolated' });
