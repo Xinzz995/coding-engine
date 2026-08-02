@@ -91,6 +91,12 @@ namespace CodingX.WorkspaceSafety
                 connected = false;
                 throw new SafetyException("protocol send timed out");
             }
+            if (deadline.Expired)
+            {
+                request.Cancelled = true;
+                connected = false;
+                throw new SafetyException("protocol send timed out");
+            }
             if (request.Error != null) throw new SafetyException("protocol send failed");
         }
 
@@ -121,13 +127,26 @@ namespace CodingX.WorkspaceSafety
 
         internal static void TryFailure(string message)
         {
+            TryFailure(message, null);
+        }
+
+        internal static void TryFailure(string message, MonotonicDeadline deadline)
+        {
             string bounded = (message ?? "Windows supervisor failed").Replace("\r", " ").Replace("\n", " ");
             if (bounded.Length > 512) bounded = bounded.Substring(0, 512);
+            Dictionary<string, object> failure = new Dictionary<string, object> {
+                { "schemaVersion", 1 }, { "type", "FAILURE" }, { "message", bounded }
+            };
+            if (deadline != null && deadline.Expired)
+            {
+                if (!connected) return;
+                Requests.TryAdd(new WriteRequest { Line = StrictJson.Serialize(failure) }, 0);
+                return;
+            }
             try
             {
-                Send(new Dictionary<string, object> {
-                    { "schemaVersion", 1 }, { "type", "FAILURE" }, { "message", bounded }
-                });
+                if (deadline == null) Send(failure);
+                else Send(failure, deadline);
             }
             catch { }
         }

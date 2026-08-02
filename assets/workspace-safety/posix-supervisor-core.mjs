@@ -403,34 +403,51 @@ export function probeGroup(pgid) {
   }
 }
 
-export function delay(milliseconds) {
-  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
-}
-
-export function monotonicNow() {
-  return performance.now();
-}
-
-export function deadlineAfter(timeoutMs) {
-  return monotonicNow() + timeoutMs;
-}
-
-export function remainingDeadlineMs(deadline) {
-  return Math.max(0, Math.ceil(deadline - monotonicNow()));
-}
+export const delay = (milliseconds) =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+export const monotonicNow = () => performance.now();
+export const deadlineAfter = (timeoutMs) => monotonicNow() + timeoutMs;
+export const remainingDeadlineMs = (deadline) => Math.max(0, Math.ceil(deadline - monotonicNow()));
 
 export async function waitUntilDeadline(predicate, deadline, pollMs = 25) {
-  do {
-    if (predicate()) return true;
+  while (remainingDeadlineMs(deadline) > 0) {
+    const matched = predicate();
     const remaining = remainingDeadlineMs(deadline);
     if (remaining === 0) return false;
+    if (matched) return true;
     await delay(Math.min(pollMs, remaining));
-  } while (true);
+  }
+  return false;
 }
 
-export async function waitUntil(predicate, timeoutMs, pollMs = 25) {
-  return waitUntilDeadline(predicate, deadlineAfter(timeoutMs), pollMs);
+export function callbackBeforeDeadline(register, deadline, timeoutError) {
+  return new Promise((resolveCallback, rejectCallback) => {
+    let settled = false;
+    let timer;
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) rejectCallback(error);
+      else resolveCallback();
+    };
+    const settleTimeout = () => settle(timeoutError);
+    const remaining = remainingDeadlineMs(deadline);
+    if (remaining === 0) return settleTimeout();
+    timer = setTimeout(settleTimeout, remaining);
+    try {
+      register((error) => {
+        if (settled) return;
+        settle(remainingDeadlineMs(deadline) === 0 ? timeoutError : error);
+      });
+    } catch (error) {
+      settle(error);
+    }
+  });
 }
+
+export const waitUntil = (predicate, timeoutMs, pollMs = 25) =>
+  waitUntilDeadline(predicate, deadlineAfter(timeoutMs), pollMs);
 
 export function parseTarget(value) {
   if (!exactKeys(value, ['executable', 'args', 'cwd', 'environment'])) {

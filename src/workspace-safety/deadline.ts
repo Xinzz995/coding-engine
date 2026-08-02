@@ -64,6 +64,7 @@ export class MonotonicDeadline {
     try {
       pending = Promise.resolve(operation());
     } catch (error) {
+      if (this.expired) throw timeoutError();
       throw error;
     }
 
@@ -86,7 +87,8 @@ export class MonotonicDeadline {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          reject(error instanceof Error ? error : new Error(String(error)));
+          if (this.expired) reject(timeoutError());
+          else reject(error instanceof Error ? error : new Error(String(error)));
         },
       );
     });

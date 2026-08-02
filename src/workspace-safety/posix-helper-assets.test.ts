@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { cpSync, linkSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { readDarkPosixHelperBundle, readPosixHelperBundleFromPaths } from './posix-supervisor.js';
@@ -131,11 +132,99 @@ describe.runIf(process.platform !== 'win32')('fixed POSIX helper assets', () => 
     expect(supervisor).not.toContain('signalGroup(');
     expect(supervisor).toContain('const prepareDeadline = deadlineAfter(timeouts.handshakeMs)');
     expect(supervisor).toContain('remainingDeadlineMs(deadline)');
+    expect(supervisor).toContain('let naturallyDrained = containmentIsNaturallyDrained();');
+    expect(supervisor).toContain('if (remainingDeadlineMs(naturalDeadline) === 0) break;');
+    expect(supervisor).toContain('await terminateContainment(beginCloseout());');
+    expect(supervisor).toContain(
+      "launcher?.send({ schemaVersion: 1, type: 'SIGNAL_GROUP', mode: 'KILL' });",
+    );
+    expect(supervisor).toContain(
+      'const deadline = closeoutDeadline ?? deadlineAfter(timeouts.killMs);',
+    );
+    expect(supervisor).toContain('send(failure, deadline);');
+    expect(supervisor.match(/callbackBeforeDeadline\(/gu)).toHaveLength(2);
     expect(supervisor).not.toContain('Date.now()');
     expect(core).toContain("import { performance } from 'node:perf_hooks'");
     expect(core).toContain('export async function waitUntilDeadline');
     expect(core).not.toContain('Date.now()');
     expect(launcher).toContain('process.kill(-process.pid, signal)');
+  });
+
+  it('never accepts a predicate after an absolute deadline, including after a delayed poll', async () => {
+    const core = (await import(pathToFileURL(corePath).href)) as {
+      deadlineAfter(timeoutMs: number): number;
+      waitUntilDeadline(
+        predicate: () => boolean,
+        deadline: number,
+        pollMs?: number,
+      ): Promise<boolean>;
+    };
+
+    let expiredObservations = 0;
+    await expect(
+      core.waitUntilDeadline(
+        () => {
+          expiredObservations += 1;
+          return true;
+        },
+        core.deadlineAfter(0),
+        1,
+      ),
+    ).resolves.toBe(false);
+    expect(expiredObservations).toBe(0);
+
+    let ready = false;
+    setTimeout(() => {
+      ready = true;
+    }, 0);
+    const deadline = core.deadlineAfter(10);
+    const waiting = core.waitUntilDeadline(() => ready, deadline, 10);
+    while (performance.now() <= deadline + 10) {
+      // Intentionally prevent both timers from running until the absolute deadline has passed.
+    }
+    await expect(waiting).resolves.toBe(false);
+
+    const predicateDeadline = core.deadlineAfter(10);
+    await expect(
+      core.waitUntilDeadline(() => {
+        while (performance.now() <= predicateDeadline + 10) {
+          // A slow observation may not turn into success after crossing the same deadline.
+        }
+        return true;
+      }, predicateDeadline),
+    ).resolves.toBe(false);
+  });
+
+  it('rejects callback success observed after the deadline and settles only once', async () => {
+    const core = (await import(pathToFileURL(corePath).href)) as {
+      callbackBeforeDeadline(
+        register: (callback: (error?: Error | null) => void) => void,
+        deadline: number,
+        timeoutError: Error,
+      ): Promise<void>;
+      deadlineAfter(timeoutMs: number): number;
+    };
+    let callback: ((error?: Error | null) => void) | undefined;
+    const deadline = core.deadlineAfter(10);
+    const observed = core.callbackBeforeDeadline(
+      (registered) => {
+        callback = registered;
+      },
+      deadline,
+      new Error('callback delivery timed out'),
+    );
+    const outcome = observed.then(
+      () => 'resolved',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+
+    while (performance.now() <= deadline + 10) {
+      // Simulate a successful native callback that was queued before, but observed after, expiry.
+    }
+    callback?.();
+    callback?.(new Error('late second callback'));
+
+    await expect(outcome).resolves.toBe('callback delivery timed out');
   });
 
   it('accepts only the same persisted semantic contract union as the engine', () => {

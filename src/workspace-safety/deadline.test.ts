@@ -70,6 +70,21 @@ describe('MonotonicDeadline', () => {
     ).rejects.toThrow(/phase timed out/u);
   });
 
+  it('reports the deadline when an operation rejects after crossing the absolute deadline', async () => {
+    const clock = new FakeClock();
+    const deadline = MonotonicDeadline.after(10, clock);
+
+    await expect(
+      deadline.run(
+        () => {
+          clock.value = 10;
+          throw new Error('late underlying failure');
+        },
+        () => new Error('phase timed out'),
+      ),
+    ).rejects.toThrow(/phase timed out/u);
+  });
+
   it('settles only once when an operation completes after the absolute deadline', async () => {
     let complete!: (value: string) => void;
     const pending = new Promise<string>((resolve) => {

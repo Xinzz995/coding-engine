@@ -481,6 +481,74 @@ export class WindowsSupervisorProcess {
     );
   }
 
+  racePendingBefore<T extends WindowsProtocolEvent['type']>(
+    pending: Promise<Extract<WindowsProtocolEvent, { type: T }>>,
+    deadline: MonotonicDeadline,
+    label: string,
+    termination?: Promise<SupervisorTerminationReason>,
+  ): Promise<
+    | { readonly kind: 'event'; readonly event: Extract<WindowsProtocolEvent, { type: T }> }
+    | { readonly kind: 'termination'; readonly reason: SupervisorTerminationReason }
+  > {
+    const timeoutError = (): WorkspaceSafetyError => protocolError(`${label} timed out`);
+    const remaining = deadline.remainingMs();
+    if (remaining === 0) {
+      const error = timeoutError();
+      this.#cancelWait(error);
+      return Promise.reject(error);
+    }
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const error = timeoutError();
+        this.#cancelWait(error);
+        reject(error);
+      }, remaining);
+      void pending.then(
+        (event) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (deadline.expired) {
+            const error = timeoutError();
+            this.#cancelWait(error);
+            reject(error);
+          } else {
+            resolve({ kind: 'event', event });
+          }
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(
+            deadline.expired
+              ? timeoutError()
+              : error instanceof Error
+                ? error
+                : new Error(String(error)),
+          );
+        },
+      );
+      void termination?.then(
+        (reason) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve({ kind: 'termination', reason });
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
+  }
+
   sendBefore(
     envelope: StrictRecord,
     deadline: MonotonicDeadline,
@@ -529,12 +597,14 @@ export class WindowsSupervisorProcess {
     }
   }
 
-  async abort(): Promise<void> {
+  async abort(deadline: MonotonicDeadline): Promise<void> {
     this.#exitExpected = true;
+    this.#fail(protocolError('supervisor aborted'));
     this.child.stdin.destroy();
+    if (this.child.exitCode !== null || this.child.signalCode !== null) return;
     if (this.child.exitCode === null) this.child.kill('SIGKILL');
+    if (deadline.expired) return;
     try {
-      const deadline = MonotonicDeadline.after(5000);
       await deadline.run(
         () => this.#exit,
         () => protocolError('failed supervisor termination timed out'),

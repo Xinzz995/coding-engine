@@ -81,21 +81,29 @@ function settledOperationPath(workspace: string): string {
 }
 
 describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout', () => {
-  it('bounds one absolute prepare phase and proves or quarantines prestart closeout', async () => {
+  it('bounds one absolute prepare phase and retains either proof or a write fence', async () => {
     const state = await setup();
     const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-prepare-deadline-'));
     roots.push(controlRoot);
     const marker = join(controlRoot, 'must-not-run.txt');
     const startedAt = performance.now();
+    let boundHookRan = false;
 
     let failure: unknown;
     try {
       await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
         runDarkPosixSupervisedOperation(operation, {
           target: target(marker, state.workspace),
-          timeouts: { handshakeMs: 100, termMs: 50, killMs: 300, ackMs: 100, pollMs: 10 },
+          timeouts: {
+            handshakeMs: 3000,
+            termMs: 50,
+            killMs: 300,
+            ackMs: 100,
+            pollMs: 10,
+          },
           hooks: {
             onBound: ({ supervisorPid }) => {
+              boundHookRan = true;
               process.kill(supervisorPid, 'SIGSTOP');
             },
           },
@@ -105,15 +113,22 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       failure = error;
     }
 
-    expect(failure).toMatchObject({ code: 'isolated' });
+    expect(boundHookRan).toBe(true);
+    expect(failure).toMatchObject({
+      code: 'isolated',
+      message: expect.stringMatching(/prepare|prestart/u),
+    });
 
-    expect(performance.now() - startedAt).toBeLessThan(2000);
+    const elapsedMs = performance.now() - startedAt;
+    expect(elapsedMs).toBeGreaterThanOrEqual(2500);
+    expect(elapsedMs).toBeLessThan(8000);
     expect(existsSync(marker)).toBe(false);
     const active = operationPath(state.workspace);
     if (existsSync(active)) {
-      expect(parseQuarantineRecord(readFileSync(join(active, QUARANTINE_FILE))).reason).toBe(
-        'containment-unconfirmed',
-      );
+      expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
+      expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
+      expect(state.session.state).toBe('isolated');
+      await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
     } else {
       const abort = parsePrestartAbortRecord(
         readFileSync(join(settledOperationPath(state.workspace), PRESTART_ABORT_FILE)),
@@ -129,7 +144,68 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     }
   });
 
-  it('bounds a live supervisor that never emits DRAINED and preserves quarantine', async () => {
+  it('returns after a canonical operation step times out without queueing closeout behind it', async () => {
+    const state = await setup();
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-operation-deadline-'));
+    roots.push(controlRoot);
+    const marker = join(controlRoot, 'must-not-run.txt');
+    const startedAt = performance.now();
+    let releaseLateStep = (): void => undefined;
+    const lateStep = new Promise<void>((resolve) => {
+      releaseLateStep = resolve;
+    });
+    let confirmLateCommit = (): void => undefined;
+    const lateCommit = new Promise<void>((resolve) => {
+      confirmLateCommit = resolve;
+    });
+
+    await expect(
+      runWorkspaceOperation(
+        state.session,
+        operationOptions({
+          beforeActiveCommit: (activeState) =>
+            activeState === 'prepared-bound' ? lateStep : Promise.resolve(),
+          afterActiveCommitted: (activeState) => {
+            if (activeState === 'prepared-bound') confirmLateCommit();
+          },
+        }),
+        (operation) =>
+          runDarkPosixSupervisedOperation(operation, {
+            target: target(marker, state.workspace),
+            timeouts: {
+              handshakeMs: 1000,
+              termMs: 50,
+              killMs: 300,
+              ackMs: 100,
+              pollMs: 10,
+            },
+          }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'isolated',
+      message: expect.stringMatching(/prepare binding deadline/u),
+    });
+
+    expect(performance.now() - startedAt).toBeLessThan(1500);
+    expect(state.session.state).toBe('isolated');
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(operationPath(state.workspace))).toBe(true);
+    expect(existsSync(join(operationPath(state.workspace), PRESTART_ABORT_FILE))).toBe(false);
+    expect(existsSync(join(operationPath(state.workspace), QUARANTINE_FILE))).toBe(false);
+    releaseLateStep();
+    await lateCommit;
+    expect(state.session.state).toBe('isolated');
+    expect(existsSync(marker)).toBe(false);
+    expect(existsSync(operationPath(state.workspace))).toBe(true);
+    expect(
+      readdirSync(
+        join(state.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, 'settled-operations'),
+      ),
+    ).toHaveLength(0);
+    await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
+  });
+
+  it('bounds a live supervisor that never emits DRAINED and preserves the write fence', async () => {
     const state = await setup();
     let pgid: number | undefined;
     const startedAt = performance.now();
@@ -169,12 +245,12 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       }
     }
 
-    expect(performance.now() - startedAt).toBeLessThan(3000);
+    expect(performance.now() - startedAt).toBeLessThan(1000);
     const active = operationPath(state.workspace);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
-    expect(parseQuarantineRecord(readFileSync(join(active, QUARANTINE_FILE))).reason).toBe(
-      'containment-unconfirmed',
-    );
+    expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
+    expect(state.session.state).toBe('isolated');
+    await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
 
   it('bounds ACK/final exit when a drained supervisor remains alive', async () => {
@@ -204,12 +280,12 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       message: expect.stringMatching(/post-drain|ACK|exit/u),
     });
 
-    expect(performance.now() - startedAt).toBeLessThan(3000);
+    expect(performance.now() - startedAt).toBeLessThan(1500);
     const active = operationPath(state.workspace);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(true);
-    expect(parseQuarantineRecord(readFileSync(join(active, QUARANTINE_FILE))).reason).toBe(
-      'containment-unconfirmed',
-    );
+    expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
+    expect(state.session.state).toBe('isolated');
+    await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
 
   it('fails within the shared closeout deadline when escaped output never reaches EOF', async () => {
@@ -262,10 +338,12 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       }
     }
 
-    expect(performance.now() - startedAt).toBeLessThan(3000);
+    expect(performance.now() - startedAt).toBeLessThan(1500);
     const active = operationPath(state.workspace);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
-    expect(existsSync(join(active, QUARANTINE_FILE))).toBe(true);
+    expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
+    expect(state.session.state).toBe('isolated');
+    await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
 
   it('settles a setup failure from prepared with zero project execution', async () => {

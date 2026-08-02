@@ -418,10 +418,14 @@ namespace CodingX.WorkspaceSafety
             while (!deadline.Expired)
             {
                 CaptureRootResult();
-                if (ActiveProcesses(job) == 0 && OutputEnded) return true;
-                Thread.Sleep(Math.Min(pollMs, deadline.RemainingMilliseconds));
+                bool drained = ActiveProcesses(job) == 0 && OutputEnded;
+                if (deadline.Expired) return false;
+                if (drained) return true;
+                int remaining = deadline.RemainingMilliseconds;
+                if (remaining == 0) return false;
+                Thread.Sleep(Math.Min(pollMs, remaining));
             }
-            return ActiveProcesses(job) == 0 && OutputEnded;
+            return false;
         }
 
         internal void CloseJob() { Native.Close(ref job); }

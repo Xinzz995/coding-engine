@@ -85,6 +85,33 @@ function windowsDeadlineError(label: string): WorkspaceSafetyError {
   );
 }
 
+interface OperationDeadlineState {
+  timedOut: boolean;
+}
+
+async function runOperationStepBefore<T>(
+  deadline: MonotonicDeadline,
+  state: OperationDeadlineState,
+  label: string,
+  operation: () => T | PromiseLike<T>,
+): Promise<T> {
+  let started = false;
+  let finished = false;
+  try {
+    return await deadline.run(async () => {
+      started = true;
+      try {
+        return await operation();
+      } finally {
+        finished = true;
+      }
+    }, () => windowsDeadlineError(label));
+  } catch (error) {
+    if (started && !finished && deadline.expired) state.timedOut = true;
+    throw error;
+  }
+}
+
 function validateWindowsBound(
   processHandle: WindowsSupervisorProcess,
   event: WindowsBoundEvent,
@@ -121,11 +148,12 @@ interface TerminationTrigger {
   readonly reason: SupervisorTerminationReason | undefined;
   readonly commandDeadline: MonotonicDeadline | undefined;
   startCommandTimer(): void;
+  commandDeadlineExpired(): boolean;
   rootCompleted(): void;
   dispose(): void;
 }
 
-function createTerminationTrigger(
+export function createTerminationTrigger(
   commandTimeoutMs: number | undefined,
   termination: RunDarkWindowsSupervisedOperationOptions['termination'],
 ): TerminationTrigger {
@@ -170,9 +198,15 @@ function createTerminationTrigger(
         timeout = setTimeout(() => freeze('timeout'), commandDeadline.remainingMs());
       }
     },
+    commandDeadlineExpired() {
+      if (!commandDeadline?.expired) return false;
+      freeze('timeout');
+      return frozenReason === 'timeout';
+    },
     rootCompleted() {
       if (timeout) clearTimeout(timeout);
       timeout = undefined;
+      commandDeadline = undefined;
     },
     dispose() {
       if (timeout) clearTimeout(timeout);
@@ -211,14 +245,18 @@ async function abortPreparedWindowsOperation(
   processHandle: WindowsSupervisorProcess | undefined,
   supervisorIdentity: string | undefined,
   reason: PrestartAbortReason,
+  operationDeadline: OperationDeadlineState,
+  deadline: MonotonicDeadline,
 ): Promise<void> {
-  const settlementDeadline = MonotonicDeadline.after(5000);
   if (processHandle) {
     if (!supervisorIdentity) protocolIsolated('spawned supervisor identity was never established');
-    await processHandle.abort();
+    await processHandle.abort(deadline);
     assertExactProcessDeath(processHandle.pid, supervisorIdentity, 'supervisor');
   }
-  await settlementDeadline.run(
+  await runOperationStepBefore(
+    deadline,
+    operationDeadline,
+    'prestart settlement',
     () =>
       operation.abortPrestartControlled({
         reason,
@@ -226,7 +264,6 @@ async function abortPreparedWindowsOperation(
         supervisor: processHandle ? 'dead' : 'never-created',
         containment: 'not-created',
       }),
-    () => windowsDeadlineError('prestart settlement'),
   );
 }
 
@@ -234,19 +271,19 @@ async function abortPreparedBoundWindowsOperation(
   operation: WorkspaceOperationHandleControlled,
   processHandle: WindowsSupervisorProcess,
   descriptor: BoundSupervisorDescriptor,
-  timeouts: WindowsSupervisorTimeouts,
   reason: PrestartAbortReason,
+  operationDeadline: OperationDeadlineState,
+  deadline: MonotonicDeadline,
 ): Promise<void> {
-  const drainDeadline = MonotonicDeadline.after(timeouts.terminateMs);
   processHandle.expectCleanExit();
   await processHandle.sendBefore(
     embeddedEnvelope('ABORT_BEFORE_START', encodeSupervisorAbortBeforeStart(operation.operationId)),
-    drainDeadline,
+    deadline,
     'prestart abort delivery',
   );
   const event = await processHandle.nextBefore(
     ['PRESTART_DRAINED'],
-    drainDeadline,
+    deadline,
     'prestart drain',
   );
   const drained = parseSupervisorPrestartDrained(event.messageBytes);
@@ -257,10 +294,12 @@ async function abortPreparedBoundWindowsOperation(
   ) {
     protocolInvalid('PRESTART_DRAINED does not bind the prepared-bound supervisor');
   }
-  const exitDeadline = MonotonicDeadline.after(timeouts.ackMs);
-  await processHandle.waitForPrestartExit(exitDeadline);
+  await processHandle.waitForPrestartExit(deadline);
   assertExactProcessDeath(processHandle.pid, descriptor.supervisorIdentity, 'supervisor');
-  await exitDeadline.run(
+  await runOperationStepBefore(
+    deadline,
+    operationDeadline,
+    'prestart settlement',
     () =>
       operation.abortPrestartControlled({
         reason,
@@ -269,16 +308,19 @@ async function abortPreparedBoundWindowsOperation(
         containment: 'empty',
         prestartDrainedBytes: event.messageBytes,
       }),
-    () => windowsDeadlineError('prestart settlement'),
   );
 }
 
 async function quarantineUnfinishedWindowsOperation(
   operation: WorkspaceOperationHandleControlled,
   reason: 'containment-unconfirmed' | 'operation-proof-missing',
+  deadline: MonotonicDeadline,
+  operationDeadline: OperationDeadlineState,
 ): Promise<void> {
-  if (!operation.settled && !operation.quarantined) {
-    await operation.installQuarantineControlled(reason);
+  if (!deadline.expired && !operation.settled && !operation.quarantined) {
+    await runOperationStepBefore(deadline, operationDeadline, 'quarantine installation', () =>
+      operation.installQuarantineControlled(reason),
+    );
   }
 }
 
@@ -293,6 +335,8 @@ export async function runDarkWindowsSupervisedOperation(
   let terminationAttempted = false;
   let completed = false;
   let resolvedTimeouts: WindowsSupervisorTimeouts | undefined;
+  let failureCloseoutDeadline: MonotonicDeadline | undefined;
+  const operationDeadline: OperationDeadlineState = { timedOut: false };
   try {
     terminationTrigger = createTerminationTrigger(options.commandTimeoutMs, options.termination);
     throwIfPrestartInterrupted(terminationTrigger);
@@ -326,13 +370,17 @@ export async function runDarkWindowsSupervisedOperation(
       () => windowsDeadlineError('prepare hook'),
     );
     throwIfPrestartInterrupted(terminationTrigger);
-    await prepareDeadline.run(
+    await runOperationStepBefore(
+      prepareDeadline,
+      operationDeadline,
+      'prepare binding',
       () => operation.bindSupervisorControlled(descriptor!),
-      () => windowsDeadlineError('prepare binding'),
     );
-    await prepareDeadline.run(
+    await runOperationStepBefore(
+      prepareDeadline,
+      operationDeadline,
+      'prepare authority read',
       () => operation.readPreparedBoundBindingControlled(launch.assets.helperBytes),
-      () => windowsDeadlineError('prepare authority read'),
     );
     throwIfPrestartInterrupted(terminationTrigger);
 
@@ -353,13 +401,17 @@ export async function runDarkWindowsSupervisedOperation(
     const armedEvent = await processHandle.nextBefore(['ARMED'], prepareDeadline, 'prepare');
     const containment = validateWindowsContainment(armedEvent);
     throwIfPrestartInterrupted(terminationTrigger);
-    await prepareDeadline.run(
+    await runOperationStepBefore(
+      prepareDeadline,
+      operationDeadline,
+      'prepare containment binding',
       () => operation.armContainmentControlled(containment),
-      () => windowsDeadlineError('prepare containment binding'),
     );
-    const armedBinding = await prepareDeadline.run(
+    const armedBinding = await runOperationStepBefore(
+      prepareDeadline,
+      operationDeadline,
+      'prepare armed authority read',
       () => operation.readArmedBindingControlled(launch.assets.helperBytes),
-      () => windowsDeadlineError('prepare armed authority read'),
     );
     await prepareDeadline.run(
       () => options.hooks?.onArmed?.({ supervisorPid: processHandle!.pid, containment }),
@@ -377,6 +429,7 @@ export async function runDarkWindowsSupervisedOperation(
       if (terminationSent !== undefined) return;
       if (closeoutDeadline) closeoutDeadline.tightenAfter(timeouts.terminateMs);
       else closeoutDeadline = MonotonicDeadline.after(timeouts.terminateMs);
+      failureCloseoutDeadline = closeoutDeadline;
       terminationSent = reason;
       terminationAttempted = true;
       await runningSupervisor.sendBefore(
@@ -415,34 +468,35 @@ export async function runDarkWindowsSupervisedOperation(
       if (terminationSent === undefined && terminationTrigger.reason !== undefined) {
         await sendTermination(terminationTrigger.reason);
       }
-      const next =
-        closeoutDeadline === undefined
-          ? await Promise.race([
-              pendingEvent.then((event) => ({ kind: 'event' as const, event })),
-              terminationTrigger.promise.then((reason) => ({
-                kind: 'termination' as const,
-                reason,
-              })),
-            ])
-          : {
-              kind: 'event' as const,
-              event: await closeoutDeadline.run(
-                () => pendingEvent,
-                () => windowsDeadlineError('termination and drain'),
-              ),
-            };
+      const next = closeoutDeadline
+        ? await processHandle.racePendingBefore(
+            pendingEvent,
+            closeoutDeadline,
+            'termination and drain',
+            terminationSent === undefined ? terminationTrigger.promise : undefined,
+          )
+        : await Promise.race([
+            pendingEvent.then((event) => ({ kind: 'event' as const, event })),
+            terminationTrigger.promise.then((reason) => ({
+              kind: 'termination' as const,
+              reason,
+            })),
+          ]);
       if (next.kind === 'termination') {
         await sendTermination(next.reason);
         continue;
       }
       const event = next.event;
+      if (terminationSent === undefined && terminationTrigger.commandDeadlineExpired()) {
+        await sendTermination('timeout');
+      }
       if (event.type === 'STARTED') {
         if (started || result) protocolInvalid('STARTED is duplicated or follows RESULT');
         if (event.targetPid !== containment.targetPid) {
           protocolInvalid('STARTED target does not match ARMED containment');
         }
         started = event;
-        if (options.hooks?.onStarted) {
+        if (options.hooks?.onStarted && terminationSent === undefined) {
           const startedHook = () =>
             options.hooks!.onStarted!({
               supervisorPid: processHandle!.pid,
@@ -466,6 +520,7 @@ export async function runDarkWindowsSupervisedOperation(
             ? timeouts.naturalDrainMs + timeouts.terminateMs
             : timeouts.terminateMs,
         );
+        failureCloseoutDeadline = closeoutDeadline;
         await closeoutDeadline.run(
           () =>
             options.hooks?.onRootResult?.({
@@ -486,10 +541,13 @@ export async function runDarkWindowsSupervisedOperation(
 
     terminationTrigger.dispose();
     const ackExitDeadline = MonotonicDeadline.after(timeouts.ackMs);
+    failureCloseoutDeadline = ackExitDeadline;
     const drainedMessage = parseSupervisorDrained(drained.messageBytes);
-    const receipt = await ackExitDeadline.run(
+    const receipt = await runOperationStepBefore(
+      ackExitDeadline,
+      operationDeadline,
+      'receipt acceptance',
       () => operation.acceptInstalledDrainedReceiptControlled(drained.messageBytes),
-      () => windowsDeadlineError('receipt acceptance'),
     );
     const receiptBytes = readFileSync(join(operation.operationPath, DRAINED_RECEIPT_FILE));
     parseDrainedReceipt(receiptBytes);
@@ -534,13 +592,15 @@ export async function runDarkWindowsSupervisedOperation(
     await processHandle.waitForCleanExit(ackExitDeadline);
     assertExactProcessDeath(containment.targetPid, containment.targetIdentity, 'target process');
     assertExactProcessDeath(processHandle.pid, descriptor.supervisorIdentity, 'supervisor');
-    const settlement = await ackExitDeadline.run(
+    const settlement = await runOperationStepBefore(
+      ackExitDeadline,
+      operationDeadline,
+      'final settlement',
       () =>
         operation.settleArmedControlled({
           supervisor: 'dead',
           containment: 'empty',
         }),
-      () => windowsDeadlineError('final settlement'),
     );
     completed = true;
     const leftover = receipt.drainReason === 'process-tree-not-empty';
@@ -567,11 +627,24 @@ export async function runDarkWindowsSupervisedOperation(
     };
   } catch (error) {
     let closeoutError: unknown;
+    const failureTimeouts = resolvedTimeouts ?? resolveWindowsSupervisorTimeouts(options.timeouts);
+    failureCloseoutDeadline ??= MonotonicDeadline.after(
+      operationDeadline.timedOut
+        ? 0
+        : failureTimeouts.terminateMs + failureTimeouts.ackMs,
+    );
     try {
-      if (!operation.settled && !operation.quarantined) {
+      if (!operationDeadline.timedOut && !operation.settled && !operation.quarantined) {
         const reason = prestartAbortReason(error, terminationTrigger?.reason);
         if (operation.activeState === 'prepared') {
-          await abortPreparedWindowsOperation(operation, processHandle, supervisorIdentity, reason);
+          await abortPreparedWindowsOperation(
+            operation,
+            processHandle,
+            supervisorIdentity,
+            reason,
+            operationDeadline,
+            failureCloseoutDeadline,
+          );
         } else if (operation.activeState === 'prepared-bound') {
           if (!processHandle || !descriptor) {
             protocolIsolated('prepared-bound operation lost its supervisor binding in memory');
@@ -580,8 +653,9 @@ export async function runDarkWindowsSupervisedOperation(
             operation,
             processHandle,
             descriptor,
-            resolvedTimeouts ?? resolveWindowsSupervisorTimeouts(options.timeouts),
             reason,
+            operationDeadline,
+            failureCloseoutDeadline,
           );
         } else {
           await quarantineUnfinishedWindowsOperation(
@@ -589,14 +663,21 @@ export async function runDarkWindowsSupervisedOperation(
             terminationAttempted || operation.receiptInstalled
               ? 'containment-unconfirmed'
               : 'operation-proof-missing',
+            failureCloseoutDeadline,
+            operationDeadline,
           );
         }
       }
     } catch (failure) {
       closeoutError = failure;
-      if (!operation.settled && !operation.quarantined) {
+      if (!operationDeadline.timedOut && !operation.settled && !operation.quarantined) {
         try {
-          await operation.installQuarantineControlled('containment-unconfirmed');
+          await quarantineUnfinishedWindowsOperation(
+            operation,
+            'containment-unconfirmed',
+            failureCloseoutDeadline,
+            operationDeadline,
+          );
         } catch (quarantineError) {
           closeoutError = quarantineError;
         }
@@ -605,6 +686,8 @@ export async function runDarkWindowsSupervisedOperation(
     throw closeoutError ?? error;
   } finally {
     terminationTrigger?.dispose();
-    if (!completed && processHandle) await processHandle.abort();
+    if (!completed && processHandle) {
+      await processHandle.abort(failureCloseoutDeadline ?? MonotonicDeadline.after(0));
+    }
   }
 }

@@ -64,15 +64,72 @@ describe('Windows supervisor parent deadline contract', () => {
     try {
       await consumeThroughResult(processHandle);
       const deadline = MonotonicDeadline.after(80);
+      const pending = processHandle.nextAny(['DRAINED'], null);
       await expect(
-        processHandle.nextBefore(['DRAINED'], deadline, 'termination and drain'),
+        processHandle.racePendingBefore(pending, deadline, 'termination and drain'),
       ).rejects.toThrow(/termination and drain timed out/u);
       await expect(
         processHandle.nextBefore(['DRAINED'], MonotonicDeadline.after(20), 'second drain wait'),
       ).rejects.toThrow(/second drain wait timed out/u);
     } finally {
-      await processHandle.abort();
+      await processHandle.abort(MonotonicDeadline.after(5000));
     }
+  });
+
+  it('reuses one pending event after termination wins and releases it on closeout timeout', async () => {
+    const processHandle = fakeSupervisor(
+      `${protocolPrefix()}process.stdin.resume();setInterval(()=>{},1000);`,
+    );
+    try {
+      await consumeThroughResult(processHandle);
+      const pending = processHandle.nextAny(['DRAINED'], null);
+      const deadline = MonotonicDeadline.after(80);
+      await expect(
+        processHandle.racePendingBefore(
+          pending,
+          deadline,
+          'termination and drain',
+          Promise.resolve('user-interrupt'),
+        ),
+      ).resolves.toEqual({ kind: 'termination', reason: 'user-interrupt' });
+      await expect(
+        processHandle.racePendingBefore(pending, deadline, 'termination and drain'),
+      ).rejects.toThrow(/termination and drain timed out/u);
+      await expect(
+        processHandle.nextBefore(['DRAINED'], MonotonicDeadline.after(20), 'released waiter'),
+      ).rejects.toThrow(/released waiter timed out/u);
+    } finally {
+      await processHandle.abort(MonotonicDeadline.after(5000));
+    }
+  });
+
+  it('rejects and releases an active pending event when the parent aborts', async () => {
+    const processHandle = fakeSupervisor(
+      `${protocolPrefix()}process.stdin.resume();setInterval(()=>{},1000);`,
+    );
+    await consumeThroughResult(processHandle);
+    const pending = processHandle.nextAny(['DRAINED'], null);
+    const rejected = expect(pending).rejects.toThrow(/supervisor aborted/u);
+
+    await processHandle.abort(MonotonicDeadline.after(5000));
+    await rejected;
+    await expect(processHandle.nextAny(['DRAINED'], null)).rejects.toThrow();
+  });
+
+  it('does not start a new wait after the owning phase expired', async () => {
+    const processHandle = fakeSupervisor(
+      `${protocolPrefix()}process.stdin.resume();setInterval(()=>{},1000);`,
+    );
+    await consumeThroughResult(processHandle);
+    const pending = processHandle.nextAny(['DRAINED'], null);
+    const rejected = expect(pending).rejects.toThrow(/supervisor aborted/u);
+    const deadline = MonotonicDeadline.after(0);
+    const startedAt = performance.now();
+
+    await processHandle.abort(deadline);
+
+    expect(performance.now() - startedAt).toBeLessThan(50);
+    await rejected;
   });
 
   it('uses one ACK/exit budget when the helper accepts ACK but never exits', async () => {
@@ -88,7 +145,7 @@ describe('Windows supervisor parent deadline contract', () => {
         /supervisor exit after ACK timed out/u,
       );
     } finally {
-      await processHandle.abort();
+      await processHandle.abort(MonotonicDeadline.after(5000));
     }
   });
 
@@ -126,7 +183,7 @@ describe('Windows supervisor parent deadline contract', () => {
           }
         }
       }
-      await processHandle.abort();
+      await processHandle.abort(MonotonicDeadline.after(5000));
     }
   });
 });

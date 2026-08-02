@@ -444,6 +444,7 @@ namespace CodingX.WorkspaceSafety
         private string receiptDigest;
         private string terminationReason;
         private bool terminationBeforeStart;
+        private MonotonicDeadline currentDeadline;
 
         internal SupervisorSession(string digest, Timeouts values)
         {
@@ -451,6 +452,19 @@ namespace CodingX.WorkspaceSafety
             timeouts = values;
             supervisorPid = System.Diagnostics.Process.GetCurrentProcess().Id;
             supervisorIdentity = Native.ProcessIdentity(Native.GetCurrentProcess());
+        }
+
+        internal MonotonicDeadline FailureDeadline()
+        {
+            if (currentDeadline == null)
+                currentDeadline = MonotonicDeadline.Start(timeouts.TerminateMs);
+            return currentDeadline;
+        }
+
+        private MonotonicDeadline StartPhaseDeadline(int durationMs)
+        {
+            currentDeadline = MonotonicDeadline.Start(durationMs);
+            return currentDeadline;
         }
 
         private static Dictionary<string, object> Message(ControlFrame frame, string label)
@@ -516,7 +530,7 @@ namespace CodingX.WorkspaceSafety
 
         private void WaitForAcknowledgement()
         {
-            MonotonicDeadline deadline = MonotonicDeadline.Start(timeouts.AckMs);
+            MonotonicDeadline deadline = StartPhaseDeadline(timeouts.AckMs);
             while (!deadline.Expired)
             {
                 ControlFrame frame = control.Take(deadline, "ACK");
@@ -589,7 +603,7 @@ namespace CodingX.WorkspaceSafety
                     parentConnected = !frame.EndOfFile;
                     if (requestedTermination != null)
                     {
-                        closeoutDeadline = MonotonicDeadline.Start(timeouts.TerminateMs);
+                        closeoutDeadline = StartPhaseDeadline(timeouts.TerminateMs);
                         break;
                     }
                 }
@@ -599,14 +613,15 @@ namespace CodingX.WorkspaceSafety
                 closeoutDeadline, timeouts.PollMs))
                 throw new SafetyException("terminated root did not exit");
             if (closeoutDeadline == null)
-                closeoutDeadline = MonotonicDeadline.Start(
+                closeoutDeadline = StartPhaseDeadline(
                     timeouts.NaturalDrainMs + timeouts.TerminateMs);
             ProtocolWriter.Send(new Dictionary<string, object> {
                 { "schemaVersion", 1 }, { "type", "RESULT" },
                 { "code", (long)jobTarget.RootExitCode }, { "signal", null }
             }, closeoutDeadline);
             MonotonicDeadline naturalDeadline = MonotonicDeadline.Start(timeouts.NaturalDrainMs);
-            while (requestedTermination == null && !jobTarget.Drained &&
+            bool naturallyDrained = jobTarget.Drained;
+            while (requestedTermination == null && !naturallyDrained &&
                 !naturalDeadline.Expired && !closeoutDeadline.Expired)
             {
                 ControlFrame frame;
@@ -620,6 +635,13 @@ namespace CodingX.WorkspaceSafety
                     if (requestedTermination != null)
                         closeoutDeadline.TightenAfter(timeouts.TerminateMs);
                 }
+                if (requestedTermination == null && !naturalDeadline.Expired &&
+                    !closeoutDeadline.Expired)
+                {
+                    bool observedDrained = jobTarget.Drained;
+                    if (!naturalDeadline.Expired && !closeoutDeadline.Expired)
+                        naturallyDrained = observedDrained;
+                }
             }
             string drainReason;
             if (requestedTermination != null)
@@ -627,7 +649,7 @@ namespace CodingX.WorkspaceSafety
                 drainReason = requestedTermination;
                 if (!jobTarget.Drained) jobTarget.Terminate();
             }
-            else if (!jobTarget.Drained)
+            else if (!naturallyDrained)
             {
                 drainReason = "process-tree-not-empty";
                 jobTarget.Terminate();
@@ -641,7 +663,7 @@ namespace CodingX.WorkspaceSafety
         {
             using (control = new ControlReader())
             {
-                MonotonicDeadline prepareDeadline = MonotonicDeadline.Start(timeouts.HandshakeMs);
+                MonotonicDeadline prepareDeadline = StartPhaseDeadline(timeouts.HandshakeMs);
                 SendBound(prepareDeadline);
                 Dictionary<string, object> dataEnvelope = Message(
                     control.Take(prepareDeadline, "DATA handshake"), "DATA envelope");
@@ -659,7 +681,7 @@ namespace CodingX.WorkspaceSafety
                         !Patterns.Uuid.IsMatch(operationId))
                         throw new SafetyException("ABORT_BEFORE_START binding is invalid");
                     MonotonicDeadline closeoutDeadline =
-                        MonotonicDeadline.Start(timeouts.TerminateMs);
+                        StartPhaseDeadline(timeouts.TerminateMs);
                     SendPrestartDrained(operationId, closeoutDeadline);
                     return 0;
                 }
@@ -679,7 +701,7 @@ namespace CodingX.WorkspaceSafety
                     {
                         ProtocolWriter.Disconnect();
                         MonotonicDeadline closeoutDeadline =
-                            MonotonicDeadline.Start(timeouts.TerminateMs);
+                            StartPhaseDeadline(timeouts.TerminateMs);
                         jobTarget.Terminate();
                         if (!jobTarget.WaitForEmptyAndEof(closeoutDeadline, timeouts.PollMs))
                             throw new SafetyException("prestart Job did not drain after parent EOF");
@@ -702,7 +724,7 @@ namespace CodingX.WorkspaceSafety
                             throw new SafetyException("ABORT_BEFORE_START binding is invalid");
                         prepared.AssertStillPrepared(target);
                         MonotonicDeadline closeoutDeadline =
-                            MonotonicDeadline.Start(timeouts.TerminateMs);
+                            StartPhaseDeadline(timeouts.TerminateMs);
                         jobTarget.Terminate();
                         if (!jobTarget.WaitForEmptyAndEof(closeoutDeadline, timeouts.PollMs))
                             throw new SafetyException("prestart Job did not drain");
@@ -719,7 +741,7 @@ namespace CodingX.WorkspaceSafety
                         if (binding == null)
                             throw new SafetyException("TERMINATE before START requires canonical armed authority");
                         MonotonicDeadline closeoutDeadline =
-                            MonotonicDeadline.Start(timeouts.TerminateMs);
+                            StartPhaseDeadline(timeouts.TerminateMs);
                         jobTarget.Terminate();
                         DrainAndSend(reason, ProtocolWriter.Connected,
                             "never-started-containment-empty-v1", closeoutDeadline);
@@ -741,6 +763,7 @@ namespace CodingX.WorkspaceSafety
                         { "schemaVersion", 1 }, { "type", "STARTED" },
                         { "targetPid", (long)jobTarget.ProcessId }
                     });
+                    currentDeadline = null;
                     RunStarted();
                     jobTarget.CloseJob();
                     return 0;

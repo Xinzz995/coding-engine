@@ -3,6 +3,7 @@ import { linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { MonotonicDeadline } from './deadline.js';
 import { createSystemIdentityAdapter } from './identity.js';
 import {
   DEFAULT_WINDOWS_SUPERVISOR_TIMEOUTS,
@@ -141,7 +142,7 @@ describe('fixed Windows Job supervisor assets', () => {
           value: bound.supervisorIdentity,
         });
       } finally {
-        await supervisor.abort();
+        await supervisor.abort(MonotonicDeadline.after(5000));
       }
     },
   );
@@ -186,12 +187,45 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(deadlines).toContain('RemainingMilliseconds');
     expect(deadlines).toContain('TightenAfter');
     expect(deadlines).toContain('protocol send timed out');
+    expect(deadlines).toContain('TryFailure(string message, MonotonicDeadline deadline)');
+    expect(deadlines).toContain(
+      'Requests.TryAdd(new WriteRequest { Line = StrictJson.Serialize(failure) }, 0)',
+    );
+    expect(deadlines).toMatch(
+      /request\.Completed\.Wait\(remaining\)[\s\S]*?if \(deadline\.Expired\)[\s\S]*?request\.Error/u,
+    );
     expect(deadlines).not.toContain('DateTime.UtcNow');
     expect(processSource).toContain('WaitForEmptyAndEof(MonotonicDeadline deadline');
+    expect(processSource).toMatch(
+      /bool drained = ActiveProcesses\(job\) == 0 && OutputEnded;\s*if \(deadline\.Expired\) return false;\s*if \(drained\) return true;/u,
+    );
+    expect(processSource).not.toMatch(
+      /Thread\.Sleep\([\s\S]*?\);\s*\}\s*return ActiveProcesses\(job\) == 0 && OutputEnded;/u,
+    );
     expect(processSource).not.toContain('DateTime.UtcNow.AddMilliseconds');
+    expect(core).toMatch(
+      /if \(!frames\.TryTake\(out frame, timeoutMs\)\)\s*throw new SafetyException\(label \+ " timed out"\);\s*if \(deadline\.Expired\) throw new SafetyException\(label \+ " timed out"\);/u,
+    );
+    expect(core).toContain('internal bool TryTake(int timeoutMs, out ControlFrame frame)');
     expect(authority).toContain('control.Take(prepareDeadline, "DATA handshake")');
     expect(authority).toContain('control.Take(prepareDeadline, "START handshake")');
     expect(authority).toContain('control.Take(deadline, "ACK")');
+    expect(authority).toContain('closeoutDeadline.TightenAfter(timeouts.TerminateMs)');
+    expect(authority).toContain('StartPhaseDeadline(timeouts.AckMs)');
+    expect(authority).toContain('internal MonotonicDeadline FailureDeadline()');
+    expect(core).toContain('session == null ? null : session.FailureDeadline()');
+    expect(authority).toMatch(
+      /MonotonicDeadline naturalDeadline = MonotonicDeadline\.Start\(timeouts\.NaturalDrainMs\);\s*bool naturallyDrained = jobTarget\.Drained;\s*while \(requestedTermination == null && !naturallyDrained &&\s*!naturalDeadline\.Expired/u,
+    );
+    expect(authority).toContain('control.TryTake(timeouts.PollMs, out frame)');
+    expect(authority).toMatch(
+      /int waitMs = Math\.Min\(timeouts\.PollMs,\s*Math\.Min\(naturalDeadline\.RemainingMilliseconds,\s*closeoutDeadline\.RemainingMilliseconds\)\);\s*if \(waitMs > 0 && control\.TryTake\(waitMs, out frame\)\)/u,
+    );
+    expect(authority).toMatch(
+      /if \(requestedTermination == null && !naturalDeadline\.Expired &&\s*!closeoutDeadline\.Expired\)\s*\{\s*bool observedDrained = jobTarget\.Drained;\s*if \(!naturalDeadline\.Expired && !closeoutDeadline\.Expired\)\s*naturallyDrained = observedDrained;\s*\}/u,
+    );
+    expect(authority).toContain('else if (!naturallyDrained)');
+    expect(authority).not.toContain('else if (!jobTarget.Drained)');
     expect(authority).not.toContain('DateTime.UtcNow.AddMilliseconds');
     expect(processSource.indexOf('CreateJobObjectW')).toBeLessThan(
       processSource.indexOf('CreateProcessW'),
