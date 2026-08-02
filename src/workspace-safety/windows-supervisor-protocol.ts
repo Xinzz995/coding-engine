@@ -464,7 +464,7 @@ export class WindowsSupervisorProcess {
     label: string,
   ): Promise<Extract<WindowsProtocolEvent, { type: T }>> {
     return deadline.run(
-      () => this.nextAny(expected, Math.max(1, deadline.remainingMs())),
+      () => this.nextAny(expected, null),
       () => protocolError(`${label} timed out`),
     );
   }
