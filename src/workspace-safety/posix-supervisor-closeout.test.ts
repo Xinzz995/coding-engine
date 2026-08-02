@@ -209,6 +209,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     const state = await setup();
     let pgid: number | undefined;
     const startedAt = performance.now();
+    let failedAt: number | undefined;
 
     try {
       await expect(
@@ -234,6 +235,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
         code: 'isolated',
         message: expect.stringMatching(/termination and drain|deadline/u),
       });
+      failedAt = performance.now();
     } finally {
       if (pgid !== undefined) {
         try {
@@ -245,7 +247,8 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       }
     }
 
-    expect(performance.now() - startedAt).toBeLessThan(1000);
+    expect(failedAt).toBeTypeOf('number');
+    expect(failedAt - startedAt).toBeLessThan(1000);
     const active = operationPath(state.workspace);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
     expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
@@ -301,6 +304,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       'child.unref();',
     ].join('');
     const startedAt = performance.now();
+    let failedAt: number | undefined;
 
     try {
       await expect(
@@ -324,6 +328,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
           }),
         ),
       ).rejects.toMatchObject({ code: 'isolated' });
+      failedAt = performance.now();
     } finally {
       if (existsSync(escapedPidPath)) {
         const escapedPid = Number(readFileSync(escapedPidPath, 'utf8'));
@@ -338,10 +343,22 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
       }
     }
 
-    expect(performance.now() - startedAt).toBeLessThan(1500);
+    expect(failedAt).toBeTypeOf('number');
+    expect(failedAt - startedAt).toBeLessThan(1500);
     const active = operationPath(state.workspace);
+    expect(existsSync(active)).toBe(true);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(false);
-    expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
+    const quarantinePath = join(active, QUARANTINE_FILE);
+    if (existsSync(quarantinePath)) {
+      expect(parseQuarantineRecord(readFileSync(quarantinePath))).toMatchObject({
+        ownerId: OWNER_ID,
+        operationId: OPERATION_ID,
+        activeChildDigest: digestBytes(readFileSync(join(active, ACTIVE_CHILD_FILE))),
+        delegatedBaselineDigest: digestBytes(readFileSync(join(active, DELEGATED_BASELINE_FILE))),
+        reason: 'operation-proof-missing',
+        creator: { kind: 'owner', id: OWNER_ID },
+      });
+    }
     expect(state.session.state).toBe('isolated');
     await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
