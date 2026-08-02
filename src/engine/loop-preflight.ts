@@ -23,7 +23,11 @@ import {
 } from './state.js';
 import { checkTddPolicyManaged, readTddConfig, type TddConfig } from './tdd-gate.js';
 import { readGitHead } from './validation-protocol.js';
-import { digestCandidateStoryValidationEnvironment } from './story-validation-currentness.js';
+import {
+  bindStoryValidationRuntimeIdentity,
+  digestCandidateStoryValidationEnvironment,
+  type StoryValidationRuntimeIdentity,
+} from './story-validation-currentness.js';
 import {
   assessQualityRuntime,
   qualityChecksMatchContract,
@@ -60,6 +64,7 @@ export type LoopPreflightResult =
       runKind: AgentKind;
       gitHead: string;
       validationEnvironmentDigest: string;
+      validationRuntimeIdentity: StoryValidationRuntimeIdentity;
       validationAdditionalRefs: string[];
       bootResolved: boolean;
     };
@@ -90,9 +95,10 @@ export async function runLoopPreflight(
     console.error(`❌ 质量契约不可用（${qualityRead.path}）：${detail}`);
     return { status: 'failed', exitCode: 2 };
   }
+  const actualCodingXVersion = cfg.actualVersion ?? CODING_X_VERSION;
   const runtime = assessQualityRuntime(
     qualityRead.contract,
-    cfg.actualVersion ?? CODING_X_VERSION,
+    actualCodingXVersion,
     cfg.shadow ?? false,
   );
   if (runtime.mode === 'version-mismatch') {
@@ -150,13 +156,22 @@ export async function runLoopPreflight(
 
   const tddRead = readTddConfig(bootPrd);
   const validationAdditionalRefs = tddRead.status === 'enabled' ? [tddRead.config.baselineRef] : [];
+  const validationRuntimeIdentity: StoryValidationRuntimeIdentity = {
+    mode: runtime.mode,
+    actualCodingXVersion,
+  };
   const currentValidationEnvironmentDigest =
-    cfg.validationEnvironmentDigestForTests ??
-    digestCandidateStoryValidationEnvironment({
-      contract: qualityRead.contract,
-      headSha: bootGitHead,
-      tddConfig: tddRead.status === 'enabled' ? tddRead.config : null,
-    });
+    cfg.validationEnvironmentDigestForTests !== undefined
+      ? bindStoryValidationRuntimeIdentity(
+          cfg.validationEnvironmentDigestForTests,
+          validationRuntimeIdentity,
+        )
+      : digestCandidateStoryValidationEnvironment({
+          contract: qualityRead.contract,
+          headSha: bootGitHead,
+          tddConfig: tddRead.status === 'enabled' ? tddRead.config : null,
+          runtimeIdentity: validationRuntimeIdentity,
+        });
 
   // 先只在内存准备状态。文件缺失时从 legacy PRD 抽取候选；文件存在但损坏时按
   // 全未开始失败关闭。只有全部启动预检通过后才创建或迁移 state.json。
@@ -365,6 +380,7 @@ export async function runLoopPreflight(
     runKind,
     gitHead: bootGitHead,
     validationEnvironmentDigest: currentValidationEnvironmentDigest,
+    validationRuntimeIdentity,
     validationAdditionalRefs,
     bootResolved,
   };

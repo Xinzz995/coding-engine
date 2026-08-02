@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离实施计划
 status: active
-updated: 2026-07-31
+updated: 2026-08-02
 scope: root
 ---
 
@@ -144,10 +144,23 @@ Issue #91 干净检出。
 完成信号：任一正式入口不能绕过 owner domain；root 成功但遗留后代不能假绿；recovery 和 mutation
 中断都有可执行出路；0.34.0 行为文档与代码一致。
 
-### PR 4：真实 Dogfood 与关闭
+### PR 4：候选准备、跨语言 Dogfood 与关闭
 
-- 在 coding-engine 新 workspace 运行正式闭环；
-- 候选 tarball 在 Go 多模块与 Python Monorepo 以 `--shadow` 验证正常 workspace 行为；
+- 先补齐稳定裁判与候选运行之间唯一受控的准备路径：只有 `doctor --shadow` 和
+  `workspace apply-prd --shadow` 可以容许质量契约固定版本与当前候选版本不同；普通 doctor、普通
+  apply-prd 和所有其他 workspace 命令仍严格拒绝版本不一致；
+- shadow doctor 只能把“单纯版本不一致”分类为候选可准备，并以退出码 7 明确表示非正式结果；契约
+  损坏、摘要/检查快照漂移、Git HEAD/源 PRD 漂移、TDD、workspace safety 或远端问题仍照常失败；
+- shadow apply-prd 继续机械复核契约、摘要、检查快照、Git HEAD、源 PRD、TDD 和租约，只在最终
+  版本判定上进入 shadow；成功状态与退出码必须分别为 `applied-shadow` 和 7；
+- Story 验收环境摘要同时绑定实际 coding-x 版本和 formal/shadow 模式，候选结果不能在正式模式或
+  另一候选版本中复用；正式重跑必须重新签发 Validator 凭证；
+- `prd-to-json` 只有在用户显式选择固定候选 Dogfood 时，才以同一候选 CLI 的绝对路径调用 shadow
+  doctor 与 shadow apply-prd；仍不得直接写 workspace；
+- 在 coding-engine 新 workspace 运行候选 shadow 闭环；发布并完成 Policy PR 后，再用固定稳定版运行
+  正式闭环；
+- 同一个候选 tarball 在 Go 多模块与 Python Monorepo 合成试点以 `--shadow` 验证正常 workspace
+  行为；两个试点证明跨语言、多模块和原生 CI，不冒充真实业务下游；
 - 保存三平台 Actions、旧 0.33.3 binary 兼容测试和破坏性场景链接；
 - 对账 README、architecture、patterns、dogfood regression、CLI help 与退出码；
 - 逐条回复 Issue #106 六项跟进证据，确认无同类 P0/P1 后关闭。
@@ -252,13 +265,29 @@ node dist/cli.js --help
 PR 2 与 PR 3 还必须保存 Linux、macOS、Windows 的真实任务链接。Windows mock taskkill、macOS 本机
 单测或复制旧算法都不能替代对应真机合同。旧 0.33.3 兼容必须执行冻结的实际 package/binary。
 
+候选准备路径还必须先证明失败，再证明成功：
+
+- 普通 doctor/apply-prd 遇到版本不一致时失败，apply-prd 对业务 workspace 零写；
+- shadow doctor 仅有版本不一致时返回 shadow/7；任一其他问题仍失败；
+- shadow apply-prd 成功原子应用，但不生成或复用正式 Validator/Final Review 结果；
+- shadow apply-prd 在 mutation 安装后中断再由 resume-mutation 恢复时，仍从持久记录返回 shadow/7，
+  不能因进程重启丢成普通成功；
+- shadow 不得绕过坏契约、未提交契约、摘要/检查快照、HEAD/源 PRD、TDD、租约或路径安全；
+- 同一 Story 在 shadow 0.34.0、formal 0.34.0 和 shadow 另一候选版本下得到三个不同环境摘要；
+- `--shadow` 用在受支持入口以外时明确拒绝，不能被静默忽略。
+
 ## 黄金原则对照
 
-1. **可证伪合同**：正常 exit 的遗留孙进程是第一反例；每项绑定明确 marker/状态。
-2. **独立裁决**：Agent/项目命令不签发释放；coordinator 和平台集合事实决定。
-3. **防线与可逆性**：终止失败保留隔离；恢复移动原字节；未知需 reboot proof。
-4. **原生与中立**：Node/OS process group/Windows Job；无 runner 专有核心状态。
-5. **假绿与恢复**：先做三平台破坏性测试、双恢复与 mutation 中断，再接生产路径。
+1. **可证伪合同**：正常 exit 的遗留孙进程是第一反例；候选准备再以“formal 必须拒绝、shadow
+   只能放宽版本且返回 7、正式不得复用 shadow 凭证”为反例矩阵，每项绑定明确 marker/状态/退出码。
+2. **独立裁决**：Agent/项目命令不签发释放；coordinator 和平台集合事实决定。shadow 模式与实际版本
+   进入引擎签发的验收环境摘要，不能由 Agent 自述升级为正式凭证。
+3. **防线与可逆性**：终止失败保留隔离；恢复移动原字节；未知需 reboot proof。候选准备不新增写
+   范围，只复用受管 apply-prd mutation；所有非版本错误继续 fail-closed。
+4. **原生与中立**：Node/OS process group/Windows Job；无 runner 专有核心状态。shadow 是
+   runner-neutral 的运行模式，不新增模型或托管平台分支。
+5. **假绿与恢复**：先做三平台破坏性测试、双恢复与 mutation 中断，再接生产路径；候选缺口来自真实
+   发布预演，固化为 formal/shadow currentness 与零写回归，降低候选被误认成正式通过的假绿风险。
 
 ## 关闭条件
 
@@ -290,4 +319,6 @@ PR 2 与 PR 3 还必须保存 Linux、macOS、Windows 的真实任务链接。Wi
   recovery+lease 并由 exact resume 完成，不得走普通 release；
 - 新 workspace 初始化成立，旧 0.33 正在运行的不可 fencing 边界被诚实保留；
 - architecture、patterns、README、Builder 指令与实际代码一致；
+- 候选 CLI 能在稳定契约固定旧版本时通过受控 shadow 路径准备新 workspace，且任何 shadow 结果都
+  无法晋升或复用为正式结果；
 - Issue #106 在 2026-08-06 前关闭，0.34.0 发布前无未处理同类 P0/P1。

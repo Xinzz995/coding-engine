@@ -1,7 +1,7 @@
 ---
 title: coding-x 候选发布与恢复手册
 status: active
-updated: 2026-07-28
+updated: 2026-08-02
 scope: root
 ---
 
@@ -10,7 +10,7 @@ scope: root
 ## 边界
 
 发布不是“推一个标签就把当前目录发出去”。固定顺序是：受保护 PR 合并版本 → 无发布身份地
-构建固定候选包 → 三个真实项目验证 → 显式选择该候选进入 npm staging → 维护者用 2FA 批准
+构建固定候选包 → coding-engine 与两个跨语言合成试点验证 → 显式选择该候选进入 npm staging → 维护者用 2FA 批准
 到 `next` → 公开精确版本再次验证 → 维护者移动 `latest` → 创建不可改写的标签和 GitHub
 Release。
 
@@ -21,7 +21,8 @@ Release。
 
 候选版本与质量契约固定的稳定裁判版本不同是预期状态。GitHub 和暂存流程只运行
 `repository-health` 机械检查，不运行候选版本的完整 `doctor`，也不把 shadow 结果转换成成功。
-完整 `doctor` 必须继续拒绝版本不匹配，直到新版本发布后由独立 Policy PR 更新固定版本。
+普通 `doctor` 必须继续拒绝版本不匹配，直到新版本发布后由独立 Policy PR 更新固定版本；本地
+候选准备只能显式使用 `doctor --shadow`，健康时也返回 7，不能作为正式裁判证明。
 
 ## 一次性启用
 
@@ -54,12 +55,13 @@ PR 合并到 `main` 后再完成 npm 配置，因为 npm 只接受已经存在�
 （0.33.0 已被 npm 判定不可复用），并采用一次性的“机械 CI + owner 人工 Bootstrap”：PR
 最新提交必须通过全部仓库检查，但不声称完成正式本地 AI Review，也不得用候选版本为自己
 签发正式结果。0.33.1 发布并由独立 Policy PR 固定后，后续版本恢复稳定版评估候选版的常规
-流程。
+流程。本轮 0.34.0 仍由固定的 0.33.3 规则裁决候选；发布完成后才用独立 Policy PR 把正式裁判
+更新为 0.34.0。
 
 ### 2. 构建固定候选
 
 从 GitHub Actions 手动运行 `Build release candidate`，分支必须选 `main`，输入精确稳定版本，
-例如 `0.33.0`。该工作流在没有 npm 身份的环境中执行完整检查、构建并保存候选包。
+例如 `0.34.0`。该工作流在没有 npm 身份的环境中执行完整检查、构建并保存候选包。
 
 下载该次运行的制品：
 
@@ -71,13 +73,36 @@ PR 合并到 `main` 后再完成 npm 配置，因为 npm 只接受已经存在�
 
 ### 3. 批准前 Dogfood
 
-三个项目都安装 `npm-candidate-X.Y.Z` 中同一个压缩包并记录 SHA-256：
+coding-engine、Go 多模块合成试点和 Python Monorepo 合成试点都安装
+`npm-candidate-X.Y.Z` 中同一个压缩包并记录 SHA-256。两个外部试点只证明跨语言、多模块和
+原生 CI，不证明真实业务下游已经采用。
+
+每个项目把候选安装到仓库外独立目录，并把同一候选 CLI 的绝对路径固定为 `<candidate-cli>`。
+从准备到运行不能换回全局/npx 稳定版，也不能混用另一个候选：
+
+```bash
+<candidate-cli> workspace init --workspace <new-workspace>
+<candidate-cli> doctor --shadow --json --workspace <new-workspace>
+<candidate-cli> workspace apply-prd --shadow --json \
+  --input <system-temp-request> --workspace <new-workspace>
+<candidate-cli> <runner> --shadow --workspace <new-workspace> --no-open
+```
+
+- workspace init 返回 0；
+- shadow doctor 必须同时得到退出 7、`quality.status=shadow` 且没有其他错误；
+- shadow apply-prd 必须同时得到退出 7 和 `status=applied-shadow`；
+- 最终 run 必须退出 7，并保留 `shadow=true` 的最终 Review；
+- 普通 doctor/apply-prd 仍应因固定版本不一致而失败，不能靠手写 `prd.json`/`state.json` 绕过；
+- shadow Story 凭证在正式模式或另一候选版本中必须自动过期并重验。
+
+随后分别核对：
 
 - coding-engine 使用候选版本运行 `--shadow`；退出 7 只表示影子验证走完，不表示可交付；
 - Go 多模块项目运行自身 Go 检查，GitHub CI 不安装 Node 或 coding-x；
 - Python Monorepo 运行自身 Python 检查，GitHub CI 不安装 Node 或 coding-x。
 
-三个真实 PR、候选摘要和远端总闸均通过后，才进入批准。
+三个候选 PR、候选摘要和远端总闸均通过后，才进入批准。当前尚未实现三仓机器回执，总闸不会
+自动证明这一步已经完成；发布维护者必须逐仓人工核对，不能把 workflow 可触发误写成机器强制。
 
 ### 4. 提升已验证候选到 npm staging
 
@@ -109,7 +134,8 @@ npm stage approve <stage-id>
 ```
 
 批准会把暂存时固定的 `next` 标签一并公开；不能在批准时改标签。重新下载公开的精确版本，
-在三个项目执行安装冒烟，并核对候选摘要、npm `gitHead` 和 provenance 都指向候选提交。
+在 coding-engine 与两个合成试点执行安装冒烟，并核对候选摘要、npm `gitHead` 和 provenance
+都指向候选提交。
 
 ### 6. 提升稳定版本
 
@@ -147,7 +173,8 @@ git push origin vX.Y.Z
 - npm registry 压缩包与候选压缩包摘要一致，签名和 provenance 可验证；
 - `vX.Y.Z` 是 annotated tag，指向同一提交且属于受保护 `main`；
 - GitHub Release 显示 Immutable，两个资产摘要和 Release attestation 均通过；
-- 三个项目记录的是同一候选摘要；本地 `main` 干净并与远端同步。
+- coding-engine 与两个合成试点记录的是同一候选摘要；本地 `main` 干净并与远端同步；
+- 本轮证据只证明跨语言试点，不声称已经完成真实业务下游验证。
 
 ## 失败恢复
 

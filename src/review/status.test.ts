@@ -17,6 +17,11 @@ import type { readRunnerVersion } from './runner.js';
 import { collectCurrentReviewStatus, runnerVersionStaleReason } from './status.js';
 import { observeCurrentReviewRunnerVersion } from './runner-version-observation.js';
 import type { FinalReviewState, ReviewAxisResult } from './types.js';
+import { collectManagedStatusQuality } from './managed-status.js';
+import type {
+  StoryValidationObservation,
+  StoryValidationObservationOptions,
+} from './story-validation-observation.js';
 
 const roots: string[] = [];
 const STORY_VALIDATION_DIGEST = `sha256:${'c'.repeat(64)}`;
@@ -107,6 +112,26 @@ function writeReadyReview(workspace: string): void {
 
 function session(workspacePath: string): WorkspaceSession {
   return { writer: { workspacePath } } as WorkspaceSession;
+}
+
+function unavailableStoryObservation(workspacePath: string): StoryValidationObservation {
+  return {
+    status: 'unverifiable',
+    reason: 'evaluation-error',
+    message: 'fixture stops after runtime identity capture',
+    headSha: null,
+    prd: null,
+    state: {},
+    display: null,
+    storyValidationEnvironmentDigest: null,
+    storyValidationDigest: null,
+    workingContract: null,
+    trackedContract: null,
+    workingContractDigest: null,
+    trackedContractDigest: null,
+    workspacePath,
+    observationToken: null,
+  };
 }
 
 function reviewContext(): ReviewPreflightContext {
@@ -298,6 +323,49 @@ describe('Runner version currentness observation', () => {
 });
 
 describe('collectCurrentReviewStatus currentness binding', () => {
+  it('binds managed Story observations to the saved review mode and actual candidate version', async () => {
+    const workspace = temporaryDirectory('managed-status-runtime-identity-');
+    const observeStoryValidation = vi.fn(
+      async (options: StoryValidationObservationOptions) =>
+        unavailableStoryObservation(options.workspace ?? workspace),
+    );
+    const observe = async (codingXVersion: string) => {
+      await collectManagedStatusQuality({
+        session: session(workspace),
+        workspace,
+        projectRoot: '/project',
+        refreshRemote: false,
+        codingXVersion,
+        adapters: { observeStoryValidation },
+      });
+      return observeStoryValidation.mock.calls.at(-1)?.[0];
+    };
+
+    await expect(observe('0.34.0')).resolves.toMatchObject({
+      runtimeIdentity: { mode: 'formal', actualCodingXVersion: '0.34.0' },
+    });
+
+    writeReadyReview(workspace);
+    const reviewPath = join(workspace, 'final-review.json');
+    const shadow = JSON.parse(readFileSync(reviewPath, 'utf8')) as FinalReviewState;
+    shadow.shadow = true;
+    shadow.deliveryStatus = 'shadow';
+    writeFileSync(reviewPath, `${JSON.stringify(shadow)}\n`);
+    await expect(observe('0.34.0')).resolves.toMatchObject({
+      runtimeIdentity: { mode: 'shadow', actualCodingXVersion: '0.34.0' },
+    });
+
+    shadow.shadow = false;
+    shadow.deliveryStatus = 'ready';
+    writeFileSync(reviewPath, `${JSON.stringify(shadow)}\n`);
+    await expect(observe('0.34.0')).resolves.toMatchObject({
+      runtimeIdentity: { mode: 'formal', actualCodingXVersion: '0.34.0' },
+    });
+    await expect(observe('0.35.0')).resolves.toMatchObject({
+      runtimeIdentity: { mode: 'formal', actualCodingXVersion: '0.35.0' },
+    });
+  });
+
   it('旧 Review 可读取但会失效，当前凭证集合摘要变化也会失效', () => {
     const workspace = temporaryDirectory('review-status-story-binding-');
     const context = reviewContext();

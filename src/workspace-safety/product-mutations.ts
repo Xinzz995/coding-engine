@@ -5,7 +5,11 @@ import { readModelRouting } from '../engine/models.js';
 import type { Prd } from '../engine/prd.js';
 import { readTddConfig, runTddGate } from '../engine/tdd-gate.js';
 import { readGitHead } from '../engine/validation-protocol.js';
-import { qualityChecksMatchContract, readQualityContract } from '../quality/contract.js';
+import {
+  assessQualityRuntime,
+  qualityChecksMatchContract,
+  readQualityContract,
+} from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
 import {
   asStrictRecord,
@@ -82,6 +86,8 @@ export interface ProductMutationOptions {
 
 export interface ApplyPrdV1Options extends ProductMutationOptions {
   readonly projectRoot: string;
+  /** 正式模式要求精确固定版本；shadow 只放宽此一项且永不产生正式结果。 */
+  readonly runtimeMode: 'formal' | 'shadow';
 }
 
 const REVIEW_ROOTS = Object.freeze([
@@ -588,9 +594,14 @@ async function verifyApplyLiveBindings(
   if (quality.status !== 'ready') {
     throw mutationInvalid(`apply-prd-v1 quality contract is not ready: ${quality.status}`);
   }
-  if (quality.contract.codingXVersion !== CODING_X_VERSION) {
+  const runtime = assessQualityRuntime(
+    quality.contract,
+    CODING_X_VERSION,
+    options.runtimeMode === 'shadow',
+  );
+  if (runtime.mode === 'version-mismatch') {
     throw mutationInvalid(
-      `apply-prd-v1 requires coding-x ${quality.contract.codingXVersion}, running ${CODING_X_VERSION}`,
+      `apply-prd-v1 requires coding-x ${runtime.expectedVersion}, running ${runtime.actualVersion}`,
     );
   }
   if (
@@ -706,7 +717,9 @@ export async function runApplyPrdV1Mutation(
 
   const hooks = interruptionHooks(options);
   return await runWorkspaceMutationControlled(session, {
-    kind: 'apply-prd-v1',
+    // Persist the candidate-only classification in the canonical mutation record. If the process
+    // stops after installation, resume-mutation can still return the non-delivery exit code.
+    kind: options.runtimeMode === 'shadow' ? 'apply-prd-shadow-v1' : 'apply-prd-v1',
     writes,
     deletes,
     archivePaths,

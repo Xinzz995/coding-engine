@@ -4,9 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { acceptanceHash } from '../contracts/validation-contract.js';
+import { CODING_X_VERSION } from '../version.js';
 import type { RunState } from '../contracts/run-state-contract.js';
 import type { Prd, TddConfig } from '../engine/prd.js';
-import { digestCandidateStoryValidationEnvironment } from '../engine/story-validation-currentness.js';
+import {
+  bindStoryValidationRuntimeIdentity,
+  digestCandidateStoryValidationEnvironment,
+} from '../engine/story-validation-currentness.js';
 import type { QualityContract, QualityContractReadResult } from '../quality/contract.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import {
@@ -22,6 +26,10 @@ const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 const QUALITY_A = `sha256:${'c'.repeat(64)}`;
 const QUALITY_B = `sha256:${'d'.repeat(64)}`;
+const FORMAL_RUNTIME = {
+  mode: 'formal',
+  actualCodingXVersion: CODING_X_VERSION,
+} as const;
 const roots: string[] = [];
 
 afterEach(() => {
@@ -79,6 +87,7 @@ function state(
     contract,
     headSha: HEAD_A,
     tddConfig: null,
+    runtimeIdentity: FORMAL_RUNTIME,
     platform: 'linux',
   }),
 ): RunState {
@@ -158,6 +167,7 @@ const options = () => ({
   projectRoot: '/project',
   session: fakeSession(),
   platform: 'linux' as const,
+  runtimeIdentity: FORMAL_RUNTIME,
 });
 
 describe('observeStoryValidationCurrentnessControlled', () => {
@@ -180,7 +190,8 @@ describe('observeStoryValidationCurrentnessControlled', () => {
 
   it('keeps the existing Loop fixed-digest test seam without weakening production reads', async () => {
     const fixedDigest = `sha256:${'e'.repeat(64)}`;
-    const fixedState = file(state('', fixedDigest), 'state-fixed');
+    const boundDigest = bindStoryValidationRuntimeIdentity(fixedDigest, FORMAL_RUNTIME);
+    const fixedState = file(state('', boundDigest), 'state-fixed');
     const result = await observeStoryValidationCurrentnessControlled(
       { ...options(), validationEnvironmentDigestForTests: fixedDigest },
       readers({ state: [fixedState, fixedState] }),
@@ -188,7 +199,7 @@ describe('observeStoryValidationCurrentnessControlled', () => {
 
     expect(result).toMatchObject({
       status: 'ready',
-      storyValidationEnvironmentDigest: fixedDigest,
+      storyValidationEnvironmentDigest: boundDigest,
       storyValidationDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
     });
   });

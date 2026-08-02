@@ -21,9 +21,16 @@ import type { FinalReviewState, ReviewAxisResult, ReviewRemoteState } from '../r
 import type { WorkspaceSession, WorkspaceWriteData } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { writeCurrentReportWithSession } from './current-report.js';
-import type { StoryValidationObservation } from '../review/story-validation-observation.js';
+import type {
+  StoryValidationObservation,
+  StoryValidationObservationOptions,
+} from '../review/story-validation-observation.js';
 
 const roots: string[] = [];
+const FORMAL_RUNTIME = {
+  mode: 'formal',
+  actualCodingXVersion: CODING_X_VERSION,
+} as const;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -68,6 +75,7 @@ function workspace(): string {
             contract: currentQuality.contract,
             headSha: head,
             tddConfig: null,
+            runtimeIdentity: FORMAL_RUNTIME,
           }),
         },
         notes: '',
@@ -176,6 +184,7 @@ function reviewState(
     contract: reviewContext.baseContract,
     headSha: reviewContext.headSha,
     tddConfig: null,
+    runtimeIdentity: FORMAL_RUNTIME,
   });
   const storyValidation =
     prd && runState
@@ -327,6 +336,7 @@ function currentStoryObservation(
     headSha,
     workingContract: contractRead,
     trackedContract: contractRead,
+    runtimeIdentity: FORMAL_RUNTIME,
     platform:
       process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
   });
@@ -359,7 +369,7 @@ function adapters(options: {
   const createObservation = vi.fn(() => observation(currentGitHead));
   const readVersion = vi.fn(async (_options: { session: WorkspaceSession }) => 'codex 1.2.3');
   const remote = vi.fn(async () => readyRemote());
-  const observeStoryValidation = vi.fn(async (request: { workspace?: string }) => {
+  const observeStoryValidation = vi.fn(async (request: StoryValidationObservationOptions) => {
     const workspacePath = request.workspace;
     if (workspacePath === undefined) throw new Error('expected observed workspace');
     return (
@@ -391,6 +401,35 @@ function adapters(options: {
 }
 
 describe('managed manual report currentness', () => {
+  it('passes the saved shadow mode and actual candidate version to every Story observation', async () => {
+    const ws = workspace();
+    const q = quality();
+    const ctx = context(q.contract, q.digest);
+    const state = reviewState(ctx, ws);
+    state.shadow = true;
+    state.deliveryStatus = 'shadow';
+    writeReview(ws, state);
+    const fake = adapters({ reviewContext: ctx });
+
+    await writeCurrentReportWithSession({
+      session: session(ws),
+      workspace: ws,
+      projectRoot: process.cwd(),
+      refreshRemote: false,
+      codingXVersion: '0.34.0-candidate',
+      adapters: fake.value,
+    });
+
+    expect(fake.observeStoryValidation).toHaveBeenCalled();
+    expect(
+      fake.observeStoryValidation.mock.calls.every(
+        ([request]) =>
+          request.runtimeIdentity.mode === 'shadow' &&
+          request.runtimeIdentity.actualCodingXVersion === '0.34.0-candidate',
+      ),
+    ).toBe(true);
+  });
+
   it('reports current Story receipts even when Final Review has not run yet', async () => {
     const ws = workspace();
     const q = quality();

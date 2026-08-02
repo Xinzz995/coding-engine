@@ -29,7 +29,7 @@ type ReadyQuality = Extract<ReturnType<typeof readQualityContract>, { readonly s
 let QUALITY: ReadyQuality;
 let QUALITY_DIGEST: string;
 let HEAD: string;
-let APPLY_OPTIONS: { readonly projectRoot: string };
+let APPLY_OPTIONS: { readonly projectRoot: string; readonly runtimeMode: 'formal' };
 
 beforeEach(() => {
   const project = gitProject();
@@ -40,7 +40,7 @@ beforeEach(() => {
   QUALITY = quality;
   QUALITY_DIGEST = quality.digest;
   HEAD = project.head;
-  APPLY_OPTIONS = { projectRoot: project.root };
+  APPLY_OPTIONS = { projectRoot: project.root, runtimeMode: 'formal' };
 });
 
 afterEach(() => {
@@ -104,14 +104,14 @@ function applyRequest(
   };
 }
 
-function gitProject(): { readonly root: string; readonly head: string } {
+function gitProject(codingXVersion = CODING_X_VERSION): { readonly root: string; readonly head: string } {
   const root = mkdtempSync(join(tmpdir(), 'workspace-product-project-'));
   roots.push(root);
   mkdirSync(join(root, '.coding-x'), { recursive: true });
   const contract = JSON.parse(
     readFileSync(join(process.cwd(), '.coding-x', 'quality.json'), 'utf8'),
   ) as Record<string, unknown>;
-  contract.codingXVersion = CODING_X_VERSION;
+  contract.codingXVersion = codingXVersion;
   writeFileSync(join(root, '.coding-x', 'quality.json'), `${JSON.stringify(contract, null, 2)}\n`);
   writeFileSync(join(root, 'source.txt'), '# source PRD\n');
   writeFileSync(join(root, 'README.md'), '# different source\n');
@@ -154,6 +154,69 @@ describe('fixed apply-prd-v1 product mutation', () => {
       'runApplyPrdV1Mutation',
       'runRepairV1Mutation',
     ]);
+  });
+
+  it('keeps a version mismatch zero-write in formal mode but permits only the same request in shadow mode', async () => {
+    const project = gitProject('9.9.9');
+    const quality = readQualityContract(project.root);
+    if (quality.status !== 'ready') throw new Error(`quality fixture unavailable: ${quality.status}`);
+    QUALITY = quality;
+    QUALITY_DIGEST = quality.digest;
+    HEAD = project.head;
+    const candidate = {
+      prd: prd('ralph/shadow-feature', 'candidate'),
+      state: null,
+      progress: Buffer.from('# candidate progress\n'),
+    };
+    const request = applyRequest('replace-feature', candidate);
+
+    const formal = await fixture('apply-prd');
+    writeOldRun(formal.root);
+    const originalPrd = readFileSync(join(formal.root, 'prd.json'));
+    await expect(runApplyPrdV1Mutation(formal.session, request, {
+      projectRoot: project.root,
+      runtimeMode: 'formal',
+    })).rejects.toThrow(/requires coding-x 9\.9\.9/u);
+    expect(readFileSync(join(formal.root, 'prd.json'))).toEqual(originalPrd);
+    expect(existsSync(join(formal.root, 'state.json'))).toBe(true);
+    await expect(formal.session.close()).resolves.toContain('released-');
+
+    const shadow = await fixture('apply-prd');
+    const committed = await runApplyPrdV1Mutation(shadow.session, request, {
+      projectRoot: project.root,
+      runtimeMode: 'shadow',
+    });
+    expect(committed.state.kind).toBe('apply-prd-shadow-v1');
+    expect(committed.state.phase).toBe('committed');
+    expect(readFileSync(join(shadow.root, 'prd.json'))).toEqual(candidate.prd);
+    expect(readFileSync(join(shadow.root, 'progress.md'))).toEqual(candidate.progress);
+    expect(existsSync(join(shadow.root, 'state.json'))).toBe(false);
+    await expect(shadow.session.close()).resolves.toContain('released-');
+  });
+
+  it('does not let shadow bypass a stale quality-check snapshot', async () => {
+    const project = gitProject('9.9.9');
+    const quality = readQualityContract(project.root);
+    if (quality.status !== 'ready') throw new Error(`quality fixture unavailable: ${quality.status}`);
+    QUALITY = quality;
+    QUALITY_DIGEST = quality.digest;
+    HEAD = project.head;
+    const { root, session } = await fixture('apply-prd');
+    writeOldRun(root);
+    const originalPrd = readFileSync(join(root, 'prd.json'));
+    const candidate = {
+      prd: prd('ralph/shadow-feature', 'candidate', { qualityChecks: ['not-derived'] }),
+      state: null,
+      progress: Buffer.from('# candidate progress\n'),
+    };
+
+    await expect(runApplyPrdV1Mutation(
+      session,
+      applyRequest('replace-feature', candidate),
+      { projectRoot: project.root, runtimeMode: 'shadow' },
+    )).rejects.toThrow(/qualityChecks/u);
+    expect(readFileSync(join(root, 'prd.json'))).toEqual(originalPrd);
+    await expect(session.close()).resolves.toContain('released-');
   });
 
   it('archives a complete old feature, resets its run material, and never archives an unlisted file', async () => {
@@ -518,7 +581,7 @@ describe('fixed apply-prd-v1 product mutation', () => {
       runApplyPrdV1Mutation(
         session,
         applyRequest('replace-feature', candidate, { head: project.head }),
-        { projectRoot: project.root },
+        { projectRoot: project.root, runtimeMode: 'formal' },
       ),
     ).rejects.toThrow(/Git HEAD no longer matches/u);
     expect(readGitHead(project.root)).toBe(nextHead);
@@ -588,7 +651,7 @@ describe('fixed apply-prd-v1 product mutation', () => {
           runApplyPrdV1Mutation(
             session,
             applyRequest('replace-feature', candidate, { head: project.head }),
-            { projectRoot: project.root },
+            { projectRoot: project.root, runtimeMode: 'formal' },
           ),
         ).rejects.toThrow(expected);
       } finally {

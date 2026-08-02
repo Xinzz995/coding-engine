@@ -153,7 +153,7 @@ runner:
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（init/workspace/doctor/status/models）
-  --shadow                       候选版本 Dogfood；永远不产生可交付结论
+  --shadow                       候选 Dogfood；仅用于 run、doctor、workspace apply-prd，永远不可交付
   --contract <file>              init 使用已确认的质量契约文件
   --input <file>                 workspace 写命令的严格 JSON 请求文件
   --yes                          init 接受已展示的远端和文件变更
@@ -321,6 +321,15 @@ export function parseCliArgs(argv: string[]): CliConfig {
   }
   if (!help && command === 'workspace' && positionals.length > 2) {
     throw new Error(`❌ workspace ${workspaceAction} 不接受额外位置参数`);
+  }
+  if (
+    !help &&
+    values.shadow === true &&
+    command !== 'run' &&
+    command !== 'doctor' &&
+    !(command === 'workspace' && workspaceAction === 'apply-prd')
+  ) {
+    throw new Error('❌ --shadow 只能用于 run、doctor 或 workspace apply-prd');
   }
   if (
     !help &&
@@ -655,7 +664,11 @@ export async function main(argv: string[]): Promise<number> {
         }
         if (cfg.json) console.log(JSON.stringify(result, null, 2));
         else if (result.ok) {
-          console.log(`✅ ${result.message} 归档：${result.archivePath}`);
+          console.log(
+            result.runtimeMode === 'shadow'
+              ? `🧪 ${result.message} Shadow 候选已恢复；本结果不能表示可交付。归档：${result.archivePath}`
+              : `✅ ${result.message} 归档：${result.archivePath}`,
+          );
         } else {
           console.error(`❌ ${result.message}${result.detail ? ` ${result.detail}` : ''}`);
         }
@@ -666,6 +679,7 @@ export async function main(argv: string[]): Promise<number> {
         const mutation = await withWorkspaceSession(cfg.workspace, 'apply-prd', async (session) =>
           runApplyPrdV1Mutation(session, request, {
             projectRoot: process.cwd(),
+            runtimeMode: cfg.shadow ? 'shadow' : 'formal',
             termination: commandSignals.termination,
           }),
         );
@@ -673,15 +687,21 @@ export async function main(argv: string[]): Promise<number> {
           return commandInterrupted(cfg, 'PRD 应用', commandSignals);
         }
         const output = {
-          status: 'applied',
-          exitCode: 0,
+          status: cfg.shadow ? 'applied-shadow' : 'applied',
+          exitCode: cfg.shadow ? 7 : 0,
           mutationId: mutation.state.mutationId,
           kind: mutation.state.kind,
           phase: mutation.state.phase,
         };
         if (cfg.json) console.log(JSON.stringify(output, null, 2));
-        else console.log(`✅ PRD 候选已原子应用：${mutation.state.mutationId}`);
-        return 0;
+        else {
+          console.log(
+            cfg.shadow
+              ? `🧪 PRD 候选已按 Shadow 模式原子应用：${mutation.state.mutationId}；本结果不能表示可交付`
+              : `✅ PRD 候选已原子应用：${mutation.state.mutationId}`,
+          );
+        }
+        return cfg.shadow ? 7 : 0;
       }
       const request = parseReviewDecisionRequest(readJsonInput(cfg.inputFile!, cfg.workspace));
       const decision = await withWorkspaceSession(
@@ -816,6 +836,7 @@ export async function main(argv: string[]): Promise<number> {
       staleDays: cfg.staleDays,
       workspace: cfg.workspace,
       local: cfg.local,
+      shadow: cfg.shadow,
     });
     const { text, exitCode } = cfg.json ? renderDoctorJson(report) : renderDoctorReport(report);
     console.log(text);

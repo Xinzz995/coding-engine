@@ -7,6 +7,7 @@ import {
   evaluateStoryValidationCurrentness,
   unverifiableStoryValidationCurrentness,
   type StoryValidationCurrentnessInput,
+  type StoryValidationRuntimeIdentity,
   type ReadyStoryValidationCurrentness,
   type UnverifiableStoryValidationCurrentness,
 } from '../engine/story-validation-currentness.js';
@@ -38,9 +39,11 @@ export interface StoryValidationObservationOptions {
   session: WorkspaceSession;
   termination?: ManagedGateContext['termination'];
   platform?: QualityPlatform;
+  /** 签发/复核 Story 凭证的实际引擎版本与正式/候选模式。 */
+  runtimeIdentity: StoryValidationRuntimeIdentity;
   /** @internal Loop 测试夹具兼容；正式运行必须省略，由观察器分别读取工作树与 HEAD。 */
   qualityContractReader?: (projectRoot: string) => QualityContractReadResult;
-  /** @internal Loop 固定摘要测试夹具兼容；正式运行必须省略。 */
+  /** @internal Loop 机械环境摘要夹具兼容；实际版本与模式仍会在其后强制绑定。 */
   validationEnvironmentDigestForTests?: string;
 }
 
@@ -209,6 +212,7 @@ function changedSnapshotSources(before: ObservationSnapshot, after: ObservationS
 function currentnessInput(
   snapshot: ObservationSnapshot,
   platform: QualityPlatform,
+  runtimeIdentity: StoryValidationRuntimeIdentity,
   validationEnvironmentDigestForTests?: string,
 ): StoryValidationCurrentnessInput {
   return {
@@ -219,6 +223,7 @@ function currentnessInput(
     workingContract: snapshot.workingContract,
     trackedContract: snapshot.trackedContract,
     platform,
+    runtimeIdentity,
     tddRead: snapshot.tddRead,
     ...(validationEnvironmentDigestForTests !== undefined
       ? { storyValidationEnvironmentDigestForTests: validationEnvironmentDigestForTests }
@@ -279,6 +284,7 @@ export async function observeStoryValidationCurrentnessControlled(
   const input = currentnessInput(
     after,
     fallbackPlatform,
+    options.runtimeIdentity,
     options.validationEnvironmentDigestForTests,
   );
   if (platform === null) {

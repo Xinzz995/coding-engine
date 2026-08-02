@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-08-01
+updated: 2026-08-02
 scope: root
 ---
 
@@ -36,6 +36,7 @@ scope: root
 - 2026-07-22 会继续读写 workspace 的受管子进程，只有 coordinator 已确认 containment 清空且文件 delta 合法后才能结算并允许父进程继续写。POSIX 使用独占进程组，Windows 使用 Job Object；父进程崩溃、终止失败、越界变化或未完成 mutation 都保留隔离并要求显式恢复，不得把根进程退出当作集合清空证明（ADR-021）。
 - 2026-07-22 无人值守子进程的错误恢复不能依赖当时终端滚屏：stdout/stderr 用 pipe+tee 保持实时可见，同时只滚动保留统一上限的尾部；duration 必须覆盖超时后的受管进程集合收口。POSIX 主动 `setsid` 或其他平台 containment 逃逸是明确非目标，文案不得把它升级成操作系统沙箱或任意恶意后代的完整证明。成功 transcript 不持久化，异常尾部才进入 evidence/status/report；provider 的人类可读 token/费用文案不得用正则伪装成稳定计量，需等结构化 adapter 合同（ADR-016、021）。
 - 2026-07-22 skill 不直接改写 workspace，也不通过双 doctor 检查模拟互斥：只在系统临时目录生成一次性候选/请求，再调用固定的 `workspace apply-prd` 或 `workspace record-review-decision` 入口。正式命令必须在同一 session 中完成租约获取、实时输入重核和产品动作；租约或输入失效时保持零业务写入，不允许 skill 删除协议根、租约或恢复记录。
+- 2026-08-02 稳定裁判 N 验证候选 N+1 时，候选准备不能手写新版 workspace，也不能让普通版本检查降级：只允许同一绝对候选 CLI 依次执行 `workspace init`、`doctor --shadow`、`workspace apply-prd --shadow` 和最终 shadow run。doctor/apply 健康也返回 7，调用方必须同时核对结构化状态；任一非版本错误仍失败。Story 验收环境摘要必须在测试注入之后继续绑定实际 coding-x 版本与 formal/shadow 模式，防止测试 seam 或复制旧凭证绕过重验。
 - 2026-07-16 `--workspace` 是一个需要端到端保持身份的输入：CLI 只在边界 canonicalize 一次，skills/commands 对用户显式值原样透传，所有读写和安全分类都复用同一结果。不能在不同阶段分别 `join`、补默认值或改写拼写；绝对路径、相对路径和别名若在不同入口被解释成不同目录，会产生假阴性或绕开同一租约竞争（0.21.0 的 `join` 事故是历史反例）。
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。
 - 2026-07-20 引擎对 agent 的一切判定只消费机械信号：进程结局按超时标志与退出码三分（completed/timeout/error），产物变化按轮首/轮后内容字符串对比（不 parse）——agent 自己声明的「做完了」不可信，与机械门禁不可共谋同源（见 loop.ts `outcomeOf` 与 no-op 双无变化判定；ADR-009）。给判定加新维度时先自问是否仍是引擎自己观测的确定性事实。

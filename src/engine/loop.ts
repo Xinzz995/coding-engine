@@ -81,6 +81,7 @@ import {
   type CleanValidationCheckout,
 } from './clean-validation-checkout.js';
 import {
+  bindStoryValidationRuntimeIdentity,
   candidateStoryValidationEnvironmentPolicy,
   digestCandidateStoryValidationEnvironment,
 } from './story-validation-currentness.js';
@@ -157,7 +158,7 @@ export interface LoopConfig {
   unsafeUseProjectRootForValidationTests?: boolean;
   /** @internal 允许测试 fake Runner 位于项目 workspace；生产拒绝这类覆盖。 */
   unsafeAllowProjectScopedRunnerForValidationTests?: boolean;
-  /** @internal 历史 receipt fixture 的稳定环境摘要；生产从契约与 HEAD 计算。 */
+  /** @internal 历史 receipt fixture 的机械环境摘要；实际版本与模式仍由引擎强制绑定。 */
   validationEnvironmentDigestForTests?: string;
   /**
    * 仅供历史单测 fixture：允许旧 Validator 直接改 state。CLI 从不设置；生产默认
@@ -262,8 +263,21 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       runKind,
       bootResolved,
       validationEnvironmentDigest: bootValidationEnvironmentDigest,
+      validationRuntimeIdentity,
     } = startup;
     const agentCwd = projectRoot;
+    const storyValidationEnvironmentAt = (headSha: string): string =>
+      cfg.validationEnvironmentDigestForTests !== undefined
+        ? bindStoryValidationRuntimeIdentity(
+            cfg.validationEnvironmentDigestForTests,
+            validationRuntimeIdentity,
+          )
+        : digestCandidateStoryValidationEnvironment({
+            contract: qualityRead.contract,
+            headSha,
+            tddConfig,
+            runtimeIdentity: validationRuntimeIdentity,
+          });
     const runId = randomUUID();
     const validationRunnerEnvironment = Object.fromEntries(
       ['CODING_X_CLAUDE_BIN', 'CODING_X_CODEX_BIN', 'CODING_X_CURSOR_BIN'].flatMap((name) => {
@@ -299,6 +313,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         observeStoryValidationCurrentness({
           projectRoot,
           session,
+          runtimeIdentity: validationRuntimeIdentity,
           termination: commandSignals.termination,
           ...(cfg.qualityContractReader
             ? { qualityContractReader: cfg.qualityContractReader }
@@ -402,13 +417,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         console.error(`❌ ${context}无法读取当前 Git HEAD，本次运行停止且不会接受旧验收结果`);
         return null;
       }
-      const currentEnvironmentDigest =
-        cfg.validationEnvironmentDigestForTests ??
-        digestCandidateStoryValidationEnvironment({
-          contract: qualityRead.contract,
-          headSha: gitHead,
-          tddConfig,
-        });
+      const currentEnvironmentDigest = storyValidationEnvironmentAt(gitHead);
       const reconciled = reconcileValidationReceipts(prd, state, gitHead, currentEnvironmentDigest);
       if (reconciled.invalidatedStoryIds.length > 0) {
         await session.writer.writeFile('state.json', JSON.stringify(reconciled.state, null, 2));
@@ -460,6 +469,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       observeStoryValidationCurrentness({
         projectRoot,
         session,
+        runtimeIdentity: validationRuntimeIdentity,
         termination: commandSignals.termination,
         ...(cfg.qualityContractReader ? { qualityContractReader: cfg.qualityContractReader } : {}),
         ...(cfg.validationEnvironmentDigestForTests !== undefined
@@ -848,13 +858,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (before && observedGitHead) {
           const state = tryReadState(statePath);
           if (state) {
-            const observedEnvironmentDigest =
-              cfg.validationEnvironmentDigestForTests ??
-              digestCandidateStoryValidationEnvironment({
-                contract: qualityRead.contract,
-                headSha: observedGitHead,
-                tddConfig,
-              });
+            const observedEnvironmentDigest = storyValidationEnvironmentAt(observedGitHead);
             const reconciled = reconcileValidationReceipts(
               before,
               state,
@@ -1200,8 +1204,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             validationPolicy.additionalRefs,
             validationPolicy.additionalPolicy,
           );
-          if (validationCheckout.environmentDigest !== roundValidationEnvironmentDigest) {
-            const receivedDigest = validationCheckout.environmentDigest;
+          const receivedDigest = bindStoryValidationRuntimeIdentity(
+            validationCheckout.environmentDigest,
+            validationRuntimeIdentity,
+          );
+          if (receivedDigest !== roundValidationEnvironmentDigest) {
             const cleanup = cleanValidationManager.dispose();
             validationCheckout = null;
             const cleanupDiagnostic =
@@ -2154,12 +2161,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           after,
           afterState,
           afterGitHead,
-          cfg.validationEnvironmentDigestForTests ??
-            digestCandidateStoryValidationEnvironment({
-              contract: qualityRead.contract,
-              headSha: afterGitHead,
-              tddConfig,
-            }),
+          storyValidationEnvironmentAt(afterGitHead),
         )
       ) {
         exitCode = await completeResolvedRunWithDashboard();

@@ -20,6 +20,10 @@ import type { FinalReviewState } from '../review/types.js';
 import { acceptanceHash } from './validation-protocol.js';
 import type { ValidationReceipt } from './state.js';
 import {
+  bindStoryValidationRuntimeIdentity,
+  type StoryValidationRuntimeIdentity,
+} from './story-validation-currentness.js';
+import {
   INCIDENTS_DIR,
   PROTOCOL_FILE,
   PROTOCOL_ROOT_DIR,
@@ -33,6 +37,10 @@ import { workspaceDirectoryIdentity } from '../workspace-safety/filesystem.js';
 
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 export const TEST_VALIDATION_ENVIRONMENT_DIGEST = `sha256:${'e'.repeat(64)}`;
+export const TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST = bindStoryValidationRuntimeIdentity(
+  TEST_VALIDATION_ENVIRONMENT_DIGEST,
+  { mode: 'formal', actualCodingXVersion: CODING_X_VERSION },
+);
 
 export const TEST_QUALITY_CONTRACT = {
   codingXVersion: CODING_X_VERSION,
@@ -191,13 +199,20 @@ export function validationReceiptFor(
   target: { id: string; acceptanceCriteria: string[] },
   gitHead: string,
   requestId = 'fixture-validator-request',
+  runtimeIdentity: StoryValidationRuntimeIdentity = {
+    mode: 'formal',
+    actualCodingXVersion: CODING_X_VERSION,
+  },
 ): ValidationReceipt {
   return {
     schemaVersion: 2,
     requestId,
     gitHead,
     acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
-    validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT_DIGEST,
+    validationEnvironmentDigest: bindStoryValidationRuntimeIdentity(
+      TEST_VALIDATION_ENVIRONMENT_DIGEST,
+      runtimeIdentity,
+    ),
   };
 }
 

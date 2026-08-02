@@ -32,7 +32,11 @@ export const MUTATION_LIMITS = Object.freeze({
 });
 
 /** generic-v1 is reserved for dark fixtures; production callers retain their durable purpose. */
-export type MutationKind = 'apply-prd-v1' | 'repair-v1' | 'generic-v1';
+export type MutationKind =
+  | 'apply-prd-v1'
+  | 'apply-prd-shadow-v1'
+  | 'repair-v1'
+  | 'generic-v1';
 
 export type MutationFileSnapshot =
   | { readonly kind: 'missing' }
@@ -88,7 +92,12 @@ export interface MutationState {
 }
 
 const PHASES = new Set<MutationPhase>(['staged', 'archiving', 'applying', 'committed']);
-const KINDS = new Set<MutationKind>(['apply-prd-v1', 'repair-v1', 'generic-v1']);
+const KINDS = new Set<MutationKind>([
+  'apply-prd-v1',
+  'apply-prd-shadow-v1',
+  'repair-v1',
+  'generic-v1',
+]);
 
 export function mutationInvalid(message: string, cause?: unknown): WorkspaceSafetyError {
   const error = new WorkspaceSafetyError('invalid', `Invalid mutation protocol: ${message}`);

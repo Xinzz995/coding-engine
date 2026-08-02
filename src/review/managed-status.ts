@@ -21,6 +21,14 @@ import {
 } from './story-validation-observation.js';
 import type { FinalReviewState } from './types.js';
 
+interface ManagedStatusAdapters {
+  observeStoryValidation: typeof observeStoryValidationCurrentness;
+}
+
+const MANAGED_STATUS_ADAPTERS: ManagedStatusAdapters = {
+  observeStoryValidation: observeStoryValidationCurrentness,
+};
+
 export interface ManagedStatusQualityResult {
   storyValidation: StoryValidationObservation;
   runnerVersionObservation:
@@ -140,15 +148,22 @@ export async function collectManagedStatusQuality(options: {
   refreshRemote: boolean;
   termination?: ManagedReviewTermination;
   codingXVersion?: string;
+  /** @internal Deterministic currentness seam; production always uses the fixed observer. */
+  adapters?: Partial<ManagedStatusAdapters>;
 }): Promise<ManagedStatusQualityResult> {
+  const adapters = { ...MANAGED_STATUS_ADAPTERS, ...options.adapters };
+  const read = readFinalReviewState(options.workspace);
   const storyOptions = {
     session: options.session,
     workspace: options.workspace,
     projectRoot: options.projectRoot,
+    runtimeIdentity: {
+      mode: read.status === 'ready' && read.state.shadow ? 'shadow' as const : 'formal' as const,
+      actualCodingXVersion: options.codingXVersion ?? CODING_X_VERSION,
+    },
     ...(options.termination === undefined ? {} : { termination: options.termination }),
   };
-  const initialStory = await observeStoryValidationCurrentness(storyOptions);
-  const read = readFinalReviewState(options.workspace);
+  const initialStory = await adapters.observeStoryValidation(storyOptions);
   if (read.status !== 'ready') {
     return {
       storyValidation: initialStory,
@@ -232,7 +247,7 @@ export async function collectManagedStatusQuality(options: {
       })
     : undefined;
   const firstRevalidation = await revalidateReviewContext(context, options.workspace, observation);
-  let finalStory = await observeStoryValidationCurrentness(storyOptions);
+  let finalStory = await adapters.observeStoryValidation(storyOptions);
   finalRunner = await runnerObservation({
     session: options.session,
     projectRoot: options.projectRoot,
