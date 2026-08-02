@@ -198,46 +198,46 @@ describe.skipIf(process.platform !== 'win32')(
         const reviewPackage = managedReviewPackage(mark);
         mark('package-created');
         vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+        let failure: Error | undefined;
         try {
-          await expect(
-            runSafeReviewAxis({
-              session,
-              runner: 'codex',
-              model: 'review-model',
-              runnerVersion: 'codex-test',
-              axis: 'engineering',
-              reviewPackage,
-              timeoutMs: 10_000,
-              managedProcess: async (managedSession, options) => {
-                mark('managed-process-start');
-                try {
-                  const result = await runManagedWorkspaceProcess(managedSession, {
-                    ...options,
-                    supervisorTimeouts: {
-                      ...options.supervisorTimeouts,
-                      handshakeMs: 5000,
-                    },
-                  });
-                  mark(`managed-process-${result.verdict}`);
-                  process.stdout.write(
-                    `[windows-review-managed-result] ${JSON.stringify({
-                      verdict: result.verdict,
-                      exitCode: result.exitCode,
-                      timedOut: result.timedOut,
-                      processTreeNotEmpty: result.processTreeNotEmpty,
-                      terminationReason: result.terminationReason,
-                      stdoutBase64: result.stdout.subarray(0, 4096).toString('base64'),
-                      stderrBase64: result.stderr.subarray(0, 4096).toString('base64'),
-                    })}\n`,
-                  );
-                  return result;
-                } catch (error) {
-                  mark(`managed-process-error-${error instanceof Error ? error.name : 'unknown'}`);
-                  throw error;
-                }
-              },
-            }),
-          ).resolves.toMatchObject({
+          const result = await runSafeReviewAxis({
+            session,
+            runner: 'codex',
+            model: 'review-model',
+            runnerVersion: 'codex-test',
+            axis: 'engineering',
+            reviewPackage,
+            timeoutMs: 10_000,
+            managedProcess: async (managedSession, options) => {
+              mark('managed-process-start');
+              try {
+                const managedResult = await runManagedWorkspaceProcess(managedSession, {
+                  ...options,
+                  supervisorTimeouts: {
+                    ...options.supervisorTimeouts,
+                    prepareMs: 30_000,
+                  },
+                });
+                mark(`managed-process-${managedResult.verdict}`);
+                process.stdout.write(
+                  `[windows-review-managed-result] ${JSON.stringify({
+                    verdict: managedResult.verdict,
+                    exitCode: managedResult.exitCode,
+                    timedOut: managedResult.timedOut,
+                    processTreeNotEmpty: managedResult.processTreeNotEmpty,
+                    terminationReason: managedResult.terminationReason,
+                    stdoutBase64: managedResult.stdout.subarray(0, 4096).toString('base64'),
+                    stderrBase64: managedResult.stderr.subarray(0, 4096).toString('base64'),
+                  })}\n`,
+                );
+                return managedResult;
+              } catch (error) {
+                mark(`managed-process-error-${error instanceof Error ? error.name : 'unknown'}`);
+                throw error;
+              }
+            },
+          });
+          expect(result).toMatchObject({
             attempts: 1,
             output: { status: 'passed' },
           });
@@ -246,12 +246,27 @@ describe.skipIf(process.platform !== 'win32')(
           mark('package-asserted');
           expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
           expect(existsSync(reviewPackage.root)).toBe(false);
+        } catch (error) {
+          failure = error instanceof Error ? error : new Error(String(error));
         } finally {
-          reviewPackage.cleanup();
+          try {
+            reviewPackage.cleanup();
+          } catch (error) {
+            if (failure === undefined) {
+              failure = error instanceof Error ? error : new Error(String(error));
+            }
+          }
           mark('session-close-start');
-          await session.close();
-          mark('session-close-complete');
+          try {
+            await session.close();
+            mark('session-close-complete');
+          } catch (error) {
+            if (failure === undefined) {
+              failure = error instanceof Error ? error : new Error(String(error));
+            }
+          }
         }
+        if (failure !== undefined) throw failure;
       },
       WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
     );

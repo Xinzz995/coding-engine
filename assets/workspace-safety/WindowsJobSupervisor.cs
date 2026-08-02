@@ -19,17 +19,20 @@ namespace CodingX.WorkspaceSafety
 
         public static int Run(string expectedHelperDigest, string timeoutsBase64)
         {
+            SupervisorSession session = null;
             try
             {
                 if (!Patterns.Digest.IsMatch(expectedHelperDigest ?? String.Empty))
                     throw new SafetyException("invalid fixed helper digest");
                 Timeouts timeouts = Timeouts.Parse(timeoutsBase64);
-                SupervisorSession session = new SupervisorSession(expectedHelperDigest, timeouts);
+                session = new SupervisorSession(expectedHelperDigest, timeouts);
                 return session.Run();
             }
             catch (Exception error)
             {
-                ProtocolWriter.TryFailure(error is SafetyException ? error.Message : "Windows supervisor failed");
+                ProtocolWriter.TryFailure(
+                    error is SafetyException ? error.Message : "Windows supervisor failed",
+                    session == null ? null : session.FailureDeadline());
                 return ExitFailure;
             }
         }
@@ -847,11 +850,14 @@ namespace CodingX.WorkspaceSafety
             }
         }
 
-        internal ControlFrame Take(int timeoutMs)
+        internal ControlFrame Take(MonotonicDeadline deadline, string label)
         {
+            int timeoutMs = deadline.RemainingMilliseconds;
+            if (timeoutMs == 0) throw new SafetyException(label + " timed out");
             ControlFrame frame;
             if (!frames.TryTake(out frame, timeoutMs))
-                throw new SafetyException("control handshake timed out");
+                throw new SafetyException(label + " timed out");
+            if (deadline.Expired) throw new SafetyException(label + " timed out");
             if (frame.Error != null) throw new SafetyException(frame.Error.Message);
             return frame;
         }
@@ -864,42 +870,6 @@ namespace CodingX.WorkspaceSafety
         }
 
         public void Dispose() { frames.Dispose(); }
-    }
-
-    internal static class ProtocolWriter
-    {
-        private static readonly object Gate = new object();
-        private static bool connected = true;
-
-        internal static bool Connected { get { lock (Gate) { return connected; } } }
-
-        internal static void Send(Dictionary<string, object> message)
-        {
-            lock (Gate)
-            {
-                if (!connected) return;
-                try
-                {
-                    Console.Out.WriteLine(StrictJson.Serialize(message));
-                    Console.Out.Flush();
-                }
-                catch
-                {
-                    connected = false;
-                }
-            }
-        }
-
-        internal static void Disconnect() { lock (Gate) { connected = false; } }
-
-        internal static void TryFailure(string message)
-        {
-            string bounded = (message ?? "Windows supervisor failed").Replace("\r", " ").Replace("\n", " ");
-            if (bounded.Length > 512) bounded = bounded.Substring(0, 512);
-            Send(new Dictionary<string, object> {
-                { "schemaVersion", 1 }, { "type", "FAILURE" }, { "message", bounded }
-            });
-        }
     }
 
     internal sealed class EnvironmentEntry

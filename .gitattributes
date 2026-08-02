@@ -1,6 +1,7 @@
 assets/workspace-safety/WindowsPathAttributes.cs text eol=lf
 assets/workspace-safety/WindowsPathInspectorProgram.cs text eol=lf
 assets/workspace-safety/WindowsJobAuthority.cs text eol=lf
+assets/workspace-safety/WindowsJobDeadlines.cs text eol=lf
 assets/workspace-safety/WindowsJobProcess.cs text eol=lf
 assets/workspace-safety/WindowsJobSupervisor.cs text eol=lf
 assets/workspace-safety/WindowsSupervisorProgram.cs text eol=lf

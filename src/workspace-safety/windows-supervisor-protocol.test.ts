@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
+import { MonotonicDeadline } from './deadline.js';
 import { WindowsSupervisorProcess } from './windows-supervisor-protocol.js';
 import {
   WindowsSupervisorEventOrder,
@@ -201,7 +202,7 @@ describe('Windows supervisor protocol parser', () => {
         /output exceeded the total bound/i,
       );
     } finally {
-      await processHandle.abort();
+      await processHandle.abort(MonotonicDeadline.after(5000));
     }
   }, 30_000);
 });

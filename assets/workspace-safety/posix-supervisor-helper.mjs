@@ -8,6 +8,8 @@ import {
   assertCachedAuthorityCurrent,
   assertPreparedBoundAuthority,
   boundedString,
+  callbackBeforeDeadline,
+  deadlineAfter,
   delay,
   digestBytes,
   exactKeys,
@@ -21,7 +23,8 @@ import {
   processIdentity,
   processIds,
   readAuthorityFiles,
-  waitUntil as waitUntilWithPoll,
+  remainingDeadlineMs,
+  waitUntilDeadline,
 } from './posix-supervisor-core.mjs';
 
 const supervisorPath = fileURLToPath(import.meta.url);
@@ -52,24 +55,45 @@ let terminalCause;
 let parentConnected = true;
 let stageTimer;
 let prestartCleanupStarted = false;
+let closeoutDeadline;
+let pendingParentMessages = 0;
 
 if (process.platform === 'win32' || !launcherPath || !isAbsolute(launcherPath) || !timeoutInput) {
   process.exit(2);
 }
 
 const timeouts = parseTimeouts(timeoutInput);
+const prepareDeadline = deadlineAfter(timeouts.handshakeMs);
 
-function waitUntil(predicate, timeoutMs) {
-  return waitUntilWithPoll(predicate, timeoutMs, timeouts.pollMs);
+function waitUntil(predicate, deadline) {
+  return waitUntilDeadline(predicate, deadline, timeouts.pollMs);
 }
 
-function send(message) {
+function send(message, deadline = deadlineAfter(5000)) {
   if (!parentConnected || !process.connected) return;
-  try {
-    process.send(message, () => undefined);
-  } catch {
+  const remaining = remainingDeadlineMs(deadline);
+  if (remaining === 0 || pendingParentMessages >= 4096) {
     parentConnected = false;
+    void handleParentDisconnect();
+    return;
   }
+  pendingParentMessages += 1;
+  void callbackBeforeDeadline(
+    (callback) => process.send(message, callback),
+    deadline,
+    new Error('parent protocol send timed out'),
+  ).then(
+    () => {
+      pendingParentMessages -= 1;
+    },
+    () => {
+      pendingParentMessages -= 1;
+      if (parentConnected) {
+        parentConnected = false;
+        void handleParentDisconnect();
+      }
+    },
+  );
 }
 
 function sendOutput(stream, chunk) {
@@ -83,11 +107,32 @@ function sendOutput(stream, chunk) {
   }
 }
 
-function armStageTimeout(label) {
+function armStageDeadline(label, deadline) {
   clearTimeout(stageTimer);
+  const remaining = remainingDeadlineMs(deadline);
+  if (remaining === 0) {
+    queueMicrotask(() => void failClosed(`${label} timed out`));
+    return;
+  }
   stageTimer = setTimeout(() => {
     void failClosed(`${label} timed out`);
-  }, timeouts.handshakeMs);
+  }, remaining);
+}
+
+function armPrepareDeadline(label) {
+  armStageDeadline(label, prepareDeadline);
+}
+
+function beginCloseout(includeNaturalDrain = false) {
+  const candidate = deadlineAfter(
+    timeouts.killMs + (includeNaturalDrain ? timeouts.naturalDrainMs : 0),
+  );
+  closeoutDeadline =
+    closeoutDeadline === undefined || includeNaturalDrain
+      ? (closeoutDeadline ?? candidate)
+      : Math.min(closeoutDeadline, candidate);
+  armStageDeadline('containment closeout', closeoutDeadline);
+  return closeoutDeadline;
 }
 
 function authorityContext() {
@@ -119,7 +164,7 @@ function assertLiveLauncherGroupBinding() {
   }
 }
 
-function requestLauncherGroupSignal(mode) {
+function requestLauncherGroupSignal(mode, deadline) {
   if (
     !launcher ||
     !launcher.connected ||
@@ -129,12 +174,11 @@ function requestLauncherGroupSignal(mode) {
   ) {
     throw new Error('fixed launcher signal channel is unavailable');
   }
-  return new Promise((resolveSignal, rejectSignal) => {
-    launcher.send({ schemaVersion: 1, type: 'SIGNAL_GROUP', mode }, (error) => {
-      if (error) rejectSignal(error);
-      else resolveSignal();
-    });
-  });
+  return callbackBeforeDeadline(
+    (callback) => launcher.send({ schemaVersion: 1, type: 'SIGNAL_GROUP', mode }, callback),
+    deadline,
+    new Error(`launcher ${mode} signal delivery timed out`),
+  );
 }
 
 function installReceipt(proof, drainReason) {
@@ -181,42 +225,38 @@ function installReceipt(proof, drainReason) {
   });
 }
 
-async function ensureOutputEof(timeoutMs) {
-  return waitUntil(() => stdoutEof && stderrEof, timeoutMs);
+async function ensureOutputEof(deadline) {
+  return waitUntil(() => stdoutEof && stderrEof, deadline);
 }
 
-async function terminateContainment() {
+async function terminateContainment(deadline = beginCloseout()) {
   if (!launcherPgid) return;
   const initial = probeGroup(launcherPgid);
   if (initial === 'unknown') throw new Error('POSIX group presence is unknown');
   if (initial === 'alive') {
-    await requestLauncherGroupSignal('TERM');
-    const termDeadline = Date.now() + timeouts.termMs;
+    await requestLauncherGroupSignal('TERM', deadline);
+    const termDeadline = Math.min(deadline, deadlineAfter(timeouts.termMs));
     if (!rootResult) {
-      await waitUntil(() => rootResult !== undefined, timeouts.termMs);
+      await waitUntil(() => rootResult !== undefined, termDeadline);
     }
     if (rootResult) {
-      await waitUntil(
-        () => {
-          const members = groupMembers(launcherPgid);
-          return members.length === 1 && members[0] === launcher.pid;
-        },
-        Math.max(0, termDeadline - Date.now()),
-      );
+      await waitUntil(() => {
+        const members = groupMembers(launcherPgid);
+        return members.length === 1 && members[0] === launcher.pid;
+      }, termDeadline);
     }
 
     const afterRootMembers = groupMembers(launcherPgid);
     if (afterRootMembers.length === 1 && afterRootMembers[0] === launcher.pid) {
       launcher.send({ schemaVersion: 1, type: 'RELEASE_AFTER_DRAIN' });
     } else if (afterRootMembers.length > 0) {
-      await requestLauncherGroupSignal('KILL');
+      await requestLauncherGroupSignal('KILL', deadline);
     }
-    if (!(await waitUntil(() => probeGroup(launcherPgid) === 'empty', timeouts.killMs))) {
+    if (!(await waitUntil(() => probeGroup(launcherPgid) === 'empty', deadline))) {
       throw new Error('POSIX group could not be confirmed empty');
     }
   }
-  if (!(await ensureOutputEof(timeouts.killMs)))
-    throw new Error('target output pipes did not close');
+  if (!(await ensureOutputEof(deadline))) throw new Error('target output pipes did not close');
 }
 
 async function finishWithReceipt(proof, drainReason) {
@@ -228,26 +268,29 @@ async function finishWithReceipt(proof, drainReason) {
   }
   const messageBytes = installReceipt(proof, drainReason);
   state = 'drained';
-  send({
-    schemaVersion: 1,
-    type: 'DRAINED',
-    messageBase64: messageBytes.toString('base64'),
-  });
+  send(
+    {
+      schemaVersion: 1,
+      type: 'DRAINED',
+      messageBase64: messageBytes.toString('base64'),
+    },
+    closeoutDeadline ?? deadlineAfter(timeouts.killMs),
+  );
   if (!parentConnected) return process.exit(0);
-  armStageTimeout('ACK');
+  armStageDeadline('ACK', deadlineAfter(timeouts.ackMs));
 }
 
-async function drainNeverStartedContainment() {
+async function drainNeverStartedContainment(deadline = beginCloseout()) {
   const presence = probeGroup(launcherPgid);
   if (presence === 'unknown') throw new Error('POSIX group presence is unknown');
   if (presence === 'alive') {
     assertLiveLauncherGroupBinding();
     launcher.send({ schemaVersion: 1, type: 'RELEASE_BEFORE_START' });
-    if (!(await waitUntil(() => probeGroup(launcherPgid) === 'empty', timeouts.killMs))) {
+    if (!(await waitUntil(() => probeGroup(launcherPgid) === 'empty', deadline))) {
       throw new Error('never-started launcher group did not disappear');
     }
   }
-  if (!(await ensureOutputEof(timeouts.killMs))) {
+  if (!(await ensureOutputEof(deadline))) {
     throw new Error('never-started output pipes did not close');
   }
 }
@@ -275,7 +318,8 @@ async function finishPrestartAbort() {
   if (prestartCleanupStarted) return;
   prestartCleanupStarted = true;
   clearTimeout(stageTimer);
-  if (launcher) await drainNeverStartedContainment();
+  const deadline = beginCloseout();
+  if (launcher) await drainNeverStartedContainment(deadline);
   const messageBytes = jsonBytes({
     schemaVersion: 1,
     type: 'PRESTART_DRAINED',
@@ -286,40 +330,64 @@ async function finishPrestartAbort() {
     drainedAt: new Date().toISOString(),
   });
   state = 'prestart-drained';
-  send({
-    schemaVersion: 1,
-    type: 'PRESTART_DRAINED',
-    messageBase64: messageBytes.toString('base64'),
-  });
+  send(
+    {
+      schemaVersion: 1,
+      type: 'PRESTART_DRAINED',
+      messageBase64: messageBytes.toString('base64'),
+    },
+    deadline,
+  );
 }
 
 async function drainNormally() {
   if (cleanupStarted) return;
   cleanupStarted = true;
-  const deadline = Date.now() + timeouts.naturalDrainMs;
-  let naturallyDrained = false;
-  while (parentConnected && !terminalCause && Date.now() <= deadline) {
+  const initialCloseoutDeadline = beginCloseout(true);
+  const naturalDeadline = Math.min(
+    initialCloseoutDeadline,
+    deadlineAfter(timeouts.naturalDrainMs),
+  );
+  const containmentIsNaturallyDrained = () => {
     if (stdoutEof && stderrEof) {
       const members = groupMembers(launcherPgid);
-      if (members.length === 1 && members[0] === launcher.pid) {
-        naturallyDrained = true;
-        break;
-      }
+      return members.length === 1 && members[0] === launcher.pid;
     }
-    await delay(timeouts.pollMs);
+    return false;
+  };
+  let naturallyDrained = containmentIsNaturallyDrained();
+  while (
+    !naturallyDrained &&
+    parentConnected &&
+    !terminalCause &&
+    remainingDeadlineMs(naturalDeadline) > 0
+  ) {
+    const remaining = remainingDeadlineMs(naturalDeadline);
+    if (remaining === 0) break;
+    await delay(Math.min(timeouts.pollMs, remaining));
+    if (remainingDeadlineMs(naturalDeadline) === 0) break;
+    naturallyDrained = containmentIsNaturallyDrained();
   }
   if (terminalCause) {
-    await terminateContainment();
+    // TERMINATE or parent EOF may arrive after natural drain has already begun.
+    // Re-read and tighten the shared closeout deadline instead of continuing with
+    // the longer natural-drain deadline captured at entry.
+    await terminateContainment(beginCloseout());
     return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
   }
   if (!naturallyDrained) {
     terminalCause = 'process-tree-not-empty';
-    await terminateContainment();
+    await terminateContainment(beginCloseout());
     return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
   }
   terminalCause = 'natural';
   launcher.send({ schemaVersion: 1, type: 'RELEASE_AFTER_DRAIN' });
-  if (!(await waitUntil(() => probeGroup(launcherPgid) === 'empty', timeouts.killMs))) {
+  if (
+    !(await waitUntil(
+      () => probeGroup(launcherPgid) === 'empty',
+      closeoutDeadline ?? initialCloseoutDeadline,
+    ))
+  ) {
     throw new Error('launcher group did not disappear after natural drain');
   }
   return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
@@ -328,12 +396,32 @@ async function drainNormally() {
 async function failClosed(message) {
   if (state === 'failed') return;
   state = 'failed';
+  cleanupStarted = true;
   clearTimeout(stageTimer);
-  send({ schemaVersion: 1, type: 'FAILURE', message });
+  const deadline = closeoutDeadline ?? deadlineAfter(timeouts.killMs);
+  closeoutDeadline ??= deadline;
+  const failure = { schemaVersion: 1, type: 'FAILURE', message };
+  if (remainingDeadlineMs(deadline) > 0) {
+    send(failure, deadline);
+  } else if (parentConnected && process.connected) {
+    try {
+      process.send(failure);
+    } catch {
+      // An expired phase permits only an immediate best-effort diagnostic.
+    }
+  }
   try {
     if (launcherPgid && probeGroup(launcherPgid) === 'alive') {
-      await requestLauncherGroupSignal('KILL');
-      await waitUntil(() => probeGroup(launcherPgid) === 'empty', timeouts.killMs);
+      if (remainingDeadlineMs(deadline) === 0) {
+        try {
+          launcher?.send({ schemaVersion: 1, type: 'SIGNAL_GROUP', mode: 'KILL' });
+        } catch {
+          // Never renew an expired closeout merely to report or signal failure.
+        }
+      } else {
+        await requestLauncherGroupSignal('KILL', deadline);
+        await waitUntil(() => probeGroup(launcherPgid) === 'empty', deadline);
+      }
     }
   } catch {
     // Failure remains fail-closed; never synthesize a receipt from this path.
@@ -346,13 +434,15 @@ async function handleParentDisconnect() {
   clearTimeout(stageTimer);
   if (state === 'drained') return process.exit(0);
   if (state === 'prestart-drained') return process.exit(0);
+  if (state === 'acknowledged') return process.exit(0);
   if (!launcherPgid) return process.exit(0);
   try {
     if (state === 'start-accepted' || state === 'running' || state === 'root-exited') {
       terminalCause ??= 'parent-shutdown';
+      const deadline = beginCloseout();
       if (cleanupStarted) return;
       cleanupStarted = true;
-      await terminateContainment();
+      await terminateContainment(deadline);
       await finishWithReceipt('posix-group-empty-and-pipes-eof-v1', 'parent-shutdown');
       return process.exit(0);
     }
@@ -361,14 +451,17 @@ async function handleParentDisconnect() {
       const activeDigest = digestBytes(authority.active);
       cachedBinding ??= assertArmedAuthority(authorityContext(), activeDigest);
       terminalCause ??= 'parent-shutdown';
+      const deadline = beginCloseout();
       if (cleanupStarted) return;
       cleanupStarted = true;
-      await drainNeverStartedContainment();
+      await drainNeverStartedContainment(deadline);
       await finishWithReceipt('never-started-containment-empty-v1', 'parent-shutdown');
       return process.exit(0);
     }
+    const deadline = beginCloseout();
     if (cleanupStarted) return;
-    await terminateContainment();
+    cleanupStarted = true;
+    await terminateContainment(deadline);
     return process.exit(0);
   } catch {
     return process.exit(2);
@@ -407,17 +500,20 @@ function handleLauncherMessage(message) {
         return;
       }
       state = 'armed';
-      armStageTimeout('START');
-      send({
-        schemaVersion: 1,
-        type: 'ARMED',
-        containment: {
-          platform: 'posix-process-group-v1',
-          pgid: launcherPgid,
-          launcherPid: launcher.pid,
-          launcherIdentity,
+      armPrepareDeadline('START');
+      send(
+        {
+          schemaVersion: 1,
+          type: 'ARMED',
+          containment: {
+            platform: 'posix-process-group-v1',
+            pgid: launcherPgid,
+            launcherPid: launcher.pid,
+            launcherIdentity,
+          },
         },
-      });
+        prepareDeadline,
+      );
       return;
     }
     if (message.type === 'STARTED') {
@@ -445,7 +541,7 @@ function handleLauncherMessage(message) {
       }
       state = 'root-exited';
       rootResult = { code: message.code, signal: message.signal };
-      send(message);
+      send(message, beginCloseout(true));
       void drainNormally().catch((error) =>
         failClosed(error instanceof Error ? error.message : 'normal drain failed'),
       );
@@ -512,7 +608,7 @@ function handleParentMessage(envelope) {
       launcher.once('spawn', () => {
         launcher.send({ schemaVersion: 1, type: 'CONFIG', target });
       });
-      armStageTimeout('launcher barrier');
+      armPrepareDeadline('launcher barrier');
       return;
     }
     if (envelope.type === 'START') {
@@ -581,7 +677,8 @@ function handleParentMessage(envelope) {
         state = 'termination-before-start';
         clearTimeout(stageTimer);
         cleanupStarted = true;
-        void drainNeverStartedContainment()
+        const deadline = beginCloseout();
+        void drainNeverStartedContainment(deadline)
           .then(() => finishWithReceipt('never-started-containment-empty-v1', terminalCause))
           .catch((error) =>
             failClosed(error instanceof Error ? error.message : 'prestart termination failed'),
@@ -593,9 +690,10 @@ function handleParentMessage(envelope) {
       }
       terminalCause = message.reason;
       clearTimeout(stageTimer);
+      const deadline = beginCloseout();
       if (!cleanupStarted) {
         cleanupStarted = true;
-        void terminateContainment()
+        void terminateContainment(deadline)
           .then(() => finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause))
           .catch((error) =>
             failClosed(error instanceof Error ? error.message : 'termination failed'),
@@ -610,7 +708,7 @@ function handleParentMessage(envelope) {
       operationId = parseAbortBeforeStart(envelope);
       if (state === 'data-accepted') {
         state = 'prestart-aborting';
-        armStageTimeout('prestart containment');
+        beginCloseout();
         return;
       }
       state = 'prestart-aborting';
@@ -636,11 +734,14 @@ const selfIdentity = processIdentity(process.pid);
 const selfIds = processIds(process.pid);
 if (selfIds.pgid !== process.pid || selfIds.sessionId !== process.pid) process.exit(2);
 
-send({
-  schemaVersion: 1,
-  type: 'BOUND',
-  supervisorPid: process.pid,
-  supervisorIdentity: selfIdentity,
-  helperDigest: digestBytes(helperBundleBytes(supervisorPath, launcherPath)),
-});
-armStageTimeout('DATA');
+send(
+  {
+    schemaVersion: 1,
+    type: 'BOUND',
+    supervisorPid: process.pid,
+    supervisorIdentity: selfIdentity,
+    helperDigest: digestBytes(helperBundleBytes(supervisorPath, launcherPath)),
+  },
+  prepareDeadline,
+);
+armPrepareDeadline('DATA');

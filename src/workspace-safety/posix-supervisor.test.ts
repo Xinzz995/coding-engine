@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,7 +11,7 @@ import {
   type RecordedPosixTestGroup,
 } from './__fixtures__/posix-test-process-group.js';
 import { bootstrapWorkspaceWithAuthority as bootstrapWorkspace } from './workspace-authority-test-seam.js';
-import { createIdentityProbe } from './identity.js';
+import { createIdentityProbe, createSystemIdentityAdapter } from './identity.js';
 import { acquireWorkspaceLeaseWithAuthority as acquireWorkspaceLease } from './workspace-authority-test-seam.js';
 import { DRAINED_RECEIPT_FILE } from './operation.js';
 import { runWorkspaceOperationWithAuthority as runWorkspaceOperation } from './operation-authority-test-seam.js';
@@ -100,6 +100,17 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
     if (Date.now() >= deadline) throw new Error('condition timed out');
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+
+function processIsGoneOrZombie(pid: number, expectedIdentity: string): boolean {
+  const observed = createSystemIdentityAdapter().readProcessIdentity(pid);
+  if (observed.status !== 'found' || observed.value !== expectedIdentity) return true;
+  const state = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'state='], {
+    encoding: 'utf8',
+    env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },
+    timeout: 1000,
+  });
+  return !state.error && state.status === 0 && state.stdout.trimStart().startsWith('Z');
 }
 
 function readFdInventory(path: string): PosixFdInventory {
@@ -218,6 +229,41 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
     expect(existsSync(outcome.settledPath)).toBe(true);
     expect(existsSync(operationPath(setupState.workspace))).toBe(false);
+    await setupState.session.close();
+  }, 15_000);
+
+  it('performs an immediate natural-drain observation when the configured grace is zero', async () => {
+    const setupState = await setup();
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target('process.exit(0)', setupState.workspace),
+          commandTimeoutMs: 2000,
+          timeouts: {
+            naturalDrainMs: 0,
+            termMs: 100,
+            killMs: 3000,
+            ackMs: 1000,
+            pollMs: 20,
+          },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      leftover: false,
+      receipt: { drainReason: 'natural' },
+    });
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
     await setupState.session.close();
   }, 15_000);
 
@@ -452,6 +498,317 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
     await setupState.session.close();
   }, 15_000);
+
+  it('honors a user interrupt that arrives while a completed root is naturally draining', async () => {
+    const setupState = await setup();
+    const controller = new AbortController();
+    const descendant = 'setInterval(() => {}, 1000)';
+    const root = [
+      "const {spawn}=require('node:child_process');",
+      `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});`,
+      'process.exit(0);',
+    ].join('');
+
+    const startedAt = performance.now();
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(root, setupState.workspace),
+          termination: { signal: controller.signal, reason: 'user-interrupt' },
+          timeouts: { naturalDrainMs: 5000, termMs: 100, killMs: 1000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+            onRootResult: async () => {
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              controller.abort();
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'user-interrupt',
+      code: null,
+      signal: null,
+      leftover: false,
+    });
+    expect(outcome.receipt.drainReason).toBe('user-interrupt');
+    expect(performance.now() - startedAt).toBeLessThan(3000);
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 15_000);
+
+  it('tightens late termination even when the parent can no longer enforce helper cleanup', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'coding-x-posix-natural-terminate-'));
+    roots.push(workspace);
+    const workerPath = fileURLToPath(
+      new URL('./__fixtures__/posix-natural-drain-terminate-worker.ts', import.meta.url),
+    );
+    const worker = spawn(process.execPath, ['--import', 'tsx', workerPath, workspace], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: process.env.PATH ?? '/usr/bin:/bin' },
+    });
+    workers.add(worker);
+    let stdout = '';
+    let stderr = '';
+    worker.stdout.setEncoding('utf8');
+    worker.stderr.setEncoding('utf8');
+    worker.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    worker.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+
+    let containmentRecord: RecordedPosixTestGroup | undefined;
+    let supervisorFacts: { readonly pid: number; readonly identity: string } | undefined;
+    try {
+      await waitUntil(() => stdout.trim().split('\n').length >= 2, 10_000);
+      const lines = stdout
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      const facts = lines[0] as {
+        phase: 'started';
+        supervisorPid: number;
+        supervisorIdentity: string;
+        pgid: number;
+        launcherPid: number;
+        launcherIdentity: string;
+      };
+      expect(facts.phase).toBe('started');
+      expect(lines[1]).toEqual({ phase: 'terminate-sent', reason: 'user-interrupt' });
+      supervisorFacts = { pid: facts.supervisorPid, identity: facts.supervisorIdentity };
+      containmentRecord = trackGroup({
+        platform: 'posix-process-group-v1',
+        pgid: facts.pgid,
+        launcherPid: facts.launcherPid,
+        launcherIdentity: facts.launcherIdentity,
+      });
+
+      const parentStoppedAt = performance.now();
+      worker.kill('SIGSTOP');
+      await waitUntil(
+        () => processIsGoneOrZombie(facts.supervisorPid, facts.supervisorIdentity),
+        2000,
+      );
+      expect(performance.now() - parentStoppedAt).toBeLessThan(2000);
+      expect(existsSync(join(operationPath(workspace), DRAINED_RECEIPT_FILE))).toBe(false);
+      expect(stderr).toBe('');
+    } finally {
+      if (worker.exitCode === null && worker.signalCode === null) {
+        worker.kill('SIGKILL');
+        await once(worker, 'exit');
+      }
+      workers.delete(worker);
+      if (containmentRecord && probePosixProcessGroup(containmentRecord.pgid) !== 'empty') {
+        await terminateRecordedPosixTestGroup(containmentRecord, {
+          termTimeoutMs: 50,
+          killTimeoutMs: 3000,
+          pollIntervalMs: 10,
+        });
+        groups.delete(containmentRecord.pgid);
+      }
+      if (supervisorFacts) {
+        const observed = createSystemIdentityAdapter().readProcessIdentity(supervisorFacts.pid);
+        if (observed.status === 'found' && observed.value === supervisorFacts.identity) {
+          process.kill(supervisorFacts.pid, 'SIGKILL');
+        }
+      }
+    }
+  }, 20_000);
+
+  it('accepts a natural receipt that wins before a late user interrupt', async () => {
+    const setupState = await setup();
+    const controller = new AbortController();
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target('process.exit(0)', setupState.workspace),
+          termination: { signal: controller.signal, reason: 'user-interrupt' },
+          timeouts: { naturalDrainMs: 5000, termMs: 100, killMs: 1000, ackMs: 1000 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+            onRootResult: async () => {
+              await waitUntil(
+                () =>
+                  existsSync(
+                    join(operationPath(setupState.workspace), DRAINED_RECEIPT_FILE),
+                  ),
+                5000,
+              );
+              controller.abort();
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(controller.signal.aborted).toBe(true);
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      terminationReason: null,
+      code: 0,
+      signal: null,
+      leftover: false,
+    });
+    expect(outcome.receipt.drainReason).toBe('natural');
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 15_000);
+
+  it('tightens an active natural drain when the parent disconnects', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'coding-x-posix-natural-parent-crash-'));
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-natural-parent-control-'));
+    roots.push(workspace, controlRoot);
+    const escapedPidPath = join(controlRoot, 'escaped.pid');
+    const workerPath = fileURLToPath(
+      new URL('./__fixtures__/posix-natural-drain-parent-worker.ts', import.meta.url),
+    );
+    const worker = spawn(
+      process.execPath,
+      ['--import', 'tsx', workerPath, workspace, escapedPidPath],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      },
+    );
+    workers.add(worker);
+    let stdout = '';
+    let stderr = '';
+    worker.stdout.setEncoding('utf8');
+    worker.stderr.setEncoding('utf8');
+    worker.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    worker.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+
+    let escapedPid: number | undefined;
+    let containmentRecord: RecordedPosixTestGroup | undefined;
+    let supervisorFacts: { readonly pid: number; readonly identity: string } | undefined;
+    try {
+      await waitUntil(() => stdout.trim().split('\n').length >= 2, 10_000);
+      const lines = stdout.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(lines[1]).toEqual({ phase: 'natural-drain' });
+      const facts = lines[0] as {
+        phase: 'started';
+        supervisorPid: number;
+        supervisorIdentity: string;
+        pgid: number;
+        launcherPid: number;
+        launcherIdentity: string;
+      };
+      expect(facts.phase).toBe('started');
+      supervisorFacts = { pid: facts.supervisorPid, identity: facts.supervisorIdentity };
+      containmentRecord = trackGroup({
+        platform: 'posix-process-group-v1',
+        pgid: facts.pgid,
+        launcherPid: facts.launcherPid,
+        launcherIdentity: facts.launcherIdentity,
+      });
+      await waitUntil(() => existsSync(escapedPidPath), 5000);
+      escapedPid = Number(readFileSync(escapedPidPath, 'utf8'));
+      expect(escapedPid).toBeGreaterThan(0);
+      process.kill(facts.launcherPid, 'SIGSTOP');
+
+      const disconnectedAt = performance.now();
+      worker.kill('SIGKILL');
+      await once(worker, 'exit');
+      workers.delete(worker);
+      await waitUntil(() => {
+        try {
+          process.kill(facts.supervisorPid, 0);
+          return false;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === 'ESRCH';
+        }
+      }, 2500);
+      expect(performance.now() - disconnectedAt).toBeLessThan(2500);
+      await terminateRecordedPosixTestGroup(containmentRecord, {
+        termTimeoutMs: 50,
+        killTimeoutMs: 3000,
+        pollIntervalMs: 10,
+      });
+      expect(await waitForPosixProcessGroupEmpty(facts.pgid, 1000, 10)).toBe(true);
+      groups.delete(facts.pgid);
+      expect(existsSync(join(operationPath(workspace), DRAINED_RECEIPT_FILE))).toBe(false);
+      expect(stderr).toBe('');
+    } finally {
+      if (containmentRecord && probePosixProcessGroup(containmentRecord.pgid) !== 'empty') {
+        await terminateRecordedPosixTestGroup(containmentRecord, {
+          termTimeoutMs: 50,
+          killTimeoutMs: 3000,
+          pollIntervalMs: 10,
+        });
+        groups.delete(containmentRecord.pgid);
+      }
+      if (escapedPid && Number.isSafeInteger(escapedPid)) {
+        try {
+          process.kill(escapedPid, 'SIGKILL');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+        }
+        await waitForPosixProcessGroupEmpty(escapedPid, 3000, 10);
+      }
+      if (supervisorFacts) {
+        const observed = createSystemIdentityAdapter().readProcessIdentity(supervisorFacts.pid);
+        if (observed.status === 'found' && observed.value === supervisorFacts.identity) {
+          process.kill(supervisorFacts.pid, 'SIGKILL');
+        }
+      }
+    }
+  }, 20_000);
+
+  it('keeps a timely RESULT successful when natural drain finishes after the command deadline', async () => {
+    const setupState = await setup();
+    const descendant = 'setTimeout(() => process.exit(0), 5000)';
+    const root = [
+      "const {spawn}=require('node:child_process');",
+      `spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});`,
+      'process.exit(0);',
+    ].join('');
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(root, setupState.workspace),
+          commandTimeoutMs: 3000,
+          timeouts: { naturalDrainMs: 7000, termMs: 100, killMs: 3000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      terminationReason: null,
+      code: 0,
+      signal: null,
+      leftover: false,
+    });
+    expect(outcome.receipt.drainReason).toBe('natural');
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 20_000);
 
   it('times out and drains a confirmed-live stubborn root and grandchild', async () => {
     const setupState = await setup();
