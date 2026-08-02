@@ -8,7 +8,6 @@ import {
   ExternalFileLinkSnapshotBudget,
   ExternalFileLinkSnapshotBudgetError,
   canSnapshotExternalFileLinks,
-  externalFileLinkReaderBytes,
   isExternalFileSystemMagicOrRemote,
   sameExternalFileLinkIdentity,
   snapshotManagedExternalFileLink,
@@ -92,9 +91,7 @@ describe('external file link snapshot budget', () => {
       mkdirSync(checkoutRoot);
       mkdirSync(sourceRoot);
       const linkPath = join(checkoutRoot, 'runtime');
-      const readerPath = join(root, 'reader.cjs');
       symlinkSync(process.platform === 'linux' ? '/proc/self/exe' : '/dev/fd/1', linkPath);
-      writeFileSync(readerPath, externalFileLinkReaderBytes(), { mode: 0o500 });
       const managed = await createManagedProcessTestSession();
       try {
         const budget = new ExternalFileLinkSnapshotBudget({
@@ -112,7 +109,6 @@ describe('external file link snapshot budget', () => {
             session: managed.session,
             kind: 'quality-check',
             cwd: checkoutRoot,
-            readerPath,
           }),
         ).rejects.toThrow(/magic, virtual or remote filesystem/u);
       } finally {
@@ -124,7 +120,7 @@ describe('external file link snapshot budget', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
-    'captures an ordinary external file with the fixed production reader',
+    'captures an ordinary external file with the built-in production reader',
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'coding-x-external-happy-'));
       const checkoutRoot = join(root, 'checkout');
@@ -133,10 +129,8 @@ describe('external file link snapshot budget', () => {
       mkdirSync(sourceRoot);
       const target = join(root, 'target');
       const linkPath = join(checkoutRoot, 'target');
-      const readerPath = join(root, 'reader.cjs');
       writeFileSync(target, 'content\n');
       symlinkSync(target, linkPath);
-      writeFileSync(readerPath, externalFileLinkReaderBytes(), { mode: 0o500 });
       const managed = await createManagedProcessTestSession();
       try {
         const budget = new ExternalFileLinkSnapshotBudget({
@@ -153,7 +147,6 @@ describe('external file link snapshot budget', () => {
           session: managed.session,
           kind: 'quality-check',
           cwd: checkoutRoot,
-          readerPath,
         });
         expect(observed).toMatchObject({
           scope: 'external',

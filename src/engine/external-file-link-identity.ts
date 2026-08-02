@@ -1,7 +1,10 @@
 import { performance } from 'node:perf_hooks';
-import { lstatSync, readFileSync } from 'node:fs';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
+import {
+  inlineCommonJsArguments,
+  InlineProgramTransportError,
+} from '../workspace-safety/inline-program.js';
 import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
 
 export interface ExternalFileStatIdentity {
@@ -176,7 +179,6 @@ export interface ManagedExternalFileLinkSnapshotOptions {
   readonly session: WorkspaceSession;
   readonly kind: 'quality-check' | 'tdd-check' | 'final-review';
   readonly cwd: string;
-  readonly readerPath?: string;
   readonly termination?: {
     readonly signal: AbortSignal;
     readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
@@ -282,7 +284,7 @@ function resolveWithoutMagicLinks(original) {
 let descriptor;
 try {
   snapshot: {
-  const request = JSON.parse(Buffer.from(process.argv[2], 'base64url').toString('utf8'));
+  const request = JSON.parse(Buffer.from(process.argv[1], 'base64url').toString('utf8'));
   const linkBefore = fs.lstatSync(request.linkPath, { bigint: true });
   if (!linkBefore.isSymbolicLink()) fail('external link identity changed before resolution');
   const linkTargetBefore = decodedLinkTarget(request.linkPath).bytes;
@@ -375,23 +377,6 @@ try {
 }
 `;
 
-export function externalFileLinkReaderBytes(): Buffer {
-  return Buffer.from(EXTERNAL_FILE_LINK_READER, 'utf8');
-}
-
-function assertFixedExternalFileLinkReader(path: string): void {
-  const info = lstatSync(path, { bigint: true });
-  if (
-    !info.isFile() ||
-    info.isSymbolicLink() ||
-    info.nlink !== 1n ||
-    (info.mode & 0o22n) !== 0n ||
-    !readFileSync(path).equals(externalFileLinkReaderBytes())
-  ) {
-    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接固定 reader 身份无效');
-  }
-}
-
 function parsedStatIdentity(value: unknown): ExternalFileStatIdentity | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
@@ -475,25 +460,29 @@ export async function snapshotManagedExternalFileLink(
     }),
     'utf8',
   ).toString('base64url');
-  if (!options.readerProgramForTests) {
-    if (!options.readerPath) {
-      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接缺少固定 reader');
+  const readerProgram = options.readerProgramForTests ?? EXTERNAL_FILE_LINK_READER;
+  let args: string[];
+  try {
+    args = inlineCommonJsArguments(readerProgram, request);
+  } catch (error) {
+    if (error instanceof InlineProgramTransportError) {
+      throw new ExternalFileLinkSnapshotBudgetError(
+        `外部普通文件链接 reader 无法固定传输：${error.message}`,
+      );
     }
-    assertFixedExternalFileLinkReader(options.readerPath);
+    throw error;
   }
   const result = await runManagedWorkspaceProcess(options.session, {
     kind: options.kind,
     delegation: 'read-only-v1',
     executable: process.execPath,
-    args: options.readerProgramForTests
-      ? ['-e', options.readerProgramForTests, request]
-      : [options.readerPath!, request],
+    // 固定 reader 从当前受信任进程内存分块传输，避免先检查脚本路径、再由 Node 重新打开的竞态。
+    args,
     cwd: options.cwd,
     environment: [],
     timeoutMs: options.budget.remainingMs(),
     ...(options.termination ? { termination: options.termination } : {}),
   });
-  if (!options.readerProgramForTests) assertFixedExternalFileLinkReader(options.readerPath!);
   options.budget.checkpoint();
   if (
     result.verdict !== 'completed' ||

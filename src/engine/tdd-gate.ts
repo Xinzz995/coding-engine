@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, realpathSync } from 'node:fs';
-import { devNull } from 'node:os';
 import { isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 import {
   classifyValidationOnlyGateFailure,
@@ -11,6 +10,7 @@ import {
   type ValidationOnlyFailureClassification,
 } from './gate.js';
 import { resolveExecutablePath } from './agent.js';
+import { GIT_NULL_CONFIG_PATH } from './git-environment.js';
 import type { Prd, TddConfig, TddPolicyFile } from './prd.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 
@@ -268,7 +268,7 @@ const MANAGED_GIT_POLICY_PROBE = String.raw`
 import { spawnSync } from 'node:child_process';
 const request = JSON.parse(process.argv[1]);
 const run = (args) => {
-  const result = spawnSync(request.git, ['--no-replace-objects', ...args], {
+  const result = spawnSync(request.git, args, {
     cwd: process.cwd(),
     encoding: 'utf8',
     maxBuffer: ${GIT_OUTPUT_LIMIT},
@@ -315,7 +315,8 @@ async function runManagedGitPolicyProbes(
   }
   Object.assign(environment, {
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CONFIG_GLOBAL: GIT_NULL_CONFIG_PATH,
+    GIT_NO_REPLACE_OBJECTS: '1',
     GIT_TERMINAL_PROMPT: '0',
     GIT_OPTIONAL_LOCKS: '0',
     GIT_ATTR_NOSYSTEM: '1',

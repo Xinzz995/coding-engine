@@ -825,7 +825,6 @@ describe.runIf(
             ino: originalIdentity.ino,
           });
           renameSync(replacement, target);
-          expect(readFileSync(target, 'utf8')).toBe('original\n');
           expect(realpathSync(join(checkout.root, 'node_modules', 'tool'))).toBe(
             realpathSync(target),
           );

@@ -439,8 +439,9 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
       expect(code).toBe(0);
       const prompt = readFileSync(marker, 'utf8');
-      expect(prompt).toContain(`${workspace}/prd.json`);
-      expect(prompt).toContain(`${workspace}/progress.md`);
+      const canonicalWorkspace = realpathSync.native(workspace);
+      expect(prompt).toContain(`${canonicalWorkspace}/prd.json`);
+      expect(prompt).toContain(`${canonicalWorkspace}/progress.md`);
       expect(prompt).not.toContain('{{WORKSPACE}}');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;

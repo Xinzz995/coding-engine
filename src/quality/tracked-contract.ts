@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs';
-import { devNull } from 'node:os';
 import type { ManagedGateContext } from '../engine/gate.js';
+import { GIT_NULL_CONFIG_PATH } from '../engine/git-environment.js';
 import {
   createValidationProcessEnvironment,
   resolveValidationGitExecutable,
@@ -30,7 +30,7 @@ export async function readTrackedQualityContractAtHead(options: {
   const environment = createValidationProcessEnvironment(options.projectRoot, options.projectRoot);
   Object.assign(environment, {
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CONFIG_GLOBAL: GIT_NULL_CONFIG_PATH,
     GIT_TERMINAL_PROMPT: '0',
   });
   let git: string;

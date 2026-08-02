@@ -3,18 +3,17 @@ import {
   mkdirSync,
   mkdtempSync,
   opendirSync,
-  readFileSync,
   realpathSync,
   rmSync,
-  writeFileSync,
   type BigIntStats,
 } from 'node:fs';
-import { devNull, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ManagedGateContext } from './gate.js';
 import { runContractPrepareCommands } from './gate.js';
 import { resolveExecutablePath } from './agent.js';
+import { GIT_NULL_CONFIG_PATH } from './git-environment.js';
 import { isGitHead } from '../contracts/validation-contract.js';
 import { snapshotQualityContract, type QualityContract } from '../quality/contract.js';
 import {
@@ -23,9 +22,12 @@ import {
 } from '../quality/validation-environment.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import {
+  inlineModuleArguments,
+  InlineProgramTransportError,
+} from '../workspace-safety/inline-program.js';
+import {
   ExternalFileLinkSnapshotBudget,
   ExternalFileLinkSnapshotBudgetError,
-  externalFileLinkReaderBytes,
   externalFileTargetIdentityKey,
   sameExternalFileLinkIdentity,
   snapshotManagedExternalFileLink,
@@ -122,27 +124,9 @@ function directoryIdentity(path: string): DirectoryIdentity {
   return { dev: info.dev, ino: info.ino, uid: info.uid };
 }
 
-function fileIdentity(path: string): DirectoryIdentity {
-  const info = lstatSync(path, { bigint: true });
-  if (!info.isFile() || info.isSymbolicLink()) {
-    throw new CleanValidationCheckoutError('cleanup-unverifiable', '验证 helper 不是普通文件');
-  }
-  return { dev: info.dev, ino: info.ino, uid: info.uid };
-}
-
 function sameDirectoryIdentity(left: DirectoryIdentity, right: BigIntStats): boolean {
   return (
     right.isDirectory() &&
-    !right.isSymbolicLink() &&
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.uid === right.uid
-  );
-}
-
-function sameFileIdentity(left: DirectoryIdentity, right: BigIntStats): boolean {
-  return (
-    right.isFile() &&
     !right.isSymbolicLink() &&
     left.dev === right.dev &&
     left.ino === right.ino &&
@@ -167,7 +151,6 @@ async function observeManagedFileLink(
   managed: ManagedGateContext,
   checkoutRoot: string,
   sourceRoot: string,
-  readerPath: string,
 ) {
   try {
     return await snapshotManagedExternalFileLink({
@@ -179,7 +162,6 @@ async function observeManagedFileLink(
       session: managed.session,
       kind: managed.kind,
       cwd: checkoutRoot,
-      readerPath,
       ...(managed.termination ? { termination: managed.termination } : {}),
     });
   } catch (error) {
@@ -370,7 +352,7 @@ function safeGitEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     ...base,
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: devNull,
+    GIT_CONFIG_GLOBAL: GIT_NULL_CONFIG_PATH,
     GIT_TERMINAL_PROMPT: '0',
     GIT_LFS_SKIP_SMUDGE: '1',
     GIT_ATTR_NOSYSTEM: '1',
@@ -389,7 +371,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, posix } from 'node:path';
-const request = JSON.parse(process.argv[2]);
+const request = JSON.parse(process.argv[1]);
 const run = (args) => {
   const result = spawnSync(request.git, args, {
     cwd: request.root,
@@ -691,30 +673,27 @@ interface GitHelperResult {
 async function runGitHelper(options: {
   readonly request: Record<string, unknown>;
   readonly cwd: string;
-  readonly helperPath: string;
-  readonly helperIdentity: DirectoryIdentity;
   readonly environment: NodeJS.ProcessEnv;
   readonly managed: ManagedGateContext;
 }): Promise<GitHelperResult> {
-  let helperInfo: BigIntStats;
+  let args: string[];
   try {
-    helperInfo = lstatSync(options.helperPath, { bigint: true });
-  } catch {
-    throw new CleanValidationCheckoutError('identity-changed', 'Git helper 文件无法重新读取');
-  }
-  if (
-    !helperInfo.isFile() ||
-    helperInfo.isSymbolicLink() ||
-    !sameFileIdentity(options.helperIdentity, helperInfo) ||
-    !readFileSync(options.helperPath).equals(Buffer.from(MANAGED_GIT_HELPER, 'utf8'))
-  ) {
-    throw new CleanValidationCheckoutError('identity-changed', 'Git helper 文件身份或内容发生变化');
+    args = inlineModuleArguments(MANAGED_GIT_HELPER, JSON.stringify(options.request));
+  } catch (error) {
+    if (error instanceof InlineProgramTransportError) {
+      throw new CleanValidationCheckoutError(
+        'git-failed',
+        `Git helper 无法固定传输：${error.message}`,
+      );
+    }
+    throw error;
   }
   const result = await runManagedWorkspaceProcess(options.managed.session, {
     kind: options.managed.kind,
     delegation: 'read-only-v1',
     executable: realpathSync.native(process.execPath),
-    args: [options.helperPath, JSON.stringify(options.request)],
+    // 固定 helper 从当前受信任进程内存分块传输，执行阶段不再重新打开可替换的脚本路径。
+    args,
     cwd: options.cwd,
     environment: environmentEntries(options.environment),
     timeoutMs: GIT_TIMEOUT_MS,
@@ -806,7 +785,6 @@ async function assertSafeArtifactTopology(
     readonly permittedExternalLinks: ReadonlyMap<string, ExternalFileLinkIdentity>;
     readonly signal?: AbortSignal;
     readonly managed: ManagedGateContext;
-    readonly readerPath: string;
   },
 ): Promise<Map<string, ExternalFileLinkIdentity>> {
   const capturedExternalLinks = new Map<string, ExternalFileLinkIdentity>();
@@ -875,7 +853,6 @@ async function assertSafeArtifactTopology(
             options.managed,
             root,
             sourceRoot,
-            options.readerPath,
           );
           if (observation.scope === 'internal') continue;
           if (observation.scope === 'source') {
@@ -1021,8 +998,6 @@ export async function createCleanValidationCheckout(
     throw error;
   }
   let checkoutRoot = join(container, 'checkout');
-  const helperPath = join(container, 'git-helper.mjs');
-  const externalFileReaderPath = join(container, 'external-file-link-reader.cjs');
   let checkoutIdentity: DirectoryIdentity | null = null;
   let cleanupResult: CleanValidationCheckoutCleanup | undefined;
   const retainCleanupFailure = (
@@ -1113,16 +1088,6 @@ export async function createCleanValidationCheckout(
 
   try {
     options.onContainerCreatedForTests?.(container);
-    writeFileSync(externalFileReaderPath, externalFileLinkReaderBytes(), {
-      mode: 0o500,
-      flag: 'wx',
-    });
-    writeFileSync(helperPath, MANAGED_GIT_HELPER, {
-      encoding: 'utf8',
-      mode: 0o500,
-      flag: 'wx',
-    });
-    const helperIdentity = fileIdentity(helperPath);
     mkdirSync(checkoutRoot);
     checkoutRoot = realpathSync.native(checkoutRoot);
     checkoutIdentity = directoryIdentity(checkoutRoot);
@@ -1147,8 +1112,6 @@ export async function createCleanValidationCheckout(
         refs: [options.head, ...additionalRefs],
       },
       cwd: checkoutRoot,
-      helperPath,
-      helperIdentity,
       environment,
       managed: options.managed,
     });
@@ -1189,8 +1152,6 @@ export async function createCleanValidationCheckout(
       const observed = await runGitHelper({
         request: { mode: 'assert', git, root: checkoutRoot, control, objectFormat },
         cwd: checkoutRoot,
-        helperPath,
-        helperIdentity,
         environment,
         managed: options.managed,
       });
@@ -1253,7 +1214,6 @@ export async function createCleanValidationCheckout(
           permittedExternalLinks,
           signal: options.managed.termination?.signal,
           managed: options.managed,
-          readerPath: externalFileReaderPath,
         },
       );
       if (capturePreparedExternalLinks) permittedExternalLinks = captured;

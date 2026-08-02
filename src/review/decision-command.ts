@@ -1,12 +1,4 @@
 import { createHash } from 'node:crypto';
-import {
-  closeSync,
-  constants as fsConstants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readSync,
-} from 'node:fs';
 import { join } from 'node:path';
 import { digestFinalReviewMechanicalEnvironment } from '../engine/story-validation-currentness.js';
 import {
@@ -17,6 +9,7 @@ import {
 import { type GitHubReviewReadClient } from '../quality/github.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { createReviewBinding, digestReviewBinding } from './binding.js';
 import { digest } from './common.js';
@@ -364,69 +357,19 @@ interface DecisionCheckpoint {
 }
 
 function workspaceFileSnapshot(path: string): RawWorkspaceFileSnapshot {
-  let descriptor: number | null = null;
-  let pathObserved = false;
-  try {
-    const linkedBefore = lstatSync(path);
-    pathObserved = true;
-    if (
-      linkedBefore.isSymbolicLink() ||
-      !linkedBefore.isFile() ||
-      linkedBefore.size > MAX_DECISION_ARTIFACT_BYTES
-    ) {
-      invalid(`${path} 必须是至多 ${MAX_DECISION_ARTIFACT_BYTES} 字节的普通文件`);
-    }
-    const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW;
-    descriptor = openSync(path, fsConstants.O_RDONLY | noFollow);
-    const opened = fstatSync(descriptor);
-    if (
-      !opened.isFile() ||
-      opened.dev !== linkedBefore.dev ||
-      opened.ino !== linkedBefore.ino ||
-      opened.size !== linkedBefore.size
-    ) {
-      invalid(`${path} 在打开时发生身份变化`);
-    }
-    const bytes = Buffer.allocUnsafe(opened.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
-      if (count <= 0) invalid(`${path} 在读取时提前结束`);
-      offset += count;
-    }
-    const openedAfter = fstatSync(descriptor);
-    const linkedAfter = lstatSync(path);
-    if (
-      linkedAfter.isSymbolicLink() ||
-      !linkedAfter.isFile() ||
-      openedAfter.dev !== opened.dev ||
-      openedAfter.ino !== opened.ino ||
-      openedAfter.size !== opened.size ||
-      openedAfter.mtimeMs !== opened.mtimeMs ||
-      openedAfter.ctimeMs !== opened.ctimeMs ||
-      linkedAfter.dev !== opened.dev ||
-      linkedAfter.ino !== opened.ino
-    ) {
-      invalid(`${path} 在读取期间发生变化`);
-    }
-    return {
-      status: 'ready',
-      digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
-      bytes,
-    };
-  } catch (error) {
-    const code =
-      typeof error === 'object' && error !== null && 'code' in error
-        ? String((error as { code?: unknown }).code)
-        : null;
-    if (code === 'ENOENT' && !pathObserved) {
-      return { status: 'missing', digest: 'missing', bytes: null };
-    }
-    if (error instanceof WorkspaceSafetyError) throw error;
-    return invalid(`无法读取 ${path}：${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    if (descriptor !== null) closeSync(descriptor);
+  const observed = readStableFile(path, {
+    label: path,
+    maxBytes: MAX_DECISION_ARTIFACT_BYTES,
+  });
+  if (observed.status === 'missing') {
+    return { status: 'missing', digest: 'missing', bytes: null };
   }
+  if (observed.status === 'invalid') invalid(observed.diagnostic);
+  return {
+    status: 'ready',
+    digest: observed.fingerprint,
+    bytes: observed.bytes,
+  };
 }
 
 function sameWorkspaceFile(

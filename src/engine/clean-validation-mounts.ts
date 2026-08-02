@@ -6,7 +6,7 @@ import {
   readSync,
   realpathSync,
 } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, posix, relative, resolve, sep } from 'node:path';
 import { readDarwinMountTable } from '../workspace-safety/darwin-mount-table-transport.js';
 import { assertWindowsWorkspaceTreeHasNoReparsePoints } from '../workspace-safety/windows-path-attributes.js';
 
@@ -25,15 +25,21 @@ function invalid(message: string): CleanValidationMountProofError {
   return new CleanValidationMountProofError(`无法证明验证临时目录没有挂载点：${message}`);
 }
 
-function supportedMountPath(path: string, context: string): string {
-  if (
-    path.length === 0 ||
-    path.length > MAX_MOUNT_PATH_CHARS ||
-    path.includes('\0') ||
-    !isAbsolute(path)
-  ) {
+function assertSupportedMountPath(path: string, context: string): void {
+  if (path.length === 0 || path.length > MAX_MOUNT_PATH_CHARS || path.includes('\0')) {
     throw invalid(`${context}包含非法路径`);
   }
+}
+
+function supportedPosixMountPath(path: string, context: string): string {
+  assertSupportedMountPath(path, context);
+  if (!posix.isAbsolute(path)) throw invalid(`${context}包含非法路径`);
+  return posix.normalize(path);
+}
+
+function supportedNativeMountPath(path: string, context: string): string {
+  assertSupportedMountPath(path, context);
+  if (!isAbsolute(path)) throw invalid(`${context}包含非法路径`);
   return resolve(path);
 }
 
@@ -104,7 +110,7 @@ export function parseLinuxMountInfoForTests(bytes: Uint8Array): string[] {
     if (fields.length < 6 || fields.some((field) => field.length === 0)) {
       throw invalid('Linux mountinfo 前置字段不完整');
     }
-    return supportedMountPath(decodeLinuxMountField(fields[4]), 'Linux mountinfo');
+    return supportedPosixMountPath(decodeLinuxMountField(fields[4]), 'Linux mountinfo');
   });
 }
 
@@ -131,7 +137,7 @@ export function parseDarwinMountOutputForTests(bytes: Uint8Array): string[] {
     ) {
       throw invalid('macOS mount 行无法唯一解析');
     }
-    return supportedMountPath(line.slice(delimiter + 4, options), 'macOS mount');
+    return supportedPosixMountPath(line.slice(delimiter + 4, options), 'macOS mount');
   });
 }
 
@@ -142,7 +148,7 @@ export function assertNoMountedPathsAtOrBelowForTests(
 ): void {
   const canonicalRoot = resolve(root);
   for (const rawPath of mountedPaths) {
-    const mountedPath = supportedMountPath(rawPath, '挂载表');
+    const mountedPath = supportedNativeMountPath(rawPath, '挂载表');
     const child = relative(canonicalRoot, mountedPath);
     if (child === '' || (!child.startsWith(`..${sep}`) && child !== '..' && !isAbsolute(child))) {
       throw invalid(`临时目录内存在挂载点 ${child === '' ? '.' : child}`);
