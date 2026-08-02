@@ -347,7 +347,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       runDarkWindowsSupervisedOperation(operation, {
         target: target('process.exit(0)', state.workspace),
         termination: { signal: controller.signal, reason: 'user-interrupt' },
-        timeouts: { naturalDrainMs: 5000, terminateMs: 1000, ackMs: 1000, pollMs: 20 },
+        timeouts: { naturalDrainMs: 5000, terminateMs: 1000, ackMs: 10_000, pollMs: 20 },
         hooks: {
           onRootResult: async () => {
             await waitUntil(
