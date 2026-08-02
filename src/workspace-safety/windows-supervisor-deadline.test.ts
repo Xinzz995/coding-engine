@@ -67,6 +67,9 @@ describe('Windows supervisor parent deadline contract', () => {
       await expect(
         processHandle.nextBefore(['DRAINED'], deadline, 'termination and drain'),
       ).rejects.toThrow(/termination and drain timed out/u);
+      await expect(
+        processHandle.nextBefore(['DRAINED'], MonotonicDeadline.after(20), 'second drain wait'),
+      ).rejects.toThrow(/second drain wait timed out/u);
     } finally {
       await processHandle.abort();
     }

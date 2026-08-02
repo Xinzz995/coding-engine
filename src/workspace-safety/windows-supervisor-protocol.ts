@@ -406,6 +406,14 @@ export class WindowsSupervisorProcess {
     }
   }
 
+  #cancelWait(error: Error): void {
+    if (!this.#waiter) return;
+    const waiter = this.#waiter;
+    this.#waiter = undefined;
+    if (waiter.timer) clearTimeout(waiter.timer);
+    waiter.reject(error);
+  }
+
   next<T extends WindowsProtocolEvent['type']>(
     expected: T,
   ): Promise<Extract<WindowsProtocolEvent, { type: T }>> {
@@ -465,7 +473,11 @@ export class WindowsSupervisorProcess {
   ): Promise<Extract<WindowsProtocolEvent, { type: T }>> {
     return deadline.run(
       () => this.nextAny(expected, null),
-      () => protocolError(`${label} timed out`),
+      () => {
+        const error = protocolError(`${label} timed out`);
+        this.#cancelWait(error);
+        return error;
+      },
     );
   }
 

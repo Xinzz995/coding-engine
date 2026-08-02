@@ -420,6 +420,14 @@ class PosixSupervisorProcess {
     }
   }
 
+  #cancelWait(error: Error): void {
+    if (!this.#waiter) return;
+    const waiter = this.#waiter;
+    this.#waiter = undefined;
+    if (waiter.timer) clearTimeout(waiter.timer);
+    waiter.reject(error);
+  }
+
   next<T extends ProtocolEvent['type']>(expected: T): Promise<Extract<ProtocolEvent, { type: T }>> {
     return this.nextAny([expected]);
   }
@@ -480,7 +488,11 @@ class PosixSupervisorProcess {
   ): Promise<Extract<ProtocolEvent, { type: T }>> {
     return deadline.run(
       () => this.nextAny(expected, null),
-      () => posixDeadlineError(label),
+      () => {
+        const error = posixDeadlineError(label);
+        this.#cancelWait(error);
+        return error;
+      },
     );
   }
 
