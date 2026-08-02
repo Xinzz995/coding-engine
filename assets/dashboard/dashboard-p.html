@@ -273,6 +273,7 @@ const FALLBACK = {
   - 类型定义放在 app/types.ts，示例数据放在 app/sample-data.ts`,
   runtime: { iteration: 12, max_iterations: 50, phase: "developing", current_story: "US-003", elapsed: 340, model: "opus", route_source: "difficulty", story_difficulty: "medium", runner: "claude" },
   stateCorrupted: false,
+  storyValidation: { gitHead: "0000000000000000000000000000000000000000", current: true, invalidStoryIds: [], configurationError: null },
   modelRouting: { status: "disabled", config: null, errors: [] },
   workspaceSafety: null
 };
@@ -342,11 +343,34 @@ function getRuntime() {
   return dashboardData.runtime || FALLBACK.runtime;
 }
 
-function getStoryState(story) {
+function isStoryPassed(story, storyValidation) {
+  if (!storyValidation || storyValidation.configurationError) return false;
+  const invalidStoryIds = Array.isArray(storyValidation.invalidStoryIds)
+    ? storyValidation.invalidStoryIds
+    : [];
+  if (invalidStoryIds.includes(story.id)) return false;
+  if (storyValidation.current !== true && invalidStoryIds.length === 0) return false;
+  return !story.blocked && story.passes === true && story.validated === true;
+}
+
+function countPassedStories(stories, storyValidation) {
+  return stories.filter(story => isStoryPassed(story, storyValidation)).length;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function getStoryState(story, storyValidation = dashboardData.storyValidation) {
   const runtime = getRuntime();
   if (story.id === runtime.current_story) return 'active';
   if (story.blocked) return 'blocked';
-  if (story.passes === true && story.validated === true) return 'passed';
+  if (isStoryPassed(story, storyValidation)) return 'passed';
   if (story.passes === true) return 'awaiting';
   if (story.passes === false && (story.retryCount > 0 || story.notes)) return 'failed';
   return 'pending';
@@ -485,12 +509,19 @@ function render() {
   ensureCharStates();
   const stories = getStories();
   const runtime = getRuntime();
-  const passedCount = stories.filter(s => !s.blocked && s.passes === true && s.validated === true).length;
+  const storyValidation = dashboardData.storyValidation;
+  const passedCount = countPassedStories(stories, storyValidation);
   const pct = stories.length ? Math.round((passedCount / stories.length) * 100) : 0;
   const isActive = runtime.phase === 'developing' || runtime.phase === 'validating';
   const routing = dashboardData.modelRouting;
   const routeConfig = dashboardData.stateCorrupted
     ? '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair'
+    : !storyValidation
+      ? '⚠ Story 验收状态不可用，不能显示为已通过'
+      : storyValidation.configurationError
+        ? `⚠ PRD Story 集合配置错误，验收无法验证：${escapeHtml(storyValidation.configurationError)}`
+        : storyValidation.current !== true
+          ? `⚠ ${storyValidation.invalidStoryIds.length} 个 Story 验收待重验`
     : routing && routing.status === 'enabled'
       ? `${routing.config.runner} · L:${routing.config.builder.low} M:${routing.config.builder.medium} H:${routing.config.builder.high} · V:${routing.config.validator} · E:${routing.config.escalation}`
       : `${runtime.runner || '默认 runner'} · ${routing && routing.status === 'invalid' ? '模型路由无效' : '未启用 PRD 模型路由'}`;

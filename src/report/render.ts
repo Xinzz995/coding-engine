@@ -170,6 +170,9 @@ function renderImplementationBanner(
   storyValidation: ReportData['storyValidation'],
 ): string {
   if (stateCorrupted) return '<div class="banner blocked">❌ 状态不可验证：state.json 已损坏</div>';
+  if (storyValidation.configurationError !== null) {
+    return `<div class="banner blocked">❌ PRD Story 集合配置错误，验收无法验证：${text(storyValidation.configurationError)}</div>`;
+  }
   if (storyValidation.gitHead === null) {
     return '<div class="banner blocked">❌ 当前 Git HEAD 不可读取，Story 验收结果均需重验</div>';
   }
@@ -663,16 +666,22 @@ export function renderReportHtml(data: ReportData): string {
   // 其他调用方直接构造 ReportData 时把损坏态与通过态组合成假绿报告。
   const stories = data.stateCorrupted
     ? data.stories.map((story) => ({ ...story, ...INITIAL_STORY_STATE }))
-    : data.storyValidation.current
-      ? data.stories
-      : (() => {
-          const invalid = new Set(data.storyValidation.invalidStoryIds);
-          const invalidateAll = data.storyValidation.gitHead === null || invalid.size === 0;
-          return data.stories.map((story) =>
-            invalidateAll || invalid.has(story.id)
-              ? { ...story, validated: false, validationReceipt: null }
-              : story);
-        })();
+    : data.storyValidation.configurationError !== null
+      ? data.stories.map((story) => ({
+          ...story,
+          validated: false,
+          validationReceipt: null,
+        }))
+      : data.storyValidation.current
+        ? data.stories
+        : (() => {
+            const invalid = new Set(data.storyValidation.invalidStoryIds);
+            const invalidateAll = data.storyValidation.gitHead === null || invalid.size === 0;
+            return data.stories.map((story) =>
+              invalidateAll || invalid.has(story.id)
+                ? { ...story, validated: false, validationReceipt: null }
+                : story);
+          })();
   const byStory = new Map<string, ScreenshotEntry[]>();
   for (const s of data.screenshots) {
     if (s.storyId === null) continue;

@@ -1,14 +1,14 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { tryReadPrd, validatePrdStorySet, type Prd } from '../engine/prd.js';
+import { tryReadPrd, type Prd } from '../engine/prd.js';
 import {
   readDisplayState,
   mergedStories,
   getCurrentStoryId,
   type StoryView,
   isStoryPassed,
-  evaluateStoryValidationReceiptSet,
-  reconcileValidationReceipts,
+  evaluateStoryValidationDisplay,
+  type StoryValidationDisplayCurrentness,
 } from '../engine/state.js';
 import { readGitHead } from '../engine/validation-protocol.js';
 import { readProgress } from '../engine/progress.js';
@@ -64,13 +64,7 @@ export interface StoryRecentValidationHeadAbort extends ValidationHeadAbortEvide
   iteration: number;
 }
 
-export interface StoryValidationCurrentness {
-  gitHead: string | null;
-  /** true 表示没有持久绿灯因当前 HEAD/PRD 失效，不表示全部 Story 已完成。 */
-  current: boolean;
-  /** 本次只读对账实际撤销验收的 Story；普通未完成项不在其中。 */
-  invalidStoryIds: string[];
-}
+export type StoryValidationCurrentness = StoryValidationDisplayCurrentness;
 
 export type StatusReport = (
   | { status: 'missing'; workspace: string }
@@ -215,18 +209,8 @@ function collectStatusControlled(
     options.currentGitHead === undefined
       ? readGitHead(options.projectRoot ?? process.cwd())
       : options.currentGitHead;
-  const storySet = validatePrdStorySet(prd);
-  const storyValidationSet = evaluateStoryValidationReceiptSet(
-    prd,
-    state,
-    currentGitHead ?? '',
-  );
-  const reconciledStoryValidation = reconcileValidationReceipts(
-    prd,
-    state,
-    currentGitHead ?? '',
-  );
-  const currentState = reconciledStoryValidation.state;
+  const storyValidation = evaluateStoryValidationDisplay(prd, state, currentGitHead);
+  const currentState = storyValidation.state;
   let evidence: ReturnType<typeof readEvidence> = { records: [], skippedLines: 0 };
   let evidenceUnavailable = false;
   try {
@@ -247,20 +231,13 @@ function collectStatusControlled(
     evidenceSkippedLines: evidence.skippedLines,
     evidenceUnavailable,
     stateCorrupted,
-    storyValidation: {
-      gitHead: currentGitHead,
-      current:
-        currentGitHead !== null &&
-        storySet.valid &&
-        reconciledStoryValidation.invalidatedStoryIds.length === 0,
-      invalidStoryIds: reconciledStoryValidation.invalidatedStoryIds,
-    },
+    storyValidation: storyValidation.currentness,
     finalReview: collectCurrentReviewStatus({
       workspace,
       ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
       ...(options.client ? { client: options.client } : {}),
       refreshRemote: options.refreshRemote ?? false,
-      storyValidationDigest: storyValidationSet.digest,
+      storyValidationDigest: storyValidation.digest,
       ...(options.runnerVersionObservation
         ? { runnerVersionObservation: options.runnerVersionObservation }
         : {}),
@@ -397,7 +374,12 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     lines.push('❌ workspace 安全状态未就绪，不能表示可交付');
     return { text: lines.join('\n'), exitCode: 2 };
   }
-  if (report.storyValidation.gitHead === null) {
+  if (report.storyValidation.configurationError !== null) {
+    lines.push(
+      `❌ PRD Story 集合配置错误，验收无法验证：${report.storyValidation.configurationError}`,
+      '',
+    );
+  } else if (report.storyValidation.gitHead === null) {
     lines.push('⚠️ 当前 Git HEAD 不可读取，Story 验收结果均按待重验显示', '');
   } else if (!report.storyValidation.current) {
     lines.push(
@@ -515,6 +497,9 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   }
   if (report.evidenceUnavailable)
     lines.push('⚠️ evidence.jsonl 当前不可读，最近实际路由可能不完整');
+  if (report.storyValidation.configurationError !== null) {
+    return { text: lines.join('\n'), exitCode: 2 };
+  }
   // 空 story 列表不算全绿：status 的退出码用作 CI 门禁，对退化的 prd.json 必须保守
   if (total === 0) {
     lines.push('', '⚠️ prd.json 中没有任何 story');
@@ -619,6 +604,9 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
     summary,
   };
   if (report.workspaceSafety !== undefined && report.workspaceSafety.status !== 'ready') {
+    return { text: JSON.stringify(view, null, 2), exitCode: 2 };
+  }
+  if (report.storyValidation.configurationError !== null) {
     return { text: JSON.stringify(view, null, 2), exitCode: 2 };
   }
   // 与人类可读模式同一保守语义：空 story 列表不算全绿

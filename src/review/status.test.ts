@@ -463,7 +463,12 @@ describe('collectCurrentReviewStatus currentness binding', () => {
       evidenceSkippedLines: 0,
       evidenceUnavailable: false,
       stateCorrupted: false,
-      storyValidation: { gitHead: context.headSha, current: true, invalidStoryIds: [] },
+      storyValidation: {
+        gitHead: context.headSha,
+        current: true,
+        invalidStoryIds: [],
+        configurationError: null,
+      },
       finalReview: result,
     } as unknown as StatusReport);
     expect(rendered.exitCode).toBe(6);

@@ -213,19 +213,33 @@ function fmtElapsed(s) {
   return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
 }
 
-function getState(story, cur) {
+function isStoryPassed(story, storyValidation) {
+  if (!storyValidation || storyValidation.configurationError) return false;
+  const invalidStoryIds = Array.isArray(storyValidation.invalidStoryIds)
+    ? storyValidation.invalidStoryIds
+    : [];
+  if (invalidStoryIds.includes(story.id)) return false;
+  if (storyValidation.current !== true && invalidStoryIds.length === 0) return false;
+  return !story.blocked && story.passes === true && story.validated === true;
+}
+
+function countPassedStories(stories, storyValidation) {
+  return stories.filter(story => isStoryPassed(story, storyValidation)).length;
+}
+
+function getState(story, cur, storyValidation) {
   if (story.id === cur) return 'active';
   if (story.blocked) return 'blocked';
-  if (story.passes === true && story.validated === true) return 'passed';
+  if (isStoryPassed(story, storyValidation)) return 'passed';
   if (story.passes === true) return 'awaiting';
   if (story.passes === false && (story.retryCount > 0 || story.notes)) return 'failed';
   return 'pending';
 }
 
-function renderStories(stories, cur) {
+function renderStories(stories, cur, storyValidation) {
   const el = document.getElementById('storyList');
   el.innerHTML = stories.map(s => {
-    const st = getState(s, cur);
+    const st = getState(s, cur, storyValidation);
     const cfg = STATE_CONFIG[st];
     const isActive = st === 'active';
     return `<div class="story-card ${st} ${isActive ? 'active-pulse' : ''}">
@@ -265,14 +279,14 @@ function renderLogs(logs) {
   el.scrollTop = el.scrollHeight;
 }
 
-function renderProgress(stories) {
-  const passed = stories.filter(s => !s.blocked && s.passes === true && s.validated === true).length;
+function renderProgress(stories, storyValidation) {
+  const passed = countPassedStories(stories, storyValidation);
   const total = stories.length;
   document.getElementById('progressFill').style.width = (total ? Math.round(passed/total*100) : 0) + '%';
   document.getElementById('progressLabel').textContent = passed + '/' + total;
 }
 
-function renderPhase(rt, routing, stateCorrupted) {
+function renderPhase(rt, routing, stateCorrupted, storyValidation) {
   const cfg = PHASE_MAP[rt.phase] || PHASE_MAP.idle;
   const dot = document.getElementById('phaseDot');
   const text = document.getElementById('phaseText');
@@ -292,6 +306,12 @@ function renderPhase(rt, routing, stateCorrupted) {
   const routingText = document.getElementById('routingText');
   if (stateCorrupted) {
     routingText.textContent = '⚠ state.json 已损坏，所有 story 按未验证状态显示；请运行 npx coding-x repair';
+  } else if (!storyValidation) {
+    routingText.textContent = '⚠ Story 验收状态不可用，不能显示为已通过';
+  } else if (storyValidation.configurationError) {
+    routingText.textContent = `⚠ PRD Story 集合配置错误，验收无法验证：${storyValidation.configurationError}`;
+  } else if (storyValidation.current !== true) {
+    routingText.textContent = `⚠ ${storyValidation.invalidStoryIds.length} 个 Story 验收待重验`;
   } else if (routing && routing.status === 'enabled') {
     const m = routing.config;
     routingText.textContent = `${m.runner} · L:${m.builder.low} M:${m.builder.medium} H:${m.builder.high} · V:${m.validator} · E:${m.escalation}`;
@@ -328,6 +348,7 @@ function setEndedBanner(visible) {
 const FALLBACK = {
   runtime: { iteration: 12, max_iterations: 50, phase: 'developing', current_story: 'US-003', elapsed: 340, model: 'opus', route_source: 'difficulty', story_difficulty: 'medium', runner: 'claude' },
   stateCorrupted: false,
+  storyValidation: { gitHead: '0000000000000000000000000000000000000000', current: true, invalidStoryIds: [], configurationError: null },
   modelRouting: { status: 'disabled', config: null, errors: [] },
   workspaceSafety: null,
   project: '简易笔记系统',
@@ -367,10 +388,10 @@ async function poll() {
       data = FALLBACK;
     }
   }
-  renderStories(data.stories, data.runtime.current_story);
-  renderProgress(data.stories);
+  renderStories(data.stories, data.runtime.current_story, data.storyValidation);
+  renderProgress(data.stories, data.storyValidation);
   renderLogs(data.logs);
-  renderPhase(data.runtime, data.modelRouting, data.stateCorrupted);
+  renderPhase(data.runtime, data.modelRouting, data.stateCorrupted, data.storyValidation);
   renderWorkspaceSafety(data.workspaceSafety);
 }
 

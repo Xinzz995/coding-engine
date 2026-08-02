@@ -2,12 +2,13 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tryReadPrd, validatePrdStorySet, type StoryDifficulty } from '../engine/prd.js';
+import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
 import {
+  evaluateStoryValidationDisplay,
   readDisplayState,
-  reconcileValidationReceipts,
   mergedStories,
   type StoryView,
+  type StoryValidationDisplayCurrentness,
 } from '../engine/state.js';
 import { readGitHead } from '../engine/validation-protocol.js';
 import { readProgress } from '../engine/progress.js';
@@ -105,12 +106,7 @@ export interface ApiResponse {
   stories: StoryView[];
   /** state.json 存在但损坏；stories 已按未验证状态 fail-closed。 */
   stateCorrupted: boolean;
-  storyValidation: {
-    gitHead: string | null;
-    /** true 表示没有持久绿灯失效，不表示全部 Story 已完成。 */
-    current: boolean;
-    invalidStoryIds: string[];
-  };
+  storyValidation: StoryValidationDisplayCurrentness;
   modelRouting: ModelRoutingReadResult;
   logs: string;
   /** 只读安全观察；null 仅供尚未迁移的同步测试/调用方兼容。 */
@@ -126,12 +122,11 @@ function buildApiResponseForWorkspace(
   const prd = tryReadPrd(join(workspace, 'prd.json'));
   const displayState = prd ? readDisplayState(join(workspace, 'state.json'), prd) : null;
   const currentGitHead = readGitHead(projectRoot);
-  const storySet = prd ? validatePrdStorySet(prd) : null;
-  const reconciledStoryValidation =
+  const storyValidation =
     prd && displayState
-      ? reconcileValidationReceipts(prd, displayState.state, currentGitHead ?? '')
+      ? evaluateStoryValidationDisplay(prd, displayState.state, currentGitHead)
       : null;
-  const currentState = reconciledStoryValidation?.state ?? null;
+  const currentState = storyValidation?.state ?? null;
   const logs = readProgress(join(workspace, 'progress.md'));
   return {
     runtime: {
@@ -150,14 +145,11 @@ function buildApiResponseForWorkspace(
     sourcePrd: prd?.sourcePrd ?? '',
     stories: prd && currentState ? mergedStories(prd, currentState) : [],
     stateCorrupted: displayState?.stateCorrupted ?? false,
-    storyValidation: {
+    storyValidation: storyValidation?.currentness ?? {
       gitHead: currentGitHead,
-      current:
-        currentGitHead !== null &&
-        storySet?.valid === true &&
-        reconciledStoryValidation !== null &&
-        reconciledStoryValidation.invalidatedStoryIds.length === 0,
-      invalidStoryIds: reconciledStoryValidation?.invalidatedStoryIds ?? [],
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'prd.json 缺失或无法解析，Story 验收无法验证',
     },
     modelRouting: readModelRouting(prd),
     logs,

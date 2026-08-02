@@ -20,6 +20,7 @@ import {
   type RunState,
   parseValidationReceipt,
   evaluateStoryValidation,
+  evaluateStoryValidationDisplay,
   evaluateStoryValidationReceiptSet,
   isStoryPassedAt,
   reconcileValidationReceipts,
@@ -566,7 +567,35 @@ describe('current Validator receipt evaluation', () => {
       digest: null,
       configurationError: 'userStories 包含重复 Story ID：US-001',
     });
+    const persisted = structuredClone(shared);
+    const display = evaluateStoryValidationDisplay(duplicate, shared, HEAD_A);
+    expect(display.currentness).toEqual({
+      gitHead: HEAD_A,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    });
+    expect(mergedStories(duplicate, display.state)).toHaveLength(2);
+    expect(mergedStories(duplicate, display.state).every((story) => !story.validated)).toBe(true);
+    expect(shared).toEqual(persisted);
     expect(allStoriesResolvedAt(duplicate, shared, HEAD_A)).toBe(false);
+
+    const malformed = {
+      ...contentPrd([]),
+      userStories: [null],
+    } as unknown as Prd;
+    expect(initialStateFor(malformed)).toEqual({});
+    expect(blankStateFor(malformed)).toEqual({});
+    const malformedDisplay = evaluateStoryValidationDisplay(malformed, {}, HEAD_A);
+    expect(malformedDisplay.currentness).toEqual({
+      gitHead: HEAD_A,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'userStories[0] 的 Story ID 非法',
+    });
+    expect(mergedStories(malformed, malformedDisplay.state)).toEqual([]);
+    expect(getCurrentStoryId(malformed, malformedDisplay.state)).toBeNull();
+    expect(allStoriesResolved(malformed, malformedDisplay.state)).toBe(false);
   });
 });
 

@@ -29,7 +29,12 @@ function data(over: Partial<ReportData> = {}): ReportData {
       },
     ],
     stateCorrupted: false,
-    storyValidation: { gitHead: 'b'.repeat(40), current: true, invalidStoryIds: [] },
+    storyValidation: {
+      gitHead: 'b'.repeat(40),
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    },
     progress: '',
     reviews: [],
     tamperedArchives: [],
@@ -156,7 +161,14 @@ describe('renderReportHtml', () => {
 
   it('当前 HEAD 不可读取或凭证过期时不会展示 Story 完成绿灯', () => {
     const unavailable = renderReportHtml(
-      data({ storyValidation: { gitHead: null, current: false, invalidStoryIds: ['US-001'] } }),
+      data({
+        storyValidation: {
+          gitHead: null,
+          current: false,
+          invalidStoryIds: ['US-001'],
+          configurationError: null,
+        },
+      }),
     );
     expect(unavailable).toContain('当前 Git HEAD 不可读取');
     expect(unavailable).not.toContain('Story 验证完成');
@@ -167,11 +179,28 @@ describe('renderReportHtml', () => {
           gitHead: 'c'.repeat(40),
           current: false,
           invalidStoryIds: ['US-001'],
+          configurationError: null,
         },
       }),
     );
     expect(stale).toContain('Story 验收凭证已过期：US-001');
     expect(stale).not.toContain('Story 验证完成');
+  });
+
+  it('配置错误即使与 current=true 错误组合也会由渲染边界撤销绿灯', () => {
+    const html = renderReportHtml(
+      data({
+        storyValidation: {
+          gitHead: 'c'.repeat(40),
+          current: true,
+          invalidStoryIds: [],
+          configurationError: 'userStories 包含重复 Story ID：US-001',
+        },
+      }),
+    );
+    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    expect(html).toContain('🟨 待引擎验收');
+    expect(html).not.toContain('✅ 通过');
   });
 
   it('只让过期 Story 失去验收状态，保留同一报告中仍有效的 Story', () => {
@@ -202,6 +231,7 @@ describe('renderReportHtml', () => {
           gitHead: 'c'.repeat(40),
           current: false,
           invalidStoryIds: ['US-001'],
+          configurationError: null,
         },
       }),
     );

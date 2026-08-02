@@ -1,13 +1,13 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { tryReadPrd, validatePrdStorySet, type Prd } from '../engine/prd.js';
+import { tryReadPrd, type Prd } from '../engine/prd.js';
 import {
-  evaluateStoryValidationReceiptSet,
+  evaluateStoryValidationDisplay,
   readDisplayState,
-  reconcileValidationReceipts,
   mergedStories,
   type StoryView,
+  type StoryValidationDisplayCurrentness,
 } from '../engine/state.js';
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
 import { readProgress } from '../engine/progress.js';
@@ -37,12 +37,7 @@ export interface ReportData {
   /** state.json 存在但解析失败——报告内警示 */
   stateCorrupted: boolean;
   /** 报告生成瞬间，Story 验收凭证相对于已观察 Git HEAD 的当前性。 */
-  storyValidation: {
-    gitHead: string | null;
-    /** true 表示没有持久绿灯失效，不表示全部 Story 已完成。 */
-    current: boolean;
-    invalidStoryIds: string[];
-  };
+  storyValidation: StoryValidationDisplayCurrentness;
   progress: string;
   reviews: { filename: string; content: string }[];
   tamperedArchives: string[];
@@ -149,14 +144,8 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
   const statePath = join(workspace, 'state.json');
   const { state, stateCorrupted } = readDisplayState(statePath, prd);
   const currentGitHead = options.currentGitHead ?? null;
-  const storySet = validatePrdStorySet(prd);
-  const storyValidation = evaluateStoryValidationReceiptSet(prd, state, currentGitHead ?? '');
-  const reconciledStoryValidation = reconcileValidationReceipts(
-    prd,
-    state,
-    currentGitHead ?? '',
-  );
-  const currentState = reconciledStoryValidation.state;
+  const storyValidation = evaluateStoryValidationDisplay(prd, state, currentGitHead);
+  const currentState = storyValidation.state;
   const rootFiles = listFiles(workspace);
   const reviews: { filename: string; content: string }[] = [];
   for (const filename of rootFiles.filter((n) => /^review-.*\.md$/.test(n)).sort()) {
@@ -164,7 +153,8 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
       reviews.push({ filename, content: readFileSync(join(workspace, filename), 'utf-8') });
     } catch { /* 单文件读取失败跳过——容错：有什么记什么 */ }
   }
-  const storyIds = prd.userStories.map((s) => s.id);
+  const stories = mergedStories(prd, currentState);
+  const storyIds = stories.map((story) => story.id);
   return {
     status: 'ok',
     data: {
@@ -172,16 +162,9 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
       generatedAt: now,
       prd,
       prdSource,
-      stories: mergedStories(prd, currentState),
+      stories,
       stateCorrupted,
-      storyValidation: {
-        gitHead: currentGitHead,
-        current:
-          currentGitHead !== null &&
-          storySet.valid &&
-          reconciledStoryValidation.invalidatedStoryIds.length === 0,
-        invalidStoryIds: reconciledStoryValidation.invalidatedStoryIds,
-      },
+      storyValidation: storyValidation.currentness,
       progress: readProgress(join(workspace, 'progress.md')),
       reviews,
       tamperedArchives: rootFiles.filter((n) => /^prd\.tampered-.*\.json$/.test(n)).sort(),

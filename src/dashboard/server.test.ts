@@ -48,6 +48,13 @@ type DashboardStory = {
   blocked: boolean;
 };
 
+type DashboardStoryValidation = {
+  gitHead: string | null;
+  current: boolean;
+  invalidStoryIds: string[];
+  configurationError: string | null;
+};
+
 const dashboardAssets = [
   {
     label: '普通页',
@@ -67,7 +74,7 @@ function readDashboardAsset(file: string): string {
   return readFileSync(join(process.cwd(), 'assets', 'dashboard', file), 'utf-8');
 }
 
-function extractStateFunction(html: string, name: string): string {
+function extractInlineFunction(html: string, name: string): string {
   const source = html.match(
     new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{[\\s\\S]*?\\n\\}`),
   );
@@ -79,16 +86,39 @@ function dashboardState(
   asset: (typeof dashboardAssets)[number],
   story: DashboardStory,
   currentStory: string | null = null,
+  storyValidation: DashboardStoryValidation | null = {
+    gitHead: 'a'.repeat(40),
+    current: true,
+    invalidStoryIds: [],
+    configurationError: null,
+  },
 ): string {
-  const source = extractStateFunction(readDashboardAsset(asset.file), asset.stateFunction);
+  const html = readDashboardAsset(asset.file);
+  const passedSource = extractInlineFunction(html, 'isStoryPassed');
+  const stateSource = extractInlineFunction(html, asset.stateFunction);
   const invocation = asset.currentStoryArgument
-    ? `(${source})(story, currentStory)`
-    : `(${source})(story)`;
-  return runInNewContext(invocation, {
+    ? `${asset.stateFunction}(story, currentStory, storyValidation)`
+    : `${asset.stateFunction}(story, storyValidation)`;
+  return runInNewContext(`${passedSource}\n${stateSource}\n${invocation}`, {
     story,
     currentStory,
+    storyValidation,
     getRuntime: () => ({ current_story: currentStory }),
   }) as string;
+}
+
+function dashboardPassedCount(
+  asset: (typeof dashboardAssets)[number],
+  stories: DashboardStory[],
+  storyValidation: DashboardStoryValidation | null,
+): number {
+  const html = readDashboardAsset(asset.file);
+  const passedSource = extractInlineFunction(html, 'isStoryPassed');
+  const countSource = extractInlineFunction(html, 'countPassedStories');
+  return runInNewContext(
+    `${passedSource}\n${countSource}\ncountPassedStories(stories, storyValidation)`,
+    { stories, storyValidation },
+  ) as number;
 }
 
 describe.each(dashboardAssets)('$label dashboard published-state contract', (asset) => {
@@ -111,12 +141,53 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
     expect(dashboardState(asset, story())).toBe('pending');
   });
 
-  it('将待验收标记为「待引擎验收」，且完成计数必须同时要求 passes 与 validated', () => {
+  it('将待验收标记为「待引擎验收」，并真实消费 Story 验收评估结果', () => {
     const html = readDashboardAsset(asset.file);
     expect(html).toMatch(/awaiting\s*:\s*(?:\{[^}]*label\s*:\s*)?['"]待引擎验收['"]/);
-    expect(html).toMatch(
-      /stories\.filter\(s\s*=>\s*!s\.blocked\s*&&\s*s\.passes\s*===\s*true\s*&&\s*s\.validated\s*===\s*true\)\.length/,
-    );
+    const green = story({ passes: true, validated: true });
+    const current: DashboardStoryValidation = {
+      gitHead: 'a'.repeat(40),
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    };
+    expect(dashboardState(asset, green, null, current)).toBe('passed');
+    expect(dashboardPassedCount(asset, [green], current)).toBe(1);
+
+    const invalidIdentity = {
+      ...current,
+      current: false,
+      invalidStoryIds: ['US-001'],
+    };
+    expect(dashboardState(asset, green, null, invalidIdentity)).toBe('awaiting');
+    expect(dashboardPassedCount(asset, [green], invalidIdentity)).toBe(0);
+
+    const configurationError = {
+      ...current,
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    };
+    expect(dashboardState(asset, green, null, configurationError)).toBe('awaiting');
+    expect(dashboardPassedCount(asset, [green], configurationError)).toBe(0);
+    expect(dashboardState(asset, green, null, null)).toBe('awaiting');
+    expect(dashboardPassedCount(asset, [green], null)).toBe(0);
+
+    const anotherStoryIsStale = {
+      ...current,
+      current: false,
+      invalidStoryIds: ['US-002'],
+    };
+    expect(dashboardState(asset, green, null, anotherStoryIsStale)).toBe('passed');
+    expect(html.match(/countPassedStories\(stories, storyValidation\)/g)).toHaveLength(2);
+    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    if (asset.currentStoryArgument) {
+      expect(html).toContain(
+        'renderStories(data.stories, data.runtime.current_story, data.storyValidation);',
+      );
+      expect(html).toContain('renderProgress(data.stories, data.storyValidation);');
+    } else {
+      expect(html).toContain('const storyValidation = dashboardData.storyValidation;');
+      expect(html).toContain('const passedCount = countPassedStories(stories, storyValidation);');
+    }
   });
 
   it('state 损坏时展示 fail-closed 警告', () => {
@@ -183,7 +254,98 @@ describe('buildApiResponse', () => {
       gitHead: head,
       current: false,
       invalidStoryIds: [],
+      configurationError: 'prd.json 必须包含至少一个 Story',
     });
+  });
+
+  it('非法 Story 元素不会让 dashboard API 崩溃，而是返回配置错误', () => {
+    const ws = tempWorkspace();
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'malformed-stories',
+        branchName: 'feature/malformed',
+        description: 'd',
+        userStories: [null],
+      }),
+    );
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+
+    configureWorkspace(ws, 50, process.cwd());
+    const response = buildApiResponse();
+    expect(response.stories).toEqual([]);
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'userStories[0] 的 Story ID 非法',
+    });
+  });
+
+  it('重复 Story ID 时 API 撤销全部绿灯、暴露配置错误且不改写状态文件', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-duplicate-stories-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'initial\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'initial');
+    const head = git('rev-parse', 'HEAD');
+    const duplicateStory = {
+      id: 'US-001',
+      title: 'duplicate',
+      description: 'd',
+      acceptanceCriteria: ['ac'],
+      priority: 1,
+    };
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'duplicate-stories',
+        branchName: 'feature/duplicate',
+        description: 'd',
+        userStories: [duplicateStory, { ...duplicateStory }],
+      }),
+    );
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'duplicate-dashboard-receipt',
+          gitHead: head,
+          acceptanceHash: acceptanceHash('US-001', ['ac']),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+    writeFileSync(join(ws, 'progress.md'), '');
+
+    configureWorkspace(ws, 50, root);
+    const response = buildApiResponse();
+    expect(response.stories).toHaveLength(2);
+    expect(response.stories.every((item) => item.passes && !item.validated)).toBe(true);
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    });
+    expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
   it('按项目当前 HEAD 只在内存中撤销过期的 Validator 绿灯', () => {
@@ -249,6 +411,7 @@ describe('buildApiResponse', () => {
       gitHead: currentHead,
       current: false,
       invalidStoryIds: ['US-001'],
+      configurationError: null,
     });
     expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });
@@ -350,6 +513,7 @@ describe('buildApiResponse', () => {
       gitHead: currentHead,
       current: false,
       invalidStoryIds: ['US-001'],
+      configurationError: null,
     });
     expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });

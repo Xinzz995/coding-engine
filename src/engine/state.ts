@@ -43,6 +43,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function displayableStoryId(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.id !== 'string') return null;
+  return value.id;
+}
+
 export function tryReadState(path: string): RunState | null {
   try {
     const parsed = parseRunStateBytes(readFileSync(path));
@@ -112,14 +117,22 @@ function legacyStateOf(story: Story): StoryState {
 
 export function initialStateFor(prd: Prd): RunState {
   const state: RunState = {};
-  for (const s of prd.userStories) state[s.id] = legacyStateOf(s);
+  for (const value of prd.userStories as unknown[]) {
+    const id = displayableStoryId(value);
+    if (id === null) continue;
+    state[id] = legacyStateOf(value as Story);
+  }
   return state;
 }
 
 // 运行期回退用：不读 story 上的 legacy 字段（防止已迁移的旧状态“复活”），全部按初始值。
 export function blankStateFor(prd: Prd): RunState {
   const state: RunState = {};
-  for (const s of prd.userStories) state[s.id] = INITIAL_STORY_STATE;
+  for (const value of prd.userStories as unknown[]) {
+    const id = displayableStoryId(value);
+    if (id === null) continue;
+    state[id] = INITIAL_STORY_STATE;
+  }
   return state;
 }
 
@@ -323,6 +336,79 @@ export function reconcileValidationReceipts(
     invalidatedStoryIds.push(story.id);
   }
   return { state: next, invalidatedStoryIds };
+}
+
+export interface StoryValidationDisplayCurrentness {
+  gitHead: string | null;
+  /** true 表示没有持久绿灯因当前 HEAD/PRD 失效，不表示全部 Story 已完成。 */
+  current: boolean;
+  /** 本次只读对账实际撤销验收的 Story；普通未完成项不在其中。 */
+  invalidStoryIds: string[];
+  /** Story 集合无法形成唯一身份时的配置错误；null 表示集合结构有效。 */
+  configurationError: string | null;
+}
+
+export interface StoryValidationDisplayEvaluation {
+  /** 仅用于展示的内存状态；调用方不得据此回写 state.json。 */
+  state: RunState;
+  /** Final Review 绑定使用的完整验收凭证集合摘要。 */
+  digest: string | null;
+  currentness: StoryValidationDisplayCurrentness;
+}
+
+/**
+ * status/report/dashboard 的 Story 验收展示单源。
+ *
+ * PRD Story 集合非法时，Story 身份已无法唯一对应持久状态：此时必须把所有 Story
+ * 的验收绿灯仅在内存中撤销，并显式暴露配置错误，不能继续按逐 Story 凭证对账。
+ */
+export function evaluateStoryValidationDisplay(
+  prd: Prd,
+  state: RunState,
+  currentGitHead: string | null,
+): StoryValidationDisplayEvaluation {
+  const storySet = validatePrdStorySet(prd);
+  const receiptSet = evaluateStoryValidationReceiptSet(prd, state, currentGitHead ?? '');
+  if (!storySet.valid) {
+    let next = state;
+    const invalidStoryIds = [
+      ...new Set(
+        (prd.userStories as unknown[])
+          .map(displayableStoryId)
+          .filter((storyId): storyId is string => storyId !== null),
+      ),
+    ];
+    for (const storyId of invalidStoryIds) {
+      const current = storyStateOf(state, storyId);
+      if (!current.validated && (current.validationReceipt ?? null) === null) continue;
+      next = {
+        ...next,
+        [storyId]: { ...current, validated: false, validationReceipt: null },
+      };
+    }
+    return {
+      state: next,
+      digest: null,
+      currentness: {
+        gitHead: currentGitHead,
+        current: false,
+        invalidStoryIds,
+        configurationError: storySet.message,
+      },
+    };
+  }
+
+  const reconciled = reconcileValidationReceipts(prd, state, currentGitHead ?? '');
+  return {
+    state: reconciled.state,
+    digest: receiptSet.digest,
+    currentness: {
+      gitHead: currentGitHead,
+      current: currentGitHead !== null && reconciled.invalidatedStoryIds.length === 0,
+      invalidStoryIds: reconciled.invalidatedStoryIds,
+      configurationError: null,
+    },
+  };
 }
 
 export interface EscalatedTamper {
@@ -591,6 +677,7 @@ export function enableEscalation(
 }
 
 export function getCurrentStoryId(prd: Prd, state: RunState): string | null {
+  if (!validatePrdStorySet(prd).valid) return null;
   for (const s of prd.userStories) {
     const st = storyStateOf(state, s.id);
     if (!isStoryPassed(st) && !st.blocked) return s.id;
@@ -599,6 +686,7 @@ export function getCurrentStoryId(prd: Prd, state: RunState): string | null {
 }
 
 export function allStoriesResolved(prd: Prd, state: RunState): boolean {
+  if (!validatePrdStorySet(prd).valid) return false;
   return prd.userStories.every((s) => {
     const st = storyStateOf(state, s.id);
     return isStoryPassed(st) || st.blocked;
@@ -646,8 +734,15 @@ export function allStoriesResolvedAt(prd: Prd, state: RunState, currentGitHead: 
 // 只读合并（不落盘）：state 为 null 时回退读 story 上的旧格式字段。
 // 消费方区分缺失/损坏时应先走 readDisplayState，避免损坏态复活 legacy 字段。
 export function mergedStories(prd: Prd, state: RunState | null): StoryView[] {
-  return prd.userStories.map((s) => ({
-    ...s,
-    ...(state ? storyStateOf(state, s.id) : legacyStateOf(s)),
-  }));
+  return (prd.userStories as unknown[]).flatMap((value) => {
+    const id = displayableStoryId(value);
+    if (id === null) return [];
+    const story = value as Story;
+    return [
+      {
+        ...story,
+        ...(state ? storyStateOf(state, id) : legacyStateOf(story)),
+      },
+    ];
+  });
 }

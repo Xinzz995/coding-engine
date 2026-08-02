@@ -229,6 +229,7 @@ describe('collectStatus', () => {
         gitHead: nextHead,
         current: false,
         invalidStoryIds: ['US-001'],
+        configurationError: null,
       });
       expect(renderStatusReport(report)).toMatchObject({ exitCode: 1 });
       expect(renderStatusReport(report).text).toContain('验收凭证已过期');
@@ -293,6 +294,7 @@ describe('collectStatus', () => {
         gitHead: currentHead,
         current: false,
         invalidStoryIds: ['US-001'],
+        configurationError: null,
       });
       expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
     } finally {
@@ -697,17 +699,84 @@ describe('renderStatusReport', () => {
     }
   });
 
-  it('treats an empty userStories list as not-green: warns and exits 1', () => {
+  it('treats an empty userStories list as an explicit configuration error', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [] }));
       const report = collectStatus(ws);
       if (report.status !== 'ok') throw new Error('expected ok');
-      expect(report.storyValidation.current).toBe(false);
+      expect(report.storyValidation).toMatchObject({
+        current: false,
+        invalidStoryIds: [],
+        configurationError: 'prd.json 必须包含至少一个 Story',
+      });
       const { text, exitCode } = renderStatusReport(report);
-      expect(text).toContain('没有任何 story');
+      expect(text).toContain('PRD Story 集合配置错误，验收无法验证');
       expect(text).not.toContain('全部 story 已通过');
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(2);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('非法 Story 元素不会让 status 崩溃，而是返回无法验证的配置错误', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [null] }));
+      const report = collectStatus(ws, { currentGitHead: CURRENT_GIT_HEAD });
+      if (report.status !== 'ok') throw new Error('expected ok');
+      expect(report.stories).toEqual([]);
+      expect(report.currentStoryId).toBeNull();
+      expect(report.storyValidation).toEqual({
+        gitHead: CURRENT_GIT_HEAD,
+        current: false,
+        invalidStoryIds: [],
+        configurationError: 'userStories[0] 的 Story ID 非法',
+      });
+      expect(renderStatusReport(report)).toMatchObject({ exitCode: 2 });
+      expect(renderStatusReport(report).text).toContain('验收无法验证');
+      expect(renderStatusJson(report)).toMatchObject({ exitCode: 2 });
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('重复 Story ID 时文本和 JSON 都撤销全部绿灯并暴露同一配置错误', () => {
+    const ws = makeWorkspace();
+    try {
+      const target = PRD.userStories[0];
+      const duplicatePrd = { ...PRD, userStories: [target, { ...target }] };
+      const persisted = { 'US-001': passedState(target) };
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(duplicatePrd));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify(persisted));
+
+      const report = collectStatus(ws, { currentGitHead: CURRENT_GIT_HEAD });
+      if (report.status !== 'ok') throw new Error('expected ok');
+      expect(report.stories).toHaveLength(2);
+      expect(report.stories.every((item) => item.passes && !item.validated)).toBe(true);
+      expect(report.storyValidation).toEqual({
+        gitHead: CURRENT_GIT_HEAD,
+        current: false,
+        invalidStoryIds: ['US-001'],
+        configurationError: 'userStories 包含重复 Story ID：US-001',
+      });
+
+      const textResult = renderStatusReport(report);
+      expect(textResult).toMatchObject({ exitCode: 2 });
+      expect(textResult.text).toContain('PRD Story 集合配置错误，验收无法验证');
+      expect(textResult.text).not.toContain('✅ US-001');
+
+      const jsonResult = renderStatusJson(report);
+      const json = JSON.parse(jsonResult.text) as {
+        stories: Array<{ validated: boolean }>;
+        storyValidation: { configurationError: string | null };
+      };
+      expect(jsonResult.exitCode).toBe(2);
+      expect(json.stories.every((item) => !item.validated)).toBe(true);
+      expect(json.storyValidation.configurationError).toBe(
+        'userStories 包含重复 Story ID：US-001',
+      );
+      expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -1098,13 +1167,15 @@ describe('renderStatusJson', () => {
     }
   });
 
-  it('treats an empty userStories list as not-green: exits 1, matching human-readable semantics', () => {
+  it('treats an empty userStories list as a machine-readable configuration error', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [] }));
       const { text, exitCode } = renderStatusJson(collectStatus(ws));
-      expect(JSON.parse(text).summary).toEqual({ total: 0, passed: 0, blocked: 0 });
-      expect(exitCode).toBe(1);
+      const json = JSON.parse(text);
+      expect(json.summary).toEqual({ total: 0, passed: 0, blocked: 0 });
+      expect(json.storyValidation.configurationError).toBe('prd.json 必须包含至少一个 Story');
+      expect(exitCode).toBe(2);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }

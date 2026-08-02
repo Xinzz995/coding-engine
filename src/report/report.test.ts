@@ -232,6 +232,7 @@ describe('collectReport ok 收集', () => {
       gitHead: nextHead,
       current: false,
       invalidStoryIds: ['US-001'],
+      configurationError: null,
     });
     expect(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))).toEqual(persisted);
   });
@@ -304,6 +305,7 @@ describe('collectReport ok 收集', () => {
       gitHead: currentHead,
       current: false,
       invalidStoryIds: ['US-001'],
+      configurationError: null,
     });
     expect(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))).toEqual(persisted);
   });
@@ -405,7 +407,69 @@ describe('writeReport', () => {
       gitHead: 'a'.repeat(40),
       current: false,
       invalidStoryIds: [],
+      configurationError: 'prd.json 必须包含至少一个 Story',
     });
+  });
+
+  it('非法 Story 元素不会让报告崩溃，而是输出无法验证的配置错误', () => {
+    const dir = ws();
+    const head = 'a'.repeat(40);
+    writePrd(dir, [null]);
+    const result = collectReport(dir, new Date(), { currentGitHead: head });
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.data.stories).toEqual([]);
+    expect(result.data.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'userStories[0] 的 Story ID 非法',
+    });
+    expect(() => writeReport(dir, new Date(), { currentGitHead: head })).not.toThrow();
+    expect(readFileSync(join(dir, 'report.html'), 'utf8')).toContain(
+      'PRD Story 集合配置错误，验收无法验证',
+    );
+  });
+
+  it('重复 Story ID 时报告数据和 HTML 都撤销全部绿灯且不改写状态文件', () => {
+    const dir = ws();
+    const head = 'a'.repeat(40);
+    const target = story('US-001');
+    writePrd(dir, [target, { ...target }]);
+    const persisted = {
+      'US-001': {
+        passes: true,
+        validated: true,
+        validationReceipt: {
+          schemaVersion: 1,
+          requestId: 'duplicate-report-receipt',
+          gitHead: head,
+          acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+        },
+        notes: '',
+        retryCount: 0,
+        blocked: false,
+        escalated: false,
+      },
+    };
+    writeFileSync(join(dir, 'state.json'), JSON.stringify(persisted));
+
+    const result = collectReport(dir, new Date(), { currentGitHead: head });
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.data.stories).toHaveLength(2);
+    expect(result.data.stories.every((item) => item.passes && !item.validated)).toBe(true);
+    expect(result.data.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: 'userStories 包含重复 Story ID：US-001',
+    });
+
+    writeReport(dir, new Date(), { currentGitHead: head });
+    const html = readFileSync(join(dir, 'report.html'), 'utf8');
+    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    expect(html).not.toContain('Story 验证完成');
+    expect(html).not.toContain('✅ 通过');
+    expect(JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
   it('原子写失败时保留上一份完整 report.html', () => {

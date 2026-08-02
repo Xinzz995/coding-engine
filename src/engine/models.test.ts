@@ -32,6 +32,18 @@ describe('readModelRouting', () => {
     expect(readModelRouting(prd())).toEqual({ status: 'enabled', config, errors: [] });
   });
 
+  it('reports malformed Story elements instead of dereferencing them', () => {
+    const malformed = {
+      ...prd(null, []),
+      userStories: [null],
+    } as unknown as Prd;
+    expect(readModelRouting(malformed)).toEqual({
+      status: 'invalid',
+      config: null,
+      errors: ['userStories[0] 形状非法：必须是对象'],
+    });
+  });
+
   it('requires all five non-empty model identifiers and a known runner', () => {
     const result = readModelRouting(prd({
       runner: 'other', builder: { low: '', medium: 'm' }, validator: ' ', escalation: 42,
