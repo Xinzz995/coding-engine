@@ -30,6 +30,11 @@ import {
 } from '../quality/validation-environment.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import { globMatches } from '../review/common.js';
+import {
+  sameExternalFileLinkIdentity,
+  type ExternalFileLinkIdentity,
+  type ExternalFileStatIdentity,
+} from './external-file-link-identity.js';
 
 export { CLEAN_VALIDATION_CHECKOUT_VERSION, validationEnvironmentDigest };
 const TEMP_PREFIX = 'coding-x-validation-';
@@ -64,21 +69,6 @@ interface DirectoryIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
   readonly uid: bigint;
-}
-
-interface ExternalFileStatIdentity extends DirectoryIdentity {
-  readonly mode: bigint;
-  readonly size: bigint;
-  readonly mtimeNs: bigint;
-  readonly ctimeNs: bigint;
-}
-
-interface ExternalFileLinkIdentity {
-  readonly resolvedPath: string;
-  readonly link: ExternalFileStatIdentity;
-  readonly linkTargetDigest: string;
-  readonly target: ExternalFileStatIdentity;
-  readonly targetDigest: string;
 }
 
 export interface CleanValidationCheckoutOptions {
@@ -181,34 +171,6 @@ function sameExternalFileStat(left: ExternalFileStatIdentity, right: BigIntStats
     left.size === right.size &&
     left.mtimeNs === right.mtimeNs &&
     left.ctimeNs === right.ctimeNs
-  );
-}
-
-function sameExternalFileStatIdentity(
-  left: ExternalFileStatIdentity,
-  right: ExternalFileStatIdentity,
-): boolean {
-  return (
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.uid === right.uid &&
-    left.mode === right.mode &&
-    left.size === right.size &&
-    left.mtimeNs === right.mtimeNs &&
-    left.ctimeNs === right.ctimeNs
-  );
-}
-
-function sameExternalFileLink(
-  left: ExternalFileLinkIdentity,
-  right: ExternalFileLinkIdentity,
-): boolean {
-  return (
-    left.resolvedPath === right.resolvedPath &&
-    sameExternalFileStatIdentity(left.link, right.link) &&
-    left.linkTargetDigest === right.linkTargetDigest &&
-    sameExternalFileStatIdentity(left.target, right.target) &&
-    left.targetDigest === right.targetDigest
   );
 }
 
@@ -927,7 +889,7 @@ function assertSafeArtifactTopology(
               );
             }
             const observed = snapshotExternalFileLink(target, resolved, path, context);
-            if (!sameExternalFileLink(permitted, observed)) {
+            if (!sameExternalFileLinkIdentity(permitted, observed)) {
               throw new CleanValidationCheckoutError(
                 'artifact-boundary-violated',
                 `${context}外部普通文件链接身份或内容发生变化：${path}`,

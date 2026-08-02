@@ -219,6 +219,18 @@ describe('parseQualityContract', () => {
     expect(result.digest).not.toBe(digestQualityContract(result.contract));
   });
 
+  it('rejects a globbed generated path while migrating a schema 1 default-branch contract', () => {
+    const legacy = clone();
+    legacy.schemaVersion = 1;
+    legacy.generatedPaths = ['x*/**'];
+    delete legacy.localValidation;
+    const result = parseReviewBaseQualityContract(legacy);
+    expect(result).toMatchObject({ status: 'invalid' });
+    if (result.status === 'invalid') {
+      expect(result.errors.join('\n')).toContain('基目录必须是字面路径');
+    }
+  });
+
   it('rejects an ambiguous schema 1 setup instead of trusting the candidate PR', () => {
     const legacy = clone();
     legacy.schemaVersion = 1;
@@ -362,6 +374,7 @@ describe('parseQualityContract', () => {
     ['generatedPaths', ['allowed-*/**'], '基目录必须是字面路径'],
     ['generatedPaths', ['.*/**'], '基目录必须是字面路径'],
     ['generatedPaths', ['src*/**'], '基目录必须是字面路径'],
+    ['generatedPaths', ['src?/**'], '基目录必须是字面路径'],
     ['generatedPaths', ['packages/[ab]/dist/**'], '基目录必须是字面路径'],
     ['generatedPaths', ['packages/{api,web}/dist/**'], '基目录必须是字面路径'],
     ['generatedPaths', ['bundle.js'], '必须是明确目录的 /** 模式'],

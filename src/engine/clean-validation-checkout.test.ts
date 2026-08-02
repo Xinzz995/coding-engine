@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -505,6 +506,62 @@ describe.runIf(
           await checkout.assertCurrent('外部普通文件链接写入前');
           writeFileSync(join(checkout.root, 'node_modules', 'tool'), 'changed\n');
           await expect(checkout.assertCurrent('外部普通文件链接写入后')).rejects.toMatchObject({
+            code: 'artifact-boundary-violated',
+          });
+        } finally {
+          expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+        }
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'invalidates a prepared external file link when its target is replaced with identical content',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const external = mkdtempSync(join(tmpdir(), 'coding-x-external-file-'));
+      roots.push(external);
+      const target = join(external, 'tool');
+      const replacement = join(external, 'replacement');
+      writeFileSync(target, 'original\n');
+      const originalIdentity = lstatSync(target, { bigint: true });
+      const managed = await createManagedProcessTestSession();
+      try {
+        const checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract({
+            prepare: [
+              {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  `require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync(${JSON.stringify(target)}, 'node_modules/tool')`,
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos'],
+                timeoutMs: 5_000,
+              },
+            ],
+          }),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        try {
+          writeFileSync(replacement, 'original\n');
+          const replacementIdentity = lstatSync(replacement, { bigint: true });
+          expect({ dev: replacementIdentity.dev, ino: replacementIdentity.ino }).not.toEqual({
+            dev: originalIdentity.dev,
+            ino: originalIdentity.ino,
+          });
+          renameSync(replacement, target);
+          expect(readFileSync(target, 'utf8')).toBe('original\n');
+          expect(realpathSync(join(checkout.root, 'node_modules', 'tool'))).toBe(
+            realpathSync(target),
+          );
+          await expect(checkout.assertCurrent('外部普通文件链接目标替换后')).rejects.toMatchObject({
             code: 'artifact-boundary-violated',
           });
         } finally {
