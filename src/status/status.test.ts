@@ -701,7 +701,10 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [] }));
-      const { text, exitCode } = renderStatusReport(collectStatus(ws));
+      const report = collectStatus(ws);
+      if (report.status !== 'ok') throw new Error('expected ok');
+      expect(report.storyValidation.current).toBe(false);
+      const { text, exitCode } = renderStatusReport(report);
       expect(text).toContain('没有任何 story');
       expect(text).not.toContain('全部 story 已通过');
       expect(exitCode).toBe(1);

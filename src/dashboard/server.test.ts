@@ -151,6 +151,41 @@ describe('buildApiResponse', () => {
     expect(r.logs).toContain('US-001');
   });
 
+  it('非法空 Story 集合不能显示为当前验收结果', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dashboard-empty-stories-'));
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+    const ws = join(root, '.workspace');
+    mkdirSync(ws);
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q');
+    git('config', 'user.name', 'coding-x test');
+    git('config', 'user.email', 'coding-x@example.test');
+    git('config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'initial\n');
+    git('add', 'tracked.txt');
+    git('commit', '-qm', 'initial');
+    const head = git('rev-parse', 'HEAD');
+    writeFileSync(
+      join(ws, 'prd.json'),
+      JSON.stringify({
+        project: 'empty-stories',
+        branchName: 'feature/empty',
+        description: 'd',
+        userStories: [],
+      }),
+    );
+    writeFileSync(join(ws, 'state.json'), '{}');
+    writeFileSync(join(ws, 'progress.md'), '');
+
+    configureWorkspace(ws, 50, root);
+    expect(buildApiResponse().storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: [],
+    });
+  });
+
   it('按项目当前 HEAD 只在内存中撤销过期的 Validator 绿灯', () => {
     const root = mkdtempSync(join(tmpdir(), 'dashboard-head-'));
     cleanup.push(() => rmSync(root, { recursive: true, force: true }));

@@ -396,6 +396,18 @@ describe('writeReport', () => {
     expect(html).not.toContain('全部通过');
   });
 
+  it('非法空 Story 集合不能显示为当前验收结果', () => {
+    const dir = ws();
+    writePrd(dir, []);
+    const result = collectReport(dir, new Date(), { currentGitHead: 'a'.repeat(40) });
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.data.storyValidation).toEqual({
+      gitHead: 'a'.repeat(40),
+      current: false,
+      invalidStoryIds: [],
+    });
+  });
+
   it('原子写失败时保留上一份完整 report.html', () => {
     const dir = ws();
     writePrd(dir, [story('US-001')]);

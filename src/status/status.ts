@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { tryReadPrd, type Prd } from '../engine/prd.js';
+import { tryReadPrd, validatePrdStorySet, type Prd } from '../engine/prd.js';
 import {
   readDisplayState,
   mergedStories,
@@ -215,6 +215,7 @@ function collectStatusControlled(
     options.currentGitHead === undefined
       ? readGitHead(options.projectRoot ?? process.cwd())
       : options.currentGitHead;
+  const storySet = validatePrdStorySet(prd);
   const storyValidationSet = evaluateStoryValidationReceiptSet(
     prd,
     state,
@@ -249,7 +250,9 @@ function collectStatusControlled(
     storyValidation: {
       gitHead: currentGitHead,
       current:
-        currentGitHead !== null && reconciledStoryValidation.invalidatedStoryIds.length === 0,
+        currentGitHead !== null &&
+        storySet.valid &&
+        reconciledStoryValidation.invalidatedStoryIds.length === 0,
       invalidStoryIds: reconciledStoryValidation.invalidatedStoryIds,
     },
     finalReview: collectCurrentReviewStatus({

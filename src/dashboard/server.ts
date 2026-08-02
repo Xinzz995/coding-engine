@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
+import { tryReadPrd, validatePrdStorySet, type StoryDifficulty } from '../engine/prd.js';
 import {
   readDisplayState,
   reconcileValidationReceipts,
@@ -126,6 +126,7 @@ function buildApiResponseForWorkspace(
   const prd = tryReadPrd(join(workspace, 'prd.json'));
   const displayState = prd ? readDisplayState(join(workspace, 'state.json'), prd) : null;
   const currentGitHead = readGitHead(projectRoot);
+  const storySet = prd ? validatePrdStorySet(prd) : null;
   const reconciledStoryValidation =
     prd && displayState
       ? reconcileValidationReceipts(prd, displayState.state, currentGitHead ?? '')
@@ -153,6 +154,7 @@ function buildApiResponseForWorkspace(
       gitHead: currentGitHead,
       current:
         currentGitHead !== null &&
+        storySet?.valid === true &&
         reconciledStoryValidation !== null &&
         reconciledStoryValidation.invalidatedStoryIds.length === 0,
       invalidStoryIds: reconciledStoryValidation?.invalidatedStoryIds ?? [],

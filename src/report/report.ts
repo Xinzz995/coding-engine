@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { tryReadPrd, type Prd } from '../engine/prd.js';
+import { tryReadPrd, validatePrdStorySet, type Prd } from '../engine/prd.js';
 import {
   evaluateStoryValidationReceiptSet,
   readDisplayState,
@@ -149,6 +149,7 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
   const statePath = join(workspace, 'state.json');
   const { state, stateCorrupted } = readDisplayState(statePath, prd);
   const currentGitHead = options.currentGitHead ?? null;
+  const storySet = validatePrdStorySet(prd);
   const storyValidation = evaluateStoryValidationReceiptSet(prd, state, currentGitHead ?? '');
   const reconciledStoryValidation = reconcileValidationReceipts(
     prd,
@@ -176,7 +177,9 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
       storyValidation: {
         gitHead: currentGitHead,
         current:
-          currentGitHead !== null && reconciledStoryValidation.invalidatedStoryIds.length === 0,
+          currentGitHead !== null &&
+          storySet.valid &&
+          reconciledStoryValidation.invalidatedStoryIds.length === 0,
         invalidStoryIds: reconciledStoryValidation.invalidatedStoryIds,
       },
       progress: readProgress(join(workspace, 'progress.md')),
