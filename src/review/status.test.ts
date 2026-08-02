@@ -2,13 +2,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { digestFinalReviewMechanicalEnvironment } from '../engine/story-validation-currentness.js';
 import type { QualityContract } from '../quality/contract.js';
 import type { GitHubQualityClient } from '../quality/github.js';
 import { GITHUB_ACTIONS_APP_ID } from '../quality/github.js';
 import { buildManagedRulesetPayload } from '../quality/ruleset.js';
 import { renderStatusReport, type StatusReport } from '../status/status.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
-import { createReviewBinding } from './binding.js';
+import { createReviewBinding, digestReviewBinding } from './binding.js';
 import { digest } from './common.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { applyReviewerRequestedDeepReview, assessReviewRisk } from './risk.js';
@@ -43,7 +44,7 @@ function writeReadyReview(workspace: string): void {
     join(workspace, 'final-review.json'),
     `${JSON.stringify(
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         status: 'passed',
         deliveryStatus: 'ready',
         binding: {
@@ -56,6 +57,8 @@ function writeReadyReview(workspace: string): void {
           specDigest: 'spec',
           engineeringStandardsDigest: 'standards',
           qualityContractDigest: 'contract',
+          validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
+          storyValidationDigest: STORY_VALIDATION_DIGEST,
           codingXVersion: '0.34.0',
           runner: 'codex',
           model: 'review-model',
@@ -111,6 +114,7 @@ function reviewContext(): ReviewPreflightContext {
     repository: { provider: 'github', fullName: 'owner/repo', defaultBranch: 'main' },
     github: { requiredChecks: ['quality-gate'], requiredCodeScanning: [] },
     release: { protectedRefs: [] },
+    exceptions: { p1: { maxDays: 30 }, policy: { maxDays: 7 } },
     modules: [{ id: 'root', path: '.' }],
     generatedPaths: [],
     risk: { defaultCategories: [], highRiskPaths: [], pathRules: [] },
@@ -189,7 +193,7 @@ function writeBoundReview(
       ]
     : primaryAxes;
   const state: FinalReviewState = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'passed',
     deliveryStatus: 'ready',
     binding: createReviewBinding({
@@ -200,6 +204,10 @@ function writeBoundReview(
       model: 'review-model',
       runnerVersion: 'codex 1.2.3',
       storyValidationDigest: STORY_VALIDATION_DIGEST,
+      validationEnvironmentDigest: digestFinalReviewMechanicalEnvironment({
+        contract: context.baseContract,
+        headSha: context.headSha,
+      }),
     }),
     risk,
     axes,
@@ -296,8 +304,14 @@ describe('collectCurrentReviewStatus currentness binding', () => {
     writeBoundReview(workspace, context);
     const reviewPath = join(workspace, 'final-review.json');
     const legacy = JSON.parse(readFileSync(reviewPath, 'utf8')) as {
-      binding: { storyValidationDigest?: string };
+      schemaVersion: number;
+      binding: {
+        validationEnvironmentDigest?: string;
+        storyValidationDigest?: string;
+      };
     };
+    legacy.schemaVersion = 1;
+    delete legacy.binding.validationEnvironmentDigest;
     delete legacy.binding.storyValidationDigest;
     writeFileSync(reviewPath, JSON.stringify(legacy));
 
@@ -315,7 +329,7 @@ describe('collectCurrentReviewStatus currentness binding', () => {
     };
     expect(collectCurrentReviewStatus(baseOptions)).toMatchObject({
       current: false,
-      staleReasons: ['旧 Final Review 未绑定 Story 验收凭证集合'],
+      staleReasons: ['旧 Final Review schema 已失效'],
     });
 
     writeBoundReview(workspace, context);
@@ -472,5 +486,115 @@ describe('collectCurrentReviewStatus currentness binding', () => {
       finalReview: result,
     } as unknown as StatusReport);
     expect(rendered.exitCode).toBe(6);
+  });
+
+  it('revalidates the exact P1 deferral Issue and fails closed after it is closed', () => {
+    const workspace = temporaryDirectory('review-status-p1-deferral-');
+    const context = reviewContext();
+    writeBoundReview(workspace, context);
+    const reviewPath = join(workspace, 'final-review.json');
+    const state = JSON.parse(readFileSync(reviewPath, 'utf8')) as FinalReviewState;
+    const finding = {
+      id: 'engineering:P1:deferred',
+      axis: 'engineering' as const,
+      severity: 'P1' as const,
+      title: 'deferred problem',
+      location: { path: 'src/demo.ts', line: 1 },
+      ruleSource: 'AGENTS.md',
+      impact: 'delivery remains risky',
+      recommendation: 'fix it',
+      requiresHumanDecision: false,
+      prNumber: state.binding.prNumber,
+      baseSha: state.binding.baseSha,
+      headSha: state.binding.headSha,
+      round: state.round,
+    };
+    state.axes.find((axis) => axis.axis === 'engineering')!.findings.push(finding);
+    writeFileSync(reviewPath, `${JSON.stringify(state, null, 2)}\n`);
+    writeFileSync(
+      join(workspace, 'review-decisions.json'),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        decisions: [
+          {
+            findingId: finding.id,
+            headSha: state.binding.headSha,
+            reviewBindingDigest: digestReviewBinding(state.binding),
+            action: 'p1-deferred',
+            operator: 'owner',
+            at: '2026-07-26T00:00:00.000Z',
+            issue: 42,
+          },
+        ],
+      })}\n`,
+    );
+    const ruleset = {
+      id: 1,
+      ...buildManagedRulesetPayload(null, [
+        { context: 'quality-gate', integration_id: GITHUB_ACTIONS_APP_ID },
+      ]),
+    };
+    let currentBody = context.pullRequest.body;
+    const client = {
+      listRulesets: () => [ruleset],
+      listCheckRuns: () => [
+        {
+          id: 1,
+          name: 'quality-gate',
+          headSha: context.headSha,
+          status: 'completed',
+          conclusion: 'success',
+          app: { id: GITHUB_ACTIONS_APP_ID, slug: 'github-actions', name: 'GitHub Actions' },
+        },
+      ],
+      getIssue: () => {
+        currentBody = 'P1 Issue 查询期间 PR 正文发生变化';
+        return {
+          number: 42,
+          state: 'closed' as const,
+          title: 'defer',
+          url: 'https://example.test/issues/42',
+          labels: ['quality-p1-deferral'],
+          isPullRequest: false,
+          body: [
+            '### 负责人',
+            '@owner',
+            '### 原因',
+            '等待兼容窗口',
+            '### 到期日',
+            '2026-08-01',
+            '### 跟进事项',
+            '补齐实现与回归',
+          ].join('\n'),
+        };
+      },
+    } as unknown as GitHubQualityClient;
+    const common = {
+      workspace,
+      projectRoot: '/project',
+      client,
+      codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
+      runnerVersionObservation: {
+        status: 'ready' as const,
+        runner: 'codex' as const,
+        version: 'codex 1.2.3',
+      },
+      preflight: () => ({ status: 'ready' as const, context }),
+      revalidate: () =>
+        currentBody === context.pullRequest.body
+          ? { ok: true as const }
+          : { ok: false as const, message: '评审期间 PR 标题或正文发生变化' },
+      now: new Date('2026-07-26T12:00:00.000Z'),
+    };
+
+    expect(collectCurrentReviewStatus(common).staleReasons).toContain(
+      'P1 延期 Issue 未经过当前 GitHub 状态核验',
+    );
+    const refreshed = collectCurrentReviewStatus({ ...common, refreshRemote: true });
+    expect(refreshed.current).toBe(false);
+    expect(refreshed.staleReasons).toContain('engineering:P1:deferred：延期引用必须是开放 Issue');
+    expect(refreshed.staleReasons).toContain('评审期间 PR 标题或正文发生变化');
+    expect(refreshed).not.toHaveProperty('refreshedRemote');
   });
 });

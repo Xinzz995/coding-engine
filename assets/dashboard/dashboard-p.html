@@ -386,7 +386,7 @@ function formatElapsed(sec) {
 const stateLabel = { active:'进行中', passed:'已通过', failed:'未通过', blocked:'已阻塞', awaiting:'待引擎验收', pending:'待执行' };
 const stateColor = { active:'#4a9eff', passed:'#4ade80', failed:'#f87171', blocked:'#fb923c', awaiting:'#c084fc', pending:'#6b7280' };
 const phaseEmoji = { idle:'⏸', developing:'🤖', validating:'🔍', done:'✅', blocked:'⏸', shadow:'🧪', error:'❌' };
-const phaseText = { idle:'等待启动', developing:'开发中', validating:'验证中', done:'全部完成', blocked:'等待处理', shadow:'影子验证完成', error:'出现错误' };
+const phaseText = { idle:'等待启动', developing:'开发中', validating:'验证中', done:'本次运行已完成', blocked:'等待处理', shadow:'影子验证完成', error:'出现错误' };
 
 function effectiveDashboardPhase(runtimePhase, stateCorrupted, storyValidation, reviewCompletion) {
   const validationUnavailable = stateCorrupted || !storyValidation

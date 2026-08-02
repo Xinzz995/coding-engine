@@ -100,6 +100,7 @@ function localIssues(
 function currentP1IssueNumbers(root: string, workspace: string): number[] {
   const review = readFinalReviewState(join(root, workspace));
   if (review.status !== 'ready') return [];
+  if (review.state.schemaVersion !== 2) return [];
   const bindingDigest = digestReviewBinding(review.state.binding);
   const decisions = readReviewDecisions(join(root, workspace)).decisions.filter(
     (decision) =>

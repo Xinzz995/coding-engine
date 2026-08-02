@@ -1,8 +1,19 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, readdirSync, mkdirSync, unlinkSync, chmodSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  readFileSync,
+  readdirSync,
+  mkdirSync,
+  unlinkSync,
+  chmodSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createPrdGuard } from './prd-guard.js';
+import { createManagedPrdGuard, createPrdGuard } from './prd-guard.js';
+import type { WorkspaceWriteData, WorkspaceWriter } from '../workspace-safety/session.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -20,9 +31,19 @@ function setup(content?: string): { dir: string; prdPath: string } {
 }
 
 const PRD = JSON.stringify({
-  project: 'p', branchName: 'ralph/x', description: 'd',
+  project: 'p',
+  branchName: 'ralph/x',
+  description: 'd',
   qualityChecks: ['npm test'],
-  userStories: [{ id: 'US-001', title: 't', description: 'd', acceptanceCriteria: ['原始验收标准'], priority: 1 }],
+  userStories: [
+    {
+      id: 'US-001',
+      title: 't',
+      description: 'd',
+      acceptanceCriteria: ['原始验收标准'],
+      priority: 1,
+    },
+  ],
 });
 
 describe('createPrdGuard: 快照建立与一致读取', () => {
@@ -63,6 +84,28 @@ describe('createPrdGuard: 快照建立与一致读取', () => {
 });
 
 describe('createPrdGuard: 篡改处置', () => {
+  it.runIf(process.platform !== 'win32')('managed guard 恢复 FIFO 而不等待写端', async () => {
+    const { dir, prdPath } = setup(PRD);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const writer = {
+      workspacePath: dir,
+      writeFile: async (relativePath: string, data: WorkspaceWriteData) => {
+        const path = join(dir, relativePath);
+        rmSync(path, { force: true, recursive: true });
+        writeFileSync(path, data);
+      },
+    } as unknown as WorkspaceWriter;
+    const guard = createManagedPrdGuard(prdPath, writer);
+    expect((await guard.read()).prd?.project).toBe('p');
+    unlinkSync(prdPath);
+    execFileSync('mkfifo', [prdPath]);
+
+    const restored = await guard.read();
+
+    expect(restored).toMatchObject({ restoreFailed: false, prd: { project: 'p' } });
+    expect(readFileSync(prdPath, 'utf8')).toBe(PRD);
+  });
+
   it('篡改后 read 返回快照、磁盘被恢复、篡改版被存档', () => {
     const { dir, prdPath } = setup(PRD);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

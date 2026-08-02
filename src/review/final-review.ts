@@ -7,6 +7,15 @@ import type { AgentKind } from '../engine/agent.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { GitHubReviewReadClient } from '../quality/github.js';
 import type { QualityContract } from '../quality/contract.js';
+import {
+  digestFinalReviewMechanicalEnvironment,
+  finalReviewMechanicalEnvironmentPolicy,
+} from '../engine/story-validation-currentness.js';
+import {
+  createCleanValidationCheckout,
+  describeCleanValidationCheckoutCleanup,
+  type CleanValidationCheckout,
+} from '../engine/clean-validation-checkout.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { workspacePathsReferToSameDirectory } from '../workspace-safety/filesystem.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
@@ -71,7 +80,7 @@ type AxisRunner = (options: {
 }) => Promise<SafeRunnerInvocation>;
 
 export type StoryValidationBindingObservation =
-  | { status: 'ready'; digest: string }
+  | { status: 'ready'; digest: string; observationToken: string }
   | { status: 'unverifiable'; message: string };
 
 function findingId(axis: ReviewAxis, finding: ModelReviewOutput['findings'][number]): string {
@@ -171,6 +180,8 @@ export async function runFinalReview(options: {
   probe?: typeof probeRunnerIsolation;
   axisRunner?: AxisRunner;
   runnerVersion?: string;
+  /** @internal Deterministic Runner identity seam; production fixes readRunnerVersion. */
+  runnerVersionReader?: typeof readRunnerVersion;
   remote?: (
     context: ReviewPreflightContext,
     contract: QualityContract,
@@ -180,8 +191,7 @@ export async function runFinalReview(options: {
   storyValidationDigest: string;
   /** 在同一 workspace session 中只读重算当前 PRD/state/HEAD 的凭证集合。 */
   observeStoryValidation: () =>
-    | StoryValidationBindingObservation
-    | Promise<StoryValidationBindingObservation>;
+    StoryValidationBindingObservation | Promise<StoryValidationBindingObservation>;
   termination?: ManagedGateContext['termination'];
 }): Promise<FinalReviewOutcome> {
   const startedAt = new Date().toISOString();
@@ -217,6 +227,66 @@ export async function runFinalReview(options: {
     };
   }
   const model = options.model.trim();
+  const round = initialRound(workspace);
+  const isolateAfterStateRevocationFailure = (message: string): string => {
+    if (options.session.state === 'open') {
+      try {
+        options.session.retainLeaseForIsolation();
+        return `${message}；workspace 已隔离，活动租约已保留`;
+      } catch (error) {
+        return `${message}；workspace 无法进入隔离：${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    }
+    return `${message}；workspace session 处于 ${options.session.state}，活动状态不得视为已安全收口`;
+  };
+  // 一旦用户明确发起新一轮 Review，就先撤销旧结论。后续任何前置检查、受管观察或
+  // 远端读取失败，都不能让旧绿色结果继续冒充本轮结论。
+  try {
+    await invalidateFinalReviewState(options.session.writer);
+  } catch (error) {
+    return {
+      exitCode: 5,
+      message: isolateAfterStateRevocationFailure(
+        `无法先撤销旧 Final Review：${error instanceof Error ? error.message : String(error)}`,
+      ),
+    };
+  }
+  let storyObservationToken: string | null = null;
+  const verifyStoryValidationBinding = async (
+    phase: string,
+    establish = false,
+  ): Promise<string | null> => {
+    if (!/^sha256:[a-f0-9]{64}$/u.test(options.storyValidationDigest)) {
+      return `${phase}Story 验收凭证集合摘要非法；本轮 Review 已作废`;
+    }
+    try {
+      const observed = await options.observeStoryValidation();
+      if (observed.status !== 'ready') {
+        return `${phase}Story 验收凭证集合无法验证：${observed.message}`;
+      }
+      if (!/^sha256:[a-f0-9]{64}$/u.test(observed.observationToken)) {
+        return `${phase}Story 验收观察令牌非法；本轮 Review 已作废`;
+      }
+      if (observed.digest !== options.storyValidationDigest) {
+        return `${phase}Story 验收凭证集合发生变化；本轮 Review 已作废`;
+      }
+      if (establish) {
+        storyObservationToken = observed.observationToken;
+        return null;
+      }
+      return storyObservationToken === observed.observationToken
+        ? null
+        : `${phase}Story 验收权威输入发生变化；本轮 Review 已作废`;
+    } catch (error) {
+      return `${phase}Story 验收凭证集合无法验证：${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+  };
+  const initialStoryError = await verifyStoryValidationBinding('最终 Review 启动前：', true);
+  if (initialStoryError) return { exitCode: 5, message: initialStoryError };
   const managedObservation =
     options.observation ??
     createManagedReviewObservation({
@@ -242,28 +312,6 @@ export async function runFinalReview(options: {
     return { exitCode, message: preflight.message };
   }
   const context = preflight.context;
-  const round = initialRound(workspace);
-  // 先使旧结果失效，再进入本轮任何可失败环节。否则同一 head 上的机械
-  // 检查回归、裁决文件损坏或 Runner 中断可能让 status 继续读到旧的绿色结果。
-  await invalidateFinalReviewState(options.session.writer);
-  const verifyStoryValidationBinding = async (phase: string): Promise<string | null> => {
-    if (!/^sha256:[a-f0-9]{64}$/u.test(options.storyValidationDigest)) {
-      return `${phase}Story 验收凭证集合摘要非法；本轮 Review 已作废`;
-    }
-    try {
-      const observed = await options.observeStoryValidation();
-      if (observed.status !== 'ready') {
-        return `${phase}Story 验收凭证集合无法验证：${observed.message}`;
-      }
-      return observed.digest === options.storyValidationDigest
-        ? null
-        : `${phase}Story 验收凭证集合发生变化；本轮 Review 已作废`;
-    } catch (error) {
-      return `${phase}Story 验收凭证集合无法验证：${
-        error instanceof Error ? error.message : String(error)
-      }`;
-    }
-  };
   let decisions;
   try {
     decisions = readReviewDecisions(workspace);
@@ -273,15 +321,87 @@ export async function runFinalReview(options: {
       message: `Review 裁决记录无效：${error instanceof Error ? error.message : String(error)}`,
     };
   }
+  const decisionsDigest = digest(decisions);
+  const verifyDecisionsSnapshot = (phase: string): string | null => {
+    try {
+      return digest(readReviewDecisions(workspace)) === decisionsDigest
+        ? null
+        : `${phase}Review 裁决记录发生变化；本轮 Review 已作废`;
+    } catch (error) {
+      return `${phase}Review 裁决记录无法验证：${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+  };
 
   const managedGate: ManagedGateContext = {
     session: options.session,
     kind: 'final-review',
     termination: options.termination,
   };
-  const gate = await (options.gate
-    ? options.gate(context.baseContract, context.root, managedGate)
-    : runContractQualityChecks(context.baseContract.checks, context.root, undefined, managedGate));
+  let mechanicalCheckout: CleanValidationCheckout | null = null;
+  let mechanicalRoot = context.root;
+  const mechanicalValidationEnvironmentDigest = digestFinalReviewMechanicalEnvironment({
+    contract: context.baseContract,
+    headSha: context.headSha,
+  });
+  let gate: ContractGateResult | null = null;
+  let mechanicalEnvironmentError: string | null = null;
+  try {
+    if (!options.gate) {
+      mechanicalCheckout = await createCleanValidationCheckout({
+        sourceRoot: context.root,
+        head: context.headSha,
+        contract: context.baseContract,
+        ...finalReviewMechanicalEnvironmentPolicy(),
+        managed: managedGate,
+      });
+      mechanicalRoot = mechanicalCheckout.root;
+      if (mechanicalCheckout.environmentDigest !== mechanicalValidationEnvironmentDigest) {
+        throw new Error('最终 Review 干净检出返回的机械环境摘要与引擎预计算值不一致');
+      }
+      const preparedStoryError =
+        await verifyStoryValidationBinding('最终 Review 干净检出准备结束后：');
+      if (preparedStoryError) return { exitCode: 5, message: preparedStoryError };
+    }
+    gate = await (options.gate
+      ? options.gate(context.baseContract, context.root, managedGate)
+      : runContractQualityChecks(
+          context.baseContract.checks,
+          mechanicalRoot,
+          undefined,
+          mechanicalCheckout
+            ? {
+                ...managedGate,
+                environment: mechanicalCheckout.processEnvironment,
+                forbiddenExecutableRoot: context.root,
+              }
+            : managedGate,
+        ));
+    if (mechanicalCheckout) {
+      await mechanicalCheckout.assertCurrent('最终 Review 机械检查结束后');
+    }
+  } catch (error) {
+    mechanicalEnvironmentError = error instanceof Error ? error.message : String(error);
+  } finally {
+    if (mechanicalCheckout) {
+      const cleanup = mechanicalCheckout.cleanup();
+      if (cleanup.status !== 'removed') {
+        mechanicalEnvironmentError =
+          `${mechanicalEnvironmentError ? `${mechanicalEnvironmentError}；` : ''}` +
+          `临时验证目录未能安全清理，${describeCleanValidationCheckoutCleanup(cleanup)}`;
+      }
+    }
+  }
+  if (mechanicalEnvironmentError) {
+    return {
+      exitCode: 5,
+      message: `最终 Review 的机械验证环境不可验证：${mechanicalEnvironmentError}`,
+    };
+  }
+  if (!gate) {
+    return { exitCode: 5, message: '最终 Review 的机械检查没有返回结果' };
+  }
   if (options.termination?.signal.aborted) {
     return { exitCode: 5, message: '最终 Review 已由用户中断；旧结果保持失效' };
   }
@@ -298,6 +418,7 @@ export async function runFinalReview(options: {
     status: 'passed' as const,
     headSha: context.headSha,
     qualityContractDigest: context.baseContractDigest,
+    validationEnvironmentDigest: mechanicalValidationEnvironmentDigest,
     scope: 'all-current-platform-applicable-contract-checks' as const,
   };
   const preModelStoryError = await verifyStoryValidationBinding('机械检查结束后、模型调用前：');
@@ -307,7 +428,7 @@ export async function runFinalReview(options: {
   try {
     runnerVersion =
       options.runnerVersion ??
-      (await readRunnerVersion({
+      (await (options.runnerVersionReader ?? readRunnerVersion)({
         session: options.session,
         runner: options.runner,
         projectRoot: context.root,
@@ -329,13 +450,14 @@ export async function runFinalReview(options: {
       model,
       runnerVersion,
       storyValidationDigest: options.storyValidationDigest,
+      validationEnvironmentDigest: mechanicalValidationEnvironmentDigest,
     });
   const revalidateContext = async () =>
     await (options.revalidate?.() ?? revalidateReviewContext(context, workspace, observation));
   const verifyRunnerVersion = async (phase: string): Promise<string | null> => {
     if (options.runnerVersion !== undefined) return null;
     try {
-      const currentRunnerVersion = await readRunnerVersion({
+      const currentRunnerVersion = await (options.runnerVersionReader ?? readRunnerVersion)({
         session: options.session,
         runner: options.runner,
         projectRoot: context.root,
@@ -348,6 +470,43 @@ export async function runFinalReview(options: {
       return `${phase}无法核对 Runner 版本：${error instanceof Error ? error.message : String(error)}`;
     }
   };
+  const verifyReviewAuthorities = async (
+    phase: string,
+    includeDecisions: boolean,
+  ): Promise<string | null> => {
+    const storyError = await verifyStoryValidationBinding(`${phase}：`);
+    if (storyError) return storyError;
+    const runnerError = await verifyRunnerVersion(`${phase}：`);
+    if (runnerError) return runnerError;
+    const decisionsError = includeDecisions ? verifyDecisionsSnapshot(`${phase}：`) : null;
+    if (decisionsError) return decisionsError;
+    const revalidated = await revalidateContext();
+    return revalidated.ok ? null : `${phase}：${revalidated.message}；本轮 Review 已作废`;
+  };
+  const persistVerifiedState = async (
+    state: FinalReviewState,
+    includeDecisions: boolean,
+  ): Promise<string | null> => {
+    const before = await verifyReviewAuthorities('最终 Review 状态落盘前', includeDecisions);
+    if (before) return before;
+    const persistenceError = await persistState(state);
+    if (persistenceError) return persistenceError;
+    const after = await verifyReviewAuthorities('最终 Review 状态落盘后', includeDecisions);
+    if (!after) return null;
+    try {
+      await invalidateFinalReviewState(options.session.writer);
+      return `${after}；刚写入的状态已撤销`;
+    } catch (error) {
+      return isolateAfterStateRevocationFailure(
+        `${after}；刚写入的状态无法安全撤销：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  };
+
+  const beforeProbeError = await verifyReviewAuthorities('Runner 隔离探测前', false);
+  if (beforeProbeError) return { exitCode: 5, message: beforeProbeError };
 
   let probe: RunnerIsolationProbe;
   try {
@@ -371,8 +530,10 @@ export async function runFinalReview(options: {
       failures: [error instanceof Error ? error.message : String(error)],
     };
   }
-  const postProbeStoryError = await verifyStoryValidationBinding('Runner 隔离探测结束后：');
-  if (postProbeStoryError) return { exitCode: 5, message: postProbeStoryError };
+  const postProbeCurrentnessError = await verifyReviewAuthorities('Runner 隔离探测结束后', false);
+  if (postProbeCurrentnessError) {
+    return { exitCode: 5, message: postProbeCurrentnessError };
+  }
   if (!probe.ok) {
     const summary = `Runner 隔离反测未通过：${probe.failures.join('；')}`;
     if (options.session.state !== 'open') {
@@ -394,15 +555,8 @@ export async function runFinalReview(options: {
       attempts: 1,
     }));
     const remoteState = await remote();
-    const runnerError = await verifyRunnerVersion('远端核验后');
-    if (runnerError) return { exitCode: 5, message: runnerError };
-    const finallyRevalidated = await revalidateContext();
-    if (!finallyRevalidated.ok) {
-      return {
-        exitCode: 5,
-        message: `${finallyRevalidated.message}；远端核验后的本轮 Review 已作废，请重新运行 coding-x`,
-      };
-    }
+    const remoteCurrentnessError = await verifyReviewAuthorities('远端核验后', false);
+    if (remoteCurrentnessError) return { exitCode: 5, message: remoteCurrentnessError };
     const state = makeState({
       status: 'unverifiable',
       deliveryStatus: 'unverifiable',
@@ -414,9 +568,7 @@ export async function runFinalReview(options: {
       shadow: options.shadow ?? false,
       startedAt,
     });
-    const prePersistStoryError = await verifyStoryValidationBinding('最终 Review 状态落盘前：');
-    if (prePersistStoryError) return { exitCode: 5, message: prePersistStoryError };
-    const persistenceError = await persistState(state);
+    const persistenceError = await persistVerifiedState(state, false);
     if (persistenceError !== null) return { exitCode: 5, message: persistenceError };
     return stateOutcome(state);
   }
@@ -425,7 +577,11 @@ export async function runFinalReview(options: {
   const axisRunner = options.axisRunner ?? runSafeReviewAxis;
   const runAxis = async (
     axis: ReviewAxis,
-  ): Promise<{ readonly stop: boolean; readonly diagnostic?: string }> => {
+  ): Promise<{
+    readonly stop: boolean;
+    readonly diagnostic?: string;
+    readonly currentnessError?: string;
+  }> => {
     let reviewPackage: ReturnType<typeof createReviewPackage> | null = null;
     let result: ReviewAxisResult;
     let stop = false;
@@ -509,18 +665,30 @@ export async function runFinalReview(options: {
       stop = true;
     }
     axes.push(result);
-    return cleanupDiagnostic === undefined
-      ? { stop }
-      : { stop, diagnostic: cleanupDiagnostic };
+    const currentnessError = await verifyReviewAuthorities(`${axis} Review 结束后`, false);
+    return {
+      stop,
+      ...(cleanupDiagnostic === undefined ? {} : { diagnostic: cleanupDiagnostic }),
+      ...(currentnessError === null ? {} : { currentnessError }),
+    };
   };
 
   let securityStop = await runAxis('spec');
+  if (securityStop.currentnessError) {
+    return { exitCode: 5, message: securityStop.currentnessError };
+  }
   if (!securityStop.stop && !options.termination?.signal.aborted) {
     securityStop = await runAxis('engineering');
+    if (securityStop.currentnessError) {
+      return { exitCode: 5, message: securityStop.currentnessError };
+    }
   }
   risk = applyReviewerRequestedDeepReview(risk, axes);
   if (risk.triggered && !securityStop.stop && !options.termination?.signal.aborted) {
     securityStop = await runAxis('deep');
+    if (securityStop.currentnessError) {
+      return { exitCode: 5, message: securityStop.currentnessError };
+    }
   }
   const postModelStoryError = await verifyStoryValidationBinding('Reviewer 模型结束后：');
   if (postModelStoryError) return { exitCode: 5, message: postModelStoryError };
@@ -575,24 +743,17 @@ export async function runFinalReview(options: {
       shadow: options.shadow ?? false,
       startedAt,
     });
-    const prePersistStoryError = await verifyStoryValidationBinding('最终 Review 状态落盘前：');
-    if (prePersistStoryError) return { exitCode: 5, message: prePersistStoryError };
-    const persistenceError = await persistState(state);
+    const persistenceError = await persistVerifiedState(state, false);
     if (persistenceError !== null) {
       return { exitCode: 5, message: `${summary}；${persistenceError}` };
     }
     return stateOutcome(state);
   }
 
-  const revalidated = await revalidateContext();
-  if (!revalidated.ok) {
-    return {
-      exitCode: 5,
-      message: `${revalidated.message}；本轮 Review 已作废，请重新运行 coding-x`,
-    };
+  const preResolutionCurrentnessError = await verifyReviewAuthorities('评审结束时', true);
+  if (preResolutionCurrentnessError) {
+    return { exitCode: 5, message: preResolutionCurrentnessError };
   }
-  const runnerError = await verifyRunnerVersion('评审结束时');
-  if (runnerError) return { exitCode: 5, message: runnerError };
 
   const allFindings = axes.flatMap((axis) => axis.findings);
   const finalBinding = makeBinding();
@@ -604,6 +765,13 @@ export async function runFinalReview(options: {
     contract: context.baseContract,
     client,
   });
+  const postResolutionCurrentnessError = await verifyReviewAuthorities(
+    'Review 裁决与延期 Issue 核验后',
+    true,
+  );
+  if (postResolutionCurrentnessError) {
+    return { exitCode: 5, message: postResolutionCurrentnessError };
+  }
   const anyUnverifiable =
     axes.some((axis) => axis.status === 'unverifiable') || resolution.decisionErrors.length > 0;
   const status = anyUnverifiable
@@ -619,15 +787,8 @@ export async function runFinalReview(options: {
     }
   }
   const remoteState = await remote();
-  const finalRunnerError = await verifyRunnerVersion('远端核验后');
-  if (finalRunnerError) return { exitCode: 5, message: finalRunnerError };
-  const finallyRevalidated = await revalidateContext();
-  if (!finallyRevalidated.ok) {
-    return {
-      exitCode: 5,
-      message: `${finallyRevalidated.message}；远端核验后的本轮 Review 已作废，请重新运行 coding-x`,
-    };
-  }
+  const finalCurrentnessError = await verifyReviewAuthorities('远端核验后', true);
+  if (finalCurrentnessError) return { exitCode: 5, message: finalCurrentnessError };
   const shadow = options.shadow ?? false;
   const deliveryStatus =
     status === 'unverifiable'
@@ -650,9 +811,7 @@ export async function runFinalReview(options: {
     shadow,
     startedAt,
   });
-  const prePersistStoryError = await verifyStoryValidationBinding('最终 Review 状态落盘前：');
-  if (prePersistStoryError) return { exitCode: 5, message: prePersistStoryError };
-  const persistenceError = await persistState(state);
+  const persistenceError = await persistVerifiedState(state, true);
   if (persistenceError !== null) return { exitCode: 5, message: persistenceError };
   return stateOutcome(state);
 }

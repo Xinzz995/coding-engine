@@ -17,9 +17,9 @@ function readInstruction(dir: string, file: string): string | null {
 
 // Instruction files use the {{WORKSPACE}} placeholder instead of a hardcoded
 // '.workspace/' prefix so a custom --workspace path reaches the agent. The
-// agent runs at the project root, and cfg.workspace is resolved the same way
-// the engine resolves it (relative to the project root, or absolute), so the
-// agent and engine always share the same prd.json / state.json / progress.md.
+// Builder and Validator run at different roots. The caller therefore supplies the absolute,
+// lease-authenticated workspace path; a relative CLI spelling must never be reinterpreted after
+// Validator changes cwd.
 const TDD_WORKFLOW_INSTRUCTION = [
   '',
   '本轮已启用 TDD。读取并遵循已安装的 `tdd` skill；本 story 的 acceptanceCriteria 已获用户批准，',

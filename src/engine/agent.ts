@@ -1,5 +1,5 @@
 import { accessSync, constants, realpathSync } from 'node:fs';
-import { delimiter, extname, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import type { OperationDelegationScope } from '../workspace-safety/operation.js';
@@ -26,11 +26,11 @@ export function permissionWarning(kind: AgentKind): string {
   ].join('\n');
 }
 
-function executableOnPath(name: string): boolean {
-  const path = environmentValue(process.env, 'PATH', process.platform) ?? '';
+function executableOnPath(name: string, environment: NodeJS.ProcessEnv): boolean {
+  const path = environmentValue(environment, 'PATH', process.platform) ?? '';
   const extensions =
     process.platform === 'win32' && extname(name) === ''
-      ? (environmentValue(process.env, 'PATHEXT', process.platform) ?? '.COM;.EXE;.BAT;.CMD').split(
+      ? (environmentValue(environment, 'PATHEXT', process.platform) ?? '.COM;.EXE;.BAT;.CMD').split(
           ';',
         )
       : [''];
@@ -151,19 +151,27 @@ export function resolveRunnerInvocation(
   }
 }
 
-export function resolveBinary(kind: AgentKind): string {
-  if (kind === 'codex') return process.env.CODING_X_CODEX_BIN ?? 'codex';
+export function resolveBinary(
+  kind: AgentKind,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  if (kind === 'codex') return environment.CODING_X_CODEX_BIN ?? 'codex';
   if (kind === 'cursor') {
-    if (process.env.CODING_X_CURSOR_BIN) return process.env.CODING_X_CURSOR_BIN;
+    if (environment.CODING_X_CURSOR_BIN) return environment.CODING_X_CURSOR_BIN;
     // Cursor's install docs currently use `agent`; older installs expose
     // `cursor-agent`. Prefer the unambiguous legacy name when both exist.
-    return executableOnPath('cursor-agent') ? 'cursor-agent' : 'agent';
+    return executableOnPath('cursor-agent', environment) ? 'cursor-agent' : 'agent';
   }
-  return process.env.CODING_X_CLAUDE_BIN ?? 'claude';
+  return environment.CODING_X_CLAUDE_BIN ?? 'claude';
 }
 
-export function buildAgentArgs(kind: AgentKind, prompt: string, model?: string): string[] {
-  const bin = resolveBinary(kind);
+export function buildAgentArgs(
+  kind: AgentKind,
+  prompt: string,
+  model?: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const bin = resolveBinary(kind, environment);
   const modelArgs = model ? ['--model', model] : [];
   if (kind === 'codex') {
     return [bin, 'exec', '--dangerously-bypass-approvals-and-sandbox', ...modelArgs, prompt];
@@ -175,7 +183,7 @@ export function buildAgentArgs(kind: AgentKind, prompt: string, model?: string):
 export interface RunResult {
   timedOut: boolean;
   exitCode: number | null;
-  /** 从 spawn 前到 runner stdio 关闭的墙钟耗时；超时路径含整棵进程树终止等待。 */
+  /** 从 spawn 前到 runner stdio 关闭的墙钟耗时；超时路径含平台受管进程集合终止等待。 */
   durationMs: number;
   /** 受控进程完成收口后转发 stdout/stderr，并保留有界合并尾部。 */
   outputTail: string;
@@ -183,6 +191,11 @@ export interface RunResult {
   processTreeNotEmpty?: boolean;
   /** timeout 以外的受控终止来源。 */
   terminationReason?: SupervisorTerminationReason | null;
+}
+
+function pathWithin(parent: string, candidate: string): boolean {
+  const value = relative(realpathSync.native(parent), realpathSync.native(candidate));
+  return value === '' || (!value.startsWith(`..${sep}`) && value !== '..' && !isAbsolute(value));
 }
 
 export function runAgent(opts: {
@@ -194,6 +207,10 @@ export function runAgent(opts: {
   model?: string;
   /** coding-x 运行上下文等显式子进程环境；其余环境原样继承。 */
   env?: NodeJS.ProcessEnv;
+  /** 干净验证传 false，避免被删除的项目级环境从父进程重新出现。 */
+  inheritProcessEnvironment?: boolean;
+  /** Validator clean checkout rejects a Runner executable resolved from the developer tree. */
+  forbiddenExecutableRoot?: string;
   /** 所有 agent/reviewer 子进程都必须绑定当前 workspace owner domain。 */
   managed: {
     readonly session: WorkspaceSession;
@@ -204,8 +221,11 @@ export function runAgent(opts: {
     };
   };
 }): Promise<RunResult> {
-  const argv = buildAgentArgs(opts.kind, opts.prompt, opts.model);
-  const environment = { ...process.env, ...opts.env };
+  const environment = {
+    ...(opts.inheritProcessEnvironment === false ? {} : process.env),
+    ...opts.env,
+  };
+  const argv = buildAgentArgs(opts.kind, opts.prompt, opts.model, environment);
 
   let executable: string;
   let args: string[];
@@ -218,6 +238,9 @@ export function runAgent(opts: {
       opts.cwd,
       environment,
     ));
+    if (opts.forbiddenExecutableRoot && pathWithin(opts.forbiddenExecutableRoot, executable)) {
+      throw new Error('AI Runner executable 解析到开发工作树内，不能用于干净 Validator');
+    }
     cwd = realpathSync(opts.cwd);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -38,6 +38,7 @@ export interface ReviewMechanicalEvidence {
   status: 'passed';
   headSha: string;
   qualityContractDigest: string;
+  validationEnvironmentDigest: string;
   scope: 'all-current-platform-applicable-contract-checks';
 }
 
@@ -48,6 +49,7 @@ function assertMechanicalEvidence(
   if (evidence.status !== 'passed'
       || evidence.headSha !== context.headSha
       || evidence.qualityContractDigest !== context.baseContractDigest
+      || !/^sha256:[0-9a-f]{64}$/u.test(evidence.validationEnvironmentDigest)
       || evidence.scope !== 'all-current-platform-applicable-contract-checks') {
     throw new Error('前置机械检查证据未绑定当前 Review 上下文');
   }

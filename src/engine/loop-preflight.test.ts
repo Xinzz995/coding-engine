@@ -1,9 +1,16 @@
 import { describe, it, expect } from 'vitest';
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { runLoop as runProductionLoop, type LoopConfig } from './loop.js';
-import { type QualityContract, type QualityContractReadResult } from '../quality/contract.js';
+import {
+  readQualityContract,
+  type QualityContract,
+  type QualityContractReadResult,
+} from '../quality/contract.js';
 import type { FinalReviewState } from '../review/types.js';
+import { digestCandidateStoryValidationEnvironment } from './story-validation-currentness.js';
+import type { TddConfig } from './prd.js';
 import {
   TEST_QUALITY_DIGEST,
   TEST_QUALITY_CONTRACT,
@@ -13,6 +20,7 @@ import {
   previousFinalReview,
   fakeCounting,
   fakeBoundValidator,
+  currentRepoTdd,
   strictConfig,
   validationReceiptFor,
   setupGitProject,
@@ -147,6 +155,63 @@ describe('quality contract preflight and shadow mode', () => {
       validationReceipt: { gitHead: newHead },
     });
   });
+
+  it('invalidates a same-HEAD receipt when the frozen TDD policy changes', async () => {
+    const target = story({ acceptanceCriteria: ['still works'] });
+    const project = setupGitProject([target]);
+    const head = project.head();
+    const oldTdd = currentRepoTdd('node -e "process.exit(0)"', head);
+    const newTdd = currentRepoTdd('node -e "process.exitCode = 0"', head);
+    const oldEnvironment = digestCandidateStoryValidationEnvironment({
+      contract: TEST_QUALITY_CONTRACT,
+      headSha: head,
+      tddConfig: oldTdd as unknown as TddConfig,
+    });
+    const newEnvironment = digestCandidateStoryValidationEnvironment({
+      contract: TEST_QUALITY_CONTRACT,
+      headSha: head,
+      tddConfig: newTdd as unknown as TddConfig,
+    });
+    expect(newEnvironment).not.toBe(oldEnvironment);
+    const receipt = validationReceiptFor(target, head);
+    receipt.validationEnvironmentDigest = oldEnvironment;
+    writeFileSync(
+      join(project.workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: receipt,
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const prdPath = join(project.workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8')) as Record<string, unknown>;
+    prd.tdd = newTdd;
+    writeFileSync(prdPath, JSON.stringify(prd));
+    const fake = fakeBoundValidator(project.workspace, 'passed');
+    const calls = join(project.projectRoot, 'bound-calls.txt');
+    writeFileSync(calls, '1');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    expect(
+      await runProductionLoop({
+        ...strictConfig(project.workspace, project.instructionsDir),
+        validationEnvironmentDigestForTests: undefined,
+      }),
+    ).toBe(0);
+    expect(readFileSync(calls, 'utf8')).toBe('2');
+    expect(
+      JSON.parse(readFileSync(join(project.workspace, 'state.json'), 'utf8'))['US-001'],
+    ).toMatchObject({
+      validated: true,
+      validationReceipt: { validationEnvironmentDigest: newEnvironment },
+    });
+  }, 30_000);
 
   it('fails before any Story agent when a production final Review model is not explicit', async () => {
     const { workspace, instructionsDir } = setup([story()]);
@@ -311,6 +376,37 @@ describe('quality contract preflight and shadow mode', () => {
     expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(2);
   });
 
+  it('rejects an uncommitted quality contract even when PRD matches the weakened worktree copy', async () => {
+    const project = setupGitProject([story()]);
+    const contractDirectory = join(project.projectRoot, '.coding-x');
+    mkdirSync(contractDirectory);
+    const contractPath = join(contractDirectory, 'quality.json');
+    writeFileSync(contractPath, readFileSync(resolve('.coding-x/quality.json'), 'utf8'));
+    execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: project.projectRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'test: tracked quality contract'], {
+      cwd: project.projectRoot,
+    });
+
+    const weakened = JSON.parse(readFileSync(contractPath, 'utf8')) as QualityContract;
+    weakened.localValidation.allowedPaths.push('poison/**');
+    writeFileSync(contractPath, `${JSON.stringify(weakened, null, 2)}\n`);
+    const worktreeRead = readQualityContract(project.projectRoot);
+    expect(worktreeRead.status).toBe('ready');
+    if (worktreeRead.status !== 'ready') return;
+    const prdPath = join(project.workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8')) as Record<string, unknown>;
+    prd.qualityContractDigest = worktreeRead.digest;
+    prd.qualityChecks = worktreeRead.contract.checks;
+    writeFileSync(prdPath, JSON.stringify(prd));
+    const fake = fakeCounting(project.workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+    const config = strictConfig(project.workspace, project.instructionsDir);
+    delete config.qualityContractReader;
+
+    expect(await runProductionLoop(config)).toBe(2);
+    expect(existsSync(fake.calls)).toBe(false);
+  });
+
   it('allows a mismatched candidate only in shadow mode and returns 7 instead of delivery-ready', async () => {
     const target = story({ passes: true });
     const { workspace, instructionsDir, head } = setup([target]);
@@ -380,4 +476,61 @@ describe('quality contract preflight and shadow mode', () => {
     expect(code).toBe(2);
     expect(readFileSync(fake.calls, 'utf8').trim().split('\n')).toHaveLength(1);
   });
+
+  it('rejects a changed contract committed by Developer even when the worktree is restored', async () => {
+    const project = setupGitProject([story()]);
+    const contractDirectory = join(project.projectRoot, '.coding-x');
+    mkdirSync(contractDirectory);
+    const contractPath = join(contractDirectory, 'quality.json');
+    const originalContract = readFileSync(resolve('.coding-x/quality.json'), 'utf8');
+    writeFileSync(contractPath, originalContract);
+    execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: project.projectRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'test: tracked quality contract'], {
+      cwd: project.projectRoot,
+    });
+    const ready = readQualityContract(project.projectRoot);
+    expect(ready.status).toBe('ready');
+    if (ready.status !== 'ready') return;
+    const prdPath = join(project.workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8')) as Record<string, unknown>;
+    prd.qualityContractDigest = ready.digest;
+    prd.qualityChecks = ready.contract.checks;
+    writeFileSync(prdPath, JSON.stringify(prd));
+
+    const fake = join(project.workspace, 'commit-weakened-contract.mjs');
+    const calls = join(project.projectRoot, 'contract-attack-calls.txt');
+    writeFileSync(
+      fake,
+      String.raw`
+      import { execFileSync } from 'node:child_process';
+      import { readFileSync, writeFileSync } from 'node:fs';
+      const contractPath = ${JSON.stringify(contractPath)};
+      const original = readFileSync(contractPath, 'utf8');
+      const weakened = JSON.parse(original);
+      weakened.localValidation.allowedPaths.push('poison/**');
+      writeFileSync(contractPath, JSON.stringify(weakened, null, 2) + '\n');
+      execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: ${JSON.stringify(project.projectRoot)} });
+      execFileSync('git', ['commit', '-q', '-m', 'test: change tracked contract'], { cwd: ${JSON.stringify(project.projectRoot)} });
+      writeFileSync(contractPath, original);
+      const statePath = ${JSON.stringify(join(project.workspace, 'state.json'))};
+      const state = JSON.parse(readFileSync(statePath, 'utf8'));
+      state['US-001'].passes = true;
+      writeFileSync(statePath, JSON.stringify(state));
+      writeFileSync(${JSON.stringify(calls)}, 'builder');
+    `,
+    );
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const config = strictConfig(project.workspace, project.instructionsDir);
+    delete config.qualityContractReader;
+
+    expect(await runProductionLoop(config)).toBe(2);
+    expect(readFileSync(calls, 'utf8')).toBe('builder');
+    expect(readFileSync(contractPath, 'utf8')).toBe(originalContract);
+    expect(
+      execFileSync('git', ['show', 'HEAD:.coding-x/quality.json'], {
+        cwd: project.projectRoot,
+        encoding: 'utf8',
+      }),
+    ).toContain('poison/**');
+  }, 15_000);
 });

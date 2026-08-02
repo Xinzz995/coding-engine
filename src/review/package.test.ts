@@ -63,6 +63,7 @@ describe('createReviewPackage', () => {
         status: 'passed',
         headSha: ctx.headSha,
         qualityContractDigest: ctx.baseContractDigest,
+        validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
         scope: 'all-current-platform-applicable-contract-checks',
       },
     });
@@ -78,6 +79,7 @@ describe('createReviewPackage', () => {
             status: 'passed',
             headSha: ctx.headSha,
             qualityContractDigest: ctx.baseContractDigest,
+            validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
             scope: 'all-current-platform-applicable-contract-checks',
           },
           allReviewAxes: { owner: 'engine' },
@@ -115,6 +117,7 @@ describe('createReviewPackage', () => {
           status: 'passed',
           headSha: ctx.headSha,
           qualityContractDigest: ctx.baseContractDigest,
+          validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
           scope: 'all-current-platform-applicable-contract-checks',
           ...over,
         },
@@ -142,6 +145,7 @@ describe('createReviewPackage', () => {
             status: 'passed',
             headSha: ctx.headSha,
             qualityContractDigest: ctx.baseContractDigest,
+            validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
             scope: 'all-current-platform-applicable-contract-checks',
           },
           initializationHooks: {

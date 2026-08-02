@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,7 +18,7 @@ const HEAD = 'b'.repeat(40);
 
 function contract(): QualityContract {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     codingXVersion: '0.34.0',
     repository: { provider: 'github', fullName: 'owner/repo', defaultBranch: 'main' },
     release: { protectedRefs: [], notApplicable: '测试仓库不发布' },
@@ -29,6 +29,7 @@ function contract(): QualityContract {
     },
     modules: [{ id: 'root', path: '.' }],
     generatedPaths: [],
+    localValidation: { prepare: [], allowedPaths: [] },
     checks: {
       test: { notApplicable: 'fixture' },
       build: { notApplicable: 'fixture' },
@@ -74,7 +75,7 @@ function reviewState(item = finding()): FinalReviewState {
   };
   const riskDigest = digest(risk);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'failed',
     deliveryStatus: 'findings',
     binding: {
@@ -87,6 +88,8 @@ function reviewState(item = finding()): FinalReviewState {
       specDigest: `sha256:${'3'.repeat(64)}`,
       engineeringStandardsDigest: `sha256:${'4'.repeat(64)}`,
       qualityContractDigest: digestQualityContract(quality),
+      validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
+      storyValidationDigest: `sha256:${'6'.repeat(64)}`,
       codingXVersion: '0.34.0',
       runner: 'codex',
       model: 'model',
@@ -220,6 +223,55 @@ describe('recordReviewDecision', () => {
     await ctx.session.close();
   });
 
+  it('fails with zero writes when the complete Final Review file changes without changing binding', async () => {
+    const ctx = await fixture();
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'counterevidence',
+          operator: 'maintainer',
+          evidence: '这是可以独立复核、包含具体事实且长度充分的反证材料。',
+        },
+        readHead: () => HEAD,
+        beforeCommit: () => {
+          const path = join(ctx.workspace, 'final-review.json');
+          const changed = JSON.parse(readFileSync(path, 'utf8'));
+          changed.axes[0].summary = 'concurrently changed summary';
+          writeFileSync(path, `${JSON.stringify(changed, null, 2)}\n`);
+        },
+      }),
+    ).rejects.toThrow('Final Review、finding 或已有裁决已变化');
+    expect(() => readFileSync(join(ctx.workspace, 'review-decisions.json'))).toThrow();
+    await ctx.session.close();
+  });
+
+  it('fails with zero writes when the Story observation token changes', async () => {
+    const ctx = await fixture();
+    let token = `sha256:${'7'.repeat(64)}`;
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        readBinding: () => ({ binding: ctx.binding, storyObservationToken: token }),
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'counterevidence',
+          operator: 'maintainer',
+          evidence: '这是可以独立复核、包含具体事实且长度充分的反证材料。',
+        },
+        readHead: () => HEAD,
+        beforeCommit: () => {
+          token = `sha256:${'8'.repeat(64)}`;
+        },
+      }),
+    ).rejects.toThrow('Story 验收权威输入已变化');
+    expect(() => readFileSync(join(ctx.workspace, 'review-decisions.json'))).toThrow();
+    await ctx.session.close();
+  });
+
   it.each([
     ['PR body', 'prBodyDigest', `sha256:${'9'.repeat(64)}`],
     ['base SHA', 'baseSha', 'c'.repeat(40)],
@@ -304,6 +356,176 @@ describe('recordReviewDecision', () => {
     });
     const saved = JSON.parse(readFileSync(join(ctx.workspace, 'review-decisions.json'), 'utf8'));
     expect(saved.decisions[0].issue).toBe(12);
+    await ctx.session.close();
+  });
+
+  it('rechecks the complete decision set after a deferral Issue lookup', async () => {
+    const ctx = await fixture();
+    let calls = 0;
+    const client = {
+      getIssue: () => {
+        calls += 1;
+        if (calls === 1) {
+          writeFileSync(
+            join(ctx.workspace, 'review-decisions.json'),
+            `${JSON.stringify({ schemaVersion: 1, decisions: [] }, null, 2)}\n`,
+          );
+        }
+        return {
+          number: 12,
+          state: 'open',
+          title: 'defer',
+          body: [
+            '### 负责人',
+            'maintainer',
+            '### 原因',
+            '需要兼容窗口',
+            '### 到期日',
+            '2026-08-10',
+            '### 跟进事项',
+            'issue-13',
+          ].join('\n'),
+          labels: ['quality-p1-deferral'],
+          url: 'https://example.test/issues/12',
+          isPullRequest: false,
+        };
+      },
+    } as unknown as GitHubQualityClient;
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        client,
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'p1-deferred',
+          operator: 'maintainer',
+          issue: 12,
+        },
+        readHead: () => HEAD,
+        now: () => new Date('2026-07-31T00:00:00.000Z'),
+      }),
+    ).rejects.toThrow('已有裁决已变化');
+    const saved = JSON.parse(readFileSync(join(ctx.workspace, 'review-decisions.json'), 'utf8'));
+    expect(saved.decisions).toEqual([]);
+    await ctx.session.close();
+  });
+
+  it('rolls back a just-written decision when post-write Story currentness drifts', async () => {
+    const ctx = await fixture();
+    let token = `sha256:${'7'.repeat(64)}`;
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        readBinding: () => ({ binding: ctx.binding, storyObservationToken: token }),
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'counterevidence',
+          operator: 'maintainer',
+          evidence: '这是可以独立复核、包含具体事实且长度充分的反证材料。',
+        },
+        readHead: () => HEAD,
+        afterCommit: () => {
+          token = `sha256:${'8'.repeat(64)}`;
+        },
+      }),
+    ).rejects.toThrow('已恢复原裁决');
+    expect(() => readFileSync(join(ctx.workspace, 'review-decisions.json'))).toThrow();
+    expect(ctx.session.state).toBe('open');
+    await ctx.session.close();
+  });
+
+  it('isolates the session when a concurrent decisions rewrite makes rollback unsafe', async () => {
+    const ctx = await fixture();
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'counterevidence',
+          operator: 'maintainer',
+          evidence: '这是可以独立复核、包含具体事实且长度充分的反证材料。',
+        },
+        readHead: () => HEAD,
+        afterCommit: () => {
+          writeFileSync(
+            join(ctx.workspace, 'review-decisions.json'),
+            `${JSON.stringify({ schemaVersion: 1, decisions: [] }, null, 2)}\n`,
+          );
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'isolated' });
+    expect(ctx.session.state).toBe('isolated');
+  });
+
+  it('isolates the session when the post-write decisions path becomes unreadable', async () => {
+    const ctx = await fixture();
+    const path = join(ctx.workspace, 'review-decisions.json');
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'counterevidence',
+          operator: 'maintainer',
+          evidence: '这是可以独立复核、包含具体事实且长度充分的反证材料。',
+        },
+        readHead: () => HEAD,
+        afterCommit: () => {
+          rmSync(path, { force: true });
+          mkdirSync(path);
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'isolated' });
+    expect(ctx.session.state).toBe('isolated');
+  });
+
+  it('rejects special decision artifact paths before reading their content', async () => {
+    const ctx = await fixture();
+    const path = join(ctx.workspace, 'final-review.json');
+    rmSync(path, { force: true });
+    mkdirSync(path);
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'counterevidence',
+          operator: 'maintainer',
+          evidence: '这是可以独立复核、包含具体事实且长度充分的反证材料。',
+        },
+        readHead: () => HEAD,
+      }),
+    ).rejects.toThrow('普通文件');
+    expect(ctx.session.state).toBe('open');
+    await ctx.session.close();
+  });
+
+  it('keeps schema 1 readable but rejects all new decisions', async () => {
+    const ctx = await fixture();
+    const path = join(ctx.workspace, 'final-review.json');
+    const legacy = JSON.parse(readFileSync(path, 'utf8'));
+    legacy.schemaVersion = 1;
+    delete legacy.binding.validationEnvironmentDigest;
+    writeFileSync(path, `${JSON.stringify(legacy, null, 2)}\n`);
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'counterevidence',
+          operator: 'maintainer',
+          evidence: '这是可以独立复核、包含具体事实且长度充分的反证材料。',
+        },
+        readHead: () => HEAD,
+      }),
+    ).rejects.toThrow('旧 Final Review 不能记录新裁决');
+    expect(() => readFileSync(join(ctx.workspace, 'review-decisions.json'))).toThrow();
     await ctx.session.close();
   });
 });

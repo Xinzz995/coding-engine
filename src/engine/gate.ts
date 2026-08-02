@@ -6,7 +6,12 @@ import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 import { resolveExecutablePath } from './agent.js';
 import type { ValidationCheck } from './validation-protocol.js';
-import type { FrozenQualityChecks, QualityCheck, QualityPlatform } from '../quality/contract.js';
+import type {
+  FrozenQualityChecks,
+  QualityCheck,
+  QualityCommand,
+  QualityPlatform,
+} from '../quality/contract.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
@@ -113,18 +118,27 @@ interface SpawnedGateSpec {
 export interface ManagedGateContext {
   readonly session: WorkspaceSession;
   readonly kind: 'quality-check' | 'tdd-check' | 'final-review';
+  /**
+   * 干净验证检出提供的显式环境。未提供只保留给历史测试 seam；正式验证不得
+   * 从开发工作树继承 PATH、虚拟环境或 CODING_X_PROJECT_ROOT。
+   */
+  readonly environment?: NodeJS.ProcessEnv;
+  /** 干净验证拒绝从开发工作树解析 executable 或显式参数路径。 */
+  readonly forbiddenExecutableRoot?: string;
+  /** 干净检出在项目命令运行前固定的 Git；只供引擎内部政策探测，不传给项目命令。 */
+  readonly gitExecutable?: string;
   readonly termination?: {
     readonly signal: AbortSignal;
     readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
   };
 }
 
-/** legacy shell 命令和结构化契约命令共用受控超时、整树收口与有界诊断语义。 */
+/** legacy shell 命令和结构化契约命令共用受控超时、平台 containment 收口与有界诊断语义。 */
 function runSpawnedGate(
   spec: SpawnedGateSpec,
   managed: ManagedGateContext,
 ): Promise<GateFailure | null> {
-  const environment = { ...process.env };
+  const environment = { ...(managed.environment ?? process.env) };
   let executable = spec.executable;
   let args = spec.args;
   if (spec.shell) {
@@ -141,6 +155,38 @@ function runSpawnedGate(
   try {
     resolvedExecutable = resolveExecutablePath(executable, spec.cwd, environment);
     resolvedCwd = realpathSync(spec.cwd);
+    if (managed.forbiddenExecutableRoot) {
+      const forbiddenInput = resolve(managed.forbiddenExecutableRoot);
+      const forbiddenRoots = [...new Set([forbiddenInput, realpathSync(forbiddenInput)])];
+      const withinForbiddenRoot = (candidate: string): boolean =>
+        forbiddenRoots.some((root) => {
+          const rel = relative(root, candidate);
+          return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel));
+        });
+      const candidateReferencesForbiddenRoot = (entry: string): boolean => {
+        if (!entry) return false;
+        const lexical = isAbsolute(entry) ? resolve(entry) : resolve(spec.cwd, entry);
+        if (withinForbiddenRoot(lexical)) return true;
+        try {
+          return withinForbiddenRoot(realpathSync(lexical));
+        } catch {
+          return false;
+        }
+      };
+      const referencesForbiddenRoot = (value: string): boolean => {
+        if (forbiddenRoots.some((root) => value.includes(root))) return true;
+        // 结构化参数是一个原子值，路径即使含空格也必须先作为整体核对；随后才对
+        // legacy shell/script 中嵌入的常见参数形式做保守扫描。
+        if (candidateReferencesForbiddenRoot(value)) return true;
+        return value
+          .split(/[\s,;=]+/u)
+          .map((entry) => entry.replace(/^[('"`]+|[)'"`]+$/gu, ''))
+          .some(candidateReferencesForbiddenRoot);
+      };
+      if (referencesForbiddenRoot(resolvedExecutable) || args.some(referencesForbiddenRoot)) {
+        throw new Error('验证命令解析到开发工作树，不能作为干净验证输入');
+      }
+    }
   } catch (error) {
     return Promise.resolve({
       command: spec.label,
@@ -264,6 +310,101 @@ function shellArgs(shell: string, script: string): string[] {
   return ['-c', script];
 }
 
+function commandSpec(command: QualityCommand, cwd: string, label: string): SpawnedGateSpec {
+  return 'executable' in command
+    ? {
+        label,
+        executable: command.executable,
+        args: command.args,
+        cwd,
+        timeoutMs: command.timeoutMs,
+        shell: false,
+      }
+    : {
+        label,
+        executable: command.shell,
+        args: shellArgs(command.shell, command.script),
+        cwd,
+        timeoutMs: command.timeoutMs,
+        shell: false,
+      };
+}
+
+/** 在干净检出中执行质量契约显式确认的本地准备命令。 */
+export async function runContractPrepareCommands(
+  commands: readonly QualityCommand[],
+  projectRoot: string,
+  platform: QualityPlatform | null | undefined,
+  managed: ManagedGateContext,
+): Promise<ContractGateResult> {
+  const started = Date.now();
+  platform ??= nodeQualityPlatform(process.platform);
+  if (platform === null) {
+    return {
+      ok: false,
+      failure: {
+        command: '[local-prepare:platform]',
+        exitCode: null,
+        timedOut: false,
+        outputTail: `当前 Node 平台 ${process.platform} 未被质量契约支持`,
+      },
+      total: 0,
+      ran: 0,
+      ms: Date.now() - started,
+      skipped: [],
+    };
+  }
+  const applicable = commands.filter((command) => command.platforms.includes(platform));
+  const skipped = commands
+    .map((command, index) => ({ command, index }))
+    .filter(({ command }) => !command.platforms.includes(platform))
+    .map(({ index }) => `local-prepare-${index + 1}`);
+  let ran = 0;
+  for (const [index, command] of applicable.entries()) {
+    ran += 1;
+    let cwd: string;
+    try {
+      cwd = resolveContractCwd(projectRoot, command.cwd);
+    } catch (error) {
+      return {
+        ok: false,
+        failure: {
+          command: `[local-prepare-${index + 1}]`,
+          exitCode: null,
+          timedOut: false,
+          outputTail: error instanceof Error ? error.message : String(error),
+        },
+        total: applicable.length,
+        ran,
+        ms: Date.now() - started,
+        skipped,
+      };
+    }
+    const failure = await runSpawnedGate(
+      commandSpec(command, cwd, `[local-prepare-${index + 1}]`),
+      managed,
+    );
+    if (failure) {
+      return {
+        ok: false,
+        failure,
+        total: applicable.length,
+        ran,
+        ms: Date.now() - started,
+        skipped,
+      };
+    }
+  }
+  return {
+    ok: true,
+    failure: null,
+    total: applicable.length,
+    ran,
+    ms: Date.now() - started,
+    skipped,
+  };
+}
+
 /**
  * 按固定类别顺序执行质量契约中适用于当前系统的检查。结构化命令 shell=false；只有契约
  * 明确选择 shell 时才以该 executable 的原生 -c/-Command 入口执行。
@@ -317,24 +458,7 @@ export async function runContractQualityChecks(
         skipped,
       };
     }
-    const spec: SpawnedGateSpec =
-      'executable' in check.command
-        ? {
-            label: `[${check.id}]`,
-            executable: check.command.executable,
-            args: check.command.args,
-            cwd,
-            timeoutMs: check.command.timeoutMs,
-            shell: false,
-          }
-        : {
-            label: `[${check.id}]`,
-            executable: check.command.shell,
-            args: shellArgs(check.command.shell, check.command.script),
-            cwd,
-            timeoutMs: check.command.timeoutMs,
-            shell: false,
-          };
+    const spec = commandSpec(check.command, cwd, `[${check.id}]`);
     const failure = await runSpawnedGate(spec, managed);
     if (failure) {
       return {

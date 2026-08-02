@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
 import type { AgentKind } from './agent.js';
 import type { FrozenQualityChecks } from '../quality/contract.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 
 export type StoryDifficulty = 'low' | 'medium' | 'high';
 
@@ -63,9 +63,7 @@ export interface Prd {
   userStories: Story[];
 }
 
-export type PrdStorySetValidation =
-  | { valid: true }
-  | { valid: false; message: string };
+export type PrdStorySetValidation = { valid: true } | { valid: false; message: string };
 
 /**
  * 正式循环用于判定 Story 集合是否能作为唯一执行身份。这里只收紧集合与 ID；
@@ -84,12 +82,7 @@ export function validatePrdStorySet(prd: Prd): PrdStorySetValidation {
       typeof value === 'object' && value !== null && !Array.isArray(value)
         ? (value as Record<string, unknown>).id
         : undefined;
-    if (
-      typeof id !== 'string' ||
-      id.length === 0 ||
-      id.trim() !== id ||
-      /[\0\r\n]/u.test(id)
-    ) {
+    if (typeof id !== 'string' || id.length === 0 || id.trim() !== id || /[\0\r\n]/u.test(id)) {
       return { valid: false, message: `userStories[${index}] 的 Story ID 非法` };
     }
     const key = id.toLocaleLowerCase('en-US');
@@ -102,8 +95,10 @@ export function validatePrdStorySet(prd: Prd): PrdStorySetValidation {
 }
 
 export function tryReadPrd(path: string): Prd | null {
+  const file = readStableFile(path, { label: 'prd.json' });
+  if (file.status !== 'ready') return null;
   try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as Prd;
+    return JSON.parse(file.bytes.toString('utf8')) as Prd;
   } catch {
     return null;
   }

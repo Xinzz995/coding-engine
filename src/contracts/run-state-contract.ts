@@ -1,5 +1,6 @@
 import {
   parseValidationReceipt,
+  VALIDATION_RECEIPT_SCHEMA_VERSION,
   type ContractParseResult,
   type ValidationReceipt,
 } from './validation-contract.js';
@@ -41,7 +42,10 @@ function normalizeStoryState(value: unknown): StoryState | null {
     if (!validationReceipt) return null;
   }
   const hasCurrentReceipt =
-    !story.blocked && story.passes && story.validated === true && validationReceipt !== null;
+    !story.blocked &&
+    story.passes &&
+    story.validated === true &&
+    validationReceipt?.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION;
   return {
     passes: story.passes,
     validated: hasCurrentReceipt,

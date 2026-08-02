@@ -63,13 +63,14 @@ function readyReview(shadow = false): ReportData['finalReview'] {
     read: {
       status: 'ready',
       state: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: 'passed',
       deliveryStatus: shadow ? 'shadow' : 'ready',
       binding: {
         prNumber: 9, targetBranch: 'main', baseSha: 'a'.repeat(40), headSha: 'b'.repeat(40),
         prTitleDigest: 'title', prBodyDigest: 'body', specDigest: 'spec',
         engineeringStandardsDigest: 'standards', qualityContractDigest: 'contract',
+        validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
         codingXVersion: '0.30.0', runner: 'codex', model: 'gpt-test', runnerVersion: '1.0.0',
         reviewRulesVersion: '1.0.0', reviewRulesDigest: 'rules', riskDigest: 'risk',
         storyValidationDigest: `sha256:${'c'.repeat(64)}`,
@@ -94,7 +95,6 @@ describe('escapeHtml', () => {
     expect(escapeHtml('<a href="x">&</a>')).toBe('&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;');
   });
 });
-
 describe('renderMarkdownLite 六构造', () => {
   it('标题映射 h4-h6（报告自身占用 h1-h3）', () => {
     expect(renderMarkdownLite('# A')).toBe('<h4>A</h4>');
@@ -198,7 +198,7 @@ describe('renderReportHtml', () => {
         },
       }),
     );
-    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    expect(html).toContain('Story 验收配置或观察不可用：userStories 包含重复 Story ID：US-001');
     expect(html).toContain('🟨 待引擎验收');
     expect(html).not.toContain('✅ 通过');
   });

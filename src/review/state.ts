@@ -1,14 +1,18 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 import { digest } from './common.js';
 import {
   REVIEW_DECISIONS_FILE,
   REVIEW_DECISIONS_SCHEMA_VERSION,
+  LEGACY_REVIEW_STATE_SCHEMA_VERSION,
   REVIEW_MARKDOWN_FILE,
   REVIEW_STATE_FILE,
   REVIEW_STATE_SCHEMA_VERSION,
   type FinalReviewState,
+  type LegacyFinalReviewState,
+  type LegacyReviewBinding,
+  type ReadableFinalReviewState,
   type ReviewAxis,
   type ReviewAxisResult,
   type ReviewBinding,
@@ -22,7 +26,7 @@ import {
 export type ReviewStateRead =
   | { status: 'missing' }
   | { status: 'invalid'; error: string }
-  | { status: 'ready'; state: FinalReviewState };
+  | { status: 'ready'; state: ReadableFinalReviewState };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -80,7 +84,11 @@ function axisName(value: unknown, name: string): ReviewAxis {
 function finding(
   value: unknown,
   name: string,
-  expected: { axis: ReviewAxis; binding: ReviewBinding; round: number },
+  expected: {
+    axis: ReviewAxis;
+    binding: Pick<ReviewBinding, 'prNumber' | 'baseSha' | 'headSha'>;
+    round: number;
+  },
 ): ReviewFinding {
   const item = object(value, name, [
     'id',
@@ -146,37 +154,28 @@ function finding(
   };
 }
 
-function binding(value: unknown): ReviewBinding {
-  const item = object(value, 'binding', [
-    'prNumber',
-    'targetBranch',
-    'baseSha',
-    'headSha',
-    'prTitleDigest',
-    'prBodyDigest',
-    'specDigest',
-    'engineeringStandardsDigest',
-    'qualityContractDigest',
-    'codingXVersion',
-    'runner',
-    'model',
-    'runnerVersion',
-    'reviewRulesVersion',
-    'reviewRulesDigest',
-    'riskDigest',
-  ], ['storyValidationDigest']);
+const BINDING_COMMON_FIELDS = [
+  'prNumber',
+  'targetBranch',
+  'baseSha',
+  'headSha',
+  'prTitleDigest',
+  'prBodyDigest',
+  'specDigest',
+  'engineeringStandardsDigest',
+  'qualityContractDigest',
+  'codingXVersion',
+  'runner',
+  'model',
+  'runnerVersion',
+  'reviewRulesVersion',
+  'reviewRulesDigest',
+  'riskDigest',
+] as const;
+
+function parseBindingBase(item: Record<string, unknown>) {
   if (!['claude', 'codex', 'cursor'].includes(String(item.runner)))
     throw new Error('binding.runner 非法');
-  const storyValidationDigest =
-    item.storyValidationDigest === undefined
-      ? undefined
-      : string(item.storyValidationDigest, 'binding.storyValidationDigest');
-  if (
-    storyValidationDigest !== undefined &&
-    !/^sha256:[a-f0-9]{64}$/u.test(storyValidationDigest)
-  ) {
-    throw new Error('binding.storyValidationDigest 非法');
-  }
   return {
     prNumber: integer(item.prNumber, 'binding.prNumber', 1),
     targetBranch: string(item.targetBranch, 'binding.targetBranch'),
@@ -197,7 +196,46 @@ function binding(value: unknown): ReviewBinding {
     reviewRulesVersion: string(item.reviewRulesVersion, 'binding.reviewRulesVersion'),
     reviewRulesDigest: string(item.reviewRulesDigest, 'binding.reviewRulesDigest'),
     riskDigest: string(item.riskDigest, 'binding.riskDigest'),
-    ...(storyValidationDigest === undefined ? {} : { storyValidationDigest }),
+  };
+}
+
+function canonicalDigest(value: unknown, name: string): string {
+  const result = string(value, name);
+  if (!/^sha256:[a-f0-9]{64}$/u.test(result)) throw new Error(`${name} 非法`);
+  return result;
+}
+
+function legacyBinding(value: unknown): LegacyReviewBinding {
+  const item = object(value, 'binding', BINDING_COMMON_FIELDS, ['storyValidationDigest']);
+  return {
+    ...parseBindingBase(item),
+    ...(item.storyValidationDigest === undefined
+      ? {}
+      : {
+          storyValidationDigest: canonicalDigest(
+            item.storyValidationDigest,
+            'binding.storyValidationDigest',
+          ),
+        }),
+  };
+}
+
+function currentBinding(value: unknown): ReviewBinding {
+  const item = object(value, 'binding', [
+    ...BINDING_COMMON_FIELDS,
+    'storyValidationDigest',
+    'validationEnvironmentDigest',
+  ]);
+  return {
+    ...parseBindingBase(item),
+    storyValidationDigest: canonicalDigest(
+      item.storyValidationDigest,
+      'binding.storyValidationDigest',
+    ),
+    validationEnvironmentDigest: canonicalDigest(
+      item.validationEnvironmentDigest,
+      'binding.validationEnvironmentDigest',
+    ),
   };
 }
 
@@ -229,7 +267,10 @@ function risk(value: unknown): ReviewRiskAssessment {
 function axisResult(
   value: unknown,
   index: number,
-  expected: { binding: ReviewBinding; round: number },
+  expected: {
+    binding: Pick<ReviewBinding, 'prNumber' | 'baseSha' | 'headSha'>;
+    round: number;
+  },
 ): ReviewAxisResult {
   const name = `axes[${index}]`;
   const item = object(value, name, [
@@ -301,7 +342,7 @@ function remote(value: unknown): ReviewRemoteState {
   };
 }
 
-function parseFinalReviewState(value: unknown): FinalReviewState {
+function parseFinalReviewState(value: unknown): ReadableFinalReviewState {
   const root = object(value, 'final-review.json', [
     'schemaVersion',
     'status',
@@ -315,7 +356,12 @@ function parseFinalReviewState(value: unknown): FinalReviewState {
     'startedAt',
     'completedAt',
   ]);
-  if (root.schemaVersion !== 1) throw new Error('final-review.json schemaVersion 不受支持');
+  if (
+    root.schemaVersion !== LEGACY_REVIEW_STATE_SCHEMA_VERSION &&
+    root.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION
+  ) {
+    throw new Error('final-review.json schemaVersion 不受支持');
+  }
   if (!['passed', 'failed', 'unverifiable'].includes(String(root.status)))
     throw new Error('final-review.json status 非法');
   if (
@@ -326,7 +372,10 @@ function parseFinalReviewState(value: unknown): FinalReviewState {
     throw new Error('final-review.json deliveryStatus 非法');
   }
   if (typeof root.shadow !== 'boolean') throw new Error('final-review.json shadow 必须是 boolean');
-  const parsedBinding = binding(root.binding);
+  const parsedBinding =
+    root.schemaVersion === LEGACY_REVIEW_STATE_SCHEMA_VERSION
+      ? legacyBinding(root.binding)
+      : currentBinding(root.binding);
   const parsedRisk = risk(root.risk);
   const round = integer(root.round, 'final-review.json round', 1);
   if (parsedBinding.riskDigest !== parsedRisk.digest)
@@ -374,11 +423,9 @@ function parseFinalReviewState(value: unknown): FinalReviewState {
   if (hasUnverifiableAxis !== (status === 'unverifiable')) {
     throw new Error('final-review.json status 与评审轴的 unverifiable 状态不一致');
   }
-  return {
-    schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
+  const common = {
     status,
     deliveryStatus,
-    binding: parsedBinding,
     risk: parsedRisk,
     axes,
     remote: parsedRemote,
@@ -387,14 +434,27 @@ function parseFinalReviewState(value: unknown): FinalReviewState {
     startedAt: timestamp(root.startedAt, 'final-review.json startedAt'),
     completedAt: timestamp(root.completedAt, 'final-review.json completedAt'),
   };
+  return root.schemaVersion === LEGACY_REVIEW_STATE_SCHEMA_VERSION
+    ? ({
+        ...common,
+        schemaVersion: LEGACY_REVIEW_STATE_SCHEMA_VERSION,
+        binding: parsedBinding,
+      } satisfies LegacyFinalReviewState)
+    : ({
+        ...common,
+        schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
+        binding: parsedBinding as ReviewBinding,
+      } satisfies FinalReviewState);
 }
 
 /** Status/report reader. Formal run never trusts this file to skip a model Review. */
 export function readFinalReviewState(workspace: string): ReviewStateRead {
   const path = join(workspace, REVIEW_STATE_FILE);
-  if (!existsSync(path)) return { status: 'missing' };
+  const file = readStableFile(path, { label: REVIEW_STATE_FILE });
+  if (file.status === 'missing') return { status: 'missing' };
+  if (file.status === 'invalid') return { status: 'invalid', error: file.diagnostic };
   try {
-    const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    const value: unknown = JSON.parse(file.bytes.toString('utf8'));
     return { status: 'ready', state: parseFinalReviewState(value) };
   } catch (error) {
     return { status: 'invalid', error: error instanceof Error ? error.message : String(error) };
@@ -462,10 +522,14 @@ function decision(value: unknown, index: number): ReviewDecision {
 
 export function readReviewDecisions(workspace: string): ReviewDecisionsFile {
   const path = join(workspace, REVIEW_DECISIONS_FILE);
-  if (!existsSync(path)) return { schemaVersion: REVIEW_DECISIONS_SCHEMA_VERSION, decisions: [] };
+  const file = readStableFile(path, { label: REVIEW_DECISIONS_FILE });
+  if (file.status === 'missing') {
+    return { schemaVersion: REVIEW_DECISIONS_SCHEMA_VERSION, decisions: [] };
+  }
+  if (file.status === 'invalid') throw new Error(file.diagnostic);
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(path, 'utf8'));
+    value = JSON.parse(file.bytes.toString('utf8'));
   } catch (error) {
     throw new Error(
       `无法解析 ${REVIEW_DECISIONS_FILE}：${error instanceof Error ? error.message : String(error)}`,
@@ -537,8 +601,12 @@ export async function writeFinalReviewState(
   writer: WorkspaceWriter,
   state: FinalReviewState,
 ): Promise<void> {
+  const parsed = parseFinalReviewState(state);
+  if (parsed.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) {
+    throw new Error('只允许写入当前 schema v2 Final Review');
+  }
   // Markdown 只是可读投影；JSON 是 status/report 的提交标记。先写投影、最后写 JSON，
   // 即使第二步失败，也不会把未完整落盘的一轮 Review 暴露成新的绿色状态。
-  await writer.writeFile(REVIEW_MARKDOWN_FILE, renderFinalReviewMarkdown(state));
-  await writer.writeFile(REVIEW_STATE_FILE, `${JSON.stringify(state, null, 2)}\n`);
+  await writer.writeFile(REVIEW_MARKDOWN_FILE, renderFinalReviewMarkdown(parsed));
+  await writer.writeFile(REVIEW_STATE_FILE, `${JSON.stringify(parsed, null, 2)}\n`);
 }

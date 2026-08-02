@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
 import { join } from 'node:path';
 import { validatePrdStorySet, type Prd, type Story } from './prd.js';
@@ -11,6 +11,7 @@ import {
 import {
   acceptanceHash,
   isGitHead,
+  isSha256Digest,
   parseValidationReceipt,
   VALIDATION_RECEIPT_SCHEMA_VERSION,
   VALIDATION_PROTOCOL_VERSION,
@@ -18,6 +19,7 @@ import {
   type ValidationReceipt,
 } from '../contracts/validation-contract.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 
 export {
   parseValidationReceipt,
@@ -54,8 +56,10 @@ function rawStoryValues(prd: Prd): unknown[] {
 }
 
 export function tryReadState(path: string): RunState | null {
+  const file = readStableFile(path, { label: 'state.json' });
+  if (file.status !== 'ready') return null;
   try {
-    const parsed = parseRunStateBytes(readFileSync(path));
+    const parsed = parseRunStateBytes(file.bytes);
     return parsed.ok ? parsed.value : null;
   } catch {
     return null;
@@ -73,8 +77,10 @@ export interface EngineOwnedFields {
  * loop 用它区分“字段缺失”和“字段值恰好等于兼容缺省”，确保删除也能留痕。
  */
 export function tryReadEngineOwnedFields(path: string, storyId: string): EngineOwnedFields | null {
+  const file = readStableFile(path, { label: 'state.json' });
+  if (file.status !== 'ready') return null;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+    const parsed = JSON.parse(file.bytes.toString('utf8')) as unknown;
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const raw = (parsed as Record<string, unknown>)[storyId];
     if (raw === undefined) {
@@ -207,13 +213,16 @@ export function isStoryPassed(
 
 export type StoryValidationInvalidReason =
   | 'blocked'
+  | 'invalid-expected-environment'
   | 'missing-candidate'
   | 'not-validated'
   | 'missing-receipt'
   | 'invalid-receipt'
   | 'invalid-current-head'
   | 'head-mismatch'
-  | 'acceptance-mismatch';
+  | 'acceptance-mismatch'
+  | 'missing-environment-binding'
+  | 'environment-mismatch';
 
 export type StoryValidationEvaluation =
   | { valid: true; receipt: ValidationReceipt; acceptanceHash: string }
@@ -229,12 +238,21 @@ export function evaluateStoryValidation(
   story: Pick<Story, 'id' | 'acceptanceCriteria'>,
   state: StoryState,
   currentGitHead: string,
+  expectedValidationEnvironmentDigest: string,
 ): StoryValidationEvaluation {
   const expectedHash = acceptanceHash(story.id, story.acceptanceCriteria);
   const rawReceipt = state.validationReceipt ?? null;
   const receipt = rawReceipt === null ? null : parseValidationReceipt(rawReceipt);
   if (state.blocked) {
     return { valid: false, reason: 'blocked', receipt, acceptanceHash: expectedHash };
+  }
+  if (!isSha256Digest(expectedValidationEnvironmentDigest)) {
+    return {
+      valid: false,
+      reason: 'invalid-expected-environment',
+      receipt,
+      acceptanceHash: expectedHash,
+    };
   }
   if (!state.passes) {
     return { valid: false, reason: 'missing-candidate', receipt, acceptanceHash: expectedHash };
@@ -257,6 +275,25 @@ export function evaluateStoryValidation(
   if (receipt.acceptanceHash !== expectedHash) {
     return { valid: false, reason: 'acceptance-mismatch', receipt, acceptanceHash: expectedHash };
   }
+  if (
+    receipt.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
+    !isSha256Digest(receipt.validationEnvironmentDigest)
+  ) {
+    return {
+      valid: false,
+      reason: 'missing-environment-binding',
+      receipt,
+      acceptanceHash: expectedHash,
+    };
+  }
+  if (receipt.validationEnvironmentDigest !== expectedValidationEnvironmentDigest) {
+    return {
+      valid: false,
+      reason: 'environment-mismatch',
+      receipt,
+      acceptanceHash: expectedHash,
+    };
+  }
   return { valid: true, receipt, acceptanceHash: expectedHash };
 }
 
@@ -264,8 +301,10 @@ export function isStoryPassedAt(
   story: Pick<Story, 'id' | 'acceptanceCriteria'>,
   state: StoryState,
   currentGitHead: string,
+  expectedValidationEnvironmentDigest: string,
 ): boolean {
-  return evaluateStoryValidation(story, state, currentGitHead).valid;
+  return evaluateStoryValidation(story, state, currentGitHead, expectedValidationEnvironmentDigest)
+    .valid;
 }
 
 export interface StoryValidationReceiptSetEntry {
@@ -291,6 +330,7 @@ export function evaluateStoryValidationReceiptSet(
   prd: Prd,
   state: RunState,
   currentGitHead: string,
+  expectedValidationEnvironmentDigest: string,
 ): StoryValidationReceiptSetEvaluation {
   const storySet = validatePrdStorySet(prd);
   if (!storySet.valid) {
@@ -302,12 +342,30 @@ export function evaluateStoryValidationReceiptSet(
       configurationError: storySet.message,
     };
   }
+  if (!isSha256Digest(expectedValidationEnvironmentDigest)) {
+    return {
+      valid: false,
+      digest: null,
+      receipts: [],
+      invalid: prd.userStories
+        .filter((story) => !storyStateOf(state, story.id).blocked)
+        .map((story) => ({
+          storyId: story.id,
+          reason: 'invalid-expected-environment' as const,
+        })),
+    };
+  }
   const receipts: StoryValidationReceiptSetEntry[] = [];
   const invalid: StoryValidationReceiptSetEvaluation['invalid'] = [];
   for (const story of prd.userStories) {
     const current = storyStateOf(state, story.id);
     if (current.blocked) continue;
-    const evaluation = evaluateStoryValidation(story, current, currentGitHead);
+    const evaluation = evaluateStoryValidation(
+      story,
+      current,
+      currentGitHead,
+      expectedValidationEnvironmentDigest,
+    );
     if (!evaluation.valid) {
       invalid.push({ storyId: story.id, reason: evaluation.reason });
       continue;
@@ -327,12 +385,18 @@ export function reconcileValidationReceipts(
   prd: Prd,
   state: RunState,
   currentGitHead: string,
+  expectedValidationEnvironmentDigest: string,
 ): { state: RunState; invalidatedStoryIds: string[] } {
   let next = state;
   const invalidatedStoryIds: string[] = [];
   for (const story of prd.userStories) {
     const current = state[story.id];
-    if (!current || evaluateStoryValidation(story, current, currentGitHead).valid) continue;
+    if (
+      !current ||
+      evaluateStoryValidation(story, current, currentGitHead, expectedValidationEnvironmentDigest)
+        .valid
+    )
+      continue;
     if (!current.validated && (current.validationReceipt ?? null) === null) continue;
     next = {
       ...next,
@@ -371,9 +435,15 @@ export function evaluateStoryValidationDisplay(
   prd: Prd,
   state: RunState,
   currentGitHead: string | null,
+  expectedValidationEnvironmentDigest: string | null,
 ): StoryValidationDisplayEvaluation {
   const storySet = validatePrdStorySet(prd);
-  const receiptSet = evaluateStoryValidationReceiptSet(prd, state, currentGitHead ?? '');
+  const receiptSet = evaluateStoryValidationReceiptSet(
+    prd,
+    state,
+    currentGitHead ?? '',
+    expectedValidationEnvironmentDigest ?? '',
+  );
   if (!storySet.valid) {
     let next = state;
     const invalidStoryIds = [
@@ -403,13 +473,22 @@ export function evaluateStoryValidationDisplay(
     };
   }
 
-  const reconciled = reconcileValidationReceipts(prd, state, currentGitHead ?? '');
+  const reconciled = reconcileValidationReceipts(
+    prd,
+    state,
+    currentGitHead ?? '',
+    expectedValidationEnvironmentDigest ?? '',
+  );
   return {
     state: reconciled.state,
     digest: receiptSet.digest,
     currentness: {
       gitHead: currentGitHead,
-      current: currentGitHead !== null && reconciled.invalidatedStoryIds.length === 0,
+      current:
+        currentGitHead !== null &&
+        expectedValidationEnvironmentDigest !== null &&
+        isSha256Digest(expectedValidationEnvironmentDigest) &&
+        reconciled.invalidatedStoryIds.length === 0,
       invalidStoryIds: reconciled.invalidatedStoryIds,
       configurationError: null,
     },
@@ -452,7 +531,8 @@ function sameValidationReceipt(
     left.schemaVersion === right.schemaVersion &&
     left.requestId === right.requestId &&
     left.gitHead === right.gitHead &&
-    left.acceptanceHash === right.acceptanceHash
+    left.acceptanceHash === right.acceptanceHash &&
+    left.validationEnvironmentDigest === right.validationEnvironmentDigest
   );
 }
 
@@ -566,19 +646,28 @@ export function issueValidationReceipt(
   state: RunState,
   storyId: string,
 ): { state: RunState; changed: boolean };
-/** 结构化 Validator passed claim 已核对后，以本轮 request 签发持久凭证。 */
+/** @deprecated v1 测试/调用兼容；缺少环境摘要时失败关闭。 */
 export function issueValidationReceipt(
   state: RunState,
   story: Pick<Story, 'id' | 'acceptanceCriteria'>,
   request: ValidationRequest,
 ): { state: RunState; changed: boolean };
+/** 结构化 Validator passed claim 已核对后，以本轮 request 签发持久凭证。 */
+export function issueValidationReceipt(
+  state: RunState,
+  story: Pick<Story, 'id' | 'acceptanceCriteria'>,
+  request: ValidationRequest,
+  validationEnvironmentDigest: string,
+): { state: RunState; changed: boolean };
 export function issueValidationReceipt(
   state: RunState,
   storyOrId: string | Pick<Story, 'id' | 'acceptanceCriteria'>,
   request?: ValidationRequest,
+  validationEnvironmentDigest?: string,
 ): { state: RunState; changed: boolean } {
   // 没有 Story/AC/request 绑定就无法安全签发；兼容入口必须失败关闭。
-  if (typeof storyOrId === 'string' || !request) return { state, changed: false };
+  if (typeof storyOrId === 'string' || !request || !isSha256Digest(validationEnvironmentDigest))
+    return { state, changed: false };
   const story = storyOrId;
   const expectedHash = acceptanceHash(story.id, story.acceptanceCriteria);
   if (
@@ -615,6 +704,7 @@ export function issueValidationReceipt(
     requestId: request.requestId,
     gitHead: request.gitHead,
     acceptanceHash: request.acceptanceHash,
+    validationEnvironmentDigest,
   };
   if (current.validated && sameValidationReceipt(current.validationReceipt ?? null, receipt)) {
     return { state, changed: false };
@@ -712,6 +802,7 @@ export function selectNextStory(
   prd: Prd,
   state: RunState,
   currentGitHead: string,
+  expectedValidationEnvironmentDigest: string,
 ): NextStorySelection | null {
   for (const story of prd.userStories) {
     const current = storyStateOf(state, story.id);
@@ -721,18 +812,31 @@ export function selectNextStory(
   }
   for (const story of prd.userStories) {
     const current = storyStateOf(state, story.id);
-    if (!current.blocked && current.passes && !isStoryPassedAt(story, current, currentGitHead)) {
+    if (
+      !current.blocked &&
+      current.passes &&
+      !isStoryPassedAt(story, current, currentGitHead, expectedValidationEnvironmentDigest)
+    ) {
       return { storyId: story.id, mode: 'validation-only' };
     }
   }
   return null;
 }
 
-export function allStoriesResolvedAt(prd: Prd, state: RunState, currentGitHead: string): boolean {
+export function allStoriesResolvedAt(
+  prd: Prd,
+  state: RunState,
+  currentGitHead: string,
+  expectedValidationEnvironmentDigest: string,
+): boolean {
   if (!validatePrdStorySet(prd).valid) return false;
+  if (!isSha256Digest(expectedValidationEnvironmentDigest)) return false;
   return prd.userStories.every((story) => {
     const current = storyStateOf(state, story.id);
-    return current.blocked || isStoryPassedAt(story, current, currentGitHead);
+    return (
+      current.blocked ||
+      isStoryPassedAt(story, current, currentGitHead, expectedValidationEnvironmentDigest)
+    );
   });
 }
 

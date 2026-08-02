@@ -1,4 +1,5 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
   writeFileSync,
@@ -23,7 +24,11 @@ import {
 import * as dashboard from './dashboard/server.js';
 import { readGitHead } from './engine/validation-protocol.js';
 import { renderManagedGitHubFiles } from './quality/github-workflows.js';
-import { parseQualityContract, readQualityContract } from './quality/contract.js';
+import {
+  parseQualityContract,
+  readQualityContract,
+  type FrozenQualityChecks,
+} from './quality/contract.js';
 import { CODING_X_VERSION } from './version.js';
 import { bootstrapWorkspace } from './workspace-safety/bootstrap.js';
 import { digestBytes } from './workspace-safety/filesystem.js';
@@ -35,6 +40,33 @@ afterEach(() => {
   delete process.env.CODING_X_CURSOR_BIN;
   delete process.env.CODING_X_CONFIG;
 });
+
+function currentQualitySnapshot(): {
+  qualityContractDigest: string;
+  qualityChecks: FrozenQualityChecks;
+} {
+  const quality = readQualityContract(process.cwd());
+  if (quality.status !== 'ready') {
+    throw new Error(`quality fixture unavailable: ${quality.status}`);
+  }
+  return {
+    qualityContractDigest: quality.digest,
+    qualityChecks: quality.contract.checks,
+  };
+}
+
+function committedStatusProject(): string {
+  const source = join(process.cwd(), '.coding-x', 'quality.json');
+  const root = mkdtempSync(join(tmpdir(), 'status-project-'));
+  mkdirSync(join(root, '.coding-x'), { recursive: true });
+  writeFileSync(join(root, '.coding-x', 'quality.json'), readFileSync(source));
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'status fixture'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'status@example.invalid'], { cwd: root });
+  execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: root });
+  execFileSync('git', ['commit', '-q', '-m', 'status fixture'], { cwd: root });
+  return root;
+}
 
 describe('isDirectInvocation', () => {
   it('symlink/路径别名形态的 argv[1] 解析到真实模块（npm bin shim 与 macOS /tmp 别名）', () => {
@@ -501,6 +533,8 @@ describe('main — doctor JSON', () => {
 describe('main — status subcommand', () => {
   it('prints the workspace overview and returns 1 while stories are unfinished', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'status-cli-'));
+    const project = committedStatusProject();
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(project);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       await bootstrapWorkspace({ workspacePath: workspace });
@@ -510,6 +544,7 @@ describe('main — status subcommand', () => {
           project: 'cli-proj',
           branchName: 'ralph/s',
           description: 'd',
+          ...currentQualitySnapshot(),
           userStories: [
             { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 },
           ],
@@ -527,9 +562,11 @@ describe('main — status subcommand', () => {
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('0/1'));
     } finally {
       logSpy.mockRestore();
+      cwdSpy.mockRestore();
       rmSync(workspace, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('returns 2 and suggests prd-to-json when the workspace is missing', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -552,6 +589,7 @@ describe('main — status --json', () => {
         branchName: 'ralph/s',
         description: 'd',
         sourcePrd: 'docs/prds/s.md',
+        ...currentQualitySnapshot(),
         userStories: [
           { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 },
         ],
@@ -561,6 +599,8 @@ describe('main — status --json', () => {
 
   it('prints exactly one JSON.parse-able object to stdout with the same exit semantics', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
+    const project = committedStatusProject();
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(project);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
       await bootstrapWorkspace({ workspacePath: workspace });
@@ -580,11 +620,13 @@ describe('main — status --json', () => {
       expect(obj.summary).toEqual({ total: 1, passed: 0, blocked: 0 });
     } finally {
       logSpy.mockRestore();
+      cwdSpy.mockRestore();
       rmSync(workspace, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
-  it('warns on stderr (suggesting repair) for corrupt state.json without polluting stdout', async () => {
+  it('warns on stderr and exits 2 for corrupt state.json without polluting stdout', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -593,7 +635,7 @@ describe('main — status --json', () => {
       writePrd(workspace);
       writeFileSync(join(workspace, 'state.json'), '{ not json');
       const code = await main(['status', '--workspace', workspace, '--json']);
-      expect(code).toBe(1);
+      expect(code).toBe(2);
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('npx coding-x repair'));
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('按未验证状态'));
       expect(logSpy).toHaveBeenCalledTimes(1);
@@ -605,7 +647,7 @@ describe('main — status --json', () => {
       logSpy.mockRestore();
       rmSync(workspace, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('warns on stderr for corrupt state.json in human-readable mode too, but not when state.json is merely absent', async () => {
     const workspace = mkdtempSync(join(tmpdir(), 'status-json-'));
@@ -624,7 +666,7 @@ describe('main — status --json', () => {
       logSpy.mockRestore();
       rmSync(workspace, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('emits parseable error JSON and exits 2 when the workspace is missing', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -984,9 +1026,16 @@ describe('main — report subcommand', () => {
           project: 'p',
           branchName: 'b',
           description: 'd',
+          ...currentQualitySnapshot(),
           userStories: [
             { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 },
           ],
+        }),
+      );
+      writeFileSync(
+        join(dir, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
         }),
       );
       const logs: string[] = [];
@@ -1003,7 +1052,7 @@ describe('main — report subcommand', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('returns 2 when the workspace is missing', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
@@ -1023,7 +1072,7 @@ describe('main — report subcommand', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('returns 1 when writing report.html fails', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
@@ -1035,9 +1084,16 @@ describe('main — report subcommand', () => {
           project: 'p',
           branchName: 'b',
           description: 'd',
+          ...currentQualitySnapshot(),
           userStories: [
             { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 },
           ],
+        }),
+      );
+      writeFileSync(
+        join(dir, 'state.json'),
+        JSON.stringify({
+          'US-001': { passes: false, notes: '', retryCount: 0, blocked: false },
         }),
       );
       mkdirSync(join(dir, 'report.html')); // 同名目录占位 → writeFileSync 抛 EISDIR
@@ -1051,7 +1107,7 @@ describe('main — report subcommand', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 
   it('state.json 损坏时写出保守诊断报告但返回 1，绝不假绿', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-report-'));
@@ -1063,6 +1119,7 @@ describe('main — report subcommand', () => {
           project: 'p',
           branchName: 'b',
           description: 'd',
+          ...currentQualitySnapshot(),
           userStories: [
             {
               id: 'US-001',
@@ -1101,7 +1158,7 @@ describe('main — report subcommand', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
 
 describe('main — workspace commands', () => {
@@ -1226,6 +1283,29 @@ describe('repair 与工作区锁', () => {
       { id: 'US-001', title: 't', description: 'd', acceptanceCriteria: [], priority: 1 },
     ],
   });
+
+  it.runIf(process.platform !== 'win32')(
+    '特殊 prd/state 文件会立即失败而不是等待 FIFO 写端',
+    async () => {
+      for (const filename of ['prd.json', 'state.json']) {
+        const dir = mkdtempSync(join(tmpdir(), `cli-repair-${filename}-fifo-`));
+        await bootstrapWorkspace({ workspacePath: dir });
+        writeFileSync(join(dir, 'prd.json'), validPrd);
+        if (filename === 'state.json') writeFileSync(join(dir, 'state.json'), '{}');
+        rmSync(join(dir, filename), { force: true });
+        execFileSync('mkfifo', [join(dir, filename)]);
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          expect(await main(['repair', '--workspace', dir])).toBe(2);
+          expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('无法安全读取'));
+          expect(existsSync(join(dir, 'engine.lock', 'lease'))).toBe(false);
+        } finally {
+          errSpy.mockRestore();
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it('refuses to treat a legacy pid-only lock as a safe workspace (exit 2, files untouched)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'cli-repair-lock-'));

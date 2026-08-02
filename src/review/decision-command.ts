@@ -1,6 +1,6 @@
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { tryReadPrd } from '../engine/prd.js';
-import { evaluateStoryValidationReceiptSet, tryReadState } from '../engine/state.js';
+import { digestFinalReviewMechanicalEnvironment } from '../engine/story-validation-currentness.js';
 import {
   digestQualityContract,
   parseQualityContract,
@@ -9,6 +9,7 @@ import {
 import { type GitHubReviewReadClient } from '../quality/github.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { createReviewBinding, digestReviewBinding } from './binding.js';
 import { digest } from './common.js';
@@ -25,9 +26,11 @@ import {
 } from './preflight.js';
 import { readRunnerVersion } from './runner.js';
 import { readFinalReviewState, readReviewDecisions } from './state.js';
+import { observeStoryValidationCurrentness } from './story-validation-observation.js';
 import {
   REVIEW_DECISIONS_FILE,
   REVIEW_DECISIONS_SCHEMA_VERSION,
+  REVIEW_STATE_FILE,
   type FinalReviewState,
   type ReviewBinding,
   type ReviewDecision,
@@ -55,9 +58,19 @@ export interface RecordReviewDecisionOptions {
   readonly now?: () => Date;
   readonly readHead?: () => string | Promise<string>;
   /** Test-only race seam. Production reconstructs and revalidates the complete binding. */
-  readonly readBinding?: () => ReviewBinding | Promise<ReviewBinding>;
+  readonly readBinding?: () =>
+    | ReviewBinding
+    | DecisionBindingObservation
+    | Promise<ReviewBinding | DecisionBindingObservation>;
   /** Test-only race seam. Production callers do not provide this. */
   readonly beforeCommit?: () => void | Promise<void>;
+  /** Test-only post-write race seam. Production callers do not provide this. */
+  readonly afterCommit?: () => void | Promise<void>;
+}
+
+interface DecisionBindingObservation {
+  readonly binding: ReviewBinding;
+  readonly storyObservationToken: string;
 }
 
 export async function readBoundReviewDecisionContract(
@@ -233,10 +246,21 @@ function createCurrentBindingReader(options: {
   review: FinalReviewState;
   observation: ManagedReviewObservation;
   termination?: ManagedReviewTermination;
-}): () => Promise<ReviewBinding> {
-  let context: ReviewPreflightContext | undefined;
+}): () => Promise<DecisionBindingObservation> {
+  let context: ReviewPreflightContext | null = null;
   return async () => {
-    if (!context) {
+    const storyBefore = await observeStoryValidationCurrentness({
+      projectRoot: options.root,
+      workspace: options.session.lease.workspace.path,
+      session: options.session,
+      ...(options.termination ? { termination: options.termination } : {}),
+    });
+    if (storyBefore.status !== 'ready' || storyBefore.storyValidationDigest === null) {
+      const message =
+        storyBefore.status === 'ready' ? 'Story 验收凭证集合已失效' : storyBefore.message;
+      invalid(`Story 验收当前性无法重核：${message}`);
+    }
+    if (context === null) {
       const preflight = await runReviewPreflight({
         root: options.root,
         workspace: options.session.lease.workspace.path,
@@ -268,25 +292,278 @@ function createCurrentBindingReader(options: {
       options.observation,
     );
     if (!revalidated.ok) invalid(revalidated.message);
-    const prd = tryReadPrd(join(options.session.lease.workspace.path, 'prd.json'));
-    const state = tryReadState(join(options.session.lease.workspace.path, 'state.json'));
-    if (!prd || !Array.isArray(prd.userStories) || !state) {
-      invalid('当前 Story 验收状态无法读取；请重新运行 coding-x');
-    }
-    const storyValidation = evaluateStoryValidationReceiptSet(prd, state, context.headSha);
-    if (!storyValidation.valid || storyValidation.digest === null) {
-      invalid('当前 Story 验收凭证集合已失效；请重新运行 coding-x');
-    }
-    return createReviewBinding({
-      context,
-      risk: options.review.risk,
-      codingXVersion: CODING_X_VERSION,
-      runner: options.review.binding.runner,
-      model: options.review.binding.model,
-      runnerVersion,
-      storyValidationDigest: storyValidation.digest,
+    const storyAfter = await observeStoryValidationCurrentness({
+      projectRoot: options.root,
+      workspace: options.session.lease.workspace.path,
+      session: options.session,
+      ...(options.termination ? { termination: options.termination } : {}),
     });
+    if (storyAfter.status !== 'ready' || storyAfter.storyValidationDigest === null) {
+      const message =
+        storyAfter.status === 'ready' ? 'Story 验收凭证集合已失效' : storyAfter.message;
+      invalid(`Story 验收当前性无法重核：${message}`);
+    }
+    if (
+      storyBefore.observationToken !== storyAfter.observationToken ||
+      storyBefore.headSha !== storyAfter.headSha ||
+      storyAfter.headSha !== context.headSha ||
+      storyBefore.storyValidationDigest !== storyAfter.storyValidationDigest
+    ) {
+      invalid('重核 Final Review binding 期间 Story 验收权威输入发生变化');
+    }
+    return {
+      binding: createReviewBinding({
+        context,
+        risk: options.review.risk,
+        codingXVersion: CODING_X_VERSION,
+        runner: options.review.binding.runner,
+        model: options.review.binding.model,
+        runnerVersion,
+        storyValidationDigest: storyAfter.storyValidationDigest,
+        validationEnvironmentDigest: digestFinalReviewMechanicalEnvironment({
+          contract: context.baseContract,
+          headSha: context.headSha,
+        }),
+      }),
+      storyObservationToken: storyAfter.observationToken,
+    };
   };
+}
+
+interface RawWorkspaceFileSnapshot {
+  readonly status: 'ready' | 'missing';
+  readonly digest: string;
+  readonly bytes: Buffer | null;
+}
+
+const MAX_DECISION_ARTIFACT_BYTES = 16 * 1024 * 1024;
+
+interface DecisionArtifactsSnapshot {
+  readonly review: FinalReviewState;
+  readonly reviewFile: RawWorkspaceFileSnapshot;
+  readonly reviewDigest: string;
+  readonly bindingDigest: string;
+  readonly findingsDigest: string;
+  readonly decisionsFile: RawWorkspaceFileSnapshot;
+  readonly decisionsDigest: string;
+  readonly decisions: ReturnType<typeof readReviewDecisions>;
+}
+
+interface DecisionCheckpoint {
+  readonly artifacts: DecisionArtifactsSnapshot;
+  readonly binding: ReviewBinding;
+  readonly storyObservationToken: string;
+  readonly headSha: string;
+}
+
+function workspaceFileSnapshot(path: string): RawWorkspaceFileSnapshot {
+  const observed = readStableFile(path, {
+    label: path,
+    maxBytes: MAX_DECISION_ARTIFACT_BYTES,
+  });
+  if (observed.status === 'missing') {
+    return { status: 'missing', digest: 'missing', bytes: null };
+  }
+  if (observed.status === 'invalid') invalid(observed.diagnostic);
+  return {
+    status: 'ready',
+    digest: observed.fingerprint,
+    bytes: observed.bytes,
+  };
+}
+
+function sameWorkspaceFile(
+  left: RawWorkspaceFileSnapshot,
+  right: RawWorkspaceFileSnapshot,
+): boolean {
+  return left.status === right.status && left.digest === right.digest;
+}
+
+function parsedWorkspaceJsonDigest(
+  file: RawWorkspaceFileSnapshot,
+  name: string,
+  missingValue?: unknown,
+): string {
+  if (file.status === 'missing') {
+    if (missingValue !== undefined) return digest(missingValue);
+    invalid(`缺少 ${name}`);
+  }
+  try {
+    return digest(JSON.parse(file.bytes!.toString('utf8')));
+  } catch (error) {
+    invalid(`${name} 不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function readDecisionArtifacts(workspace: string): DecisionArtifactsSnapshot {
+  const reviewPath = join(workspace, REVIEW_STATE_FILE);
+  const decisionsPath = join(workspace, REVIEW_DECISIONS_FILE);
+  const reviewFileBefore = workspaceFileSnapshot(reviewPath);
+  const decisionsFileBefore = workspaceFileSnapshot(decisionsPath);
+  const review = readFinalReviewState(workspace);
+  if (review.status !== 'ready') {
+    invalid(
+      review.status === 'missing'
+        ? '缺少当前 Final Review；请先重新运行 coding-x'
+        : `Final Review 无效：${review.error}`,
+    );
+  }
+  if (review.state.schemaVersion !== 2) {
+    invalid('旧 Final Review 不能记录新裁决；请重新运行 coding-x');
+  }
+  let decisions: ReturnType<typeof readReviewDecisions>;
+  try {
+    decisions = readReviewDecisions(workspace);
+  } catch (error) {
+    invalid(error instanceof Error ? error.message : String(error));
+  }
+  const reviewFileAfter = workspaceFileSnapshot(reviewPath);
+  const decisionsFileAfter = workspaceFileSnapshot(decisionsPath);
+  if (
+    !sameWorkspaceFile(reviewFileBefore, reviewFileAfter) ||
+    !sameWorkspaceFile(decisionsFileBefore, decisionsFileAfter)
+  ) {
+    invalid('读取裁决上下文期间 Final Review 或已有裁决发生变化');
+  }
+  if (parsedWorkspaceJsonDigest(reviewFileAfter, REVIEW_STATE_FILE) !== digest(review.state)) {
+    invalid('Final Review 完整文件与严格解析结果不一致');
+  }
+  if (
+    parsedWorkspaceJsonDigest(decisionsFileAfter, REVIEW_DECISIONS_FILE, {
+      schemaVersion: REVIEW_DECISIONS_SCHEMA_VERSION,
+      decisions: [],
+    }) !== digest(decisions)
+  ) {
+    invalid('已有裁决完整文件与严格解析结果不一致');
+  }
+  const findings = review.state.axes.flatMap((axis) => axis.findings);
+  return {
+    review: review.state,
+    reviewFile: reviewFileAfter,
+    reviewDigest: digest(review.state),
+    bindingDigest: digestReviewBinding(review.state.binding),
+    findingsDigest: digest(findings),
+    decisionsFile: decisionsFileAfter,
+    decisionsDigest: digest(decisions),
+    decisions,
+  };
+}
+
+function sameDecisionArtifacts(
+  left: DecisionArtifactsSnapshot,
+  right: DecisionArtifactsSnapshot,
+): boolean {
+  return (
+    sameWorkspaceFile(left.reviewFile, right.reviewFile) &&
+    left.reviewDigest === right.reviewDigest &&
+    left.bindingDigest === right.bindingDigest &&
+    left.findingsDigest === right.findingsDigest &&
+    sameWorkspaceFile(left.decisionsFile, right.decisionsFile) &&
+    left.decisionsDigest === right.decisionsDigest
+  );
+}
+
+function normalizeBindingObservation(
+  value: ReviewBinding | DecisionBindingObservation,
+): DecisionBindingObservation {
+  if ('binding' in value) {
+    if (!/^sha256:[a-f0-9]{64}$/u.test(value.storyObservationToken)) {
+      invalid('Story 验收观察令牌非法');
+    }
+    return value;
+  }
+  return {
+    binding: value,
+    storyObservationToken: digest({ testBinding: digestReviewBinding(value) }),
+  };
+}
+
+async function observeDecisionCheckpoint(options: {
+  workspace: string;
+  readBinding: () =>
+    | ReviewBinding
+    | DecisionBindingObservation
+    | Promise<ReviewBinding | DecisionBindingObservation>;
+  readHead: () => string | Promise<string>;
+}): Promise<DecisionCheckpoint> {
+  const artifactsBefore = readDecisionArtifacts(options.workspace);
+  const binding = normalizeBindingObservation(await options.readBinding());
+  const headSha = await options.readHead();
+  const artifactsAfter = readDecisionArtifacts(options.workspace);
+  if (!sameDecisionArtifacts(artifactsBefore, artifactsAfter)) {
+    invalid('重核裁决当前性期间 Final Review、finding 或已有裁决发生变化');
+  }
+  return {
+    artifacts: artifactsAfter,
+    binding: binding.binding,
+    storyObservationToken: binding.storyObservationToken,
+    headSha,
+  };
+}
+
+function assertSameCheckpoint(
+  phase: string,
+  expected: DecisionCheckpoint,
+  current: DecisionCheckpoint,
+): void {
+  if (!sameDecisionArtifacts(expected.artifacts, current.artifacts)) {
+    invalid(`${phase} Final Review、finding 或已有裁决已变化；未写入决定`);
+  }
+  if (digestReviewBinding(current.binding) !== digestReviewBinding(expected.binding)) {
+    invalid(`${phase} Final Review binding 已变化；请重新运行 coding-x`);
+  }
+  if (current.storyObservationToken !== expected.storyObservationToken) {
+    invalid(`${phase} Story 验收权威输入已变化；请重新运行 coding-x`);
+  }
+  if (current.headSha !== expected.headSha) {
+    invalid(`${phase} Git HEAD 发生变化；未写入决定`);
+  }
+}
+
+function isolateDecisionSession(options: RecordReviewDecisionOptions, message: string): never {
+  if (options.session.state === 'open') options.session.retainLeaseForIsolation();
+  throw new WorkspaceSafetyError('isolated', message);
+}
+
+async function rollbackWrittenDecision(options: {
+  command: RecordReviewDecisionOptions;
+  workspace: string;
+  original: RawWorkspaceFileSnapshot;
+  written: RawWorkspaceFileSnapshot;
+}): Promise<void> {
+  try {
+    const path = join(options.workspace, REVIEW_DECISIONS_FILE);
+    const current = workspaceFileSnapshot(path);
+    if (!sameWorkspaceFile(current, options.written)) {
+      isolateDecisionSession(
+        options.command,
+        '裁决写入后的当前性检查失败，且裁决文件又被并发改写；workspace 已隔离',
+      );
+    }
+    if (options.original.status === 'missing') {
+      await options.command.session.writer.removeFile(REVIEW_DECISIONS_FILE);
+    } else {
+      await options.command.session.writer.writeFile(
+        REVIEW_DECISIONS_FILE,
+        options.original.bytes!,
+      );
+    }
+    const restored = workspaceFileSnapshot(path);
+    if (!sameWorkspaceFile(restored, options.original)) {
+      isolateDecisionSession(
+        options.command,
+        '裁决写入后发生漂移且无法证明原裁决已恢复；workspace 已隔离',
+      );
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceSafetyError && error.code === 'isolated') throw error;
+    isolateDecisionSession(
+      options.command,
+      `裁决写入后发生漂移且无法安全读取或恢复原裁决；workspace 已隔离：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /**
@@ -308,46 +585,44 @@ export async function recordReviewDecision(
       root: options.root,
       termination: options.termination,
     });
-  const review = readFinalReviewState(workspace);
-  if (review.status !== 'ready') {
-    invalid(
-      review.status === 'missing'
-        ? '缺少当前 Final Review；请先重新运行 coding-x'
-        : `Final Review 无效：${review.error}`,
-    );
-  }
-  if (digestQualityContract(options.contract) !== review.state.binding.qualityContractDigest) {
+  const seedArtifacts = readDecisionArtifacts(workspace);
+  if (
+    digestQualityContract(options.contract) !== seedArtifacts.review.binding.qualityContractDigest
+  ) {
     invalid('提供的质量契约与 Final Review 绑定不一致');
   }
-  const expectedBindingDigest = digestReviewBinding(review.state.binding);
   const readBinding =
     options.readBinding ??
     createCurrentBindingReader({
       session: options.session,
       root: options.root,
       contract: options.contract,
-      review: review.state,
+      review: seedArtifacts.review,
       observation,
       termination: options.termination,
     });
-  const assertCurrentBinding = async (phase: string): Promise<void> => {
-    const current = await readBinding();
-    if (digestReviewBinding(current) !== expectedBindingDigest) {
-      invalid(`${phase} Final Review binding 已变化；请重新运行 coding-x`);
-    }
-  };
-  await assertCurrentBinding('记录裁决前');
-
   const readHead = options.readHead ?? (() => currentGitHead(observation));
-  const initialHead = await readHead();
-  if (initialHead !== review.state.binding.headSha) {
+  const initial = await observeDecisionCheckpoint({ workspace, readBinding, readHead });
+  if (!sameDecisionArtifacts(seedArtifacts, initial.artifacts)) {
+    invalid('建立裁决初始快照期间 Final Review、finding 或已有裁决发生变化');
+  }
+  const expectedBindingDigest = initial.artifacts.bindingDigest;
+  if (digestReviewBinding(initial.binding) !== expectedBindingDigest) {
+    invalid('当前重建的 Final Review binding 与已保存 Review 不一致；请重新运行 coding-x');
+  }
+  if (initial.headSha !== initial.artifacts.review.binding.headSha) {
     invalid('当前 Git HEAD 与 Final Review 绑定不一致；请重新运行 coding-x');
   }
   const finding = findCurrentFinding(
-    review.state.axes.flatMap((axis) => axis.findings),
+    initial.artifacts.review.axes.flatMap((axis) => axis.findings),
     request.findingId,
   );
   validateAction(request, finding);
+
+  const assertCurrent = async (phase: string): Promise<void> => {
+    const current = await observeDecisionCheckpoint({ workspace, readBinding, readHead });
+    assertSameCheckpoint(phase, initial, current);
+  };
 
   const client = options.client ?? observation.github;
   const validateDeferralIssue = async (): Promise<void> => {
@@ -363,13 +638,12 @@ export async function recordReviewDecision(
     }
   };
   await validateDeferralIssue();
+  await assertCurrent('延期 Issue 查询后');
 
-  const current = readReviewDecisions(workspace);
-  const currentDecisionsDigest = digest(current);
   const at = (options.now ?? (() => new Date()))().toISOString();
   const decision: ReviewDecision = {
     findingId: finding.id,
-    headSha: review.state.binding.headSha,
+    headSha: initial.artifacts.review.binding.headSha,
     reviewBindingDigest: expectedBindingDigest,
     action: request.action,
     operator: request.operator,
@@ -379,25 +653,47 @@ export async function recordReviewDecision(
   };
 
   await options.beforeCommit?.();
+  await assertCurrent('beforeCommit 后');
   await validateDeferralIssue();
-  await assertCurrentBinding('提交裁决前');
-  if ((await readHead()) !== initialHead) {
-    invalid('裁决过程中 Git HEAD 发生变化；未写入决定');
-  }
-  if (digest(readReviewDecisions(workspace)) !== currentDecisionsDigest) {
-    invalid('裁决过程中已有决定发生变化；未写入决定');
-  }
+  await assertCurrent('第二次延期 Issue 查询后');
+  await assertCurrent('最终写入前');
   await options.session.lease.verify();
-  await options.session.writer.writeFile(
-    REVIEW_DECISIONS_FILE,
-    `${JSON.stringify(
-      {
-        schemaVersion: REVIEW_DECISIONS_SCHEMA_VERSION,
-        decisions: [...current.decisions, decision],
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  const nextDecisions: ReturnType<typeof readReviewDecisions> = {
+    schemaVersion: REVIEW_DECISIONS_SCHEMA_VERSION,
+    decisions: [...initial.artifacts.decisions.decisions, decision],
+  };
+  const serialized = `${JSON.stringify(nextDecisions, null, 2)}\n`;
+  await options.session.writer.writeFile(REVIEW_DECISIONS_FILE, serialized);
+  const writtenFile: RawWorkspaceFileSnapshot = {
+    status: 'ready',
+    digest: `sha256:${createHash('sha256').update(serialized).digest('hex')}`,
+    bytes: Buffer.from(serialized, 'utf8'),
+  };
+  const expectedPostWrite: DecisionCheckpoint = {
+    ...initial,
+    artifacts: {
+      ...initial.artifacts,
+      decisionsFile: writtenFile,
+      decisionsDigest: digest(nextDecisions),
+      decisions: nextDecisions,
+    },
+  };
+  try {
+    await options.afterCommit?.();
+    const postWrite = await observeDecisionCheckpoint({ workspace, readBinding, readHead });
+    assertSameCheckpoint('裁决写入后', expectedPostWrite, postWrite);
+  } catch (error) {
+    await rollbackWrittenDecision({
+      command: options,
+      workspace,
+      original: initial.artifacts.decisionsFile,
+      written: writtenFile,
+    });
+    invalid(
+      `裁决写入后当前性发生变化，已恢复原裁决：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
   return decision;
 }

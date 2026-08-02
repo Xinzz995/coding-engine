@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession } from '../workspace-safety/session.js';
-import { createManagedReviewObservation } from './managed-observation.js';
+import { resolveReviewInfrastructureExecutable } from './managed-observation.js';
 
 const roots: string[] = [];
 
@@ -33,7 +33,7 @@ afterEach(() => {
 describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
   'managed Review observations',
   () => {
-    it('quarantines a PATH git wrapper that writes workspace and then reports success', async () => {
+    it('never selects a project-owned git wrapper from npx-style PATH', async () => {
       const ctx = await fixture('run');
       const marker = join(ctx.workspace, 'git-wrapper-wrote.txt');
       wrapper(
@@ -46,22 +46,17 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
       const previousPath = process.env.PATH;
       process.env.PATH = `${ctx.bin}${delimiter}${previousPath ?? ''}`;
       try {
-        const observation = createManagedReviewObservation({
-          session: ctx.session,
-          root: ctx.root,
-        });
-        await expect(observation.git(['rev-parse', 'HEAD'])).rejects.toMatchObject({
-          code: 'isolated',
-        });
+        const executable = resolveReviewInfrastructureExecutable('git', ctx.root);
+        expect(executable).not.toBe(join(ctx.bin, 'git'));
       } finally {
         process.env.PATH = previousPath;
       }
-      expect(existsSync(marker)).toBe(true);
-      expect(ctx.session.state).toBe('isolated');
-      await expect(ctx.session.close()).rejects.toMatchObject({ code: 'isolated' });
+      expect(existsSync(marker)).toBe(false);
+      expect(ctx.session.state).toBe('open');
+      await ctx.session.close();
     }, 20_000);
 
-    it('quarantines a PATH gh wrapper that writes workspace before returning valid JSON', async () => {
+    it('fails closed when a project-owned gh wrapper is the only candidate', async () => {
       const ctx = await fixture('review-decision');
       const marker = join(ctx.workspace, 'gh-wrapper-wrote.txt');
       wrapper(
@@ -72,21 +67,17 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
         ].join('\n'),
       );
       const previousPath = process.env.PATH;
-      process.env.PATH = `${ctx.bin}${delimiter}${previousPath ?? ''}`;
+      process.env.PATH = ctx.bin;
       try {
-        const observation = createManagedReviewObservation({
-          session: ctx.session,
-          root: ctx.root,
-        });
-        await expect(observation.github.discoverRepository(ctx.root)).rejects.toMatchObject({
-          code: 'isolated',
-        });
+        expect(() => resolveReviewInfrastructureExecutable('gh', ctx.root)).toThrow(
+          '项目目录之外的可信 gh',
+        );
       } finally {
         process.env.PATH = previousPath;
       }
-      expect(existsSync(marker)).toBe(true);
-      expect(ctx.session.state).toBe('isolated');
-      await expect(ctx.session.close()).rejects.toMatchObject({ code: 'isolated' });
+      expect(existsSync(marker)).toBe(false);
+      expect(ctx.session.state).toBe('open');
+      await ctx.session.close();
     }, 20_000);
   },
 );

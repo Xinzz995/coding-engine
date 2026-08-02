@@ -39,7 +39,7 @@ function writeReadyReview(workspace: string): void {
   writeFileSync(
     join(workspace, 'final-review.json'),
     JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: 'passed',
       deliveryStatus: 'ready',
       binding: {
@@ -52,6 +52,8 @@ function writeReadyReview(workspace: string): void {
         specDigest: 'spec',
         engineeringStandardsDigest: 'standards',
         qualityContractDigest: 'contract',
+        validationEnvironmentDigest: `sha256:${'e'.repeat(64)}`,
+        storyValidationDigest: `sha256:${'f'.repeat(64)}`,
         codingXVersion: '0.34.0',
         runner: 'codex',
         model: 'review-model',

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export const VALIDATION_PROTOCOL_VERSION = 1 as const;
-export const VALIDATION_RECEIPT_SCHEMA_VERSION = 1 as const;
+export const VALIDATION_RECEIPT_SCHEMA_VERSION = 2 as const;
 export const VALIDATION_RESULT_MAX_BYTES = 64 * 1024;
 export const VALIDATION_TEXT_MAX_CHARS = 2000;
 
@@ -38,12 +38,23 @@ export interface ValidationResult {
   summary: string;
 }
 
-export interface ValidationReceipt {
-  schemaVersion: typeof VALIDATION_RECEIPT_SCHEMA_VERSION;
+interface ValidationReceiptBase {
   requestId: string;
   gitHead: string;
   acceptanceHash: string;
 }
+
+export type ValidationReceipt =
+  | (ValidationReceiptBase & {
+      /** v1 remains readable only so the engine can invalidate it safely. */
+      schemaVersion: 1;
+      validationEnvironmentDigest?: never;
+    })
+  | (ValidationReceiptBase & {
+      schemaVersion: typeof VALIDATION_RECEIPT_SCHEMA_VERSION;
+      /** Engine-owned digest of the clean-checkout execution contract. */
+      validationEnvironmentDigest: string;
+    });
 
 export interface ValidationResultBinding {
   readonly requestId: string;
@@ -84,6 +95,10 @@ export function isAcceptanceHash(value: unknown): value is string {
   return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value);
 }
 
+export function isSha256Digest(value: unknown): value is string {
+  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value);
+}
+
 function isNullableGitHead(value: unknown): value is string | null {
   return value === null || isGitHead(value);
 }
@@ -102,29 +117,41 @@ export function acceptanceHash(storyId: string, acceptanceCriteria: readonly str
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
 
-/** 严格读取 v1 凭证；保持既有 state schema 的兼容边界。 */
+/** 严格读取 v1/v2 凭证；v1 只为安全失效迁移，不再是当前通过。 */
 export function parseValidationReceipt(value: unknown): ValidationReceipt | null {
+  if (!isRecord(value)) return null;
+  const legacy = value.schemaVersion === 1;
+  if (!hasExactKeys(value, legacy
+    ? ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash']
+    : [
+        'schemaVersion',
+        'requestId',
+        'gitHead',
+        'acceptanceHash',
+        'validationEnvironmentDigest',
+      ])) return null;
   if (
-    !isRecord(value) ||
-    !hasExactKeys(value, ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash'])
-  ) {
-    return null;
-  }
-  if (
-    value.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION) ||
     typeof value.requestId !== 'string' ||
     value.requestId.trim().length === 0 ||
     !isGitHead(value.gitHead) ||
-    !isAcceptanceHash(value.acceptanceHash)
+    !isAcceptanceHash(value.acceptanceHash) ||
+    (!legacy && !isSha256Digest(value.validationEnvironmentDigest))
   ) {
     return null;
   }
-  return {
-    schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
+  const base = {
     requestId: value.requestId,
     gitHead: value.gitHead,
     acceptanceHash: value.acceptanceHash,
   };
+  return legacy
+    ? { schemaVersion: 1, ...base }
+    : {
+        schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
+        ...base,
+        validationEnvironmentDigest: value.validationEnvironmentDigest as string,
+      };
 }
 
 function invalidSchema(diagnostic: string): ValidationProtocolOutcome {

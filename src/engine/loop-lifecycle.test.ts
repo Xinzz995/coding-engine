@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { writeFileSync, rmSync, readFileSync, realpathSync, existsSync } from 'node:fs';
+import { writeFileSync, rmSync, readFileSync, realpathSync, existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
 import {
@@ -21,6 +21,7 @@ import {
   fakeCounting,
   previousFinalReview,
   validationReceiptFor,
+  TEST_VALIDATION_ENVIRONMENT_DIGEST,
 } from './loop-test-support.js';
 
 interface OwnershipViolationScenario {
@@ -295,7 +296,10 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
         passes: true,
         validated: true,
         notes: 'builder done',
-        validationReceipt: { schemaVersion: 1 },
+        validationReceipt: {
+          schemaVersion: 2,
+          validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT_DIGEST,
+        },
       });
       expect(warnings.some((line) => line.includes('待验收状态') && line.includes('US-001'))).toBe(
         false,
@@ -435,8 +439,9 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
       expect(code).toBe(0);
       const prompt = readFileSync(marker, 'utf8');
-      expect(prompt).toContain(`${workspace}/prd.json`);
-      expect(prompt).toContain(`${workspace}/progress.md`);
+      const canonicalWorkspace = realpathSync.native(workspace);
+      expect(prompt).toContain(`${canonicalWorkspace}/prd.json`);
+      expect(prompt).toContain(`${canonicalWorkspace}/progress.md`);
       expect(prompt).not.toContain('{{WORKSPACE}}');
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
@@ -597,6 +602,77 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       ).toBe('resigned-after-review');
     } finally {
       dashboardState.mockRestore();
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('isolates the workspace when a stale Final Review cannot be revoked', async () => {
+    const project = setup([story()]);
+    const fake = fakeBoundValidator(project.workspace, 'passed');
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runProductionLoop({
+        ...strictConfig(project.workspace, project.instructionsDir),
+        finalReviewRunner: async (options) => {
+          const review = previousFinalReview(project.head());
+          review.binding.storyValidationDigest = options.storyValidationDigest;
+          await options.session.writer.writeFile(
+            'final-review.json',
+            `${JSON.stringify(review)}\n`,
+          );
+          const state = JSON.parse(
+            readFileSync(join(project.workspace, 'state.json'), 'utf8'),
+          ) as Record<string, { validationReceipt: { requestId: string } }>;
+          state['US-001'].validationReceipt.requestId = 'resigned-before-failed-revoke';
+          await options.session.writer.writeFile('state.json', JSON.stringify(state, null, 2));
+          const reviewPath = join(project.workspace, 'final-review.json');
+          rmSync(reviewPath);
+          mkdirSync(reviewPath);
+          return { exitCode: 0, message: 'unrevokable stale review', state: review };
+        },
+      });
+
+      expect(code).toBe(2);
+      expect(errors.mock.calls.flat().join(' ')).toContain('workspace 已隔离');
+      expect(existsSync(join(project.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(true);
+    } finally {
+      errors.mockRestore();
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rejects a Final Review when PRD acceptance criteria change before loop acceptance', async () => {
+    const target = story({ acceptanceCriteria: ['original acceptance'] });
+    const project = setup([target]);
+    const fake = fakeBoundValidator(project.workspace, 'passed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const code = await runProductionLoop({
+        ...strictConfig(project.workspace, project.instructionsDir),
+        finalReviewRunner: async (options) => {
+          const review = previousFinalReview(project.head());
+          review.binding.storyValidationDigest = options.storyValidationDigest;
+          await options.session.writer.writeFile(
+            'final-review.json',
+            `${JSON.stringify(review)}\n`,
+          );
+          const prd = JSON.parse(readFileSync(join(project.workspace, 'prd.json'), 'utf8')) as {
+            userStories: Array<{ acceptanceCriteria: string[] }>;
+          };
+          prd.userStories[0].acceptanceCriteria.push('changed during Final Review');
+          await options.session.writer.writeFile('prd.json', JSON.stringify(prd, null, 2));
+          return { exitCode: 0, message: 'stale fixture review', state: review };
+        },
+      });
+
+      expect(code).toBe(5);
+      expect(existsSync(join(project.workspace, 'final-review.json'))).toBe(false);
+      expect(
+        JSON.parse(readFileSync(join(project.workspace, 'prd.json'), 'utf8')).userStories[0]
+          .acceptanceCriteria,
+      ).toEqual(['original acceptance']);
+    } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });

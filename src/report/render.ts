@@ -11,7 +11,6 @@ import { readTddConfig } from '../engine/tdd-gate.js';
 export function escapeHtml(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
-
 /**
  * 插值兜底 helper：来自 prd/state 落盘数据的字段类型层声明为 string，但 tryReadPrd
  * 无逐字段运行期校验（legacyStateOf 同理）——实际值可能是 undefined/数字/对象等
@@ -171,7 +170,7 @@ function renderImplementationBanner(
 ): string {
   if (stateCorrupted) return '<div class="banner blocked">❌ 状态不可验证：state.json 已损坏</div>';
   if (storyValidation.configurationError !== null) {
-    return `<div class="banner blocked">❌ PRD Story 集合配置错误，验收无法验证：${text(storyValidation.configurationError)}</div>`;
+    return `<div class="banner blocked">❌ Story 验收配置或观察不可用：${text(storyValidation.configurationError)}</div>`;
   }
   if (storyValidation.gitHead === null) {
     return '<div class="banner blocked">❌ 当前 Git HEAD 不可读取，Story 验收结果均需重验</div>';

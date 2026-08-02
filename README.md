@@ -166,11 +166,12 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 - **工作区写租约**：初始化后永久保留 `engine.lock/` 协议根，活动 owner 位于其中的 `lease/`。run、repair、report、PRD 应用和 Review 裁决都进入同一写域；第二个写入口会被拒绝，不能靠 PID 看似已死就自动接管，也不能手删租约继续。
 - **异常恢复**：Builder、Validator、项目检查和最终 Review 都在受管范围内运行，返回前必须确认本轮进程已经收口。异常中断留下的活动状态由 `doctor` / `status` 分类，再通过明确的 `workspace recover` 或 `workspace resume-mutation` 恢复；无法证明安全时保持隔离，不会伪装成已结束。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态，下一轮重试。每次真实调用记录完整收口耗时与退出码，异常时另保留最近 2000 字符诊断，终端输出仍实时可见。
-- **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018）。
+- **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。schema v2 还要求明确确认本地依赖准备命令和允许产物目录，不能从 GitHub 工作流暗推。Node 缺少 lockfile、或 Python 无法安全推导隔离环境时，自动发现会停止并要求 `init --contract`，不会借用宿主全局依赖凑出绿色。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018、022）。
+- **精确提交的干净验证**：Developer 仍在开发目录工作；本地准备、项目检查、TDD、Validator 和最终 Review 前机械检查在项目外的临时 Git 检出运行。检出只包含精确 HEAD 的已跟踪内容，不复制 `.env`、`.claude`、旧依赖或其他忽略文件；submodule、LFS/custom filter、提交身份变化、tracked 改写和未允许产物都按不可验证停止。Validator 通过后先安全清理检出，才签发绑定完整机械/TDD 环境的凭证；清理无法证明成功时不会留下绿色（ADR-022）。
 - **TDD 门禁（可选）**：启用 `prd.json.tdd` 后，Builder 按 `tdd` skill 对每个公共行为做真实 RED→同命令 GREEN→绿色重构；宿主 hook 在 agent commit 前提前检查，引擎仍在 Validator 前独立校验 Git 基线、政策摘要、新增覆盖忽略标记并运行项目原生 `coverageCheck`。hook 通过不能跳过引擎重跑；覆盖率证明代码被执行，不证明断言有效或历史上一定先写测试（ADR-017）。
 - **可信目标绑定**：每轮 Validator 都收到一次性 request ID、精确 story、AC 快照/hash 和调用前 Git HEAD，必须提交版本化、逐 AC、自洽的结构化 claim。缺结果、旧结果、错 story/hash/commit、漏 AC、产物变化或改写 `state.json` 全部 fail closed，不签发凭证（ADR-015）。该协议消除正常控制流中的错目标/无结果假绿，但同权限 agent 仍能伪造观察，不能替代机械门禁和人审。
 - **workspace 写入与 Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 只在系统临时目录生成候选，再调用 `workspace apply-prd`；`/review-loop` 也只收集决定，再调用 `workspace record-review-decision`。两者都不直接改 workspace。Git 隔离检查仍只读，不会擅自修改 `.gitignore` 或 Git 索引。
-- **状态所有权**：引擎与 agent 都在项目根目录运行，但写权限按角色收紧：builder 只写候选 `passes`/进度，Validator 只写本轮 result 与可选截图 claim，所有 Validator verdict 状态和 `validated`/`escalated` 由引擎独占。指令模板用 `{{WORKSPACE}}` 注入路径，validation request 由引擎逐轮追加，三种 runner 共用同一协议。
+- **状态所有权**：Developer 在开发目录运行，Validator 在精确提交的临时检出运行；两者都只通过原 workspace 接力状态。builder 只写候选 `passes`/进度，Validator 只写本轮 result 与可选截图 claim，所有 Validator verdict 状态和 `validated`/`escalated` 由引擎独占。指令模板用 `{{WORKSPACE}}` 注入路径，validation request 由引擎逐轮追加，三种 runner 共用同一协议。
 
 ---
 
@@ -534,7 +535,7 @@ coding-x 的信息分三层保存：
 
 > **0.25.0 验收凭证迁移：** 新状态用 `validated` 区分“builder 声称完成”和“引擎已观察 Validator 正常完成”。旧 state 缺少该字段时，读取阶段按历史 `passes` 值兼容，不会把既有已完成 workspace 全量重验；新一轮自然写回后会补齐字段。显式的 `passes=true, validated=false` 会被视为中断留下的待验收状态并回写待复核。
 
-> **结构化验收协议：** 所有新 Validator 轮次都必须提交 `validation-result.json` v1；不再从 `progress.md` 猜 story，也不再直接改 `state.json`。旧 state/evidence 继续可读，但新轮次不会静默回退到“退出 0 + passes 未变”的旧判定。Git 不可用时 request 明示 `gitHead: null`，此时只有 request/story/AC 绑定，status/report 会显示 `unavailable`，不会伪装成完整产物绑定。
+> **结构化验收协议：** 所有新 Validator 轮次都必须提交 `validation-result.json` v1；不再从 `progress.md` 猜 story，也不再直接改 `state.json`。引擎签发的 Validator receipt 使用 v2，除 request/story/AC/Git HEAD 外还绑定干净验证环境摘要；v1 receipt 继续可读，但一律按过期处理并重新验证。Git HEAD 或受支持的干净检出无法证明时，正式运行失败关闭，不会伪装成完整产物绑定。
 
 #### 可选进阶：TDD
 
@@ -651,6 +652,8 @@ npx coding-x report             # 在短租约内（重）生成 report.html；s
 ### 第 3 步：查看实时进度
 
 正式运行会打印仪表盘地址：<http://localhost:7331>（像素风视图 `/p`），但在持有 workspace 活动租约时不会另启系统命令打开浏览器。独立的 `npx coding-x dashboard` 没有活动写会话，仍会尝试自动打开；可用 `--no-open` 关闭。仪表盘展示迭代次数、当前阶段、story 难度/升级态、完整配置映射，以及当前阶段实际命中的模型与路由来源（CLI/难度/升级/默认）。
+
+仪表盘是本次运行的本地进度视图，不会持续查询 GitHub，也不会在页面保持打开期间重新核验延期 Issue。它显示“本次运行已完成”只代表保存的本地结果仍绑定当前提交；是否真正可交付始终以重新运行 `npx coding-x status`（或生成最新 report）的结果为准。
 
 - **只想快速知道完成了多少**：`npx coding-x status`。
 - **引擎没在运行但想看仪表盘**：`npx coding-x dashboard`，看完按 `Ctrl+C`。
@@ -810,7 +813,7 @@ GitHub 状态给出。
 - **Agent 调用凭证**：每次真实 Builder/Validator 子进程都记录 outcome、退出码与调用收口耗时；异常 stdout/stderr 尾部有界进入 evidence/status/report，成功 transcript 不落盘。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
-- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。引擎在 Developer 与 Validator 之间逐项执行，失败机械打回并跳过该轮验证；版本、摘要、快照或运行中契约漂移都会停止，超时会等整棵进程树退出后才继续。
+- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令和允许目录；引擎在精确 HEAD 的项目外检出中准备依赖并逐项执行，失败机械打回并跳过该轮验证；版本、摘要、快照、验证环境或运行中契约漂移都会停止，超时会等受管进程集合确认收口后才继续。主动脱离平台 containment 的恶意进程属于明确非目标，coding-x 不是操作系统沙箱。
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 安全写入与 Git 隔离检查**：builder 只 stage/commit story 文件并在受管范围内回写运行时状态；所有正式写入口共用 owner-bound 租约。`prd-to-json` 与 `/review-loop` 只准备临时请求，再由引擎写入；`doctor` 只读报告安全分类与 Git 隔离状态，不替用户删租约或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
@@ -879,7 +882,7 @@ my-project/
 | agent 执行 `git commit` 被 TDD hook 阻断                   | hook 的有限错误摘要、手工运行 `coverageCheck`                                             | 修测试、实现或政策漂移后重跑；不要关闭 hook 规避。即使绕过，coding-x 引擎仍会独立打回                                                 |
 | Cursor 没有提前检查，或 `hooks cursor status` 报缺失/过期  | 项目根的 `.cursor/hooks.json`、`.cursor/coding-x/`、status 输出                           | 在 Git 项目根运行 `npx coding-x hooks cursor install`，升级 coding-x 后也重跑；若报冲突，先人工处理被修改或不合法的文件，不要强行覆盖 |
 | Cursor 插件已装但 `npx coding-x cursor` 找不到命令         | `agent --version`（旧安装可试 `cursor-agent --version`）、登录状态、`CODING_X_CURSOR_BIN` | 单独安装 Cursor Agent CLI；桌面应用不能替代。coding-x 自动识别两种命令名，自定义路径再设置环境变量                                    |
-| Windows 提示 AI runner 的 `.cmd/.bat` 包装器不受支持       | 对应 `CODING_X_*_BIN` 的实际路径、安装包是否提供原生程序                                  | 把对应变量指向该工具的原生可执行文件；不要改成 `shell:true`，项目自己的 `npm.cmd` 检查不受影响                                       |
+| Windows 提示 AI runner 的 `.cmd/.bat` 包装器不受支持       | 对应 `CODING_X_*_BIN` 的实际路径、安装包是否提供原生程序                                  | 把对应变量指向该工具的原生可执行文件；不要改成 `shell:true`，项目自己的 `npm.cmd` 检查不受影响                                        |
 | 报“找不到 prd.json”                                        | 选定 workspace 的 `prd.json` 是否存在、`--workspace` 是否一致                             | 用 `prd-to-json` 从正式 PRD 生成临时候选并调用 apply；不要手工拼一个不完整 JSON                                                       |
 | 退出码 `2`，提示活动 lease 或恢复状态阻断                  | `doctor` / `status` 的安全分类、是否仍有 coding-x 或项目检查进程                          | 活跃运行就等待或正常停止；中断状态按提示运行 `workspace recover` 或 `workspace resume-mutation`，不要删除 `engine.lock/`              |
 | `state.json` 或 `prd.json` JSON 损坏                       | `status`/`report` 的保守警告                                                              | 运行 `npx coding-x repair`；它会自行获取短租约并按固定清单修复，不会替你解决业务失败                                                  |

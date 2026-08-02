@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { join, basename } from 'node:path';
-import { readFileSync } from 'node:fs';
 import { runAgent, type AgentKind, type RunResult } from './agent.js';
 import { type Prd } from './prd.js';
 import type { PrdReadResult } from './prd-guard.js';
@@ -14,7 +13,6 @@ import {
   restoreValidationOwnership,
   validationOwnershipOf,
   issueValidationReceipt,
-  evaluateStoryValidationReceiptSet,
   reconcileValidationReceipts,
   rollbackUnvalidatedPass,
   tryReadEngineOwnedFields,
@@ -62,22 +60,34 @@ import {
   type QualityContractReadResult,
 } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
-import {
-  runFinalReview,
-  type StoryValidationBindingObservation,
-} from '../review/final-review.js';
+import { runFinalReview, type StoryValidationBindingObservation } from '../review/final-review.js';
 import { invalidateFinalReviewState } from '../review/state.js';
 import type { FinalReviewOutcome } from '../review/types.js';
 import type { CurrentReviewStatus } from '../review/status.js';
-import { runLoopPreflight } from './loop-preflight.js';
+import { readTrackedQualityContractAtHead, runLoopPreflight } from './loop-preflight.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession, type WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 import {
   installCommandSignals,
   type CommandSignalController,
 } from '../workspace-safety/command-signals.js';
 import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
+import {
+  CleanValidationCheckoutManager,
+  describeCleanValidationCheckoutCleanup,
+  valueReferencesProjectPath,
+  type CleanValidationCheckout,
+} from './clean-validation-checkout.js';
+import {
+  candidateStoryValidationEnvironmentPolicy,
+  digestCandidateStoryValidationEnvironment,
+} from './story-validation-currentness.js';
+import {
+  observeStoryValidationCurrentness,
+  type StoryValidationObservation,
+} from '../review/story-validation-observation.js';
 
 export { renderInstruction } from './loop-instructions.js';
 
@@ -129,8 +139,7 @@ export interface LoopConfig {
     timeoutMs: number;
     storyValidationDigest: string;
     observeStoryValidation: () =>
-      | StoryValidationBindingObservation
-      | Promise<StoryValidationBindingObservation>;
+      StoryValidationBindingObservation | Promise<StoryValidationBindingObservation>;
     termination?: {
       signal: AbortSignal;
       reason: Exclude<SupervisorTerminationReason, 'timeout'>;
@@ -138,10 +147,18 @@ export interface LoopConfig {
   }) => Promise<FinalReviewOutcome>;
   /** 只供提交身份竞态测试：在 Validator request 读取 HEAD 的最后边界同步执行。 */
   beforeValidatorRequestForTests?: () => void;
+  /** 只供清理失败回归：在通过结果签发 receipt 前、验证检出清理前同步执行。 */
+  beforeValidationCheckoutCleanupForTests?: (root: string) => void;
   /** 只供 session release 信号竞态测试；生产始终安装真实进程信号。 */
   commandSignalsForTests?: CommandSignalController;
   /** 只供 session release 信号竞态测试：close 已进入 closing、尚未 await 时执行。 */
   afterSessionCloseStartedForTests?: () => void | Promise<void>;
+  /** @internal 历史状态机测试保留原 cwd；生产 CLI 永不设置。 */
+  unsafeUseProjectRootForValidationTests?: boolean;
+  /** @internal 允许测试 fake Runner 位于项目 workspace；生产拒绝这类覆盖。 */
+  unsafeAllowProjectScopedRunnerForValidationTests?: boolean;
+  /** @internal 历史 receipt fixture 的稳定环境摘要；生产从契约与 HEAD 计算。 */
+  validationEnvironmentDigestForTests?: string;
   /**
    * 仅供历史单测 fixture：允许旧 Validator 直接改 state。CLI 从不设置；生产默认
    * 必须提交结构化 validation result，禁止静默降级。
@@ -183,8 +200,14 @@ const validationOnlyFailureExit = (
   prd: Prd | null,
   state: RunState | null,
   currentGitHead: string | null,
+  currentValidationEnvironmentDigest: string,
 ): number => {
-  if (!prd || !state || !currentGitHead || !allStoriesResolvedAt(prd, state, currentGitHead)) {
+  if (
+    !prd ||
+    !state ||
+    !currentGitHead ||
+    !allStoriesResolvedAt(prd, state, currentGitHead, currentValidationEnvironmentDigest)
+  ) {
     return 1;
   }
   return blockedConvergedExit(prd, state) ?? 1;
@@ -196,6 +219,7 @@ const validationOnlyRecoveryMessage = (storyId: string | null, state: RunState |
     : '本次运行停止，下次启动重新预检后才会进入 Developer';
 
 export async function runLoop(cfg: LoopConfig): Promise<number> {
+  let cleanValidationManager: CleanValidationCheckoutManager | null = null;
   let session: WorkspaceSession;
   try {
     const lease = await acquireWorkspaceLease({ workspacePath: cfg.workspace, command: 'run' });
@@ -207,6 +231,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     }
     throw err;
   }
+  const workspace = session.writer.workspacePath;
   const commandSignals = cfg.commandSignalsForTests ?? installCommandSignals();
   let closeHookCalled = false;
   const closeSession = async (): Promise<void> => {
@@ -228,8 +253,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       projectRoot,
       qualityReader,
       qualityRead,
-      bootPrd,
-      bootState,
       agentEnv,
       tddConfig,
       builder,
@@ -238,34 +261,62 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       frozenQualityChecks,
       runKind,
       bootResolved,
+      validationEnvironmentDigest: bootValidationEnvironmentDigest,
     } = startup;
     const agentCwd = projectRoot;
     const runId = randomUUID();
+    const validationRunnerEnvironment = Object.fromEntries(
+      ['CODING_X_CLAUDE_BIN', 'CODING_X_CODEX_BIN', 'CODING_X_CURSOR_BIN'].flatMap((name) => {
+        const value = process.env[name];
+        if (!value) return [];
+        if (
+          !cfg.unsafeAllowProjectScopedRunnerForValidationTests &&
+          valueReferencesProjectPath(projectRoot, value)
+        ) {
+          return [];
+        }
+        return [[name, value]];
+      }),
+    );
+    if (!cfg.unsafeUseProjectRootForValidationTests) {
+      cleanValidationManager = new CleanValidationCheckoutManager(
+        projectRoot,
+        qualityRead.contract,
+        {
+          session,
+          kind: 'quality-check',
+          termination: commandSignals.termination,
+        },
+      );
+    }
 
     server = dashboard.start({
-      workspace: cfg.workspace,
+      workspace,
       maxIterations: cfg.maxIterations,
       projectRoot,
       port: cfg.port,
+      storyValidationObserver: () =>
+        observeStoryValidationCurrentness({
+          projectRoot,
+          session,
+          termination: commandSignals.termination,
+          ...(cfg.qualityContractReader
+            ? { qualityContractReader: cfg.qualityContractReader }
+            : {}),
+          ...(cfg.validationEnvironmentDigestForTests !== undefined
+            ? { validationEnvironmentDigestForTests: cfg.validationEnvironmentDigestForTests }
+            : {}),
+        }),
     });
     await server.ready;
     dashboard.setState({ runner: runKind });
-    // Agents must run at the project root (the engine process's cwd), NOT at
-    // cfg.workspace. The engine reads prd.json at join(cfg.workspace,
-    // 'prd.json'), which for the default relative '.workspace' resolves against
-    // the process cwd → <root>/.workspace/prd.json. The builder/validator
-    // instructions also read '.workspace/prd.json' and root AGENTS.md/tasks/,
-    // assuming cwd == project root. Spawning at cfg.workspace would make the
-    // agent resolve '.workspace/prd.json' to <root>/.workspace/.workspace/prd.json,
-    // so engine and agent would never share state and the loop would always hit
-    // maxIterations. (See loop.test.ts "spawns the agent at the project root".)
-    const progressPath = join(cfg.workspace, 'progress.md');
+    // Developer stays at the project root; Validator later moves to the exact-HEAD
+    // validation checkout. Neither agent runs inside the workspace. Instructions and result paths
+    // use the lease-authenticated absolute path, so changing cwd cannot redirect engine state.
+    const progressPath = join(workspace, 'progress.md');
     const rawOf = (p: string): string | null => {
-      try {
-        return readFileSync(p, 'utf-8');
-      } catch {
-        return null;
-      }
+      const file = readStableFile(p, { label: basename(p) });
+      return file.status === 'ready' ? file.bytes.toString('utf8') : null;
     };
     const outcomeOf = (r: {
       timedOut: boolean;
@@ -298,13 +349,42 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         }
       }
     };
-    const qualityContractStillCurrent = (): boolean => {
+    const qualityContractStillCurrent = async (expectedHead?: string): Promise<boolean> => {
       const current = qualityReader(projectRoot);
-      if (current.status === 'ready' && current.digest === qualityRead.digest) return true;
-      const observed = current.status === 'ready' ? current.digest : current.status;
+      if (current.status !== 'ready' || current.digest !== qualityRead.digest) {
+        const observed = current.status === 'ready' ? current.digest : current.status;
+        console.error(
+          `❌ 运行期间工作树质量契约发生变化或不可读（启动 ${qualityRead.digest}，当前 ${observed}）。` +
+            '本次运行按配置错误停止；请确认变更后重新派生 PRD。',
+        );
+        return false;
+      }
+      // 测试注入没有真实 Git/契约文件；生产每次都把待验证 HEAD 中的受管契约重新绑定
+      // 到启动摘要。不能只相信工作树文件：Developer 可能提交不同契约后再把工作树恢复。
+      if (cfg.qualityContractReader) return true;
+      const head = expectedHead ?? readGitHead(projectRoot);
+      if (!head) {
+        console.error('❌ 运行期间无法读取当前 Git HEAD；不能确认质量契约仍绑定待验证提交');
+        return false;
+      }
+      const tracked = await readTrackedQualityContractAtHead({
+        projectRoot,
+        head,
+        session,
+        termination: commandSignals.termination,
+      });
+      if (tracked.status === 'ready' && tracked.digest === qualityRead.digest) return true;
+      const observed =
+        tracked.status === 'ready'
+          ? tracked.digest
+          : tracked.status === 'invalid'
+            ? tracked.errors.join('；')
+            : tracked.status === 'missing'
+              ? 'missing'
+              : tracked.error;
       console.error(
-        `❌ 运行期间质量契约发生变化或不可读（启动 ${qualityRead.digest}，当前 ${observed}）。` +
-          '本次运行按配置错误停止；请确认变更后重新派生 PRD。',
+        `❌ 待验证 HEAD ${head} 的质量契约与启动契约不一致` +
+          `（启动 ${qualityRead.digest}，HEAD ${observed}）；本次运行按配置错误停止。`,
       );
       return false;
     };
@@ -312,13 +392,24 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       prd: Prd,
       state: RunState,
       context: string,
-    ): Promise<{ state: RunState; gitHead: string } | null> => {
+    ): Promise<{
+      state: RunState;
+      gitHead: string;
+      validationEnvironmentDigest: string;
+    } | null> => {
       const gitHead = readGitHead(agentCwd);
       if (!gitHead) {
         console.error(`❌ ${context}无法读取当前 Git HEAD，本次运行停止且不会接受旧验收结果`);
         return null;
       }
-      const reconciled = reconcileValidationReceipts(prd, state, gitHead);
+      const currentEnvironmentDigest =
+        cfg.validationEnvironmentDigestForTests ??
+        digestCandidateStoryValidationEnvironment({
+          contract: qualityRead.contract,
+          headSha: gitHead,
+          tddConfig,
+        });
+      const reconciled = reconcileValidationReceipts(prd, state, gitHead, currentEnvironmentDigest);
       if (reconciled.invalidatedStoryIds.length > 0) {
         await session.writer.writeFile('state.json', JSON.stringify(reconciled.state, null, 2));
         console.warn(
@@ -326,7 +417,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             reconciled.invalidatedStoryIds.join(', '),
         );
       }
-      return { state: reconciled.state, gitHead };
+      return {
+        state: reconciled.state,
+        gitHead,
+        validationEnvironmentDigest: currentEnvironmentDigest,
+      };
     };
     // 每次 guard.read() 都可能检出新篡改事件——三处读取点共用（archive 记文件名，与报告红旗区文件清单对齐）
     const recordTamper = async (read: PrdReadResult, iteration: number): Promise<void> => {
@@ -361,47 +456,77 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     };
     let exitCode = 1;
     let reportCurrentReview: CurrentReviewStatus | undefined;
-    const completeResolvedRun = async (prd: Prd, state: RunState): Promise<number> => {
-      const current = await reconcileAtCurrentHead(prd, state, '进入最终 Review 前');
-      if (!current) return 2;
-      if (!allStoriesResolvedAt(prd, current.state, current.gitHead)) {
+    const observeCurrentStoryValidation = () =>
+      observeStoryValidationCurrentness({
+        projectRoot,
+        session,
+        termination: commandSignals.termination,
+        ...(cfg.qualityContractReader ? { qualityContractReader: cfg.qualityContractReader } : {}),
+        ...(cfg.validationEnvironmentDigestForTests !== undefined
+          ? { validationEnvironmentDigestForTests: cfg.validationEnvironmentDigestForTests }
+          : {}),
+      });
+    const completeResolvedRun = async (): Promise<number> => {
+      const initialStoryValidation = await observeCurrentStoryValidation();
+      if (initialStoryValidation.status !== 'ready') {
+        console.error(
+          `❌ 进入最终 Review 前无法确认 Story 验收当前性：${initialStoryValidation.message}`,
+        );
+        return 2;
+      }
+      if (
+        !initialStoryValidation.headSha ||
+        initialStoryValidation.storyValidationDigest === null ||
+        !allStoriesResolvedAt(
+          initialStoryValidation.prd,
+          initialStoryValidation.state,
+          initialStoryValidation.headSha,
+          initialStoryValidation.storyValidationEnvironmentDigest,
+        )
+      ) {
         console.warn(
           '⚠️  进入最终 Review 前发现 Story 验收凭证不再对应当前提交，本次不启动 Review',
         );
         return 1;
       }
-      const blocked = blockedConvergedExit(prd, current.state);
-      if (blocked !== null) return blocked;
-      const initialStoryValidation = evaluateStoryValidationReceiptSet(
-        prd,
-        current.state,
-        current.gitHead,
+      const blocked = blockedConvergedExit(
+        initialStoryValidation.prd,
+        initialStoryValidation.state,
       );
-      if (!initialStoryValidation.valid || initialStoryValidation.digest === null) {
-        console.error('❌ 进入最终 Review 前无法生成当前 Story 验收凭证集合摘要');
-        return 1;
-      }
-      const observeStoryValidation = () => {
-        const observedHead = readGitHead(projectRoot);
-        const observedState = tryReadState(statePath);
-        if (!observedHead || !observedState) {
+      if (blocked !== null) return blocked;
+      const initialToken = initialStoryValidation.observationToken;
+      const initialDigest = initialStoryValidation.storyValidationDigest;
+      const initialEnvironmentDigest = initialStoryValidation.storyValidationEnvironmentDigest;
+      const initialHead = initialStoryValidation.headSha;
+      const observeStoryValidation = async (): Promise<StoryValidationBindingObservation> => {
+        const observed = await observeCurrentStoryValidation();
+        if (observed.status !== 'ready') {
           return {
             status: 'unverifiable' as const,
-            message: !observedHead ? '当前 Git HEAD 不可读取' : 'state.json 不可读取',
+            message: observed.message,
           };
         }
-        const observed = evaluateStoryValidationReceiptSet(prd, observedState, observedHead);
-        return observed.valid && observed.digest !== null
-          ? { status: 'ready' as const, digest: observed.digest }
-          : {
-              status: 'unverifiable' as const,
-              message: `Story 凭证已过期：${observed.invalid.map((item) => item.storyId).join('、')}`,
-            };
+        if (
+          observed.observationToken !== initialToken ||
+          observed.headSha !== initialHead ||
+          observed.storyValidationEnvironmentDigest !== initialEnvironmentDigest ||
+          observed.storyValidationDigest !== initialDigest
+        ) {
+          return {
+            status: 'unverifiable' as const,
+            message: 'Story 验收绑定输入已变化；必须基于最新 PRD、状态、契约与提交重新 Review',
+          };
+        }
+        return {
+          status: 'ready' as const,
+          digest: initialDigest,
+          observationToken: observed.observationToken,
+        };
       };
       console.log('\n🔎 全部 story 已验证，开始针对当前 PR 最新提交执行本地最终 Review。');
       const finalReview = await (cfg.finalReviewRunner ?? runFinalReview)({
         root: projectRoot,
-        workspace: cfg.workspace,
+        workspace,
         session,
         currentContract: qualityRead.contract,
         runner: runKind,
@@ -409,17 +534,23 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         codingXVersion: cfg.actualVersion ?? CODING_X_VERSION,
         shadow: cfg.shadow ?? false,
         timeoutMs: cfg.valTimeoutMs,
-        storyValidationDigest: initialStoryValidation.digest,
+        storyValidationDigest: initialDigest,
         observeStoryValidation,
         termination: commandSignals.termination,
       });
       if (finalReview.state !== undefined) {
-        const accepted = observeStoryValidation();
-        if (
-          accepted.status !== 'ready' ||
-          accepted.digest !== initialStoryValidation.digest
-        ) {
-          await invalidateFinalReviewState(session.writer);
+        const accepted = await observeStoryValidation();
+        if (accepted.status !== 'ready' || accepted.digest !== initialDigest) {
+          try {
+            await invalidateFinalReviewState(session.writer);
+          } catch (error) {
+            if (session.state === 'open') session.retainLeaseForIsolation();
+            console.error(
+              '❌ loop 接受最终 Review 前 Story 验收凭证集合已变化，' +
+                `但无法安全撤销旧结果；workspace 已隔离：${error instanceof Error ? error.message : String(error)}`,
+            );
+            return 2;
+          }
           console.error('⏸️  loop 接受最终 Review 前 Story 验收凭证集合已变化；本轮结果已作废');
           return 5;
         }
@@ -447,10 +578,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       if (resolvedExitCode >= 3 && resolvedExitCode <= 6) return 'blocked';
       return 'error';
     };
-    const completeResolvedRunWithDashboard = async (
-      prd: Prd,
-      state: RunState,
-    ): Promise<number> => {
+    const completeResolvedRunWithDashboard = async (): Promise<number> => {
       dashboard.setState({
         phase: 'validating',
         model: null,
@@ -458,7 +586,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         storyDifficulty: null,
       });
       try {
-        const resolvedExitCode = await completeResolvedRun(prd, state);
+        const resolvedExitCode = await completeResolvedRun();
         dashboard.setState({
           phase: phaseAfterResolvedRun(resolvedExitCode),
           model: null,
@@ -477,7 +605,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
     };
     if (bootResolved) {
-      exitCode = await completeResolvedRunWithDashboard(bootPrd, bootState);
+      exitCode = await completeResolvedRunWithDashboard();
     }
     for (
       let i = 1;
@@ -485,7 +613,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       i++
     ) {
       await session.lease.verify();
-      if (!qualityContractStillCurrent()) {
+      if (!(await qualityContractStillCurrent())) {
         exitCode = 2;
         break;
       }
@@ -498,6 +626,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       let skipValidator = beforeRead.restoreFailed;
       let beforeState = before ? readRunState(statePath, before) : null;
       let currentGitHead: string | null = null;
+      let currentValidationEnvironmentDigest = bootValidationEnvironmentDigest;
       if (before && beforeState) {
         const reconciled = await reconcileAtCurrentHead(before, beforeState, '轮首');
         if (!reconciled) {
@@ -506,11 +635,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         }
         beforeState = reconciled.state;
         currentGitHead = reconciled.gitHead;
+        currentValidationEnvironmentDigest = reconciled.validationEnvironmentDigest;
         stateRawBefore = rawOf(statePath);
       }
       const selection =
         before && beforeState && currentGitHead
-          ? selectNextStory(before, beforeState, currentGitHead)
+          ? selectNextStory(before, beforeState, currentGitHead, currentValidationEnvironmentDigest)
           : null;
       const currentStory = selection?.storyId ?? null;
       const validationOnly = selection?.mode === 'validation-only';
@@ -718,7 +848,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (before && observedGitHead) {
           const state = tryReadState(statePath);
           if (state) {
-            const reconciled = reconcileValidationReceipts(before, state, observedGitHead);
+            const observedEnvironmentDigest =
+              cfg.validationEnvironmentDigestForTests ??
+              digestCandidateStoryValidationEnvironment({
+                contract: qualityRead.contract,
+                headSha: observedGitHead,
+                tddConfig,
+              });
+            const reconciled = reconcileValidationReceipts(
+              before,
+              state,
+              observedGitHead,
+              observedEnvironmentDigest,
+            );
             if (reconciled.invalidatedStoryIds.length > 0) {
               await session.writer.writeFile(
                 'state.json',
@@ -775,6 +917,34 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           validatorOutcome: 'skipped',
           ...(validationRollback ? { validationRollback: true as const } : {}),
           validationHeadAbort,
+        });
+        dashboard.setState({
+          phase: 'idle',
+          model: null,
+          routeSource: null,
+          storyDifficulty: null,
+        });
+        exitCode = 1;
+        await tamperCheckBeforeExit(i);
+        return true;
+      };
+      const stopForValidationEnvironmentFailure = async (
+        error: unknown,
+        builderOutcome?: 'completed' | 'timeout' | 'error',
+      ): Promise<true> => {
+        const detail = clipEvidenceDiagnostic(
+          error instanceof Error ? error.message : String(error),
+        ).trim();
+        const validationRollback =
+          !validationOnly && (await rollbackPendingValidation('本地验证环境无法可靠确认'));
+        const recovery = validationOnly
+          ? '保留已有实现候选且不增加重试'
+          : '撤销本轮尚未验收的候选且不增加重试';
+        console.error(`\n⏸️  本地验证环境不可验证：${detail}；${recovery}，本次运行停止`);
+        await recordIteration({
+          ...(builderOutcome ? { builderOutcome } : {}),
+          validatorOutcome: 'skipped',
+          ...(validationRollback ? { validationRollback: true as const } : {}),
         });
         dashboard.setState({
           phase: 'idle',
@@ -897,7 +1067,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         !validationOnly &&
         builder &&
         builderOutcome === 'completed' &&
-        !qualityContractStillCurrent()
+        !(await qualityContractStillCurrent())
       ) {
         await recordIteration({ builderOutcome: 'completed' });
         exitCode = 2;
@@ -917,8 +1087,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             const validationRollback = await rollbackPendingValidation(
               'Developer 返回后无法读取 Git HEAD',
             );
-            const headDiagnostic =
-              `Developer 返回后Git HEAD 与本轮检查目标不一致（期望 ${currentGitHead ?? 'unavailable'}，当前 unavailable）`;
+            const headDiagnostic = `Developer 返回后Git HEAD 与本轮检查目标不一致（期望 ${currentGitHead ?? 'unavailable'}，当前 unavailable）`;
             await recordIteration({
               builderOutcome: 'completed',
               ...(validationRollback ? { validationRollback: true as const } : {}),
@@ -934,6 +1103,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             break;
           }
           currentGitHead = reconciled.gitHead;
+          currentValidationEnvironmentDigest = reconciled.validationEnvironmentDigest;
         }
       }
 
@@ -952,13 +1122,18 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           before &&
           beforeState &&
           currentGitHead &&
-          allStoriesResolvedAt(before, beforeState, currentGitHead)
+          allStoriesResolvedAt(
+            before,
+            beforeState,
+            currentGitHead,
+            currentValidationEnvironmentDigest,
+          )
         ) {
           // 每轮一条 iteration 不变式：这条快路径 break 前也要留痕，否则已完工工作区
           // 重跑的终轮在 evidence 时间线上是空洞（其余所有退出路径都恰写一条）。
           await recordIteration({ builderOutcome: 'completed', noop: true });
           await tamperCheckBeforeExit(i);
-          exitCode = await completeResolvedRunWithDashboard(before, beforeState);
+          exitCode = await completeResolvedRunWithDashboard();
           break;
         }
         console.warn('⏭️  本轮 builder 无任何产出（state/progress 双无变化），跳过门禁与验收');
@@ -982,6 +1157,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       }
 
       const verificationHead = currentGitHead;
+      let validationCheckout: CleanValidationCheckout | null = null;
+      let validationRoot = agentCwd;
+      const roundValidationEnvironmentDigest = currentValidationEnvironmentDigest;
 
       // 机械门禁：builder 之后、validator 之前确定性执行质量检查（fail-fast）。
       // 失败即机械打回并跳过本轮 validator——builder 谎报「检查通过」在此被零成本戳穿。
@@ -1008,6 +1186,38 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ))
       ) {
         break;
+      }
+      if (!agentBlocked && currentStory && verificationHead && cleanValidationManager) {
+        if (!(await qualityContractStillCurrent(verificationHead))) {
+          exitCode = 2;
+          await tamperCheckBeforeExit(i);
+          break;
+        }
+        try {
+          const validationPolicy = candidateStoryValidationEnvironmentPolicy(tddConfig);
+          validationCheckout = await cleanValidationManager.acquire(
+            verificationHead,
+            validationPolicy.additionalRefs,
+            validationPolicy.additionalPolicy,
+          );
+          if (validationCheckout.environmentDigest !== roundValidationEnvironmentDigest) {
+            const receivedDigest = validationCheckout.environmentDigest;
+            const cleanup = cleanValidationManager.dispose();
+            validationCheckout = null;
+            const cleanupDiagnostic =
+              cleanup && cleanup.status !== 'removed'
+                ? `；${describeCleanValidationCheckoutCleanup(cleanup)}`
+                : '';
+            throw new Error(
+              `验证检出返回的环境摘要与引擎预计算摘要不一致（期望 ${roundValidationEnvironmentDigest}，` +
+                `收到 ${receivedDigest}）${cleanupDiagnostic}`,
+            );
+          }
+          validationRoot = validationCheckout.root;
+        } catch (error) {
+          await stopForValidationEnvironmentFailure(error, builderOutcome);
+          break;
+        }
       }
       const legacyChecks =
         cfg.legacyValidatorProtocolForTests && Array.isArray(gateRead.prd?.qualityChecks)
@@ -1041,12 +1251,24 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const managedGate = {
           session,
           kind: 'quality-check' as const,
+          ...(validationCheckout
+            ? {
+                environment: validationCheckout.processEnvironment,
+                forbiddenExecutableRoot: agentCwd,
+                gitExecutable: validationCheckout.gitExecutable,
+              }
+            : {}),
           termination: commandSignals.termination,
         };
         let gate =
           legacyChecks && legacyChecks !== 'invalid'
-            ? await runQualityChecks(legacyChecks, agentCwd, undefined, managedGate)
-            : await runContractQualityChecks(frozenQualityChecks, agentCwd, undefined, managedGate);
+            ? await runQualityChecks(legacyChecks, validationRoot, undefined, managedGate)
+            : await runContractQualityChecks(
+                frozenQualityChecks,
+                validationRoot,
+                undefined,
+                managedGate,
+              );
         if (rawOf(statePath) !== stateBeforeGate) {
           if (stateBeforeGate !== null) {
             await session.writer.writeFile('state.json', stateBeforeGate);
@@ -1073,8 +1295,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const gateDiagnostic = gate.failure
           ? clipEvidenceDiagnostic(gate.failure.outputTail).trim()
           : '';
+        let gateEnvironmentFailure: Error | null = null;
+        if (validationCheckout) {
+          try {
+            await validationCheckout.assertCurrent('项目机械检查结束后');
+          } catch (error) {
+            gateEnvironmentFailure = error instanceof Error ? error : new Error(String(error));
+          }
+        }
         const gateHeadAfter = readGitHead(agentCwd);
         const gateArtifactChanged = !verificationHead || gateHeadAfter !== verificationHead;
+        const gatePostconditionFailed = gateArtifactChanged || gateEnvironmentFailure !== null;
         await recordEvidence({
           type: 'gate-run',
           source: 'engine',
@@ -1086,7 +1317,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           total: gate.total,
           ran: gate.ran,
           ms: gate.ms,
-          ...(gateArtifactChanged ? { accepted: false as const } : {}),
+          ...(gatePostconditionFailed ? { accepted: false as const } : {}),
           ...(gate.failure
             ? {
                 failedCommand: gate.failure.command,
@@ -1106,6 +1337,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             gateHeadAfter,
           ))
         ) {
+          break;
+        }
+        if (gateEnvironmentFailure !== null) {
+          await stopForValidationEnvironmentFailure(gateEnvironmentFailure, builderOutcome);
           break;
         }
         if (commandSignals.exitCode !== null) {
@@ -1186,7 +1421,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               `\n⏸️  ${currentStory} 的旧候选已被明确判定失败；` +
                 validationOnlyRecoveryMessage(currentStory, failedState),
             );
-            exitCode = validationOnlyFailureExit(before, failedState, currentGitHead);
+            exitCode = validationOnlyFailureExit(
+              before,
+              failedState,
+              currentGitHead,
+              currentValidationEnvironmentDigest,
+            );
             await tamperCheckBeforeExit(i);
             break;
           }
@@ -1214,9 +1454,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           storyDifficulty: currentStoryObj?.difficulty ?? null,
         });
         const stateBeforeTdd = rawOf(statePath);
-        let tddGate = await runTddGate(tddConfig, agentCwd, undefined, {
+        let tddGate = await runTddGate(tddConfig, validationRoot, undefined, {
           session,
           kind: 'tdd-check',
+          ...(validationCheckout
+            ? {
+                environment: validationCheckout.processEnvironment,
+                forbiddenExecutableRoot: agentCwd,
+                gitExecutable: validationCheckout.gitExecutable,
+              }
+            : {}),
           termination: commandSignals.termination,
         });
         if (rawOf(statePath) !== stateBeforeTdd) {
@@ -1240,8 +1487,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const diagnostic = tddGate.failure
           ? clipEvidenceDiagnostic(tddGate.failure.outputTail).trim()
           : '';
+        let tddEnvironmentFailure: Error | null = null;
+        if (validationCheckout) {
+          try {
+            await validationCheckout.assertCurrent('TDD 门禁结束后');
+          } catch (error) {
+            tddEnvironmentFailure = error instanceof Error ? error : new Error(String(error));
+          }
+        }
         const tddHeadAfter = readGitHead(agentCwd);
         const tddArtifactChanged = !verificationHead || tddHeadAfter !== verificationHead;
+        const tddPostconditionFailed = tddArtifactChanged || tddEnvironmentFailure !== null;
         await recordEvidence({
           type: 'tdd-gate',
           source: 'engine',
@@ -1255,7 +1511,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ...(tddGate.commandOk === null ? {} : { commandOk: tddGate.commandOk }),
           runId,
           ms: tddGate.ms,
-          ...(tddArtifactChanged ? { accepted: false as const } : {}),
+          ...(tddPostconditionFailed ? { accepted: false as const } : {}),
           ...(tddGate.failure
             ? {
                 failureCode: tddGate.failure.code,
@@ -1276,6 +1532,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             tddHeadAfter,
           ))
         ) {
+          break;
+        }
+        if (tddEnvironmentFailure !== null) {
+          await stopForValidationEnvironmentFailure(tddEnvironmentFailure, builderOutcome);
           break;
         }
         if (commandSignals.exitCode !== null) {
@@ -1355,7 +1615,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               `\n⏸️  ${currentStory} 的旧候选已被明确判定失败；` +
                 validationOnlyRecoveryMessage(currentStory, failedState),
             );
-            exitCode = validationOnlyFailureExit(before, failedState, currentGitHead);
+            exitCode = validationOnlyFailureExit(
+              before,
+              failedState,
+              currentGitHead,
+              currentValidationEnvironmentDigest,
+            );
             await tamperCheckBeforeExit(i);
             break;
           }
@@ -1422,6 +1687,32 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           `⚠️  ${currentStory ?? '当前 story'} Validator 结构化结果无效（${code}）：${diagnostic}`,
         );
       };
+      const releaseValidationCheckoutBeforeReceipt = async (): Promise<boolean> => {
+        if (!validationCheckout || !cleanValidationManager) return true;
+        let checkoutStillCurrent = true;
+        try {
+          cfg.beforeValidationCheckoutCleanupForTests?.(validationCheckout.root);
+          await validationCheckout.assertCurrent('签发凭证清理前');
+        } catch (error) {
+          rejectProtocol(
+            'artifact-changed',
+            `验证检出在签发凭证清理前已变化：${error instanceof Error ? error.message : String(error)}`,
+          );
+          validationUnverifiable = true;
+          checkoutStillCurrent = false;
+        }
+        const cleanup = cleanValidationManager.dispose();
+        validationCheckout = null;
+        if (cleanup && cleanup.status !== 'removed') {
+          rejectProtocol(
+            'artifact-changed',
+            `验证检出未能在签发凭证前安全清理：${describeCleanValidationCheckoutCleanup(cleanup)}`,
+          );
+          validationUnverifiable = true;
+          return false;
+        }
+        return checkoutStillCurrent;
+      };
 
       if (!validatorBase) {
         console.error('❌ validator.md 不存在，本轮无法签发验收凭证');
@@ -1441,14 +1732,15 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         let validationRequest: ValidationRequest | null = null;
         let validatorPrompt = validatorBase;
         let canStartValidator = true;
+        let validatorHead: string | null = null;
 
         if (currentStoryObj) {
           cfg.beforeValidatorRequestForTests?.();
-          const validatorHead = readGitHead(agentCwd);
+          const sourceHead = readGitHead(agentCwd);
           const headDiagnostic = await observeValidationHead(
             verificationHead,
             'Validator 请求建立前',
-            validatorHead,
+            sourceHead,
           );
           if (headDiagnostic) {
             canStartValidator = false;
@@ -1457,16 +1749,28 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             validationHeadAbort = validationHeadAbortOf(
               'validator-start',
               verificationHead,
-              validatorHead,
+              sourceHead,
               headDiagnostic,
             );
             console.error(`⏸️  ${headDiagnostic}；不启动 Validator`);
           } else {
-            validationRequest = createValidationRequest(
-              currentStoryObj,
-              cfg.workspace,
-              validatorHead,
-            );
+            try {
+              await validationCheckout?.assertCurrent('Validator 请求建立前');
+            } catch (error) {
+              canStartValidator = false;
+              validatorOutcome = 'skipped';
+              validationHeadFailure = error instanceof Error ? error.message : String(error);
+              console.error(`⏸️  ${validationHeadFailure}；不启动 Validator`);
+            }
+            validatorHead = canStartValidator ? readGitHead(validationRoot) : null;
+            if (!validatorHead) {
+              canStartValidator = false;
+              validatorOutcome = 'skipped';
+              validationHeadFailure ??= 'Validator 干净检出无法读取精确 HEAD';
+            }
+          }
+          if (canStartValidator) {
+            validationRequest = createValidationRequest(currentStoryObj, workspace, validatorHead);
             if (structuredValidation) {
               validationTarget = {
                 requestId: validationRequest.requestId,
@@ -1500,10 +1804,22 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           const val = await runAgent({
             kind: runKind,
             prompt: validatorPrompt,
-            cwd: agentCwd,
+            cwd: validationRoot,
             timeoutMs: cfg.valTimeoutMs,
             model: validatorModel,
-            env: agentEnv,
+            env: validationCheckout
+              ? {
+                  ...validationCheckout.processEnvironment,
+                  ...validationRunnerEnvironment,
+                  CODING_X_WORKSPACE: agentEnv.CODING_X_WORKSPACE,
+                  CODING_X_PROJECT_ROOT: validationRoot,
+                }
+              : { ...agentEnv, CODING_X_PROJECT_ROOT: validationRoot },
+            inheritProcessEnvironment: validationCheckout ? false : undefined,
+            forbiddenExecutableRoot:
+              validationCheckout && !cfg.unsafeAllowProjectScopedRunnerForValidationTests
+                ? projectRoot
+                : undefined,
             managed: {
               session,
               termination: commandSignals.termination,
@@ -1535,12 +1851,22 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               `⚠️  ${currentStory} Validator 修改了 state.json，已恢复调用前快照并拒绝本轮结论`,
             );
           }
-          const validatorHeadAfter = readGitHead(agentCwd);
-          const validatorHeadDiagnostic = await observeValidationHead(
+          const validatorHeadAfter = readGitHead(validationRoot);
+          let validatorHeadDiagnostic = await observeValidationHead(
             verificationHead,
             'Validator 返回后',
-            validatorHeadAfter,
+            readGitHead(agentCwd),
           );
+          try {
+            await validationCheckout?.assertCurrent('Validator 返回后');
+          } catch (error) {
+            validatorHeadDiagnostic = error instanceof Error ? error.message : String(error);
+          }
+          if (validatorHeadAfter !== verificationHead) {
+            validatorHeadDiagnostic =
+              `Validator 返回后干净检出 HEAD 与目标不一致（期望 ${verificationHead}，` +
+              `当前 ${validatorHeadAfter ?? 'unavailable'}）`;
+          }
 
           if (validatorHeadDiagnostic) {
             validationHeadAbort = validationHeadAbortOf(
@@ -1585,13 +1911,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 currentValidatorStateBefore.passes &&
                 !currentValidatorStateBefore.blocked &&
                 validatorStateAfter?.passes &&
-                !validatorStateAfter.blocked
+                !validatorStateAfter.blocked &&
+                (await releaseValidationCheckoutBeforeReceipt())
               ) {
                 stateAfter = tryReadState(statePath);
                 if (stateAfter) {
                   const issued =
                     validationRequest && currentStoryObj
-                      ? issueValidationReceipt(stateAfter, currentStoryObj, validationRequest)
+                      ? issueValidationReceipt(
+                          stateAfter,
+                          currentStoryObj,
+                          validationRequest,
+                          roundValidationEnvironmentDigest,
+                        )
                       : { state: stateAfter, changed: false };
                   if (issued.changed) {
                     await session.writer.writeFile(
@@ -1673,9 +2005,15 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 );
               } else {
                 const passed = applyValidatorSuccess(validatorStateBefore, currentStory);
-                const issued = currentStoryObj
-                  ? issueValidationReceipt(passed, currentStoryObj, validationRequest)
-                  : { state: passed, changed: false };
+                const issued =
+                  currentStoryObj && (await releaseValidationCheckoutBeforeReceipt())
+                    ? issueValidationReceipt(
+                        passed,
+                        currentStoryObj,
+                        validationRequest,
+                        roundValidationEnvironmentDigest,
+                      )
+                    : { state: passed, changed: false };
                 if (issued.changed) {
                   await session.writer.writeFile(
                     'state.json',
@@ -1684,7 +2022,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                   validationProtocol = 'passed';
                   validationReceipt = true;
                   console.log(`✅ ${currentStory} 结构化验收目标匹配，引擎验收凭证已签发`);
-                } else {
+                } else if (!validationProtocolError) {
                   rejectProtocol('candidate-not-passing', '引擎无法对当前候选态签发验收凭证');
                 }
               }
@@ -1751,7 +2089,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         break;
       }
 
-      if (!qualityContractStillCurrent()) {
+      if (!(await qualityContractStillCurrent())) {
         exitCode = 2;
         await tamperCheckBeforeExit(i);
         break;
@@ -1773,7 +2111,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           `\n⏸️  ${currentStory} 的旧候选已被 Validator 明确判定失败；` +
             validationOnlyRecoveryMessage(currentStory, failedState),
         );
-        exitCode = validationOnlyFailureExit(before, failedState, currentGitHead);
+        exitCode = validationOnlyFailureExit(
+          before,
+          failedState,
+          currentGitHead,
+          currentValidationEnvironmentDigest,
+        );
         await tamperCheckBeforeExit(i);
         break;
       }
@@ -1807,9 +2150,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         after &&
         afterState &&
         afterGitHead &&
-        allStoriesResolvedAt(after, afterState, afterGitHead)
+        allStoriesResolvedAt(
+          after,
+          afterState,
+          afterGitHead,
+          cfg.validationEnvironmentDigestForTests ??
+            digestCandidateStoryValidationEnvironment({
+              contract: qualityRead.contract,
+              headSha: afterGitHead,
+              tddConfig,
+            }),
+        )
       ) {
-        exitCode = await completeResolvedRunWithDashboard(after, afterState);
+        exitCode = await completeResolvedRunWithDashboard();
         break;
       }
     }
@@ -1835,12 +2188,51 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     try {
       // closeRead 是最终一次 PRD guard 读：只要启动时建立过可信快照，即使磁盘恢复
       // 失败也必须用快照出报告。guard 从未建立快照的异常输入才保留磁盘诊断回退。
-      const reportOptions: ReportOptions = {
+      const sameReadyObservation = (
+        expected: StoryValidationObservation,
+        observed: StoryValidationObservation,
+      ): boolean =>
+        expected.status === 'ready' &&
+        observed.status === 'ready' &&
+        expected.observationToken === observed.observationToken;
+      const reportOptionsFor = (
+        observation: StoryValidationObservation | null,
+        observationError?: string,
+      ): ReportOptions => ({
         ...(closeRead.prd === null ? {} : { trustedPrd: closeRead.prd }),
         ...(reportCurrentReview === undefined ? {} : { currentReview: reportCurrentReview }),
-        currentGitHead: readGitHead(projectRoot),
-      };
-      const report = await writeReportWithWriter(session.writer, new Date(), reportOptions);
+        currentGitHead: observation?.headSha ?? null,
+        storyValidationObservation: observation,
+        ...(observationError === undefined
+          ? {}
+          : { storyValidationObservationError: observationError }),
+      });
+      const beforeWrite = await observeCurrentStoryValidation();
+      let report = await writeReportWithWriter(
+        session.writer,
+        new Date(),
+        reportOptionsFor(beforeWrite),
+      );
+      if (report.status === 'written' && beforeWrite.status === 'ready') {
+        const afterWrite = await observeCurrentStoryValidation();
+        if (!sameReadyObservation(beforeWrite, afterWrite)) {
+          report = await writeReportWithWriter(
+            session.writer,
+            new Date(),
+            reportOptionsFor(afterWrite),
+          );
+          if (report.status === 'written' && afterWrite.status === 'ready') {
+            const afterRewrite = await observeCurrentStoryValidation();
+            if (!sameReadyObservation(afterWrite, afterRewrite)) {
+              report = await writeReportWithWriter(
+                session.writer,
+                new Date(),
+                reportOptionsFor(null, '报告持久化期间 Story 验收状态持续变化，已强制撤销全部绿灯'),
+              );
+            }
+          }
+        }
+      }
       if (report.status === 'written') {
         console.log(`📄 验证报告: ${report.path}`);
       } else {
@@ -1854,6 +2246,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     // keepOpen 等待阶段只读、无需持有 owner lease。
     // 等待期 Ctrl+C 完全走既有 waitForSigint 语义（真实退出码保留）
     if (commandSignals.exitCode !== null) exitCode = commandSignals.exitCode;
+    const cleanValidationCleanup = cleanValidationManager?.dispose();
+    if (cleanValidationCleanup && cleanValidationCleanup.status !== 'removed') {
+      console.error(
+        `❌ 本地验证临时目录未能安全清理，` +
+          describeCleanValidationCheckoutCleanup(cleanValidationCleanup),
+      );
+      exitCode = 2;
+    }
     await closeSession();
     if (commandSignals.exitCode !== null) exitCode = commandSignals.exitCode;
     commandSignals.dispose();
@@ -1871,6 +2271,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     throw error;
   } finally {
     let closeFailed = false;
+    const finalValidationCleanup = cleanValidationManager?.dispose();
+    if (finalValidationCleanup && finalValidationCleanup.status !== 'removed') {
+      closeFailed = true;
+      console.error(
+        `❌ 本地验证临时目录未能安全清理，` +
+          describeCleanValidationCheckoutCleanup(finalValidationCleanup),
+      );
+    }
     if (session.state === 'open') {
       try {
         await closeSession();

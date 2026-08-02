@@ -120,7 +120,8 @@ scope: root
 - P0/P1/人工决策阻断，P1 只有有效延期 Issue 可放行；P2/Info 不阻断；
 - `/review-loop` 提供裁决、反证、授权修复、延期登记，再由用户重新运行 coding-x；
 - 删除缺 PRD 降级、质量问题默认不阻断和 Markdown 自由编辑即完成；
-- doctor 通过 GitHub 检查延期 Issue 字段、开放状态和到期日。
+- doctor 通过 GitHub 检查延期 Issue 字段、开放状态和到期日；status/report 在给出交付就绪前也重新
+  核对当前 Review 精确引用的延期 Issue。Issue 已关闭、过期、字段/标签缺失或无法查询时，旧绿灯失效。
 
 ## Phase 3：初始化与 GitHub 门禁
 

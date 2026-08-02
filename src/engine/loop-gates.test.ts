@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, rmSync, readFileSync, existsSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readEvidence } from './evidence.js';
 import { runLoop as runProductionLoop } from './loop.js';
 import type { QualityContract } from '../quality/contract.js';
+import { digest } from '../review/common.js';
 import {
   setup,
   story,
@@ -13,6 +14,7 @@ import {
   currentRepoTdd,
   fakeBoundValidator,
   readyQualityContract,
+  qualityContractWithNodeScript,
   strictConfig,
   TEST_QUALITY_CONTRACT,
 } from './loop-test-support.js';
@@ -202,8 +204,11 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
   });
 
   it('gate pass lets the validator run and the loop complete', async () => {
+    const contract = qualityContractWithNodeScript('process.exit(0)', 'passing-check');
+    const contractDigest = digest(contract);
     const { workspace, instructionsDir } = setup([story()], {
-      qualityChecks: ['node -e "process.exit(0)"'],
+      qualityContractDigest: contractDigest,
+      qualityChecks: contract.checks,
     });
     const { fake, calls } = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
@@ -217,6 +222,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         instructionsDir,
         port: 0,
         openBrowser: false,
+        qualityContractReader: () => readyQualityContract(contract, contractDigest),
       });
       expect(code).toBe(0);
       // builder + validator 都跑了
@@ -246,7 +252,9 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         port: 0,
         openBrowser: false,
       });
-      expect(code).toBe(0); // 门禁未启用，行为与未配置一致
+      // 历史兼容路径仍会报警并跳过该字段，但新当前性规则不会让无效快照
+      // 获得最终 Review 绿灯。
+      expect(code).toBe(2);
       expect(warns.some((w) => w.includes('qualityChecks 形状非法'))).toBe(true);
       expect(readFileSync(calls, 'utf-8').trim().split('\n')).toHaveLength(2);
     } finally {
@@ -257,8 +265,14 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
 
   it('an agent-set blocked story skips the gate and validator for that round and resolves the loop', async () => {
     const gateMark = join(tmpdir(), `coding-x-gate-mark-${Date.now()}`);
+    const contract = qualityContractWithNodeScript(
+      `require('node:fs').writeFileSync(${JSON.stringify(gateMark)}, 'ran')`,
+      'must-be-skipped',
+    );
+    const contractDigest = digest(contract);
     const { workspace, instructionsDir } = setup([story()], {
-      qualityChecks: [`node -e 'require("node:fs").writeFileSync("${gateMark}", "ran")'`],
+      qualityContractDigest: contractDigest,
+      qualityChecks: contract.checks,
     });
     // stub agent：不置 passes，而是显式置 blocked（模拟 dogfood US-009 的仲裁上报）
     const fake = join(workspace, 'fake-blocking.mjs');
@@ -288,6 +302,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         instructionsDir,
         port: 0,
         openBrowser: false,
+        qualityContractReader: () => readyQualityContract(contract, contractDigest),
       });
       expect(code).toBe(3); // blocked 属 resolved，完成判定当轮收敛为 exit 3（Task 6：M>0 走 blocked 收敛出口）
       expect(existsSync(gateMark)).toBe(false); // 门禁命令未执行
@@ -452,8 +467,8 @@ describe('runLoop TDD gate', { timeout: 30_000, concurrent: false }, () => {
         .map((line) => JSON.parse(line));
       expect(envs).toHaveLength(2);
       expect(envs).toEqual([
-        { workspace: resolve(workspace), projectRoot: resolve(projectRoot) },
-        { workspace: resolve(workspace), projectRoot: resolve(projectRoot) },
+        { workspace: realpathSync.native(workspace), projectRoot: resolve(projectRoot) },
+        { workspace: realpathSync.native(workspace), projectRoot: resolve(projectRoot) },
       ]);
       expect(
         readEvidence(workspace).records.find(

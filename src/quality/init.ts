@@ -446,6 +446,7 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
       ...filePlan.create.map((path) => `新增 ${path}`),
       ...filePlan.update.map((path) => `更新 ${path}`),
       '请确认候选命令、工作目录、运行系统、超时、规范来源和不适用理由均正确。',
+      '尤其确认 localValidation.prepare 会在项目外的干净检出运行，allowedPaths 只列出确实需要的本地依赖目录。',
     ].join('\n'));
     if (!confirmed) {
       return result('cancelled', 6, repository, branch, ruleset, contract, {
