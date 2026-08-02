@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -124,6 +125,83 @@ describe.runIf(
     }
   }, 60_000);
 
+  it.runIf(process.platform !== 'win32')(
+    'does not treat a POSIX backslash filename as a child of an allowed directory',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+      try {
+        checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        writeFileSync(join(checkout.root, 'dist\\escaped.txt'), 'outside dist on POSIX\n');
+        await expect(checkout.assertCurrent('POSIX 反斜杠路径测试')).rejects.toMatchObject({
+          code: 'artifact-boundary-violated',
+        });
+      } finally {
+        checkout?.cleanup();
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it('rejects a hard link in an allowed artifact tree without changing its external target', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const managed = await createManagedProcessTestSession();
+    try {
+      const checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      mkdirSync(join(checkout.root, 'node_modules'));
+      linkSync(
+        join(source.root, 'source.txt'),
+        join(checkout.root, 'node_modules', 'external-hard-link.txt'),
+      );
+      await expect(checkout.assertCurrent('hard link 产物测试')).rejects.toMatchObject({
+        code: 'artifact-boundary-violated',
+        message: expect.stringContaining('hard link'),
+      });
+      expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+      expect(readFileSync(join(source.root, 'source.txt'), 'utf8')).toBe('tracked\n');
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a special file in an allowed artifact tree',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      try {
+        const checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        mkdirSync(join(checkout.root, 'node_modules'));
+        execFileSync('mkfifo', [join(checkout.root, 'node_modules', 'special-pipe')]);
+        await expect(checkout.assertCurrent('特殊产物测试')).rejects.toMatchObject({
+          code: 'artifact-boundary-violated',
+          message: expect.stringContaining('特殊文件'),
+        });
+        expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
   it('reports retained evidence when the checkout directory identity is replaced', async () => {
     const source = repository({ 'source.txt': 'tracked\n' });
     const escaped = mkdtempSync(join(tmpdir(), 'coding-x-escaped-placeholder-'));
@@ -144,15 +222,46 @@ describe.runIf(
       expect(realpathSync(dirname(cleanup.path))).toBe(realpathSync(dirname(container)));
       expect(realpathSync(cleanup.path)).toBe(realpathSync(container));
       expect(cleanup.reason).toContain('实际位置');
+      expect(managed.session.state).toBe('isolated');
       expect(existsSync(escaped)).toBe(true);
       rmSync(escaped, { recursive: true, force: true });
       rmSync(container, { recursive: true, force: true });
     } finally {
-      await managed.close();
+      await expect(managed.close()).rejects.toMatchObject({ code: 'isolated' });
     }
   }, 60_000);
 
-  it('rejects tracked changes and rebuilds instead of reusing across HEADs', async () => {
+  it('keeps a failed manager cleanup as an isolation fence for later acquisitions', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const escaped = mkdtempSync(join(tmpdir(), 'coding-x-manager-escaped-'));
+    rmSync(escaped, { recursive: true });
+    const managed = await createManagedProcessTestSession();
+    let container = '';
+    try {
+      const manager = new CleanValidationCheckoutManager(source.root, contract(), {
+        session: managed.session,
+        kind: 'quality-check',
+      });
+      const checkout = await manager.acquire(source.head());
+      container = dirname(checkout.root);
+      renameSync(checkout.root, escaped);
+      mkdirSync(checkout.root);
+      expect(manager.dispose()).toMatchObject({ status: 'location-unverifiable' });
+      expect(managed.session.state).toBe('isolated');
+      await expect(manager.acquire(source.head())).rejects.toMatchObject({
+        code: 'cleanup-unverifiable',
+      });
+      expect(manager.dispose()).toMatchObject({ status: 'location-unverifiable' });
+      rmSync(escaped, { recursive: true, force: true });
+      rmSync(container, { recursive: true, force: true });
+    } finally {
+      if (existsSync(escaped)) rmSync(escaped, { recursive: true, force: true });
+      if (container && existsSync(container)) rmSync(container, { recursive: true, force: true });
+      await expect(managed.close()).rejects.toMatchObject({ code: 'isolated' });
+    }
+  }, 60_000);
+
+  it('rejects tracked changes and rebuilds every acquisition, including the same HEAD', async () => {
     const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'H1\n' });
     const managed = await createManagedProcessTestSession();
     try {
@@ -164,22 +273,78 @@ describe.runIf(
       const first = await manager.acquire(h1);
       mkdirSync(join(first.root, 'node_modules'));
       writeFileSync(join(first.root, 'node_modules', 'polluted.js'), 'polluted\n');
-      expect((await manager.acquire(h1)).root).toBe(first.root);
-      expect(existsSync(join(first.root, 'node_modules'))).toBe(false);
-      execFileSync('git', ['update-index', '--assume-unchanged', 'source.txt'], {
-        cwd: first.root,
-      });
       writeFileSync(join(first.root, 'source.txt'), 'changed\n');
       await expect(first.assertCurrent('tracked 改写测试')).rejects.toMatchObject({
         code: 'tracked-content-changed',
       });
+      const sameHead = await manager.acquire(h1);
+      expect(sameHead.root).not.toBe(first.root);
+      expect(existsSync(first.root)).toBe(false);
+      expect(existsSync(join(sameHead.root, 'node_modules'))).toBe(false);
       writeFileSync(join(source.root, 'source.txt'), 'H2\n');
       execFileSync('git', ['add', 'source.txt'], { cwd: source.root });
       execFileSync('git', ['commit', '-q', '-m', 'H2'], { cwd: source.root });
-      const second = await manager.acquire(source.head());
-      expect(second.root).not.toBe(first.root);
-      expect(existsSync(first.root)).toBe(false);
-      expect(readFileSync(join(second.root, 'source.txt'), 'utf8')).toBe('H2\n');
+      const nextHead = await manager.acquire(source.head());
+      expect(nextHead.root).not.toBe(sameHead.root);
+      expect(existsSync(sameHead.root)).toBe(false);
+      expect(readFileSync(join(nextHead.root, 'source.txt'), 'utf8')).toBe('H2\n');
+      expect(manager.dispose()).toMatchObject({ status: 'removed' });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('cleans a newly created checkout before rejecting a wrong returned digest', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const managed = await createManagedProcessTestSession();
+    let createdRoot = '';
+    let cleanupCalls = 0;
+    try {
+      const manager = new CleanValidationCheckoutManager(
+        source.root,
+        contract(),
+        { session: managed.session, kind: 'quality-check' },
+        async (options) => {
+          const created = await createCleanValidationCheckout(options);
+          createdRoot = created.root;
+          return {
+            ...created,
+            environmentDigest: `sha256:${'0'.repeat(64)}`,
+            cleanup: () => {
+              cleanupCalls += 1;
+              return created.cleanup();
+            },
+          };
+        },
+      );
+      await expect(manager.acquire(source.head())).rejects.toMatchObject({
+        code: 'identity-changed',
+      });
+      expect(cleanupCalls).toBe(1);
+      expect(createdRoot).not.toBe('');
+      expect(existsSync(createdRoot)).toBe(false);
+      expect(manager.dispose()).toBeNull();
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('freezes the manager contract before asynchronous checkout work begins', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const rules = contract();
+    const managed = await createManagedProcessTestSession();
+    try {
+      const manager = new CleanValidationCheckoutManager(source.root, rules, {
+        session: managed.session,
+        kind: 'quality-check',
+      });
+      rules.generatedPaths.push('escaped/**');
+      const checkout = await manager.acquire(source.head());
+      mkdirSync(join(checkout.root, 'escaped'));
+      writeFileSync(join(checkout.root, 'escaped', 'output.txt'), 'not approved\n');
+      await expect(checkout.assertCurrent('冻结契约测试')).rejects.toMatchObject({
+        code: 'artifact-boundary-violated',
+      });
       expect(manager.dispose()).toMatchObject({ status: 'removed' });
     } finally {
       await managed.close();
@@ -203,6 +368,41 @@ describe.runIf(
         code: 'identity-changed',
       });
       expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('binds the complete Git index and object database hidden state', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const managed = await createManagedProcessTestSession();
+    try {
+      const indexCheckout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      const indexPath = join(indexCheckout.root, '.git', 'index');
+      writeFileSync(indexPath, Buffer.concat([readFileSync(indexPath), Buffer.from('hidden')]));
+      await expect(indexCheckout.assertCurrent('Git index 隐藏状态测试')).rejects.toMatchObject({
+        code: 'identity-changed',
+      });
+      expect(indexCheckout.cleanup()).toMatchObject({ status: 'removed' });
+
+      const objectCheckout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      const hiddenObjectDirectory = join(objectCheckout.root, '.git', 'objects', 'aa');
+      mkdirSync(hiddenObjectDirectory);
+      writeFileSync(join(hiddenObjectDirectory, '0'.repeat(38)), 'hidden object state');
+      await expect(
+        objectCheckout.assertCurrent('Git object DB 隐藏状态测试'),
+      ).rejects.toMatchObject({ code: 'identity-changed' });
+      expect(objectCheckout.cleanup()).toMatchObject({ status: 'removed' });
     } finally {
       await managed.close();
     }
@@ -411,6 +611,40 @@ describe.runIf(
   );
 
   it.runIf(process.platform !== 'win32')(
+    'bounds prepared external file links even when they share one target',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract({
+              prepare: [
+                {
+                  executable: process.execPath,
+                  args: [
+                    '-e',
+                    `const fs=require('node:fs'); fs.mkdirSync('node_modules'); for(let i=0;i<1025;i++) fs.symlinkSync(${JSON.stringify(process.execPath)}, 'node_modules/tool-'+i)`,
+                  ],
+                  cwd: '.',
+                  platforms: ['linux', 'macos'],
+                  timeoutMs: 10_000,
+                },
+              ],
+            }),
+            managed: { session: managed.session, kind: 'quality-check' },
+          }),
+        ).rejects.toMatchObject({ code: 'artifact-boundary-violated' });
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'rejects links to the developer tree but permits a prepared system interpreter link',
     async () => {
       const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
@@ -511,6 +745,40 @@ describe.runIf(
         } finally {
           expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
         }
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'rejects a procfs magic link whose self target changes between consumers',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract({
+              prepare: [
+                {
+                  executable: process.execPath,
+                  args: [
+                    '-e',
+                    "require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync('/proc/self/exe', 'node_modules/runtime')",
+                  ],
+                  cwd: '.',
+                  platforms: ['linux'],
+                  timeoutMs: 5_000,
+                },
+              ],
+            }),
+            managed: { session: managed.session, kind: 'quality-check' },
+          }),
+        ).rejects.toMatchObject({ code: 'artifact-boundary-violated' });
       } finally {
         await managed.close();
       }
@@ -757,7 +1025,7 @@ describe.runIf(
         expect(existsSync(join(container, 'checkout-escaped'))).toBe(true);
       } finally {
         if (container) rmSync(container, { recursive: true, force: true });
-        await managed.close();
+        await expect(managed.close()).rejects.toMatchObject({ code: 'isolated' });
       }
     },
     60_000,

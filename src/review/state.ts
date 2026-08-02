@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 import { digest } from './common.js';
 import {
   REVIEW_DECISIONS_FILE,
@@ -438,7 +438,7 @@ function parseFinalReviewState(value: unknown): ReadableFinalReviewState {
     ? ({
         ...common,
         schemaVersion: LEGACY_REVIEW_STATE_SCHEMA_VERSION,
-        binding: parsedBinding as LegacyReviewBinding,
+        binding: parsedBinding,
       } satisfies LegacyFinalReviewState)
     : ({
         ...common,
@@ -450,9 +450,11 @@ function parseFinalReviewState(value: unknown): ReadableFinalReviewState {
 /** Status/report reader. Formal run never trusts this file to skip a model Review. */
 export function readFinalReviewState(workspace: string): ReviewStateRead {
   const path = join(workspace, REVIEW_STATE_FILE);
-  if (!existsSync(path)) return { status: 'missing' };
+  const file = readStableFile(path, { label: REVIEW_STATE_FILE });
+  if (file.status === 'missing') return { status: 'missing' };
+  if (file.status === 'invalid') return { status: 'invalid', error: file.diagnostic };
   try {
-    const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    const value: unknown = JSON.parse(file.bytes.toString('utf8'));
     return { status: 'ready', state: parseFinalReviewState(value) };
   } catch (error) {
     return { status: 'invalid', error: error instanceof Error ? error.message : String(error) };
@@ -520,10 +522,14 @@ function decision(value: unknown, index: number): ReviewDecision {
 
 export function readReviewDecisions(workspace: string): ReviewDecisionsFile {
   const path = join(workspace, REVIEW_DECISIONS_FILE);
-  if (!existsSync(path)) return { schemaVersion: REVIEW_DECISIONS_SCHEMA_VERSION, decisions: [] };
+  const file = readStableFile(path, { label: REVIEW_DECISIONS_FILE });
+  if (file.status === 'missing') {
+    return { schemaVersion: REVIEW_DECISIONS_SCHEMA_VERSION, decisions: [] };
+  }
+  if (file.status === 'invalid') throw new Error(file.diagnostic);
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(path, 'utf8'));
+    value = JSON.parse(file.bytes.toString('utf8'));
   } catch (error) {
     throw new Error(
       `无法解析 ${REVIEW_DECISIONS_FILE}：${error instanceof Error ? error.message : String(error)}`,

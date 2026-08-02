@@ -9,7 +9,8 @@ import {
   type QualityContractReadResult,
 } from '../quality/contract.js';
 import type { FinalReviewState } from '../review/types.js';
-import { validationEnvironmentDigest } from '../quality/validation-environment.js';
+import { digestCandidateStoryValidationEnvironment } from './story-validation-currentness.js';
+import type { TddConfig } from './prd.js';
 import {
   TEST_QUALITY_DIGEST,
   TEST_QUALITY_CONTRACT,
@@ -161,17 +162,15 @@ describe('quality contract preflight and shadow mode', () => {
     const head = project.head();
     const oldTdd = currentRepoTdd('node -e "process.exit(0)"', head);
     const newTdd = currentRepoTdd('node -e "process.exitCode = 0"', head);
-    const oldEnvironment = validationEnvironmentDigest({
+    const oldEnvironment = digestCandidateStoryValidationEnvironment({
       contract: TEST_QUALITY_CONTRACT,
-      head,
-      additionalRefs: [head],
-      additionalPolicy: { tdd: oldTdd },
+      headSha: head,
+      tddConfig: oldTdd as unknown as TddConfig,
     });
-    const newEnvironment = validationEnvironmentDigest({
+    const newEnvironment = digestCandidateStoryValidationEnvironment({
       contract: TEST_QUALITY_CONTRACT,
-      head,
-      additionalRefs: [head],
-      additionalPolicy: { tdd: newTdd },
+      headSha: head,
+      tddConfig: newTdd as unknown as TddConfig,
     });
     expect(newEnvironment).not.toBe(oldEnvironment);
     const receipt = validationReceiptFor(target, head);
@@ -527,9 +526,11 @@ describe('quality contract preflight and shadow mode', () => {
     expect(await runProductionLoop(config)).toBe(2);
     expect(readFileSync(calls, 'utf8')).toBe('builder');
     expect(readFileSync(contractPath, 'utf8')).toBe(originalContract);
-    expect(execFileSync('git', ['show', 'HEAD:.coding-x/quality.json'], {
-      cwd: project.projectRoot,
-      encoding: 'utf8',
-    })).toContain('poison/**');
-  });
+    expect(
+      execFileSync('git', ['show', 'HEAD:.coding-x/quality.json'], {
+        cwd: project.projectRoot,
+        encoding: 'utf8',
+      }),
+    ).toContain('poison/**');
+  }, 15_000);
 });

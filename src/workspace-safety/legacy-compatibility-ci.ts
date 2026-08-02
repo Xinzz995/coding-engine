@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { spawn, spawnSync, type ChildProcessByStdio } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -16,7 +17,6 @@ import {
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
-import { readQualityContract } from '../quality/contract.js';
 import { bootstrapWorkspace } from './bootstrap.js';
 import { acquireWorkspaceLease } from './lease.js';
 import { ACTIVE_LEASE_DIR, PROTOCOL_ROOT_DIR, WORKSPACE_MARKER_FILE } from './types.js';
@@ -48,6 +48,12 @@ interface RunningLegacyCommand {
   readonly result: Promise<CommandResult>;
 }
 
+interface LegacyProject {
+  readonly root: string;
+  readonly qualityContractDigest: string;
+  readonly qualityChecks: Record<string, unknown>;
+}
+
 function boundedAppend(current: string, chunk: Buffer): string {
   const next = current + chunk.toString('utf8');
   return next.length <= MAX_CAPTURE_BYTES ? next : next.slice(-MAX_CAPTURE_BYTES);
@@ -55,6 +61,128 @@ function boundedAppend(current: string, chunk: Buffer): string {
 
 function exactTemporaryRoot(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), 'coding-x-legacy-0333-')));
+}
+
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalize(entry)]),
+  );
+}
+
+function runGit(cwd: string, args: readonly string[]): void {
+  const result = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: MAX_CAPTURE_BYTES,
+    windowsHide: true,
+  });
+  assert.ifError(result.error);
+  assert.equal(
+    result.status,
+    0,
+    `git ${args[0] ?? 'command'} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+}
+
+function createLegacyProject(root: string, currentProjectRoot: string): LegacyProject {
+  const projectRoot = join(root, 'legacy-project');
+  const fixtureRelativePath = 'src/workspace-safety/__fixtures__/legacy-compatibility-agent.mjs';
+  const qualityChecks = {
+    test: {
+      checks: [
+        {
+          id: 'legacy-proof',
+          module: 'root',
+          command: {
+            executable: 'node',
+            args: ['-e', 'process.exit(0)'],
+            cwd: '.',
+            platforms: ['linux', 'macos', 'windows'],
+            timeoutMs: 30_000,
+          },
+        },
+      ],
+    },
+    build: { notApplicable: 'No build is needed for the frozen legacy protocol proof.' },
+    static: { notApplicable: 'Static checks are covered by the current repository validation.' },
+    security: {
+      notApplicable: 'Security checks are covered by the current repository validation.',
+    },
+  };
+  const legacyContract = {
+    schemaVersion: 1,
+    codingXVersion: LEGACY_VERSION,
+    repository: {
+      provider: 'github',
+      fullName: 'coding-x/legacy-compatibility-proof',
+      defaultBranch: 'main',
+    },
+    release: {
+      protectedRefs: [],
+      notApplicable: 'The temporary compatibility proof is never released.',
+    },
+    sources: {
+      specs: [{ kind: 'path', path: 'SPEC.md' }],
+      acceptanceCriteria: [{ kind: 'path', path: 'SPEC.md' }],
+      engineeringStandards: ['AGENTS.md'],
+    },
+    modules: [{ id: 'root', path: '.' }],
+    generatedPaths: [],
+    checks: qualityChecks,
+    risk: {
+      defaultCategories: ['state'],
+      highRiskPaths: [],
+      pathRules: [],
+    },
+    github: {
+      jobs: [
+        {
+          id: 'legacy-proof',
+          platform: 'linux',
+          toolchains: [],
+          setup: [],
+          checkIds: ['legacy-proof'],
+        },
+      ],
+      requiredChecks: ['quality-gate', 'policy-guard-source'],
+    },
+    exceptions: {
+      p1: { issueTemplate: '.github/ISSUE_TEMPLATE/quality-p1.yml', maxDays: 30 },
+      policy: { issueTemplate: '.github/ISSUE_TEMPLATE/quality-policy.yml', maxDays: 7 },
+    },
+  };
+  const qualityContractDigest = `sha256:${createHash('sha256')
+    .update(JSON.stringify(canonicalize(legacyContract)))
+    .digest('hex')}`;
+
+  mkdirSync(join(projectRoot, '.coding-x'), { recursive: true });
+  mkdirSync(join(projectRoot, 'src/workspace-safety/__fixtures__'), { recursive: true });
+  writeFileSync(
+    join(projectRoot, '.coding-x/quality.json'),
+    `${JSON.stringify(legacyContract, null, 2)}\n`,
+  );
+  copyFileSync(
+    join(currentProjectRoot, fixtureRelativePath),
+    join(projectRoot, fixtureRelativePath),
+  );
+  writeFileSync(
+    join(projectRoot, 'package.json'),
+    `${JSON.stringify({ name: 'coding-x-legacy-compatibility-proof', private: true }, null, 2)}\n`,
+  );
+  writeFileSync(join(projectRoot, 'AGENTS.md'), '# Frozen compatibility proof\n');
+  writeFileSync(join(projectRoot, 'SPEC.md'), '# Frozen compatibility proof\n');
+  runGit(projectRoot, ['init']);
+  runGit(projectRoot, ['config', 'user.name', 'coding-x compatibility proof']);
+  runGit(projectRoot, ['config', 'user.email', 'compatibility-proof@coding-x.invalid']);
+  runGit(projectRoot, ['add', '.']);
+  runGit(projectRoot, ['commit', '-m', 'test: 建立旧版兼容验证项目']);
+  runGit(projectRoot, ['branch', '-M', 'compat/legacy-0333']);
+
+  return { root: projectRoot, qualityContractDigest, qualityChecks };
 }
 
 function npmCliPath(): string {
@@ -291,10 +419,25 @@ async function withTimeout<T>(
   }
 }
 
-async function waitForPath(path: string, label: string): Promise<void> {
+async function waitForPathOrCommand(
+  path: string,
+  label: string,
+  command: RunningLegacyCommand,
+): Promise<void> {
   const started = Date.now();
+  let settled: CommandResult | undefined;
+  void command.result.then((result) => {
+    settled = result;
+  });
   while (Date.now() - started < COMMAND_TIMEOUT_MS) {
     if (existsSync(path)) return;
+    if (settled) {
+      assert.ifError(settled.error);
+      throw new Error(
+        `${label} did not appear before the legacy command exited with status ${String(settled.status)}` +
+          `\nstdout:\n${settled.stdout}\nstderr:\n${settled.stderr}`,
+      );
+    }
     await new Promise((resolveWait) => setTimeout(resolveWait, 20));
   }
   throw new Error(`${label} did not appear`);
@@ -386,14 +529,11 @@ async function proveReportBypass(root: string, cli: string, projectRoot: string)
   assert.equal(safetySnapshot(workspace), before, 'legacy report changed new safety records');
 }
 
-function writeInFlightPrd(workspace: string, projectRoot: string): void {
-  const quality = readQualityContract(projectRoot);
-  assert.equal(quality.status, 'ready', `quality contract is not ready: ${quality.status}`);
-  if (quality.status !== 'ready') return;
+function writeInFlightPrd(workspace: string, project: LegacyProject): void {
   const prd = {
     ...minimalReportPrd(),
-    qualityContractDigest: quality.digest,
-    qualityChecks: quality.contract.checks,
+    qualityContractDigest: project.qualityContractDigest,
+    qualityChecks: project.qualityChecks,
   };
   writeFileSync(join(workspace, 'prd.json'), `${JSON.stringify(prd, null, 2)}\n`);
 }
@@ -418,14 +558,14 @@ function restoreBusinessFiles(workspace: string, holding: string): void {
 async function proveInFlightOldHandleCannotBeFenced(
   root: string,
   cli: string,
-  projectRoot: string,
+  project: LegacyProject,
 ): Promise<void> {
   const workspace = join(root, 'in-flight-workspace');
   const control = join(root, 'in-flight-control');
   const holding = join(root, 'in-flight-holding');
   mkdirSync(workspace);
   mkdirSync(control);
-  writeInFlightPrd(workspace, projectRoot);
+  writeInFlightPrd(workspace, project);
 
   const modelConfig = join(control, 'model-config.json');
   writeFileSync(
@@ -462,7 +602,7 @@ async function proveInFlightOldHandleCannotBeFenced(
       '0',
     ],
     {
-      cwd: projectRoot,
+      cwd: project.root,
       environment: {
         CODING_X_CLAUDE_BIN: agentCommand,
         CODING_X_CONFIG: modelConfig,
@@ -473,7 +613,11 @@ async function proveInFlightOldHandleCannotBeFenced(
 
   const continuePath = join(control, 'agent-continue');
   try {
-    await waitForPath(join(control, 'agent-started'), 'first legacy Builder invocation');
+    await waitForPathOrCommand(
+      join(control, 'agent-started'),
+      'first legacy Builder invocation',
+      command,
+    );
     const oldOwner = moveWorkspaceAside(workspace, holding);
     assert.equal(
       oldOwner.pid,
@@ -516,13 +660,14 @@ async function proveInFlightOldHandleCannotBeFenced(
 }
 
 async function main(): Promise<void> {
-  const projectRoot = realpathSync(resolve(process.cwd()));
+  const currentProjectRoot = realpathSync(resolve(process.cwd()));
   const root = exactTemporaryRoot();
   try {
     const cli = installFrozenLegacyPackage(root);
-    await proveReadyAndActiveAcquire(root, cli, projectRoot);
-    await proveReportBypass(root, cli, projectRoot);
-    await proveInFlightOldHandleCannotBeFenced(root, cli, projectRoot);
+    const project = createLegacyProject(root, currentProjectRoot);
+    await proveReadyAndActiveAcquire(root, cli, project.root);
+    await proveReportBypass(root, cli, project.root);
+    await proveInFlightOldHandleCannotBeFenced(root, cli, project);
     console.log(
       JSON.stringify(
         {

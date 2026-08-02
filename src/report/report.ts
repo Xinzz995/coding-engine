@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
 import {
@@ -16,6 +16,8 @@ import { readFinalReviewState } from '../review/state.js';
 import type { CurrentReviewStatus } from '../review/status.js';
 import { renderReportHtml } from './render.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
+import type { StoryValidationObservation } from '../review/story-validation-observation.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 
 export interface ScreenshotEntry {
   filename: string;
@@ -68,6 +70,10 @@ export interface ReportOptions {
   currentReview?: CurrentReviewStatus;
   /** 由受控调用方观察的当前 Git HEAD；缺失或 null 时报告按不可验证处理。 */
   currentGitHead?: string | null;
+  /** 完整受管 Story 当前性观察；同步兼容入口缺失它时必须撤销全部验收绿灯。 */
+  storyValidationObservation?: StoryValidationObservation | null;
+  /** 观察域无法建立或安全收口时供报告展示的失败原因。 */
+  storyValidationObservationError?: string | null;
 }
 
 function reportReviewStatus(
@@ -111,7 +117,9 @@ function reportReviewStatus(
 // 只读一层、只收常规文件；目录不存在/不可读一律按空处理（报告容错：有什么记什么）
 function listFiles(dir: string): string[] {
   try {
-    return readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name);
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => e.name);
   } catch {
     return [];
   }
@@ -130,12 +138,17 @@ export function parseScreenshotEntry(filename: string, storyIds: string[]): Scre
   let hit: string | null = null;
   for (const id of storyIds) {
     const idl = id.toLowerCase();
-    if ((rest === idl || rest.startsWith(idl + '-')) && (hit === null || id.length > hit.length)) hit = id;
+    if ((rest === idl || rest.startsWith(idl + '-')) && (hit === null || id.length > hit.length))
+      hit = id;
   }
   return { filename, storyId: hit, phase, isImage };
 }
 
-export function collectReport(workspace: string, now: Date, options: ReportOptions = {}): ReportSource {
+export function collectReport(
+  workspace: string,
+  now: Date,
+  options: ReportOptions = {},
+): ReportSource {
   const prdPath = join(workspace, 'prd.json');
   const prdSource = options.trustedPrd === undefined ? 'disk' : 'engine-snapshot';
   if (prdSource === 'disk' && !existsSync(prdPath)) return { status: 'missing', workspace };
@@ -143,15 +156,65 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
   if (prd === null || !Array.isArray(prd.userStories)) return { status: 'unparsable', workspace };
   const statePath = join(workspace, 'state.json');
   const { state, stateCorrupted } = readDisplayState(statePath, prd);
-  const currentGitHead = options.currentGitHead ?? null;
-  const storyValidation = evaluateStoryValidationDisplay(prd, state, currentGitHead);
+  const observed = options.storyValidationObservation;
+  const observationMatchesWorkspace =
+    observed !== undefined &&
+    observed !== null &&
+    resolve(observed.workspacePath) === resolve(workspace);
+  const observationMatchesPrd =
+    observationMatchesWorkspace && observed.prd !== null && isDeepStrictEqual(observed.prd, prd);
+  const observationMatchesState =
+    observationMatchesPrd &&
+    observed.status === 'ready' &&
+    isDeepStrictEqual(
+      evaluateStoryValidationDisplay(
+        prd,
+        state,
+        observed.headSha,
+        observed.storyValidationEnvironmentDigest,
+      ),
+      observed.display,
+    );
+  const currentGitHead =
+    observationMatchesWorkspace && observed !== null && observed !== undefined
+      ? observed.headSha
+      : (options.currentGitHead ?? null);
+  const failedStoryValidation = () => {
+    const failed = evaluateStoryValidationDisplay(prd, state, currentGitHead, null);
+    const message =
+      options.storyValidationObservationError ??
+      (observed === undefined || observed === null
+        ? '生成报告时未完成受管 Story 当前性观察'
+        : !observationMatchesWorkspace
+          ? 'Story 当前性观察来自其他 workspace'
+          : !observationMatchesPrd
+            ? 'Story 当前性观察后 prd.json 已变化'
+            : observed.status === 'ready' && !observationMatchesState
+              ? 'Story 当前性观察后 state.json 已变化'
+              : observed.status === 'unverifiable'
+                ? observed.message
+                : 'Story 当前性观察无法绑定当前报告');
+    return {
+      ...failed,
+      currentness: {
+        ...failed.currentness,
+        current: false,
+        configurationError: failed.currentness.configurationError ?? message,
+      },
+    };
+  };
+  const storyValidation =
+    observationMatchesState && observed.status === 'ready'
+      ? observed.display
+      : failedStoryValidation();
   const currentState = storyValidation.state;
   const rootFiles = listFiles(workspace);
   const reviews: { filename: string; content: string }[] = [];
   for (const filename of rootFiles.filter((n) => /^review-.*\.md$/.test(n)).sort()) {
-    try {
-      reviews.push({ filename, content: readFileSync(join(workspace, filename), 'utf-8') });
-    } catch { /* 单文件读取失败跳过——容错：有什么记什么 */ }
+    const file = readStableFile(join(workspace, filename), { label: filename });
+    if (file.status === 'ready') {
+      reviews.push({ filename, content: file.bytes.toString('utf8') });
+    }
   }
   const stories = mergedStories(prd, currentState);
   const storyIds = stories.map((story) => story.id);
@@ -168,7 +231,9 @@ export function collectReport(workspace: string, now: Date, options: ReportOptio
       progress: readProgress(join(workspace, 'progress.md')),
       reviews,
       tamperedArchives: rootFiles.filter((n) => /^prd\.tampered-.*\.json$/.test(n)).sort(),
-      screenshots: listFiles(join(workspace, 'screenshots')).sort().map((f) => parseScreenshotEntry(f, storyIds)),
+      screenshots: listFiles(join(workspace, 'screenshots'))
+        .sort()
+        .map((f) => parseScreenshotEntry(f, storyIds)),
       evidence: readEvidence(workspace),
       finalReview: reportReviewStatus(
         readFinalReviewState(workspace),
@@ -194,7 +259,11 @@ const REPORT_FILE = 'report.html';
  * missing/unparsable 原样透传不写盘；写盘 IO 失败向上抛——调用方定语义
  * （cli 退出 1 / loop 仅 warn，报告是副产物绝不影响循环结果）。
  */
-export function writeReport(workspace: string, now: Date, options: ReportOptions = {}): WriteReportResult {
+export function writeReport(
+  workspace: string,
+  now: Date,
+  options: ReportOptions = {},
+): WriteReportResult {
   const source = collectReport(workspace, now, options);
   if (source.status !== 'ok') return source;
   const path = join(workspace, REPORT_FILE);

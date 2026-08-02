@@ -7,7 +7,9 @@ import { readQualityContract, type QualityContract } from '../quality/contract.j
 import type { GitHubQualityClient } from '../quality/github.js';
 import {
   containsGitBinaryPatch,
+  MAX_REVIEW_CHANGED_FILES,
   type ReviewPreflightContext,
+  validateReviewChangedFileCount,
   validatePullRequestIntent,
 } from './preflight.js';
 import {
@@ -67,6 +69,14 @@ describe('containsGitBinaryPatch', () => {
     expect(containsGitBinaryPatch('+Binary files a/a.bin and b/a.bin differ\n')).toBe(false);
     expect(containsGitBinaryPatch('+before\rGIT binary patch\rafter\n')).toBe(false);
     expect(containsGitBinaryPatch('+before\u2028GIT binary patch\u2028after\n')).toBe(false);
+  });
+});
+
+describe('validateReviewChangedFileCount', () => {
+  it('fails closed before per-file reads can amplify an oversized PR', () => {
+    expect(validateReviewChangedFileCount(0)).toContain('没有可评审改动');
+    expect(validateReviewChangedFileCount(MAX_REVIEW_CHANGED_FILES)).toBeNull();
+    expect(validateReviewChangedFileCount(MAX_REVIEW_CHANGED_FILES + 1)).toContain('请拆分 PR');
   });
 });
 
@@ -218,6 +228,7 @@ describe('revalidateUnmanagedReviewContext', () => {
       };
       baseContract.generatedPaths = [];
       let currentBody = completeBody;
+      let currentLabels: string[] = [];
       const client = {
         discoverRepository: () => ({
           fullName: 'owner/repo',
@@ -232,7 +243,7 @@ describe('revalidateUnmanagedReviewContext', () => {
           url: 'https://example.test/1',
           title: 'feature review',
           body: currentBody,
-          labels: [],
+          labels: currentLabels,
         }),
       } as unknown as GitHubQualityClient;
       const context: ReviewPreflightContext = {
@@ -276,6 +287,18 @@ describe('revalidateUnmanagedReviewContext', () => {
       if (!changedIntent.ok) expect(changedIntent.message).toContain('标题或正文');
 
       currentBody = completeBody;
+      currentLabels = ['policy-exception'];
+      const changedLabels = revalidateUnmanagedReviewContext(context, workspace, client);
+      expect(changedLabels).toMatchObject({ ok: false });
+      if (!changedLabels.ok) expect(changedLabels.message).toContain('标签');
+
+      currentLabels = [];
+      run(root, ['switch', '-q', '-c', 'feature/renamed']);
+      const changedBranch = revalidateUnmanagedReviewContext(context, workspace, client);
+      expect(changedBranch).toMatchObject({ ok: false });
+      if (!changedBranch.ok) expect(changedBranch.message).toContain('功能分支');
+      run(root, ['switch', '-q', 'feature/review']);
+
       writeFileSync(join(root, 'unexpected.txt'), 'uncommitted\n');
       const dirty = revalidateUnmanagedReviewContext(context, workspace, client);
       expect(dirty).toMatchObject({ ok: false });

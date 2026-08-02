@@ -11,15 +11,142 @@ import {
 import { delimiter, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runLoop } from './loop.js';
+import { readEvidence } from './evidence.js';
+import type { QualityContract } from '../quality/contract.js';
 import {
   fakeBoundValidator,
   currentRepoTdd,
+  readyQualityContract,
   setupGitProject,
   story,
   strictConfig,
+  TEST_QUALITY_CONTRACT,
 } from './loop-test-support.js';
 
 describe('runLoop clean validation checkout', () => {
+  it('records completed gate facts before rejecting a polluted validation checkout', async () => {
+    const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
+    const contract = {
+      ...TEST_QUALITY_CONTRACT,
+      checks: {
+        ...TEST_QUALITY_CONTRACT.checks,
+        test: {
+          checks: [
+            {
+              id: 'pollute-after-gate',
+              module: 'root',
+              command: {
+                executable: process.execPath,
+                args: [
+                  '--input-type=module',
+                  '-e',
+                  "import { writeFileSync } from 'node:fs'; writeFileSync('unexpected-after-gate.txt', 'x');",
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos', 'windows'],
+                timeoutMs: 5000,
+              },
+            },
+          ],
+        },
+      },
+    } as QualityContract;
+    const prdPath = join(fixture.workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+    prd.qualityChecks = contract.checks;
+    writeFileSync(prdPath, JSON.stringify(prd));
+    const fake = fakeBoundValidator(fixture.workspace, 'passed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(
+        await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+          qualityContractReader: () => readyQualityContract(contract),
+        }),
+      ).toBe(1);
+      const evidence = readEvidence(fixture.workspace).records;
+      const gateIndex = evidence.findIndex((record) => record.type === 'gate-run');
+      const iterationIndex = evidence.findIndex((record) => record.type === 'iteration');
+      expect(gateIndex).toBeGreaterThanOrEqual(0);
+      expect(iterationIndex).toBeGreaterThan(gateIndex);
+      expect(evidence[gateIndex]).toMatchObject({
+        type: 'gate-run',
+        ok: true,
+        ran: 1,
+        accepted: false,
+        runId: expect.any(String),
+      });
+      expect(evidence[iterationIndex]).toMatchObject({
+        type: 'iteration',
+        validatorRan: false,
+        validatorOutcome: 'skipped',
+        validationRollback: true,
+        runId: (evidence[gateIndex] as { runId: string }).runId,
+      });
+      expect(
+        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({ passes: false, validated: false, validationReceipt: null });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  }, 60_000);
+
+  it('records completed TDD facts before rejecting a polluted validation checkout', async () => {
+    const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
+    const prdPath = join(fixture.workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+    prd.tdd = currentRepoTdd(
+      `node -e "require('node:fs').writeFileSync('unexpected-after-tdd.txt', 'x')"`,
+      fixture.head(),
+    );
+    writeFileSync(prdPath, JSON.stringify(prd));
+    const fake = fakeBoundValidator(fixture.workspace, 'passed');
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(
+        await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+        }),
+      ).toBe(1);
+      const evidence = readEvidence(fixture.workspace).records;
+      const tddIndex = evidence.findIndex(
+        (record) => record.type === 'tdd-gate' && record.phase === 'post-builder',
+      );
+      const iterationIndex = evidence.findIndex((record) => record.type === 'iteration');
+      expect(tddIndex).toBeGreaterThanOrEqual(0);
+      expect(iterationIndex).toBeGreaterThan(tddIndex);
+      expect(evidence[tddIndex]).toMatchObject({
+        type: 'tdd-gate',
+        ok: true,
+        policyOk: true,
+        commandRan: true,
+        commandOk: true,
+        accepted: false,
+        runId: expect.any(String),
+      });
+      expect(evidence[iterationIndex]).toMatchObject({
+        type: 'iteration',
+        validatorRan: false,
+        validatorOutcome: 'skipped',
+        validationRollback: true,
+        runId: (evidence[tddIndex] as { runId: string }).runId,
+      });
+      expect(
+        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({ passes: false, validated: false, validationReceipt: null });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  }, 60_000);
+
   it('keeps a relative CLI workspace bound to the canonical managed directory after Validator changes cwd', async () => {
     const fixture = setupGitProject([story({ acceptanceCriteria: ['relative workspace works'] })]);
     const validatorCwdMarker = join(fixture.instructionsDir, 'relative-validator-cwd.txt');
@@ -218,7 +345,50 @@ describe('runLoop clean validation checkout', () => {
     }
   }, 60_000);
 
-  it('does not persist a receipt when the validated checkout cannot be safely cleaned', async () => {
+  it.each([
+    {
+      label: '改写受跟踪文件',
+      mutate: (root: string) => writeFileSync(join(root, 'source.txt'), 'changed after review\n'),
+    },
+    {
+      label: '新增未声明文件',
+      mutate: (root: string) => writeFileSync(join(root, 'unexpected-before-receipt.txt'), 'x'),
+    },
+  ])(
+    '在签发前$label时拒绝 Validator 结果',
+    async ({ mutate }) => {
+      const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
+      const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      try {
+        const code = await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+          beforeValidationCheckoutCleanupForTests: mutate,
+        });
+
+        expect(code).not.toBe(0);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({ validated: false, validationReceipt: null });
+        const iteration = readEvidence(fixture.workspace).records.find(
+          (record) => record.type === 'iteration',
+        );
+        expect(iteration).toMatchObject({
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
+        });
+        expect(iteration && 'validationReceipt' in iteration).toBe(false);
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    60_000,
+  );
+
+  it('isolates the workspace and refuses reuse when a validated checkout cannot be safely cleaned', async () => {
     const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
     const fake = fakeBoundValidator(fixture.workspace, 'passed');
     const calls = join(fixture.projectRoot, 'bound-calls.txt');
@@ -238,7 +408,7 @@ describe('runLoop clean validation checkout', () => {
           mkdirSync(root);
         },
       });
-      expect(first).toBe(1);
+      expect(first).toBe(2);
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
       ).toMatchObject({ validated: false, validationReceipt: null });
@@ -252,11 +422,11 @@ describe('runLoop clean validation checkout', () => {
         unsafeAllowProjectScopedRunnerForValidationTests: true,
         validationEnvironmentDigestForTests: undefined,
       });
-      expect(second).toBe(0);
-      expect(readFileSync(calls, 'utf8')).toBe('2');
+      expect(second).toBe(2);
+      expect(existsSync(calls)).toBe(false);
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-      ).toMatchObject({ validated: true, validationReceipt: { schemaVersion: 2 } });
+      ).toMatchObject({ validated: false, validationReceipt: null });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
       if (escapedCheckout) rmSync(escapedCheckout, { recursive: true, force: true });

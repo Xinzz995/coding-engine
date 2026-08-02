@@ -1,8 +1,9 @@
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
 import { join, dirname } from 'node:path';
 import type { Prd } from './prd.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 
 export interface PrdReadResult {
   /** 快照建立后恒为快照解析结果；仅快照未建立且磁盘缺失/损坏时为 null */
@@ -43,10 +44,7 @@ function fileStamp(d: Date): string {
  * 正式运行守卫。所有恢复与归档都经过当前 owner 的 WorkspaceWriter；调用方必须等待
  * read() 完成后才能启动下一个受委托进程。
  */
-export function createManagedPrdGuard(
-  prdPath: string,
-  writer: WorkspaceWriter,
-): ManagedPrdGuard {
+export function createManagedPrdGuard(prdPath: string, writer: WorkspaceWriter): ManagedPrdGuard {
   let snapshotRaw: string | null = null;
   let snapshotPrd: Prd | null = null;
   let lastTampered: string | null | undefined;
@@ -54,11 +52,8 @@ export function createManagedPrdGuard(
   const archives: string[] = [];
 
   const tryReadRaw = (): string | null => {
-    try {
-      return readFileSync(prdPath, 'utf-8');
-    } catch {
-      return null;
-    }
+    const file = readStableFile(prdPath, { label: 'prd.json' });
+    return file.status === 'ready' ? file.bytes.toString('utf8') : null;
   };
 
   const handleTamper = async (
@@ -149,15 +144,15 @@ export function createPrdGuard(prdPath: string): PrdGuard {
   const archives: string[] = [];
 
   function tryReadRaw(): string | null {
-    try {
-      return readFileSync(prdPath, 'utf-8');
-    } catch {
-      return null;
-    }
+    const file = readStableFile(prdPath, { label: 'prd.json' });
+    return file.status === 'ready' ? file.bytes.toString('utf8') : null;
   }
 
   /** 处置篡改：存档（内容去重）→ 快照写回 → 告警（内容去重）。 */
-  function handleTamper(raw: string | null): { restoreFailed: boolean; tamperedArchive?: string | null } {
+  function handleTamper(raw: string | null): {
+    restoreFailed: boolean;
+    tamperedArchive?: string | null;
+  } {
     const isNew = lastTampered === undefined || raw !== lastTampered;
     let tamperedArchive: string | null | undefined;
     if (isNew) {
@@ -186,7 +181,7 @@ export function createPrdGuard(prdPath: string): PrdGuard {
       }
       console.warn(
         `⚠️  检测到 prd.json 在运行期被修改（${archiveNote}）。引擎已按启动快照恢复并继续；` +
-        `若是你本人想改需求：停引擎 → 修订源 PRD → prd-to-json 再派生 → 重跑。`,
+          `若是你本人想改需求：停引擎 → 修订源 PRD → prd-to-json 再派生 → 重跑。`,
       );
     }
     try {
@@ -194,7 +189,9 @@ export function createPrdGuard(prdPath: string): PrdGuard {
       writeFileAtomicSync(prdPath, snapshotRaw!);
       return { restoreFailed: false, tamperedArchive };
     } catch (e) {
-      console.warn(`⚠️  prd.json 快照写回失败（${(e as Error).message}）：磁盘仍是篡改版，本轮 validator 验收不可信`);
+      console.warn(
+        `⚠️  prd.json 快照写回失败（${(e as Error).message}）：磁盘仍是篡改版，本轮 validator 验收不可信`,
+      );
       return { restoreFailed: true, tamperedArchive };
     }
   }
@@ -215,7 +212,11 @@ export function createPrdGuard(prdPath: string): PrdGuard {
       }
       if (raw === snapshotRaw) return { prd: snapshotPrd, restoreFailed: false };
       const handled = handleTamper(raw);
-      return { prd: snapshotPrd, restoreFailed: handled.restoreFailed, tamperedArchive: handled.tamperedArchive };
+      return {
+        prd: snapshotPrd,
+        restoreFailed: handled.restoreFailed,
+        tamperedArchive: handled.tamperedArchive,
+      };
     },
     summary(): TamperSummary {
       return { count, archives: [...archives] };

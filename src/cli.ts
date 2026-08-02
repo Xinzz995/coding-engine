@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runLoop } from './engine/loop.js';
 import { repairJsonString } from './engine/repair.js';
@@ -47,6 +47,7 @@ import {
 } from './workspace-safety/recovery-dispatch.js';
 import { createWorkspaceSession, type WorkspaceSession } from './workspace-safety/session.js';
 import { WorkspaceSafetyError, type OwnerCommand } from './workspace-safety/types.js';
+import { readStableFile } from './workspace-safety/stable-file.js';
 import {
   installCommandSignals,
   type CommandSignalController,
@@ -467,8 +468,16 @@ function inputPathOutsideWorkspace(inputFile: string, workspace: string): string
 
 function readJsonInput(inputFile: string, workspace: string): unknown {
   const path = inputPathOutsideWorkspace(inputFile, workspace);
-  const bytes = readFileSync(path);
-  if (bytes.byteLength === 0 || bytes.byteLength > 64 * 1024 * 1024) {
+  const file = readStableFile(path, { label: '请求文件', maxBytes: 64 * 1024 * 1024 });
+  if (file.status !== 'ready') {
+    throw new Error(
+      file.status === 'missing'
+        ? `请求文件不存在：${path}`
+        : `请求文件不可读取：${file.diagnostic}`,
+    );
+  }
+  const bytes = file.bytes;
+  if (bytes.byteLength === 0) {
     throw new Error(`请求文件大小非法：${path}`);
   }
   let text: string;
@@ -514,9 +523,21 @@ async function withWorkspaceSession<T>(
 }
 
 function repairRequest(workspace: string): RepairV1Request {
-  const prdBytes = readFileSync(join(workspace, 'prd.json'));
-  const statePath = join(workspace, 'state.json');
-  const stateBytes = existsSync(statePath) ? readFileSync(statePath) : null;
+  const readRepairFile = (name: string, required: boolean): Buffer | null => {
+    const file = readStableFile(join(workspace, name), {
+      label: name,
+      maxBytes: 64 * 1024 * 1024,
+    });
+    if (file.status === 'ready') return file.bytes;
+    if (file.status === 'missing' && !required) return null;
+    throw new Error(
+      file.status === 'missing'
+        ? `${name} 不存在，不能修复`
+        : `${name} 无法安全读取：${file.diagnostic}`,
+    );
+  };
+  const prdBytes = readRepairFile('prd.json', true)!;
+  const stateBytes = readRepairFile('state.json', false);
   const decode = (bytes: Buffer, name: string): string => {
     try {
       return new TextDecoder('utf-8', { fatal: true }).decode(bytes);

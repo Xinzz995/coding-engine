@@ -4,10 +4,7 @@ import {
   QUALITY_CONTRACT_RELATIVE_PATH,
   type QualityContract,
 } from '../quality/contract.js';
-import {
-  GitHubQualityError,
-  type GitHubPullRequestInfo,
-} from '../quality/github.js';
+import { GitHubQualityError, type GitHubPullRequestInfo } from '../quality/github.js';
 import type { ManagedReviewObservation } from './managed-observation.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { matchesAny, normalizeText } from './common.js';
@@ -19,6 +16,20 @@ const REQUIRED_PR_SECTIONS = [
   '验证方式',
   '风险说明',
 ] as const;
+
+/** 超过该规模的 PR 必须拆分；否则逐文件完整读取会放大受管子进程调用并超出模型上下文。 */
+export const MAX_REVIEW_CHANGED_FILES = 128;
+
+export function validateReviewChangedFileCount(count: number): string | null {
+  if (count === 0) return 'PR 相对默认分支没有可评审改动';
+  if (count > MAX_REVIEW_CHANGED_FILES) {
+    return (
+      `PR 变更文件数 ${count} 超过完整 Review 上限 ${MAX_REVIEW_CHANGED_FILES}；` +
+      '请拆分 PR 后重跑'
+    );
+  }
+  return null;
+}
 
 export interface ReviewFileContent {
   path: string;
@@ -367,9 +378,8 @@ export async function runReviewPreflight(options: {
       .split('\0')
       .filter(Boolean)
       .sort();
-    if (changedFiles.length === 0) {
-      return { status: 'unverifiable', message: 'PR 相对默认分支没有可评审改动' };
-    }
+    const changedFileCountError = validateReviewChangedFileCount(changedFiles.length);
+    if (changedFileCountError) return { status: 'unverifiable', message: changedFileCountError };
     let diff: string;
     try {
       diff = await observation.git(
@@ -520,6 +530,12 @@ export async function revalidateReviewContext(
   observation: ManagedReviewObservation,
 ): Promise<ReviewContextRevalidation> {
   try {
+    const branch = normalizeText(
+      await observation.git(['symbolic-ref', '--quiet', '--short', 'HEAD']),
+    );
+    if (branch !== context.branch) {
+      return { ok: false, message: '评审期间本地功能分支身份发生变化' };
+    }
     const repository = await observation.github.discoverRepository(context.root);
     if (
       repository.fullName !== context.baseContract.repository.fullName ||
@@ -553,6 +569,13 @@ export async function revalidateReviewContext(
       normalizeText(current.body) !== normalizeText(context.pullRequest.body)
     ) {
       return { ok: false, message: '评审期间 PR 标题或正文发生变化' };
+    }
+    const labels = (value: readonly string[]) =>
+      value.map((label) => normalizeText(label)).sort((left, right) => left.localeCompare(right));
+    if (
+      JSON.stringify(labels(current.labels)) !== JSON.stringify(labels(context.pullRequest.labels))
+    ) {
+      return { ok: false, message: '评审期间 PR 标签发生变化' };
     }
     const dirty = await managedUnexpectedDirtyPaths({
       root: context.root,

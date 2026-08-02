@@ -88,6 +88,30 @@ const scenarios: readonly PrdViolationScenario[] = [
       process.exit(0);
     `,
   },
+  ...(process.platform === 'win32'
+    ? []
+    : [
+        {
+          name: 'builder 用 FIFO 替换 PRD 时立即失败关闭而不等待写端',
+          source: ({ prdPath }: { readonly prdPath: string }) => `
+            import { unlinkSync } from 'node:fs';
+            import { spawnSync } from 'node:child_process';
+            unlinkSync(${JSON.stringify(prdPath)});
+            const made = spawnSync('mkfifo', [${JSON.stringify(prdPath)}]);
+            process.exit(made.status === 0 ? 0 : 7);
+          `,
+        },
+        {
+          name: 'builder 用 FIFO 替换 state 时立即失败关闭而不等待写端',
+          source: ({ statePath }: { readonly statePath: string }) => `
+            import { unlinkSync } from 'node:fs';
+            import { spawnSync } from 'node:child_process';
+            unlinkSync(${JSON.stringify(statePath)});
+            const made = spawnSync('mkfifo', [${JSON.stringify(statePath)}]);
+            process.exit(made.status === 0 ? 0 : 7);
+          `,
+        },
+      ]),
 ];
 
 describe('runLoop PRD delegation boundary', () => {

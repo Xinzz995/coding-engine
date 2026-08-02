@@ -256,6 +256,7 @@ export function previousFinalReview(headSha: string): FinalReviewState {
       engineeringStandardsDigest: 'standards',
       qualityContractDigest: 'contract',
       validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
+      storyValidationDigest: `sha256:${'1'.repeat(64)}`,
       codingXVersion: CODING_X_VERSION,
       runner: 'claude',
       model: 'review-model',
@@ -304,12 +305,42 @@ export const runLoop = (cfg: LoopConfig): Promise<number> =>
   runProductionLoop({
     ...cfg,
     projectRoot: cfg.projectRoot ?? resolve(cfg.workspace, '..'),
-    qualityContractReader: () => readyQualityContract(),
+    qualityContractReader: cfg.qualityContractReader ?? (() => readyQualityContract()),
     legacyValidatorProtocolForTests: true,
     unsafeUseProjectRootForValidationTests: true,
     validationEnvironmentDigestForTests: TEST_VALIDATION_ENVIRONMENT_DIGEST,
     finalReviewRunner: cfg.finalReviewRunner ?? finalReviewPass,
   });
+
+/** 为需要真实执行一条项目检查的 loop fixture 建立与 PRD 完全一致的结构化契约。 */
+export function qualityContractWithNodeScript(
+  script: string,
+  id = 'fixture-node-check',
+): QualityContract {
+  return {
+    ...structuredClone(TEST_QUALITY_CONTRACT),
+    checks: {
+      test: {
+        checks: [
+          {
+            id,
+            module: 'root',
+            command: {
+              executable: process.execPath,
+              args: ['-e', script],
+              cwd: '.',
+              platforms: ['linux', 'macos', 'windows'],
+              timeoutMs: 5_000,
+            },
+          },
+        ],
+      },
+      build: { notApplicable: 'fixture' },
+      static: { notApplicable: 'fixture' },
+      security: { notApplicable: 'fixture' },
+    },
+  };
+}
 
 // builder 与 validator 共用同一 stub 二进制：以调用计数文件区分谁跑了。
 export function fakeCounting(workspace: string): { fake: string; calls: string } {

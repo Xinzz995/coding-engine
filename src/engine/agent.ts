@@ -183,7 +183,7 @@ export function buildAgentArgs(
 export interface RunResult {
   timedOut: boolean;
   exitCode: number | null;
-  /** 从 spawn 前到 runner stdio 关闭的墙钟耗时；超时路径含整棵进程树终止等待。 */
+  /** 从 spawn 前到 runner stdio 关闭的墙钟耗时；超时路径含平台受管进程集合终止等待。 */
   durationMs: number;
   /** 受控进程完成收口后转发 stdout/stderr，并保留有界合并尾部。 */
   outputTail: string;

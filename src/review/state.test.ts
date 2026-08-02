@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   invalidateFinalReviewState,
   readFinalReviewState,
+  readReviewDecisions,
   writeFinalReviewState,
 } from './state.js';
 import { digest } from './common.js';
 import type { FinalReviewState, ReviewFinding } from './types.js';
 import type { WorkspaceWriteData, WorkspaceWriter } from '../workspace-safety/session.js';
+import { STABLE_FILE_DEFAULT_MAX_BYTES } from '../workspace-safety/stable-file.js';
 
 function state(): FinalReviewState {
   const baseSha = 'a'.repeat(40);
@@ -97,6 +100,37 @@ async function withWorkspace(run: (workspace: string) => Promise<void>): Promise
 }
 
 describe('readFinalReviewState', () => {
+  it.runIf(process.platform !== 'win32')(
+    'rejects final Review and decision FIFOs without waiting for a writer',
+    async () =>
+      withWorkspace(async (workspace) => {
+        execFileSync('mkfifo', [join(workspace, 'final-review.json')]);
+        expect(readFinalReviewState(workspace)).toMatchObject({
+          status: 'invalid',
+          error: expect.stringContaining('不是独立普通文件'),
+        });
+        rmSync(join(workspace, 'final-review.json'));
+
+        execFileSync('mkfifo', [join(workspace, 'review-decisions.json')]);
+        expect(() => readReviewDecisions(workspace)).toThrow('不是独立普通文件');
+      }),
+  );
+
+  it('rejects oversized final Review and decision inputs before parsing them', async () =>
+    withWorkspace(async (workspace) => {
+      const oversized = Buffer.alloc(STABLE_FILE_DEFAULT_MAX_BYTES + 1);
+      writeFileSync(join(workspace, 'final-review.json'), oversized);
+      expect(readFinalReviewState(workspace)).toMatchObject({
+        status: 'invalid',
+        error: expect.stringContaining(`超过 ${STABLE_FILE_DEFAULT_MAX_BYTES} bytes`),
+      });
+
+      writeFileSync(join(workspace, 'review-decisions.json'), oversized);
+      expect(() => readReviewDecisions(workspace)).toThrow(
+        `超过 ${STABLE_FILE_DEFAULT_MAX_BYTES} bytes`,
+      );
+    }));
+
   it('reads both historical schema-v1 binding shapes without upgrading either one', async () =>
     withWorkspace(async (workspace) => {
       const earliest = structuredClone(state()) as unknown as {

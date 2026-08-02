@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { writeFileAtomicSync } from './fs-atomic.js';
 import { join } from 'node:path';
 import { validatePrdStorySet, type Prd, type Story } from './prd.js';
@@ -19,6 +19,7 @@ import {
   type ValidationReceipt,
 } from '../contracts/validation-contract.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 
 export {
   parseValidationReceipt,
@@ -55,8 +56,10 @@ function rawStoryValues(prd: Prd): unknown[] {
 }
 
 export function tryReadState(path: string): RunState | null {
+  const file = readStableFile(path, { label: 'state.json' });
+  if (file.status !== 'ready') return null;
   try {
-    const parsed = parseRunStateBytes(readFileSync(path));
+    const parsed = parseRunStateBytes(file.bytes);
     return parsed.ok ? parsed.value : null;
   } catch {
     return null;
@@ -74,8 +77,10 @@ export interface EngineOwnedFields {
  * loop 用它区分“字段缺失”和“字段值恰好等于兼容缺省”，确保删除也能留痕。
  */
 export function tryReadEngineOwnedFields(path: string, storyId: string): EngineOwnedFields | null {
+  const file = readStableFile(path, { label: 'state.json' });
+  if (file.status !== 'ready') return null;
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown;
+    const parsed = JSON.parse(file.bytes.toString('utf8')) as unknown;
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const raw = (parsed as Record<string, unknown>)[storyId];
     if (raw === undefined) {

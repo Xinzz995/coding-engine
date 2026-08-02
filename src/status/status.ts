@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { tryReadPrd, type Prd } from '../engine/prd.js';
 import {
   readDisplayState,
@@ -31,13 +32,21 @@ import {
   type CurrentReviewStatus,
   type RunnerVersionObservation,
 } from '../review/status.js';
+import { readFinalReviewState } from '../review/state.js';
 import type { GitHubQualityClient } from '../quality/github.js';
 import {
   inspectWorkspaceSafetyStatus,
   renderWorkspaceSafetyStatusLines,
   type WorkspaceSafetyStatusSnapshot,
 } from '../workspace-safety/status.js';
-import { observeStatusRunnerVersion } from './runner-version-observation.js';
+import {
+  observeStatusQuality,
+  type StatusQualityObservation,
+} from './runner-version-observation.js';
+import {
+  readWorkingQualityContractAuthority,
+  type StoryValidationObservation,
+} from '../review/story-validation-observation.js';
 
 export interface RecentModelRoute {
   model: string | null;
@@ -115,6 +124,14 @@ interface StatusCollectionOptions {
   readonly refreshRemote?: boolean;
   /** @internal Deterministic Story-currentness seam; production reads projectRoot HEAD. */
   readonly currentGitHead?: string | null;
+  /** 已在受管安全域完成的完整 Story 当前性观察；缺失时同步入口必须失败关闭。 */
+  readonly storyValidationObservation?: StoryValidationObservation | null;
+  /** 受管观察域自身无法建立或收口时的诊断。 */
+  readonly storyValidationObservationError?: string | null;
+  /** 已在同一受管观察域完成的最终 Review/远端当前性判断。 */
+  readonly finalReviewObservation?: CurrentReviewStatus;
+  /** @internal 异步 status 的确定性观察 seam。 */
+  readonly statusQualityObserver?: typeof observeStatusQuality;
 }
 
 interface ControlledStatusCollectionOptions extends StatusCollectionOptions {
@@ -193,6 +210,19 @@ function recentValidationHeadAbortOf(
   return recent;
 }
 
+function bindObservedFinalReview(
+  workspace: string,
+  observed: CurrentReviewStatus,
+): CurrentReviewStatus {
+  const current = readFinalReviewState(workspace);
+  if (isDeepStrictEqual(observed.read, current)) return observed;
+  return {
+    read: current,
+    current: false,
+    staleReasons: current.status === 'ready' ? ['当前性核验后最终 Review 状态已变化'] : [],
+  };
+}
+
 /** 只读收集 workspace 执行状态；state.json 缺失兼容 legacy，存在但损坏则 fail-closed。 */
 function collectStatusControlled(
   workspace: string,
@@ -209,7 +239,65 @@ function collectStatusControlled(
     options.currentGitHead === undefined
       ? readGitHead(options.projectRoot ?? process.cwd())
       : options.currentGitHead;
-  const storyValidation = evaluateStoryValidationDisplay(prd, state, currentGitHead);
+  const observed = options.storyValidationObservation;
+  const observationMatchesWorkspace =
+    observed !== undefined &&
+    observed !== null &&
+    resolve(observed.workspacePath) === resolve(workspace);
+  const observationMatchesPrd =
+    observationMatchesWorkspace && observed.prd !== null && isDeepStrictEqual(observed.prd, prd);
+  const observationMatchesState =
+    observationMatchesPrd &&
+    observed.status === 'ready' &&
+    isDeepStrictEqual(
+      evaluateStoryValidationDisplay(
+        prd,
+        state,
+        observed.headSha,
+        observed.storyValidationEnvironmentDigest,
+      ),
+      observed.display,
+    );
+  const observationMatchesHead = observationMatchesState && observed.headSha === currentGitHead;
+  const currentContract = observationMatchesHead
+    ? readWorkingQualityContractAuthority(options.projectRoot ?? process.cwd())
+    : null;
+  const observationMatchesContract =
+    observationMatchesHead &&
+    currentContract?.status === 'ready' &&
+    observed.workingContractDigest === currentContract.digest;
+  const failClosedDisplay = () => {
+    const failed = evaluateStoryValidationDisplay(prd, state, currentGitHead, null);
+    const observationMessage =
+      options.storyValidationObservationError ??
+      (observed === undefined || observed === null
+        ? '未完成受管 Story 当前性观察'
+        : !observationMatchesWorkspace
+          ? 'Story 当前性观察来自其他 workspace'
+          : !observationMatchesPrd
+            ? 'Story 当前性观察后 prd.json 已变化'
+            : observed.status === 'unverifiable'
+              ? observed.message
+              : !observationMatchesState
+                ? 'Story 当前性观察后 state.json 已变化'
+                : !observationMatchesHead
+                  ? 'Story 当前性观察后 Git HEAD 已变化'
+                  : !observationMatchesContract
+                    ? 'Story 当前性观察后工作树质量契约已变化或不可读取'
+                    : 'Story 当前性观察无法绑定当前状态');
+    return {
+      ...failed,
+      currentness: {
+        ...failed.currentness,
+        current: false,
+        configurationError: failed.currentness.configurationError ?? observationMessage,
+      },
+    };
+  };
+  const storyValidation =
+    observationMatchesContract && observed.status === 'ready'
+      ? observed.display
+      : failClosedDisplay();
   const currentState = storyValidation.state;
   let evidence: ReturnType<typeof readEvidence> = { records: [], skippedLines: 0 };
   let evidenceUnavailable = false;
@@ -232,16 +320,21 @@ function collectStatusControlled(
     evidenceUnavailable,
     stateCorrupted,
     storyValidation: storyValidation.currentness,
-    finalReview: collectCurrentReviewStatus({
-      workspace,
-      ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
-      ...(options.client ? { client: options.client } : {}),
-      refreshRemote: options.refreshRemote ?? false,
-      storyValidationDigest: storyValidation.digest,
-      ...(options.runnerVersionObservation
-        ? { runnerVersionObservation: options.runnerVersionObservation }
-        : {}),
-    }),
+    finalReview: options.finalReviewObservation
+      ? bindObservedFinalReview(workspace, options.finalReviewObservation)
+      : collectCurrentReviewStatus({
+          workspace,
+          ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
+          ...(options.client ? { client: options.client } : {}),
+          refreshRemote: options.refreshRemote ?? false,
+          storyValidationDigest:
+            observationMatchesContract && observed.status === 'ready'
+              ? observed.storyValidationDigest
+              : null,
+          ...(options.runnerVersionObservation
+            ? { runnerVersionObservation: options.runnerVersionObservation }
+            : {}),
+        }),
   };
 }
 
@@ -304,11 +397,24 @@ export async function collectStatusWithWorkspaceSafety(
 ): Promise<StatusReportWithWorkspaceSafety> {
   return await collectStatusWithWorkspaceSafetyControlled({
     collect: async () => {
-      const runnerVersionObservation = options.projectRoot
-        ? await observeStatusRunnerVersion({ workspace, projectRoot: options.projectRoot })
-        : undefined;
+      let qualityObservation: StatusQualityObservation | undefined;
+      if (options.projectRoot) {
+        qualityObservation = await (options.statusQualityObserver ?? observeStatusQuality)({
+          workspace,
+          projectRoot: options.projectRoot,
+          refreshRemote: options.refreshRemote ?? false,
+        });
+      }
+      const runnerVersionObservation = qualityObservation?.runnerVersionObservation;
       return collectStatusControlled(workspace, {
         ...options,
+        ...(qualityObservation === undefined
+          ? {}
+          : {
+              storyValidationObservation: qualityObservation.storyValidation,
+              storyValidationObservationError: qualityObservation.error,
+              finalReviewObservation: qualityObservation.finalReview,
+            }),
         ...(runnerVersionObservation === undefined ? {} : { runnerVersionObservation }),
       });
     },
@@ -375,10 +481,7 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
     return { text: lines.join('\n'), exitCode: 2 };
   }
   if (report.storyValidation.configurationError !== null) {
-    lines.push(
-      `❌ PRD Story 集合配置错误，验收无法验证：${report.storyValidation.configurationError}`,
-      '',
-    );
+    lines.push(`❌ Story 验收配置或观察不可用：${report.storyValidation.configurationError}`, '');
   } else if (report.storyValidation.gitHead === null) {
     lines.push('⚠️ 当前 Git HEAD 不可读取，Story 验收结果均按待重验显示', '');
   } else if (!report.storyValidation.current) {

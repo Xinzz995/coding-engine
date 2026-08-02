@@ -300,7 +300,8 @@ PR/base/head、评审轮次和状态。
 
 `/review-loop` 写结构化裁决记录，不再把 Markdown 当正式状态。记录至少包含 finding ID、
 绑定 head SHA、处理方式、操作者、反证或 Issue 和时间。P1 延期 Issue 必须有负责人、原因、
-到期日和跟进事项；`doctor` 检查 Issue 开放、字段完整且未过期。
+到期日和跟进事项；`doctor` 检查全部例外，`status/report` 在给出交付就绪前重新核对当前 Review
+精确引用的 Issue。关闭、过期、字段/标签缺失或无法查询都使旧结果失效。
 
 删除旧行为：缺 PRD 降级普通 diff Review、所有质量问题默认不阻断、自由编辑 Markdown 即
 视为完成。

@@ -14,6 +14,7 @@ import {
   containsGitBinaryPatch,
   isLfsPointer,
   sourceDocuments,
+  validateReviewChangedFileCount,
   validatePullRequestIntent,
   type ReviewContextRevalidation,
   type ReviewFileContent,
@@ -82,6 +83,10 @@ export function revalidateUnmanagedReviewContext(
   client: GitHubQualityClient,
 ): ReviewContextRevalidation {
   try {
+    const branch = normalizeText(git(context.root, ['symbolic-ref', '--quiet', '--short', 'HEAD']));
+    if (branch !== context.branch) {
+      return { ok: false, message: '评审期间本地功能分支身份发生变化' };
+    }
     const repository = client.discoverRepository(context.root);
     if (
       repository.fullName !== context.baseContract.repository.fullName ||
@@ -115,6 +120,13 @@ export function revalidateUnmanagedReviewContext(
       normalizeText(current.body) !== normalizeText(context.pullRequest.body)
     ) {
       return { ok: false, message: '评审期间 PR 标题或正文发生变化' };
+    }
+    const labels = (value: readonly string[]) =>
+      value.map((label) => normalizeText(label)).sort((left, right) => left.localeCompare(right));
+    if (
+      JSON.stringify(labels(current.labels)) !== JSON.stringify(labels(context.pullRequest.labels))
+    ) {
+      return { ok: false, message: '评审期间 PR 标签发生变化' };
     }
     const dirty = statusPaths(context.root).filter(
       (path) =>
@@ -249,15 +261,14 @@ export function runUnmanagedReviewPreflight(options: {
       .split('\0')
       .filter(Boolean)
       .sort();
-    if (changedFiles.length === 0) {
-      return { status: 'unverifiable', message: 'PR 相对默认分支没有可评审改动' };
-    }
+    const changedFileCountError = validateReviewChangedFileCount(changedFiles.length);
+    if (changedFileCountError) return { status: 'unverifiable', message: changedFileCountError };
     let diff: string;
     try {
       diff = git(
         root,
         ['diff', '--no-ext-diff', '--find-renames', '--binary', `${baseSha}...${headSha}`, '--'],
-        64 * 1024 * 1024,
+        16 * 1024 * 1024,
       );
     } catch (error) {
       return {

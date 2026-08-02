@@ -1,6 +1,6 @@
 import { CODING_X_VERSION } from '../version.js';
 import type { AgentKind } from '../engine/agent.js';
-import { validationEnvironmentDigest } from '../quality/validation-environment.js';
+import { digestFinalReviewMechanicalEnvironment } from '../engine/story-validation-currentness.js';
 import { digest, normalizeText } from './common.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { applyReviewerRequestedDeepReview, assessReviewRisk } from './risk.js';
@@ -74,7 +74,10 @@ export function evaluateCurrentReviewStatus(options: {
     compare(
       '机械验证环境',
       currentSaved.validationEnvironmentDigest,
-      validationEnvironmentDigest({ contract: context.baseContract, head: context.headSha }),
+      digestFinalReviewMechanicalEnvironment({
+        contract: context.baseContract,
+        headSha: context.headSha,
+      }),
     );
     if (options.storyValidationDigest === undefined) {
       staleReasons.push('Story 验收凭证集合未经过当前性核对');

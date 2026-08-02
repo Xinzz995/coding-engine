@@ -1,12 +1,10 @@
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ModelRouteSource } from './models.js';
 import type { StoryDifficulty } from './prd.js';
-import type {
-  ValidationCheck,
-  ValidationProtocolErrorCode,
-} from './validation-protocol.js';
+import type { ValidationCheck, ValidationProtocolErrorCode } from './validation-protocol.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 
 export interface ValidationTargetEvidence {
   requestId: string;
@@ -22,7 +20,8 @@ export interface AgentInvocationEvidence {
   diagnosticTail?: string;
 }
 
-export type LoopValidationProtocolErrorCode = ValidationProtocolErrorCode
+export type LoopValidationProtocolErrorCode =
+  | ValidationProtocolErrorCode
   | 'state-mutated'
   | 'candidate-not-passing'
   | 'result-cleanup-failed'
@@ -71,11 +70,20 @@ export type EvidenceRunId = string;
  * 防伪加固属后续评估，见 spec 信任边界）。
  */
 export type EvidenceRecord =
-  | { type: 'iteration'; source: 'engine'; at: string; iteration: number; storyId: string | null;
+  | {
+      type: 'iteration';
+      source: 'engine';
+      at: string;
+      iteration: number;
+      storyId: string | null;
       /** v0.34 起由引擎生成；旧记录缺省时不参与跨记录归因。 */
       runId?: EvidenceRunId;
-      builderRan: boolean; builderModel: string | null; validatorRan: boolean;
-      validatorModel: string | null; skippedValidator: boolean; agentBlocked: boolean;
+      builderRan: boolean;
+      builderModel: string | null;
+      validatorRan: boolean;
+      validatorModel: string | null;
+      skippedValidator: boolean;
+      agentBlocked: boolean;
       /** agent 进程结局（异常轮语义，v0.22.0 起）；缺省=该侧未拉起或旧版本记录 */
       builderOutcome?: 'completed' | 'timeout' | 'error';
       validatorOutcome?: 'completed' | 'timeout' | 'error' | 'skipped';
@@ -114,42 +122,88 @@ export type EvidenceRecord =
       stateRouteTamper?: Array<{
         /** 实际被改写的 story；旧 evidence 缺省时消费端回退 iteration.storyId。 */
         storyId?: string;
-        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
+        expected: boolean;
+        received: boolean | 'missing';
+        side: 'builder' | 'validator';
       }>;
       /** agent 对引擎独占 validated 的改动；引擎已恢复。 */
       stateValidationTamper?: Array<{
         /** 实际被改写的 story；旧 evidence 缺省时消费端回退 iteration.storyId。 */
         storyId?: string;
-        expected: boolean; received: boolean | 'missing'; side: 'builder' | 'validator';
-      }> }
-  | { type: 'gate-run'; source: 'engine'; at: string; iteration: number; storyId: string | null;
+        expected: boolean;
+        received: boolean | 'missing';
+        side: 'builder' | 'validator';
+      }>;
+    }
+  | {
+      type: 'gate-run';
+      source: 'engine';
+      at: string;
+      iteration: number;
+      storyId: string | null;
       runId?: EvidenceRunId;
-      ok: boolean; total: number; ran: number; ms: number;
+      ok: boolean;
+      total: number;
+      ran: number;
+      ms: number;
       /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
       accepted?: false;
-      failedCommand?: string; exitCode?: number | null; timedOut?: boolean;
+      failedCommand?: string;
+      exitCode?: number | null;
+      timedOut?: boolean;
       /** 失败命令 stdout/stderr 合并输出的尾部；有界保存。 */
-      diagnosticTail?: string }
-  | { type: 'tdd-gate'; source: 'engine'; at: string;
-      phase: 'preflight' | 'post-builder'; iteration: number; storyId: string | null;
+      diagnosticTail?: string;
+    }
+  | {
+      type: 'tdd-gate';
+      source: 'engine';
+      at: string;
+      phase: 'preflight' | 'post-builder';
+      iteration: number;
+      storyId: string | null;
       runId?: EvidenceRunId;
-      ok: boolean; policyOk: boolean; commandRan: boolean; ms: number;
+      ok: boolean;
+      policyOk: boolean;
+      commandRan: boolean;
+      ms: number;
       /** coverageCheck 的独立命令结局；旧记录缺省时从旧 failureCode 尽力还原。 */
       commandOk?: boolean;
       /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
       accepted?: false;
-      failureCode?: TddEvidenceFailureCode; failedCommand?: string;
-      exitCode?: number | null; timedOut?: boolean; diagnosticTail?: string }
+      failureCode?: TddEvidenceFailureCode;
+      failedCommand?: string;
+      exitCode?: number | null;
+      timedOut?: boolean;
+      diagnosticTail?: string;
+    }
   | { type: 'tamper'; source: 'engine'; at: string; iteration: number; archive: string | null }
-  | { type: 'validation-claim'; source: 'validator'; at: string; iteration: number;
-      requestId: string; storyId: string; acceptanceHash: string; gitHead: string | null;
-      verdict: 'passed' | 'failed'; checks: ValidationCheck[]; summary: string }
-  | { type: 'screenshot-claim'; source: 'builder' | 'validator'; at: string; storyId: string;
-      file: string; acIndex?: number; note?: string };
+  | {
+      type: 'validation-claim';
+      source: 'validator';
+      at: string;
+      iteration: number;
+      requestId: string;
+      storyId: string;
+      acceptanceHash: string;
+      gitHead: string | null;
+      verdict: 'passed' | 'failed';
+      checks: ValidationCheck[];
+      summary: string;
+    }
+  | {
+      type: 'screenshot-claim';
+      source: 'builder' | 'validator';
+      at: string;
+      storyId: string;
+      file: string;
+      acIndex?: number;
+      note?: string;
+    };
 
 export type ScreenshotClaim = Extract<EvidenceRecord, { type: 'screenshot-claim' }>;
 
 export const EVIDENCE_FILE = 'evidence.jsonl';
+export const EVIDENCE_READ_MAX_BYTES = 64 * 1024 * 1024;
 /** 失败诊断的统一上限：生产端截尾、读取端拒绝超限，防止 agent 写入撑爆报告。 */
 export const EVIDENCE_DIAGNOSTIC_CHARS = 2000;
 
@@ -185,8 +239,10 @@ function isRec(v: unknown): v is Record<string, unknown> {
 }
 
 function isEvidenceRunId(value: unknown): value is EvidenceRunId {
-  return typeof value === 'string'
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+  );
 }
 
 function hasValidOptionalRunId(value: Record<string, unknown>): boolean {
@@ -194,8 +250,15 @@ function hasValidOptionalRunId(value: Record<string, unknown>): boolean {
 }
 
 function isRouteSource(v: unknown): v is ModelRouteSource {
-  return v === 'cli-builder' || v === 'cli-escalation' || v === 'cli-validator'
-    || v === 'difficulty' || v === 'escalation' || v === 'validator' || v === 'runner-default';
+  return (
+    v === 'cli-builder' ||
+    v === 'cli-escalation' ||
+    v === 'cli-validator' ||
+    v === 'difficulty' ||
+    v === 'escalation' ||
+    v === 'validator' ||
+    v === 'runner-default'
+  );
 }
 
 function isBoundedDiagnostic(v: unknown): v is string {
@@ -203,11 +266,14 @@ function isBoundedDiagnostic(v: unknown): v is string {
 }
 
 function isInvocationEvidence(v: unknown): v is AgentInvocationEvidence {
-  return isRec(v)
-    && Number.isSafeInteger(v.durationMs) && (v.durationMs as number) >= 0
-    && (v.exitCode === null || Number.isInteger(v.exitCode))
-    && (v.diagnosticTail === undefined
-      || (isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0));
+  return (
+    isRec(v) &&
+    Number.isSafeInteger(v.durationMs) &&
+    (v.durationMs as number) >= 0 &&
+    (v.exitCode === null || Number.isInteger(v.exitCode)) &&
+    (v.diagnosticTail === undefined ||
+      (isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0))
+  );
 }
 
 function isInvocationForOutcome(
@@ -226,11 +292,17 @@ function isBoundedClaimText(v: unknown): v is string {
 }
 
 function isStateRouteTamper(v: unknown): boolean {
-  return Array.isArray(v) && v.every((item) => isRec(item)
-    && (item.storyId === undefined || typeof item.storyId === 'string')
-    && typeof item.expected === 'boolean'
-    && (typeof item.received === 'boolean' || item.received === 'missing')
-    && (item.side === 'builder' || item.side === 'validator'));
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (item) =>
+        isRec(item) &&
+        (item.storyId === undefined || typeof item.storyId === 'string') &&
+        typeof item.expected === 'boolean' &&
+        (typeof item.received === 'boolean' || item.received === 'missing') &&
+        (item.side === 'builder' || item.side === 'validator'),
+    )
+  );
 }
 
 function isGitHead(v: unknown): v is string | null {
@@ -242,17 +314,31 @@ function isAcceptanceHash(v: unknown): v is string {
 }
 
 function isValidationTarget(v: unknown): v is ValidationTargetEvidence {
-  return isRec(v) && typeof v.requestId === 'string' && v.requestId.length > 0
-    && typeof v.storyId === 'string' && v.storyId.length > 0
-    && isAcceptanceHash(v.acceptanceHash) && isGitHead(v.gitHead);
+  return (
+    isRec(v) &&
+    typeof v.requestId === 'string' &&
+    v.requestId.length > 0 &&
+    typeof v.storyId === 'string' &&
+    v.storyId.length > 0 &&
+    isAcceptanceHash(v.acceptanceHash) &&
+    isGitHead(v.gitHead)
+  );
 }
 
 function isValidationProtocolErrorCode(v: unknown): v is LoopValidationProtocolErrorCode {
-  return v === 'missing-result' || v === 'unreadable-result' || v === 'result-too-large'
-    || v === 'invalid-json' || v === 'invalid-schema' || v === 'binding-mismatch'
-    || v === 'artifact-changed' || v === 'state-mutated'
-    || v === 'candidate-not-passing' || v === 'result-cleanup-failed'
-    || v === 'agent-aborted';
+  return (
+    v === 'missing-result' ||
+    v === 'unreadable-result' ||
+    v === 'result-too-large' ||
+    v === 'invalid-json' ||
+    v === 'invalid-schema' ||
+    v === 'binding-mismatch' ||
+    v === 'artifact-changed' ||
+    v === 'state-mutated' ||
+    v === 'candidate-not-passing' ||
+    v === 'result-cleanup-failed' ||
+    v === 'agent-aborted'
+  );
 }
 
 function isValidationProtocolError(v: unknown): boolean {
@@ -260,36 +346,59 @@ function isValidationProtocolError(v: unknown): boolean {
 }
 
 function isValidationHeadAbort(v: unknown): v is ValidationHeadAbortEvidence {
-  if (!isRec(v)
-      || (v.phase !== 'quality-check-start' && v.phase !== 'quality-check-finish'
-        && v.phase !== 'tdd-check-start' && v.phase !== 'tdd-check-finish'
-        && v.phase !== 'validator-start' && v.phase !== 'validator-finish')
-      || (v.reason !== 'head-changed' && v.reason !== 'head-unreadable')
-      || !isGitHead(v.expectedGitHead) || !isGitHead(v.actualGitHead)
-      || !isBoundedDiagnostic(v.diagnostic) || v.diagnostic.trim().length === 0) {
+  if (
+    !isRec(v) ||
+    (v.phase !== 'quality-check-start' &&
+      v.phase !== 'quality-check-finish' &&
+      v.phase !== 'tdd-check-start' &&
+      v.phase !== 'tdd-check-finish' &&
+      v.phase !== 'validator-start' &&
+      v.phase !== 'validator-finish') ||
+    (v.reason !== 'head-changed' && v.reason !== 'head-unreadable') ||
+    !isGitHead(v.expectedGitHead) ||
+    !isGitHead(v.actualGitHead) ||
+    !isBoundedDiagnostic(v.diagnostic) ||
+    v.diagnostic.trim().length === 0
+  ) {
     return false;
   }
   if (v.reason === 'head-unreadable') {
     return v.expectedGitHead === null || v.actualGitHead === null;
   }
-  return v.expectedGitHead !== null && v.actualGitHead !== null
-    && v.expectedGitHead !== v.actualGitHead;
+  return (
+    v.expectedGitHead !== null && v.actualGitHead !== null && v.expectedGitHead !== v.actualGitHead
+  );
 }
 
 function isTddFailureCode(v: unknown): v is TddEvidenceFailureCode {
-  return v === 'invalid-config' || v === 'project-root-unreadable'
-    || v === 'git-unavailable' || v === 'git-root-mismatch'
-    || v === 'baseline-unreachable' || v === 'policy-file-missing'
-    || v === 'policy-file-outside-root' || v === 'policy-file-duplicate-target'
-    || v === 'policy-file-unreadable' || v === 'policy-hash-mismatch'
-    || v === 'source-scan-failed' || v === 'forbidden-pattern-added'
-    || v === 'coverage-check-failed';
+  return (
+    v === 'invalid-config' ||
+    v === 'project-root-unreadable' ||
+    v === 'git-unavailable' ||
+    v === 'git-root-mismatch' ||
+    v === 'baseline-unreachable' ||
+    v === 'policy-file-missing' ||
+    v === 'policy-file-outside-root' ||
+    v === 'policy-file-duplicate-target' ||
+    v === 'policy-file-unreadable' ||
+    v === 'policy-hash-mismatch' ||
+    v === 'source-scan-failed' ||
+    v === 'forbidden-pattern-added' ||
+    v === 'coverage-check-failed'
+  );
 }
 
 function isValidationChecks(v: unknown): v is ValidationCheck[] {
-  return Array.isArray(v) && v.every((check, index) => isRec(check)
-    && check.acIndex === index + 1
-    && typeof check.passed === 'boolean' && isBoundedClaimText(check.evidence));
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (check, index) =>
+        isRec(check) &&
+        check.acIndex === index + 1 &&
+        typeof check.passed === 'boolean' &&
+        isBoundedClaimText(check.evidence),
+    )
+  );
 }
 
 // 落盘数据不直接类型断言（patterns 约定）：按 type 分支逐字段校验，未知 type 一律不认——
@@ -298,70 +407,104 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
   if (!isRec(v) || typeof v.at !== 'string') return false;
   switch (v.type) {
     case 'iteration':
-      return v.source === 'engine' && typeof v.iteration === 'number'
-        && hasValidOptionalRunId(v)
-        && (typeof v.storyId === 'string' || v.storyId === null)
-        && typeof v.builderRan === 'boolean'
-        && (typeof v.builderModel === 'string' || v.builderModel === null)
-        && typeof v.validatorRan === 'boolean'
-        && (typeof v.validatorModel === 'string' || v.validatorModel === null)
-        && typeof v.skippedValidator === 'boolean'
-        && typeof v.agentBlocked === 'boolean'
-        && (v.builderOutcome === undefined || v.builderOutcome === 'completed' || v.builderOutcome === 'timeout' || v.builderOutcome === 'error')
-        && (v.validatorOutcome === undefined || v.validatorOutcome === 'completed' || v.validatorOutcome === 'timeout' || v.validatorOutcome === 'error' || v.validatorOutcome === 'skipped')
-        && (v.builderInvocation === undefined || (v.builderRan === true
-          && isInvocationForOutcome(v.builderInvocation, v.builderOutcome)))
-        && (v.validatorInvocation === undefined || (v.validatorRan === true
-          && v.validatorOutcome !== undefined && v.validatorOutcome !== 'skipped'
-          && isInvocationForOutcome(v.validatorInvocation, v.validatorOutcome)))
-        && (v.noop === undefined || v.noop === true)
-        && (v.gateRejected === undefined || v.gateRejected === true)
-        && (v.abortRollback === undefined || (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string'))
-        && (v.validationRollback === undefined || v.validationRollback === true)
-        && (v.validationHeadAbort === undefined || (typeof v.storyId === 'string'
-          && isValidationHeadAbort(v.validationHeadAbort)))
-        && (v.validationReceipt === undefined || v.validationReceipt === true)
-        && !(v.validationRollback === true && v.validationReceipt === true)
-        && (v.validationProtocol === undefined || v.validationProtocol === 'passed'
-          || v.validationProtocol === 'failed' || v.validationProtocol === 'invalid')
-        && (v.validationTarget === undefined || isValidationTarget(v.validationTarget))
-        && (v.validationProtocolError === undefined || isValidationProtocolError(v.validationProtocolError))
-        && (v.validationProtocolError === undefined || v.validationProtocol === 'invalid')
-        && (v.validatorStateMutation === undefined || v.validatorStateMutation === true)
-        && (v.builderRouteSource === undefined || isRouteSource(v.builderRouteSource))
-        && (v.validatorRouteSource === undefined || isRouteSource(v.validatorRouteSource))
-        && (v.storyDifficulty === undefined || v.storyDifficulty === 'low' || v.storyDifficulty === 'medium' || v.storyDifficulty === 'high')
-        && (v.escalationTriggeredBy === undefined || v.escalationTriggeredBy === 'gate'
-          || v.escalationTriggeredBy === 'validator' || v.escalationTriggeredBy === 'noop')
-        && (v.validatorDiagnostic === undefined || isBoundedDiagnostic(v.validatorDiagnostic))
-        && (v.stateRouteTamper === undefined || isStateRouteTamper(v.stateRouteTamper))
-        && (v.stateValidationTamper === undefined || isStateRouteTamper(v.stateValidationTamper));
+      return (
+        v.source === 'engine' &&
+        typeof v.iteration === 'number' &&
+        hasValidOptionalRunId(v) &&
+        (typeof v.storyId === 'string' || v.storyId === null) &&
+        typeof v.builderRan === 'boolean' &&
+        (typeof v.builderModel === 'string' || v.builderModel === null) &&
+        typeof v.validatorRan === 'boolean' &&
+        (typeof v.validatorModel === 'string' || v.validatorModel === null) &&
+        typeof v.skippedValidator === 'boolean' &&
+        typeof v.agentBlocked === 'boolean' &&
+        (v.builderOutcome === undefined ||
+          v.builderOutcome === 'completed' ||
+          v.builderOutcome === 'timeout' ||
+          v.builderOutcome === 'error') &&
+        (v.validatorOutcome === undefined ||
+          v.validatorOutcome === 'completed' ||
+          v.validatorOutcome === 'timeout' ||
+          v.validatorOutcome === 'error' ||
+          v.validatorOutcome === 'skipped') &&
+        (v.builderInvocation === undefined ||
+          (v.builderRan === true &&
+            isInvocationForOutcome(v.builderInvocation, v.builderOutcome))) &&
+        (v.validatorInvocation === undefined ||
+          (v.validatorRan === true &&
+            v.validatorOutcome !== undefined &&
+            v.validatorOutcome !== 'skipped' &&
+            isInvocationForOutcome(v.validatorInvocation, v.validatorOutcome))) &&
+        (v.noop === undefined || v.noop === true) &&
+        (v.gateRejected === undefined || v.gateRejected === true) &&
+        (v.abortRollback === undefined ||
+          (isRec(v.abortRollback) && typeof v.abortRollback.storyId === 'string')) &&
+        (v.validationRollback === undefined || v.validationRollback === true) &&
+        (v.validationHeadAbort === undefined ||
+          (typeof v.storyId === 'string' && isValidationHeadAbort(v.validationHeadAbort))) &&
+        (v.validationReceipt === undefined || v.validationReceipt === true) &&
+        !(v.validationRollback === true && v.validationReceipt === true) &&
+        (v.validationProtocol === undefined ||
+          v.validationProtocol === 'passed' ||
+          v.validationProtocol === 'failed' ||
+          v.validationProtocol === 'invalid') &&
+        (v.validationTarget === undefined || isValidationTarget(v.validationTarget)) &&
+        (v.validationProtocolError === undefined ||
+          isValidationProtocolError(v.validationProtocolError)) &&
+        (v.validationProtocolError === undefined || v.validationProtocol === 'invalid') &&
+        (v.validatorStateMutation === undefined || v.validatorStateMutation === true) &&
+        (v.builderRouteSource === undefined || isRouteSource(v.builderRouteSource)) &&
+        (v.validatorRouteSource === undefined || isRouteSource(v.validatorRouteSource)) &&
+        (v.storyDifficulty === undefined ||
+          v.storyDifficulty === 'low' ||
+          v.storyDifficulty === 'medium' ||
+          v.storyDifficulty === 'high') &&
+        (v.escalationTriggeredBy === undefined ||
+          v.escalationTriggeredBy === 'gate' ||
+          v.escalationTriggeredBy === 'validator' ||
+          v.escalationTriggeredBy === 'noop') &&
+        (v.validatorDiagnostic === undefined || isBoundedDiagnostic(v.validatorDiagnostic)) &&
+        (v.stateRouteTamper === undefined || isStateRouteTamper(v.stateRouteTamper)) &&
+        (v.stateValidationTamper === undefined || isStateRouteTamper(v.stateValidationTamper))
+      );
     case 'gate-run':
-      return v.source === 'engine' && typeof v.iteration === 'number'
-        && hasValidOptionalRunId(v)
-        && (typeof v.storyId === 'string' || v.storyId === null)
-        && typeof v.ok === 'boolean' && typeof v.total === 'number'
-        && typeof v.ran === 'number' && typeof v.ms === 'number'
-        && (v.accepted === undefined || v.accepted === false)
-        && (v.failedCommand === undefined || typeof v.failedCommand === 'string')
-        && (v.exitCode === undefined || v.exitCode === null || typeof v.exitCode === 'number')
-        && (v.timedOut === undefined || typeof v.timedOut === 'boolean')
-        && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
+      return (
+        v.source === 'engine' &&
+        typeof v.iteration === 'number' &&
+        hasValidOptionalRunId(v) &&
+        (typeof v.storyId === 'string' || v.storyId === null) &&
+        typeof v.ok === 'boolean' &&
+        typeof v.total === 'number' &&
+        typeof v.ran === 'number' &&
+        typeof v.ms === 'number' &&
+        (v.accepted === undefined || v.accepted === false) &&
+        (v.failedCommand === undefined || typeof v.failedCommand === 'string') &&
+        (v.exitCode === undefined || v.exitCode === null || typeof v.exitCode === 'number') &&
+        (v.timedOut === undefined || typeof v.timedOut === 'boolean') &&
+        (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail))
+      );
     case 'tdd-gate': {
-      const base = v.source === 'engine'
-        && hasValidOptionalRunId(v)
-        && (v.phase === 'preflight' || v.phase === 'post-builder')
-        && Number.isSafeInteger(v.iteration) && (v.iteration as number) >= 0
-        && (typeof v.storyId === 'string' || v.storyId === null)
-        && typeof v.ok === 'boolean' && typeof v.policyOk === 'boolean'
-        && typeof v.commandRan === 'boolean'
-        && (v.commandOk === undefined || typeof v.commandOk === 'boolean')
-        && (v.commandRan === true || v.commandOk === undefined)
-        && Number.isSafeInteger(v.ms) && (v.ms as number) >= 0
-        && (v.accepted === undefined || v.accepted === false)
-        && (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
+      const base =
+        v.source === 'engine' &&
+        hasValidOptionalRunId(v) &&
+        (v.phase === 'preflight' || v.phase === 'post-builder') &&
+        Number.isSafeInteger(v.iteration) &&
+        (v.iteration as number) >= 0 &&
+        (typeof v.storyId === 'string' || v.storyId === null) &&
+        typeof v.ok === 'boolean' &&
+        typeof v.policyOk === 'boolean' &&
+        typeof v.commandRan === 'boolean' &&
+        (v.commandOk === undefined || typeof v.commandOk === 'boolean') &&
+        (v.commandRan === true || v.commandOk === undefined) &&
+        Number.isSafeInteger(v.ms) &&
+        (v.ms as number) >= 0 &&
+        (v.accepted === undefined || v.accepted === false) &&
+        (v.diagnosticTail === undefined || isBoundedDiagnostic(v.diagnosticTail));
       if (!base) return false;
-      if (v.phase === 'preflight' && (v.iteration !== 0 || v.storyId !== null || v.commandRan !== false)) {
+      if (
+        v.phase === 'preflight' &&
+        (v.iteration !== 0 || v.storyId !== null || v.commandRan !== false)
+      ) {
         return false;
       }
       if (v.phase === 'post-builder' && (v.iteration === 0 || typeof v.storyId !== 'string')) {
@@ -371,22 +514,32 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         return false;
       }
       if (v.ok) {
-        return v.policyOk === true
-          && (v.phase === 'preflight' ? v.commandRan === false : v.commandRan === true)
-          && (v.commandOk === undefined || v.commandOk === true)
-          && v.failureCode === undefined && v.failedCommand === undefined
-          && v.exitCode === undefined && v.timedOut === undefined
-          && v.diagnosticTail === undefined;
+        return (
+          v.policyOk === true &&
+          (v.phase === 'preflight' ? v.commandRan === false : v.commandRan === true) &&
+          (v.commandOk === undefined || v.commandOk === true) &&
+          v.failureCode === undefined &&
+          v.failedCommand === undefined &&
+          v.exitCode === undefined &&
+          v.timedOut === undefined &&
+          v.diagnosticTail === undefined
+        );
       }
-      const validFailure = isTddFailureCode(v.failureCode)
-        && typeof v.failedCommand === 'string' && v.failedCommand.length > 0
-        && (v.exitCode === null || typeof v.exitCode === 'number')
-        && typeof v.timedOut === 'boolean'
-        && isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0;
+      const validFailure =
+        isTddFailureCode(v.failureCode) &&
+        typeof v.failedCommand === 'string' &&
+        v.failedCommand.length > 0 &&
+        (v.exitCode === null || typeof v.exitCode === 'number') &&
+        typeof v.timedOut === 'boolean' &&
+        isBoundedDiagnostic(v.diagnosticTail) &&
+        v.diagnosticTail.length > 0;
       if (!validFailure) return false;
       if (v.phase === 'preflight') {
-        return v.policyOk === false && v.commandRan === false
-          && v.failureCode !== 'coverage-check-failed';
+        return (
+          v.policyOk === false &&
+          v.commandRan === false &&
+          v.failureCode !== 'coverage-check-failed'
+        );
       }
       if (v.commandRan === false) {
         return v.policyOk === false && v.failureCode !== 'coverage-check-failed';
@@ -404,23 +557,37 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         : v.failureCode !== 'coverage-check-failed';
     }
     case 'tamper':
-      return v.source === 'engine' && typeof v.iteration === 'number'
-        && (typeof v.archive === 'string' || v.archive === null);
+      return (
+        v.source === 'engine' &&
+        typeof v.iteration === 'number' &&
+        (typeof v.archive === 'string' || v.archive === null)
+      );
     case 'validation-claim': {
-      if (v.source !== 'validator' || typeof v.iteration !== 'number'
-          || typeof v.requestId !== 'string' || v.requestId.length === 0
-          || typeof v.storyId !== 'string' || v.storyId.length === 0
-          || !isAcceptanceHash(v.acceptanceHash) || !isGitHead(v.gitHead)
-          || (v.verdict !== 'passed' && v.verdict !== 'failed')
-          || !isValidationChecks(v.checks) || !isBoundedClaimText(v.summary)) return false;
+      if (
+        v.source !== 'validator' ||
+        typeof v.iteration !== 'number' ||
+        typeof v.requestId !== 'string' ||
+        v.requestId.length === 0 ||
+        typeof v.storyId !== 'string' ||
+        v.storyId.length === 0 ||
+        !isAcceptanceHash(v.acceptanceHash) ||
+        !isGitHead(v.gitHead) ||
+        (v.verdict !== 'passed' && v.verdict !== 'failed') ||
+        !isValidationChecks(v.checks) ||
+        !isBoundedClaimText(v.summary)
+      )
+        return false;
       const allPassed = v.checks.every((check) => check.passed);
       return (v.verdict === 'passed') === allPassed;
     }
     case 'screenshot-claim':
-      return (v.source === 'builder' || v.source === 'validator')
-        && typeof v.storyId === 'string' && typeof v.file === 'string'
-        && (v.acIndex === undefined || typeof v.acIndex === 'number')
-        && (v.note === undefined || typeof v.note === 'string');
+      return (
+        (v.source === 'builder' || v.source === 'validator') &&
+        typeof v.storyId === 'string' &&
+        typeof v.file === 'string' &&
+        (v.acIndex === undefined || typeof v.acIndex === 'number') &&
+        (v.note === undefined || typeof v.note === 'string')
+      );
     default:
       return false;
   }
@@ -428,15 +595,13 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
 
 /** 读全部记录；文件缺失按空处理（容错：有什么记什么）；其余 IO 故障向上抛。 */
 export function readEvidence(workspace: string): EvidenceReadResult {
-  let raw: string;
-  try {
-    raw = readFileSync(join(workspace, EVIDENCE_FILE), 'utf-8');
-  } catch (err) {
-    // 仅「文件不存在」是合法的空态；其余 IO 故障（EACCES/EISDIR/磁盘错误）不得
-    // 伪装成「零记录」——审计信道的假阴性比报错更糟，向上抛由消费方定语义
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { records: [], skippedLines: 0 };
-    throw err;
-  }
+  const file = readStableFile(join(workspace, EVIDENCE_FILE), {
+    label: EVIDENCE_FILE,
+    maxBytes: EVIDENCE_READ_MAX_BYTES,
+  });
+  if (file.status === 'missing') return { records: [], skippedLines: 0 };
+  if (file.status === 'invalid') throw new Error(file.diagnostic);
+  const raw = file.bytes.toString('utf8');
   const records: EvidenceRecord[] = [];
   let skippedLines = 0;
   for (const line of raw.split('\n')) {

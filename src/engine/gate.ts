@@ -133,7 +133,7 @@ export interface ManagedGateContext {
   };
 }
 
-/** legacy shell 命令和结构化契约命令共用受控超时、整树收口与有界诊断语义。 */
+/** legacy shell 命令和结构化契约命令共用受控超时、平台 containment 收口与有界诊断语义。 */
 function runSpawnedGate(
   spec: SpawnedGateSpec,
   managed: ManagedGateContext,
@@ -310,11 +310,7 @@ function shellArgs(shell: string, script: string): string[] {
   return ['-c', script];
 }
 
-function commandSpec(
-  command: QualityCommand,
-  cwd: string,
-  label: string,
-): SpawnedGateSpec {
+function commandSpec(command: QualityCommand, cwd: string, label: string): SpawnedGateSpec {
   return 'executable' in command
     ? {
         label,

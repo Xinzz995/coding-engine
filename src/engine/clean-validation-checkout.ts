@@ -1,16 +1,9 @@
-import { createHash } from 'node:crypto';
 import {
-  constants as fsConstants,
-  closeSync,
-  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  openSync,
+  opendirSync,
   readFileSync,
-  readlinkSync,
-  readSync,
-  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -23,27 +16,35 @@ import type { ManagedGateContext } from './gate.js';
 import { runContractPrepareCommands } from './gate.js';
 import { resolveExecutablePath } from './agent.js';
 import { isGitHead } from '../contracts/validation-contract.js';
-import type { QualityContract } from '../quality/contract.js';
+import { snapshotQualityContract, type QualityContract } from '../quality/contract.js';
 import {
   CLEAN_VALIDATION_CHECKOUT_VERSION,
   validationEnvironmentDigest,
 } from '../quality/validation-environment.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
-import { globMatches } from '../review/common.js';
 import {
+  ExternalFileLinkSnapshotBudget,
+  ExternalFileLinkSnapshotBudgetError,
+  externalFileLinkReaderBytes,
+  externalFileTargetIdentityKey,
   sameExternalFileLinkIdentity,
+  snapshotManagedExternalFileLink,
   type ExternalFileLinkIdentity,
-  type ExternalFileStatIdentity,
 } from './external-file-link-identity.js';
+import { assertCleanValidationTreeHasNoMountPoints } from './clean-validation-mounts.js';
 
 export { CLEAN_VALIDATION_CHECKOUT_VERSION, validationEnvironmentDigest };
 const TEMP_PREFIX = 'coding-x-validation-';
 const GIT_TIMEOUT_MS = 10 * 60_000;
 const MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
-const MAX_VALIDATION_TREE_ENTRIES = 200_000;
+// 与 Windows 固定路径检查器的公开上限一致，保证任何平台都能完成同一棵树的收口证明。
+const MAX_VALIDATION_TREE_ENTRIES = 100_000;
 const MAX_GIT_CONTROL_ENTRIES = 20_000;
 const MAX_GIT_CONTROL_BYTES = 32 * 1024 * 1024;
 const MAX_EXTERNAL_LINK_FILE_BYTES = 256 * 1024 * 1024;
+const MAX_EXTERNAL_LINKS = 1024;
+const MAX_EXTERNAL_LINK_TARGET_BYTES = 1024 * 1024 * 1024;
+const EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS = 30_000;
 
 export type CleanValidationCheckoutErrorCode =
   | 'invalid-source'
@@ -110,7 +111,6 @@ export interface CleanValidationCheckout {
   readonly gitExecutable: string;
   readonly additionalRefs: readonly string[];
   assertCurrent(context: string): Promise<void>;
-  resetForReuse(): Promise<void>;
   cleanup(): CleanValidationCheckoutCleanup;
 }
 
@@ -150,128 +150,51 @@ function sameFileIdentity(left: DirectoryIdentity, right: BigIntStats): boolean 
   );
 }
 
-function externalFileStatIdentity(info: BigIntStats): ExternalFileStatIdentity {
-  return {
-    dev: info.dev,
-    ino: info.ino,
-    uid: info.uid,
-    mode: info.mode,
-    size: info.size,
-    mtimeNs: info.mtimeNs,
-    ctimeNs: info.ctimeNs,
-  };
-}
-
-function sameExternalFileStat(left: ExternalFileStatIdentity, right: BigIntStats): boolean {
-  return (
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.uid === right.uid &&
-    left.mode === right.mode &&
-    left.size === right.size &&
-    left.mtimeNs === right.mtimeNs &&
-    left.ctimeNs === right.ctimeNs
-  );
-}
-
 function pathInside(parent: string, candidate: string): boolean {
   const value = relative(resolve(parent), resolve(candidate));
   return value === '' || (!value.startsWith(`..${sep}`) && value !== '..' && !isAbsolute(value));
 }
 
-function snapshotExternalFileLink(
+interface ExternalFileTargetSnapshot {
+  readonly targetDigest: string;
+}
+
+async function observeManagedFileLink(
   linkPath: string,
-  resolvedPath: string,
   relativePath: string,
   context: string,
-): ExternalFileLinkIdentity {
-  let descriptor: number | null = null;
+  budget: ExternalFileLinkSnapshotBudget,
+  managed: ManagedGateContext,
+  checkoutRoot: string,
+  sourceRoot: string,
+  readerPath: string,
+) {
   try {
-    const linkBefore = lstatSync(linkPath, { bigint: true });
-    if (!linkBefore.isSymbolicLink()) {
-      throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
-        `${context}外部普通文件链接身份发生变化：${relativePath}`,
-      );
-    }
-    const linkTargetBefore = readlinkSync(linkPath, { encoding: 'buffer' });
-    const targetPathBefore = lstatSync(resolvedPath, { bigint: true });
-    if (!targetPathBefore.isFile() || targetPathBefore.isSymbolicLink()) {
-      throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
-        `${context}验证检出只允许链接到项目外普通文件：${relativePath}`,
-      );
-    }
-    if (targetPathBefore.size > BigInt(MAX_EXTERNAL_LINK_FILE_BYTES)) {
-      throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
-        `${context}外部普通文件链接超过 ${MAX_EXTERNAL_LINK_FILE_BYTES} bytes：${relativePath}`,
-      );
-    }
-    const noFollow = process.platform === 'win32' ? 0 : fsConstants.O_NOFOLLOW;
-    descriptor = openSync(resolvedPath, fsConstants.O_RDONLY | noFollow);
-    const openedBefore = fstatSync(descriptor, { bigint: true });
-    if (
-      !openedBefore.isFile() ||
-      !sameExternalFileStat(externalFileStatIdentity(targetPathBefore), openedBefore)
-    ) {
-      throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
-        `${context}外部普通文件链接目标无法绑定：${relativePath}`,
-      );
-    }
-    const digest = createHash('sha256');
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    const size = Number(openedBefore.size);
-    let offset = 0;
-    while (offset < size) {
-      const count = readSync(
-        descriptor,
-        buffer,
-        0,
-        Math.min(buffer.byteLength, size - offset),
-        offset,
-      );
-      if (count <= 0) {
-        throw new CleanValidationCheckoutError(
-          'artifact-boundary-violated',
-          `${context}读取外部普通文件链接时提前结束：${relativePath}`,
-        );
-      }
-      digest.update(buffer.subarray(0, count));
-      offset += count;
-    }
-    const openedAfter = fstatSync(descriptor, { bigint: true });
-    const targetPathAfter = lstatSync(resolvedPath, { bigint: true });
-    const linkAfter = lstatSync(linkPath, { bigint: true });
-    const linkTargetAfter = readlinkSync(linkPath, { encoding: 'buffer' });
-    if (
-      !sameExternalFileStat(externalFileStatIdentity(openedBefore), openedAfter) ||
-      !sameExternalFileStat(externalFileStatIdentity(openedBefore), targetPathAfter) ||
-      !sameExternalFileStat(externalFileStatIdentity(linkBefore), linkAfter) ||
-      !linkTargetBefore.equals(linkTargetAfter) ||
-      realpathSync.native(linkPath) !== resolvedPath
-    ) {
-      throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
-        `${context}外部普通文件链接在核对期间发生变化：${relativePath}`,
-      );
-    }
-    return {
-      resolvedPath,
-      link: externalFileStatIdentity(linkBefore),
-      linkTargetDigest: createHash('sha256').update(linkTargetBefore).digest('hex'),
-      target: externalFileStatIdentity(openedBefore),
-      targetDigest: digest.digest('hex'),
-    };
+    return await snapshotManagedExternalFileLink({
+      linkPath,
+      checkoutRoot,
+      sourceRoot,
+      maxFileBytes: MAX_EXTERNAL_LINK_FILE_BYTES,
+      budget,
+      session: managed.session,
+      kind: managed.kind,
+      cwd: checkoutRoot,
+      readerPath,
+      ...(managed.termination ? { termination: managed.termination } : {}),
+    });
   } catch (error) {
-    if (error instanceof CleanValidationCheckoutError) throw error;
+    if (error instanceof ExternalFileLinkSnapshotBudgetError) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}${error.message}：${relativePath}`,
+      );
+    }
     throw new CleanValidationCheckoutError(
       'artifact-boundary-violated',
-      `${context}无法冻结外部普通文件链接：${relativePath}`,
+      `${context}无法冻结外部普通文件链接：${relativePath}：${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
-  } finally {
-    if (descriptor !== null) closeSync(descriptor);
   }
 }
 
@@ -451,6 +374,7 @@ function safeGitEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     GIT_TERMINAL_PROMPT: '0',
     GIT_LFS_SKIP_SMUDGE: '1',
     GIT_ATTR_NOSYSTEM: '1',
+    GIT_OPTIONAL_LOCKS: '0',
   };
 }
 
@@ -512,18 +436,31 @@ const controlIdentity = () => {
   const records = [];
   let entries = 0;
   let bytes = 0;
+  const statRecord = (info) => [
+    info.dev, info.ino, info.uid, info.mode, info.size, info.mtimeNs, info.ctimeNs,
+  ].map((value) => value.toString()).join('\0');
   const addFile = (target, path) => {
-    const info = lstatSync(target);
+    const info = lstatSync(target, { bigint: true });
     if (!info.isFile() || info.isSymbolicLink()) {
       throw new Error('.git/' + path + ' 不是可核对的普通文件');
     }
     entries += 1;
-    bytes += info.size;
+    if (info.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('.git/' + path + ' 大小非法');
+    bytes += Number(info.size);
     if (entries > ${MAX_GIT_CONTROL_ENTRIES} || bytes > ${MAX_GIT_CONTROL_BYTES}) {
       throw new Error('Git 控制面超过核对上限');
     }
-    records.push('f\0' + path + '\0' + (info.mode & 0o777).toString(8) + '\0' +
+    records.push('f\0' + path + '\0' + (info.mode & 0o777n).toString(8) + '\0' +
       createHash('sha256').update(readFileSync(target)).digest('hex'));
+  };
+  const addObjectFile = (target, path) => {
+    const info = lstatSync(target, { bigint: true });
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new Error('.git/' + path + ' 不是可核对的普通 object 文件');
+    }
+    entries += 1;
+    if (entries > ${MAX_GIT_CONTROL_ENTRIES}) throw new Error('Git 控制面超过核对上限');
+    records.push('o\0' + path + '\0' + statRecord(info));
   };
   const visit = (directory, prefix = '') => {
     const listed = readdirSync(directory, { withFileTypes: true })
@@ -531,40 +468,44 @@ const controlIdentity = () => {
     for (const entry of listed) {
       const path = prefix === '' ? entry.name : prefix + '/' + entry.name;
       const target = join(directory, entry.name);
-      if (prefix === '' && entry.name === 'objects') {
-        const info = lstatSync(target);
-        if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('.git/objects 不是普通目录');
-        records.push('d\0objects');
-        for (const name of ['alternates', 'http-alternates']) {
-          const alternate = join(target, 'info', name);
-          try { addFile(alternate, 'objects/info/' + name); }
-          catch (error) {
-            if (!error || typeof error !== 'object' || error.code !== 'ENOENT') throw error;
-            records.push('missing\0objects/info/' + name);
-          }
-        }
-        continue;
-      }
-      if (prefix === '' && entry.name === 'index') {
-        const info = lstatSync(target);
-        if (!info.isFile() || info.isSymbolicLink()) throw new Error('.git/index 不是普通文件');
-        records.push('index\0regular');
-        continue;
-      }
-      const info = lstatSync(target);
+      const info = lstatSync(target, { bigint: true });
       if (info.isSymbolicLink()) throw new Error('.git/' + path + ' 不得是符号链接');
       if (info.isDirectory()) {
         entries += 1;
         if (entries > ${MAX_GIT_CONTROL_ENTRIES}) throw new Error('Git 控制面超过核对上限');
-        records.push('d\0' + path + '\0' + (info.mode & 0o777).toString(8));
+        records.push('d\0' + path + '\0' + statRecord(info));
         visit(target, path);
+      } else if (
+        path === 'objects/info/alternates' || path === 'objects/info/http-alternates'
+      ) {
+        addFile(target, path);
+      } else if (path.startsWith('objects/')) {
+        addObjectFile(target, path);
       } else {
         addFile(target, path);
       }
     }
   };
   visit(gitRoot);
-  return { tree: createHash('sha256').update(records.join('\0')).digest('hex') };
+  const digestRecords = (selected) =>
+    createHash('sha256').update(selected.join('\0')).digest('hex');
+  const recordPath = (record) => record.split('\0')[1];
+  const isIndexRecord = (record) => recordPath(record) === 'index';
+  const isObjectRecord = (record) => {
+    const path = record.split('\0')[1];
+    return path === 'objects' || path?.startsWith('objects/');
+  };
+  const indexRecords = records.filter(isIndexRecord);
+  const objectRecords = records.filter(isObjectRecord);
+  const otherRecords = records.filter(
+    (record) => !isIndexRecord(record) && !isObjectRecord(record),
+  );
+  return {
+    tree: digestRecords(records),
+    index: digestRecords(indexRecords),
+    objects: digestRecords(objectRecords),
+    other: digestRecords(otherRecords),
+  };
 };
 const blobHash = (entry) => {
   try {
@@ -667,20 +608,20 @@ try {
       'checkout', '--quiet', '--detach', '--force', request.head,
     ]);
     const tree = run(['rev-parse', request.head + '^{tree}']).toString('utf8').trim();
+    const indexTree = run(['write-tree']).toString('utf8').trim();
+    if (indexTree !== tree) throw new Error('初始 Git index tree 与目标提交不一致');
     process.stdout.write(JSON.stringify({
       ok: true, tree, objectFormat, control: controlIdentity(),
     }));
     process.exit(0);
   }
-  if (request.mode === 'assert' || request.mode === 'clean') {
+  if (request.mode === 'assert') {
     const control = controlIdentity();
     if (JSON.stringify(control) !== JSON.stringify(request.control)) {
-      process.stdout.write(JSON.stringify({ ok: false, code: 'identity-changed', diagnostic: '验证检出的 Git 控制文件发生变化' }));
-      process.exit(0);
-    }
-    if (request.mode === 'clean') {
-      run(['clean', '-ffdx', '--']);
-      process.stdout.write(JSON.stringify({ ok: true }));
+      const changed = ['index', 'objects', 'other'].filter(
+        (name) => control[name] !== request.control[name],
+      );
+      process.stdout.write(JSON.stringify({ ok: false, code: 'identity-changed', diagnostic: '验证检出的 Git 控制文件发生变化：' + changed.join('、') }));
       process.exit(0);
     }
     const head = run(['rev-parse', 'HEAD']).toString('utf8').trim();
@@ -805,12 +746,41 @@ async function runGitHelper(options: {
   return parsed as GitHelperResult;
 }
 
-function artifactAllowed(path: string, patterns: readonly string[]): boolean {
-  const normalized = path.replaceAll('\\', '/').replace(/\/$/u, '');
-  return patterns.some((pattern) => {
-    const directoryPattern = pattern.slice(0, -3);
-    return globMatches(normalized, directoryPattern) || globMatches(normalized, pattern);
-  });
+class ArtifactPathPolicy {
+  readonly #roots: ReadonlySet<string>;
+
+  constructor(patterns: readonly string[]) {
+    const roots = patterns.map((pattern) => {
+      if (
+        !pattern.endsWith('/**') ||
+        pattern.includes('\\') ||
+        /[*?[\]{}]/u.test(pattern.slice(0, -3))
+      ) {
+        throw new CleanValidationCheckoutError(
+          'invalid-source',
+          `质量契约含无法安全核对的产物路径：${pattern}`,
+        );
+      }
+      return pattern.slice(0, -3);
+    });
+    this.#roots = new Set(roots);
+  }
+
+  isRoot(path: string): boolean {
+    return !path.includes('\\') && this.#roots.has(path.replace(/\/$/u, ''));
+  }
+
+  allows(path: string): boolean {
+    if (path.includes('\\')) return false;
+    let candidate = path.replace(/\/$/u, '');
+    while (candidate !== '') {
+      if (this.#roots.has(candidate)) return true;
+      const separator = candidate.lastIndexOf('/');
+      if (separator < 0) return false;
+      candidate = candidate.slice(0, separator);
+    }
+    return false;
+  }
 }
 
 function parseStatusPaths(bytes: Buffer): Array<{ code: string; path: string }> {
@@ -826,60 +796,115 @@ function parseStatusPaths(bytes: Buffer): Array<{ code: string; path: string }> 
     });
 }
 
-function assertSafeArtifactTopology(
+async function assertSafeArtifactTopology(
   root: string,
   sourceRoot: string,
-  patterns: readonly string[],
+  policy: ArtifactPathPolicy,
   context: string,
   options: {
     readonly capturePreparedExternalLinks: boolean;
     readonly permittedExternalLinks: ReadonlyMap<string, ExternalFileLinkIdentity>;
+    readonly signal?: AbortSignal;
+    readonly managed: ManagedGateContext;
+    readonly readerPath: string;
   },
-): Map<string, ExternalFileLinkIdentity> {
-  const directoryPatterns = patterns.map((pattern) => pattern.slice(0, -3));
+): Promise<Map<string, ExternalFileLinkIdentity>> {
   const capturedExternalLinks = new Map<string, ExternalFileLinkIdentity>();
   const observedExternalLinks = new Set<string>();
-  let entries = 0;
-  const visit = (directory: string, prefix = ''): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (prefix === '' && entry.name === '.git') continue;
-      entries += 1;
-      if (entries > MAX_VALIDATION_TREE_ENTRIES) {
+  const externalTargetSnapshots = new Map<string, ExternalFileTargetSnapshot>();
+  const externalLinkBudget = new ExternalFileLinkSnapshotBudget(
+    {
+      maxLinks: MAX_EXTERNAL_LINKS,
+      maxUniqueTargetBytes: MAX_EXTERNAL_LINK_TARGET_BYTES,
+      deadlineMs: EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS,
+    },
+    options.signal,
+  );
+  const checkpoint = (): void => {
+    try {
+      externalLinkBudget.checkpoint();
+    } catch (error) {
+      if (error instanceof ExternalFileLinkSnapshotBudgetError) {
         throw new CleanValidationCheckoutError(
           'artifact-boundary-violated',
-          `${context}验证检出内容超过 ${MAX_VALIDATION_TREE_ENTRIES} 项，无法完整核对产物边界`,
+          `${context}${error.message}`,
         );
       }
-      const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
-      const target = join(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        if (directoryPatterns.some((pattern) => globMatches(path, pattern))) {
+      throw error;
+    }
+  };
+  let entries = 0;
+  const visit = async (directory: string, prefix = ''): Promise<void> => {
+    checkpoint();
+    const stream = opendirSync(directory);
+    try {
+      let entry;
+      while ((entry = stream.readSync()) !== null) {
+        if (prefix === '' && entry.name === '.git') continue;
+        checkpoint();
+        entries += 1;
+        if (entries > MAX_VALIDATION_TREE_ENTRIES) {
           throw new CleanValidationCheckoutError(
             'artifact-boundary-violated',
-            `${context}允许的产物根不是普通目录：${path}`,
+            `${context}验证检出内容超过 ${MAX_VALIDATION_TREE_ENTRIES} 项，无法完整核对产物边界`,
           );
         }
-        let resolved: string;
+        const path = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+        const target = join(directory, entry.name);
+        let targetInfo: BigIntStats;
         try {
-          resolved = realpathSync.native(target);
+          targetInfo = lstatSync(target, { bigint: true });
         } catch {
           throw new CleanValidationCheckoutError(
             'artifact-boundary-violated',
-            `${context}验证检出含无法解析的链接：${path}`,
+            `${context}验证检出条目在核对期间消失：${path}`,
           );
         }
-        if (!pathInside(root, resolved)) {
-          if (pathInside(sourceRoot, resolved)) {
+        if (targetInfo.isSymbolicLink()) {
+          if (policy.isRoot(path)) {
+            throw new CleanValidationCheckoutError(
+              'artifact-boundary-violated',
+              `${context}允许的产物根不是普通目录：${path}`,
+            );
+          }
+          const observation = await observeManagedFileLink(
+            target,
+            path,
+            context,
+            externalLinkBudget,
+            options.managed,
+            root,
+            sourceRoot,
+            options.readerPath,
+          );
+          if (observation.scope === 'internal') continue;
+          if (observation.scope === 'source') {
             throw new CleanValidationCheckoutError(
               'artifact-boundary-violated',
               `${context}验证检出链接回开发工作树：${path}`,
             );
           }
-          if (options.capturePreparedExternalLinks && artifactAllowed(path, patterns)) {
-            capturedExternalLinks.set(
-              path,
-              snapshotExternalFileLink(target, resolved, path, context),
+          const observed = observation.identity;
+          externalLinkBudget.countLink();
+          const targetKey = externalFileTargetIdentityKey(observed.resolvedPath, observed.target);
+          const firstTargetObservation = externalLinkBudget.reserveTarget(
+            targetKey,
+            Number(observed.target.size),
+          );
+          if (firstTargetObservation) {
+            externalTargetSnapshots.set(targetKey, {
+              targetDigest: observed.targetDigest,
+            });
+          } else if (
+            externalTargetSnapshots.get(targetKey)?.targetDigest !== observed.targetDigest
+          ) {
+            throw new CleanValidationCheckoutError(
+              'artifact-boundary-violated',
+              `${context}外部普通文件链接目标去重身份不一致：${path}`,
             );
+          }
+          if (options.capturePreparedExternalLinks && policy.allows(path)) {
+            capturedExternalLinks.set(path, observed);
           } else {
             const permitted = options.permittedExternalLinks.get(path);
             if (!permitted) {
@@ -888,7 +913,6 @@ function assertSafeArtifactTopology(
                 `${context}验证检出含未经准备阶段确认的外部链接：${path}`,
               );
             }
-            const observed = snapshotExternalFileLink(target, resolved, path, context);
             if (!sameExternalFileLinkIdentity(permitted, observed)) {
               throw new CleanValidationCheckoutError(
                 'artifact-boundary-violated',
@@ -897,19 +921,36 @@ function assertSafeArtifactTopology(
             }
             observedExternalLinks.add(path);
           }
+          continue;
         }
-        continue;
+        if (policy.isRoot(path) && !targetInfo.isDirectory()) {
+          throw new CleanValidationCheckoutError(
+            'artifact-boundary-violated',
+            `${context}允许的产物根不是普通目录：${path}`,
+          );
+        }
+        if (targetInfo.isDirectory()) {
+          await visit(target, path);
+          continue;
+        }
+        if (!targetInfo.isFile()) {
+          throw new CleanValidationCheckoutError(
+            'artifact-boundary-violated',
+            `${context}验证检出含特殊文件：${path}`,
+          );
+        }
+        if (targetInfo.nlink !== 1n) {
+          throw new CleanValidationCheckoutError(
+            'artifact-boundary-violated',
+            `${context}验证检出含 hard link：${path}`,
+          );
+        }
       }
-      if (directoryPatterns.some((pattern) => globMatches(path, pattern)) && !entry.isDirectory()) {
-        throw new CleanValidationCheckoutError(
-          'artifact-boundary-violated',
-          `${context}允许的产物根不是普通目录：${path}`,
-        );
-      }
-      if (entry.isDirectory()) visit(target, path);
+    } finally {
+      stream.closeSync();
     }
   };
-  visit(root);
+  await visit(root);
   if (!options.capturePreparedExternalLinks) {
     const missing = [...options.permittedExternalLinks.keys()].filter(
       (path) => !observedExternalLinks.has(path),
@@ -930,6 +971,27 @@ export async function createCleanValidationCheckout(
   if (!isGitHead(options.head)) {
     throw new CleanValidationCheckoutError('invalid-source', '验证检出需要完整 Git HEAD');
   }
+  if (options.managed.session.state !== 'open') {
+    throw new CleanValidationCheckoutError(
+      'cleanup-unverifiable',
+      `workspace session 处于 ${options.managed.session.state}，不能建立新的验证检出`,
+    );
+  }
+  let contract: QualityContract;
+  let additionalPolicy: unknown;
+  try {
+    contract = snapshotQualityContract(options.contract);
+    additionalPolicy =
+      options.additionalPolicy === undefined
+        ? undefined
+        : structuredClone(options.additionalPolicy);
+  } catch {
+    throw new CleanValidationCheckoutError('invalid-source', '质量契约或附加策略无法建立独立快照');
+  }
+  const artifactPolicy = new ArtifactPathPolicy([
+    ...contract.generatedPaths,
+    ...contract.localValidation.allowedPaths,
+  ]);
   const sourceInputRoot = resolve(options.sourceRoot);
   const sourceRoot = realpathSync.native(sourceInputRoot);
   const additionalRefs = [...new Set(options.additionalRefs ?? [])].sort();
@@ -947,28 +1009,51 @@ export async function createCleanValidationCheckout(
     );
   }
   const container = realpathSync.native(mkdtempSync(join(temporaryRoot, TEMP_PREFIX)));
-  options.onContainerCreatedForTests?.(container);
   let identity: DirectoryIdentity;
   try {
     identity = directoryIdentity(container);
   } catch (error) {
     try {
-      rmSync(container, { recursive: true, force: true });
+      options.managed.session.retainLeaseForIsolation();
     } catch {
-      // No untrusted process has run; preserve the original construction error.
+      // Preserve the original identity failure; a non-open session already blocks continuation.
     }
     throw error;
   }
   let checkoutRoot = join(container, 'checkout');
   const helperPath = join(container, 'git-helper.mjs');
+  const externalFileReaderPath = join(container, 'external-file-link-reader.cjs');
   let checkoutIdentity: DirectoryIdentity | null = null;
+  let cleanupResult: CleanValidationCheckoutCleanup | undefined;
+  const retainCleanupFailure = (
+    status: Exclude<CleanValidationCheckoutCleanup['status'], 'removed'>,
+    reason: string,
+  ): CleanValidationCheckoutCleanup => {
+    if (cleanupResult !== undefined) return cleanupResult;
+    let isolationDiagnostic = '';
+    if (options.managed.session.state === 'open') {
+      try {
+        options.managed.session.retainLeaseForIsolation();
+      } catch (error) {
+        isolationDiagnostic = `；保留 workspace 隔离租约失败：${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    }
+    cleanupResult = {
+      status,
+      path: container,
+      reason: `${reason}${isolationDiagnostic}`,
+    };
+    return cleanupResult;
+  };
   const cleanup = (): CleanValidationCheckoutCleanup => {
+    if (cleanupResult !== undefined) return cleanupResult;
     if (options.managed.session.state !== 'open') {
-      return {
-        status: 'retained',
-        path: container,
-        reason: `workspace session 处于 ${options.managed.session.state}，无法证明受管进程已经收口`,
-      };
+      return retainCleanupFailure(
+        'retained',
+        `workspace session 处于 ${options.managed.session.state}，无法证明受管进程已经收口`,
+      );
     }
     const temporaryRelative = relative(temporaryRoot, container);
     if (
@@ -979,57 +1064,59 @@ export async function createCleanValidationCheckout(
       temporaryRelative.includes(sep) ||
       !temporaryRelative.startsWith(TEMP_PREFIX)
     ) {
-      return { status: 'retained', path: container, reason: '临时根不再满足归属前缀' };
+      return retainCleanupFailure('retained', '临时根不再满足归属前缀');
     }
     let current: BigIntStats;
     try {
       current = lstatSync(container, { bigint: true });
     } catch (error) {
-      return {
-        status: 'location-unverifiable',
-        path: container,
-        reason: `临时根原位置无法核对，不能证明对象已删除或确认实际位置：${error instanceof Error ? error.message : String(error)}`,
-      };
+      return retainCleanupFailure(
+        'location-unverifiable',
+        `临时根原位置无法核对，不能证明对象已删除或确认实际位置：${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     if (!sameDirectoryIdentity(identity, current)) {
-      return {
-        status: 'location-unverifiable',
-        path: container,
-        reason: '临时根身份发生变化，不能推断原验证内容被移动到哪里',
-      };
+      return retainCleanupFailure(
+        'location-unverifiable',
+        '临时根身份发生变化，不能推断原验证内容被移动到哪里',
+      );
     }
     if (checkoutIdentity !== null) {
       let currentCheckout: BigIntStats;
       try {
         currentCheckout = lstatSync(checkoutRoot, { bigint: true });
       } catch (error) {
-        return {
-          status: 'location-unverifiable',
-          path: container,
-          reason: `验证 checkout 原位置无法核对：${error instanceof Error ? error.message : String(error)}`,
-        };
+        return retainCleanupFailure(
+          'location-unverifiable',
+          `验证 checkout 原位置无法核对：${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       if (!sameDirectoryIdentity(checkoutIdentity, currentCheckout)) {
-        return {
-          status: 'location-unverifiable',
-          path: container,
-          reason: '验证 checkout 身份发生变化，原验证内容的实际位置无法确认',
-        };
+        return retainCleanupFailure(
+          'location-unverifiable',
+          '验证 checkout 身份发生变化，原验证内容的实际位置无法确认',
+        );
       }
     }
     try {
+      assertCleanValidationTreeHasNoMountPoints(container);
       rmSync(container, { recursive: true, force: false });
-      return { status: 'removed', path: container };
+      cleanupResult = { status: 'removed', path: container };
+      return cleanupResult;
     } catch (error) {
-      return {
-        status: 'retained',
-        path: container,
-        reason: error instanceof Error ? error.message : String(error),
-      };
+      return retainCleanupFailure(
+        'retained',
+        error instanceof Error ? error.message : String(error),
+      );
     }
   };
 
   try {
+    options.onContainerCreatedForTests?.(container);
+    writeFileSync(externalFileReaderPath, externalFileLinkReaderBytes(), {
+      mode: 0o500,
+      flag: 'wx',
+    });
     writeFileSync(helperPath, MANAGED_GIT_HELPER, {
       encoding: 'utf8',
       mode: 0o500,
@@ -1080,23 +1167,25 @@ export async function createCleanValidationCheckout(
     const objectFormat = created.objectFormat;
     const control = created.control;
     const environmentDigest = validationEnvironmentDigest({
-      contract: options.contract,
+      contract,
       head: options.head,
       additionalRefs,
-      ...(options.additionalPolicy === undefined
-        ? {}
-        : { additionalPolicy: options.additionalPolicy }),
+      ...(additionalPolicy === undefined ? {} : { additionalPolicy }),
     });
-    const allowedPaths = [
-      ...options.contract.generatedPaths,
-      ...options.contract.localValidation.allowedPaths,
-    ];
     let permittedExternalLinks = new Map<string, ExternalFileLinkIdentity>();
 
     const assertCurrent = async (
       context: string,
       capturePreparedExternalLinks = false,
     ): Promise<void> => {
+      try {
+        assertCleanValidationTreeHasNoMountPoints(checkoutRoot);
+      } catch (error) {
+        throw new CleanValidationCheckoutError(
+          'artifact-boundary-violated',
+          `${context}${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       const observed = await runGitHelper({
         request: { mode: 'assert', git, root: checkoutRoot, control, objectFormat },
         cwd: checkoutRoot,
@@ -1144,9 +1233,9 @@ export async function createCleanValidationCheckout(
       const unexpected = status
         .filter((entry) => entry.code === '??' || entry.code === '!!')
         .map((entry) => entry.path)
-        .filter((path) => !artifactAllowed(path, allowedPaths));
+        .filter((path) => !artifactPolicy.allows(path));
       unexpected.push(
-        ...observed.untrackedDirectories.filter((path) => !artifactAllowed(path, allowedPaths)),
+        ...observed.untrackedDirectories.filter((path) => !artifactPolicy.allows(path)),
       );
       if (unexpected.length > 0) {
         throw new CleanValidationCheckoutError(
@@ -1154,16 +1243,25 @@ export async function createCleanValidationCheckout(
           `${context}验证检出产生未允许内容：${unexpected.slice(0, 20).join('、')}`,
         );
       }
-      const captured = assertSafeArtifactTopology(checkoutRoot, sourceRoot, allowedPaths, context, {
-        capturePreparedExternalLinks,
-        permittedExternalLinks,
-      });
+      const captured = await assertSafeArtifactTopology(
+        checkoutRoot,
+        sourceRoot,
+        artifactPolicy,
+        context,
+        {
+          capturePreparedExternalLinks,
+          permittedExternalLinks,
+          signal: options.managed.termination?.signal,
+          managed: options.managed,
+          readerPath: externalFileReaderPath,
+        },
+      );
       if (capturePreparedExternalLinks) permittedExternalLinks = captured;
     };
 
     const prepare = async (context: string): Promise<void> => {
       const prepared = await runContractPrepareCommands(
-        options.contract.localValidation.prepare,
+        contract.localValidation.prepare,
         checkoutRoot,
         undefined,
         {
@@ -1189,26 +1287,6 @@ export async function createCleanValidationCheckout(
     };
     await assertCurrent('准备前');
     await prepare('');
-    const resetForReuse = async (): Promise<void> => {
-      await assertCurrent('复用重置前');
-      const cleaned = await runGitHelper({
-        request: { mode: 'clean', git, root: checkoutRoot, control, objectFormat },
-        cwd: checkoutRoot,
-        helperPath,
-        helperIdentity,
-        environment,
-        managed: options.managed,
-      });
-      if (!cleaned.ok) {
-        throw new CleanValidationCheckoutError(
-          cleaned.code ?? 'git-failed',
-          cleaned.diagnostic ?? '无法重置复用验证检出',
-        );
-      }
-      permittedExternalLinks = new Map();
-      await assertCurrent('复用重新准备前');
-      await prepare('复用');
-    };
     return {
       root: checkoutRoot,
       head: options.head,
@@ -1218,7 +1296,6 @@ export async function createCleanValidationCheckout(
       gitExecutable: git,
       additionalRefs,
       assertCurrent: async (context) => await assertCurrent(context),
-      resetForReuse,
       cleanup,
     };
   } catch (error) {
@@ -1237,32 +1314,35 @@ export async function createCleanValidationCheckout(
 
 export class CleanValidationCheckoutManager {
   #checkout: CleanValidationCheckout | null = null;
+  #cleanupFailure: CleanValidationCheckoutCleanup | null = null;
+  readonly #contract: QualityContract;
+  readonly #createCheckout: typeof createCleanValidationCheckout;
 
   constructor(
     private readonly sourceRoot: string,
-    private readonly contract: QualityContract,
+    contract: QualityContract,
     private readonly managed: ManagedGateContext,
-  ) {}
+    /** @internal 仅供验证管理器拒绝错误返回值的测试 seam。 */
+    createCheckout: typeof createCleanValidationCheckout = createCleanValidationCheckout,
+  ) {
+    this.#contract = snapshotQualityContract(contract);
+    this.#createCheckout = createCheckout;
+  }
 
   async acquire(
     head: string,
     additionalRefs: readonly string[] = [],
     additionalPolicy?: unknown,
   ): Promise<CleanValidationCheckout> {
+    const normalizedRefs = [...new Set(additionalRefs)].sort();
+    const policySnapshot =
+      additionalPolicy === undefined ? undefined : structuredClone(additionalPolicy);
     const expectedDigest = validationEnvironmentDigest({
-      contract: this.contract,
+      contract: this.#contract,
       head,
-      additionalRefs,
-      ...(additionalPolicy === undefined ? {} : { additionalPolicy }),
+      additionalRefs: normalizedRefs,
+      ...(policySnapshot === undefined ? {} : { additionalPolicy: policySnapshot }),
     });
-    if (
-      this.#checkout &&
-      this.#checkout.head === head &&
-      this.#checkout.environmentDigest === expectedDigest
-    ) {
-      await this.#checkout.resetForReuse();
-      return this.#checkout;
-    }
     const previousCleanup = this.dispose();
     if (previousCleanup && previousCleanup.status !== 'removed') {
       throw new CleanValidationCheckoutError(
@@ -1270,21 +1350,37 @@ export class CleanValidationCheckoutManager {
         `旧验证检出未能安全清理，${describeCleanValidationCheckoutCleanup(previousCleanup)}`,
       );
     }
-    this.#checkout = await createCleanValidationCheckout({
+    const created = await this.#createCheckout({
       sourceRoot: this.sourceRoot,
       head,
-      contract: this.contract,
-      additionalRefs,
-      ...(additionalPolicy === undefined ? {} : { additionalPolicy }),
+      contract: this.#contract,
+      additionalRefs: normalizedRefs,
+      ...(policySnapshot === undefined ? {} : { additionalPolicy: policySnapshot }),
       managed: this.managed,
     });
-    return this.#checkout;
+    if (created.environmentDigest !== expectedDigest) {
+      const createdCleanup = created.cleanup();
+      if (createdCleanup.status !== 'removed') {
+        throw new CleanValidationCheckoutError(
+          'cleanup-unverifiable',
+          `新验证检出返回了错误环境摘要且未能安全清理，${describeCleanValidationCheckoutCleanup(createdCleanup)}`,
+        );
+      }
+      throw new CleanValidationCheckoutError(
+        'identity-changed',
+        '新验证检出返回的环境摘要与管理器预计算值不一致',
+      );
+    }
+    this.#checkout = created;
+    return created;
   }
 
   dispose(): CleanValidationCheckoutCleanup | null {
-    if (!this.#checkout) return null;
+    if (!this.#checkout) return this.#cleanupFailure;
     const checkout = this.#checkout;
     this.#checkout = null;
-    return checkout.cleanup();
+    const cleanup = checkout.cleanup();
+    this.#cleanupFailure = cleanup.status === 'removed' ? null : cleanup;
+    return cleanup;
   }
 }

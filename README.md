@@ -653,6 +653,8 @@ npx coding-x report             # 在短租约内（重）生成 report.html；s
 
 正式运行会打印仪表盘地址：<http://localhost:7331>（像素风视图 `/p`），但在持有 workspace 活动租约时不会另启系统命令打开浏览器。独立的 `npx coding-x dashboard` 没有活动写会话，仍会尝试自动打开；可用 `--no-open` 关闭。仪表盘展示迭代次数、当前阶段、story 难度/升级态、完整配置映射，以及当前阶段实际命中的模型与路由来源（CLI/难度/升级/默认）。
 
+仪表盘是本次运行的本地进度视图，不会持续查询 GitHub，也不会在页面保持打开期间重新核验延期 Issue。它显示“本次运行已完成”只代表保存的本地结果仍绑定当前提交；是否真正可交付始终以重新运行 `npx coding-x status`（或生成最新 report）的结果为准。
+
 - **只想快速知道完成了多少**：`npx coding-x status`。
 - **引擎没在运行但想看仪表盘**：`npx coding-x dashboard`，看完按 `Ctrl+C`。
 - **需要逐条 AC、截图、门禁、调用和 Review 状态**：打开 `.workspace/report.html`；它会把 Story、本地 Review 和 GitHub 交付分开显示。
@@ -811,7 +813,7 @@ GitHub 状态给出。
 - **Agent 调用凭证**：每次真实 Builder/Validator 子进程都记录 outcome、退出码与调用收口耗时；异常 stdout/stderr 尾部有界进入 evidence/status/report，成功 transcript 不落盘。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
-- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令和允许目录；引擎在精确 HEAD 的项目外检出中准备依赖并逐项执行，失败机械打回并跳过该轮验证；版本、摘要、快照、验证环境或运行中契约漂移都会停止，超时会等整棵进程树退出后才继续。
+- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令和允许目录；引擎在精确 HEAD 的项目外检出中准备依赖并逐项执行，失败机械打回并跳过该轮验证；版本、摘要、快照、验证环境或运行中契约漂移都会停止，超时会等受管进程集合确认收口后才继续。主动脱离平台 containment 的恶意进程属于明确非目标，coding-x 不是操作系统沙箱。
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 安全写入与 Git 隔离检查**：builder 只 stage/commit story 文件并在受管范围内回写运行时状态；所有正式写入口共用 owner-bound 租约。`prd-to-json` 与 `/review-loop` 只准备临时请求，再由引擎写入；`doctor` 只读报告安全分类与 Git 隔离状态，不替用户删租约或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
@@ -880,7 +882,7 @@ my-project/
 | agent 执行 `git commit` 被 TDD hook 阻断                   | hook 的有限错误摘要、手工运行 `coverageCheck`                                             | 修测试、实现或政策漂移后重跑；不要关闭 hook 规避。即使绕过，coding-x 引擎仍会独立打回                                                 |
 | Cursor 没有提前检查，或 `hooks cursor status` 报缺失/过期  | 项目根的 `.cursor/hooks.json`、`.cursor/coding-x/`、status 输出                           | 在 Git 项目根运行 `npx coding-x hooks cursor install`，升级 coding-x 后也重跑；若报冲突，先人工处理被修改或不合法的文件，不要强行覆盖 |
 | Cursor 插件已装但 `npx coding-x cursor` 找不到命令         | `agent --version`（旧安装可试 `cursor-agent --version`）、登录状态、`CODING_X_CURSOR_BIN` | 单独安装 Cursor Agent CLI；桌面应用不能替代。coding-x 自动识别两种命令名，自定义路径再设置环境变量                                    |
-| Windows 提示 AI runner 的 `.cmd/.bat` 包装器不受支持       | 对应 `CODING_X_*_BIN` 的实际路径、安装包是否提供原生程序                                  | 把对应变量指向该工具的原生可执行文件；不要改成 `shell:true`，项目自己的 `npm.cmd` 检查不受影响                                       |
+| Windows 提示 AI runner 的 `.cmd/.bat` 包装器不受支持       | 对应 `CODING_X_*_BIN` 的实际路径、安装包是否提供原生程序                                  | 把对应变量指向该工具的原生可执行文件；不要改成 `shell:true`，项目自己的 `npm.cmd` 检查不受影响                                        |
 | 报“找不到 prd.json”                                        | 选定 workspace 的 `prd.json` 是否存在、`--workspace` 是否一致                             | 用 `prd-to-json` 从正式 PRD 生成临时候选并调用 apply；不要手工拼一个不完整 JSON                                                       |
 | 退出码 `2`，提示活动 lease 或恢复状态阻断                  | `doctor` / `status` 的安全分类、是否仍有 coding-x 或项目检查进程                          | 活跃运行就等待或正常停止；中断状态按提示运行 `workspace recover` 或 `workspace resume-mutation`，不要删除 `engine.lock/`              |
 | `state.json` 或 `prd.json` JSON 损坏                       | `status`/`report` 的保守警告                                                              | 运行 `npx coding-x repair`；它会自行获取短租约并按固定清单修复，不会替你解决业务失败                                                  |

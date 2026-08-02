@@ -1,9 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 
 export function readProgress(path: string): string {
-  try {
-    return readFileSync(path, 'utf-8');
-  } catch {
-    return '';
-  }
+  const file = readStableFile(path, { label: 'progress.md' });
+  return file.status === 'ready' ? file.bytes.toString('utf8') : '';
 }

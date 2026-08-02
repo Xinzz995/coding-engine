@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readQualityContract, type QualityContract } from '../quality/contract.js';
+import type { GitHubReviewReadClient } from '../quality/github.js';
 import type { WorkspaceSession, WorkspaceWriteData } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { createManagedProcessTestSession } from '../engine/managed-process-test-support.js';
@@ -24,7 +25,7 @@ import type { ReviewPreflightContext } from './preflight.js';
 import type { ManagedReviewObservation } from './managed-observation.js';
 import { RUNNER_TOOL_POLICY_VERSION } from './runner.js';
 import { readFinalReviewState } from './state.js';
-import type { ReviewAxis, ReviewRemoteState } from './types.js';
+import { REVIEW_STATE_FILE, type ReviewAxis, type ReviewRemoteState } from './types.js';
 
 const roots: string[] = [];
 function makeFixtureRemovable(path: string): void {
@@ -80,15 +81,27 @@ function gitProject(files: Record<string, string>): { root: string; head: string
   };
 }
 
-function session(workspacePath: string): WorkspaceSession {
+function session(
+  workspacePath: string,
+  afterWrite?: (relativePath: string) => void,
+  beforeRemove?: (relativePath: string) => void,
+): WorkspaceSession {
+  let state: 'open' | 'isolated' = 'open';
   return {
-    state: 'open',
+    get state() {
+      return state;
+    },
+    retainLeaseForIsolation: () => {
+      state = 'isolated';
+    },
     writer: {
       workspacePath,
       writeFile: async (relativePath: string, data: WorkspaceWriteData) => {
         writeFileSync(join(workspacePath, relativePath), data);
+        afterWrite?.(relativePath);
       },
       removeFile: async (relativePath: string) => {
+        beforeRemove?.(relativePath);
         rmSync(join(workspacePath, relativePath), { force: true });
       },
     },
@@ -168,6 +181,8 @@ const readyRemote: ReviewRemoteState = {
   checkedAt: '2026-07-26T00:00:00.000Z',
 };
 const STORY_VALIDATION_DIGEST = `sha256:${'c'.repeat(64)}`;
+const STORY_OBSERVATION_TOKEN = `sha256:${'d'.repeat(64)}`;
+const CHANGED_STORY_OBSERVATION_TOKEN = `sha256:${'e'.repeat(64)}`;
 
 function output(axis: ReviewAxis, mode: 'passed' | 'p1' | 'unverifiable' | 'p2' = 'passed') {
   if (mode === 'unverifiable')
@@ -232,6 +247,7 @@ function options(ws: string, ctx: ReviewPreflightContext) {
     observeStoryValidation: () => ({
       status: 'ready' as const,
       digest: STORY_VALIDATION_DIGEST,
+      observationToken: STORY_OBSERVATION_TOKEN,
     }),
   };
 }
@@ -285,25 +301,27 @@ describe('runFinalReview', () => {
     projectContract.localValidation = { prepare: [], allowedPaths: [] };
     projectContract.checks = {
       test: {
-        checks: [{
-          id: 'clean-cwd',
-          module: 'root',
-          command: {
-            executable: process.execPath,
-            args: [
-              '-e',
-              [
-                "const fs = require('node:fs')",
-                "const hidden = ['.env', '.claude', 'node_modules'].filter((path) => fs.existsSync(path))",
-                `fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ cwd: process.cwd(), hidden }))`,
-                'if (hidden.length > 0) process.exit(9)',
-              ].join(';'),
-            ],
-            cwd: '.',
-            platforms: [...platform],
-            timeoutMs: 5_000,
+        checks: [
+          {
+            id: 'clean-cwd',
+            module: 'root',
+            command: {
+              executable: process.execPath,
+              args: [
+                '-e',
+                [
+                  "const fs = require('node:fs')",
+                  "const hidden = ['.env', '.claude', 'node_modules'].filter((path) => fs.existsSync(path))",
+                  `fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ cwd: process.cwd(), hidden }))`,
+                  'if (hidden.length > 0) process.exit(9)',
+                ].join(';'),
+              ],
+              cwd: '.',
+              platforms: [...platform],
+              timeoutMs: 5_000,
+            },
           },
-        }],
+        ],
       },
       build: { notApplicable: 'fixture' },
       static: { notApplicable: 'fixture' },
@@ -532,15 +550,77 @@ describe('runFinalReview', () => {
     expect(result.state).toBeUndefined();
   });
 
-  it('does not call a Reviewer model when the Story receipt set changes after mechanical checks', async () => {
+  it('stops before engineering when the authoritative Story inputs change during spec Review', async () => {
     const ws = workspace();
-    let modelCalls = 0;
+    const calls: ReviewAxis[] = [];
+    let observationToken = STORY_OBSERVATION_TOKEN;
     const result = await runFinalReview({
       ...options(ws, context()),
       observeStoryValidation: () => ({
-        status: 'ready',
-        digest: `sha256:${'d'.repeat(64)}`,
+        status: 'ready' as const,
+        digest: STORY_VALIDATION_DIGEST,
+        observationToken,
       }),
+      axisRunner: async (request) => {
+        calls.push(request.axis);
+        if (request.axis === 'spec') observationToken = CHANGED_STORY_OBSERVATION_TOKEN;
+        return output(request.axis);
+      },
+    });
+
+    expect(calls).toEqual(['spec']);
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('spec Review 结束后');
+    expect(result.message).toContain('Story 验收权威输入发生变化');
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('stops before deep Review and persistence when authoritative Story inputs change during engineering Review', async () => {
+    const ws = workspace();
+    const ctx = context({
+      changedFiles: ['src/engine/loop.ts'],
+      files: [{ path: 'src/engine/loop.ts', base: 'old', head: 'spawn retry timeout' }],
+      diff: '+spawn retry timeout',
+    });
+    const calls: ReviewAxis[] = [];
+    let observationToken = STORY_OBSERVATION_TOKEN;
+    const result = await runFinalReview({
+      ...options(ws, ctx),
+      observeStoryValidation: () => ({
+        status: 'ready' as const,
+        digest: STORY_VALIDATION_DIGEST,
+        observationToken,
+      }),
+      axisRunner: async (request) => {
+        calls.push(request.axis);
+        if (request.axis === 'engineering') {
+          observationToken = CHANGED_STORY_OBSERVATION_TOKEN;
+        }
+        return output(request.axis);
+      },
+    });
+
+    expect(calls).toEqual(['spec', 'engineering']);
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('engineering Review 结束后');
+    expect(result.message).toContain('Story 验收权威输入发生变化');
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('does not call a Reviewer model when the Story receipt set changes after mechanical checks', async () => {
+    const ws = workspace();
+    let modelCalls = 0;
+    let observations = 0;
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      observeStoryValidation: () => {
+        observations += 1;
+        return {
+          status: 'ready' as const,
+          digest: observations === 1 ? STORY_VALIDATION_DIGEST : `sha256:${'f'.repeat(64)}`,
+          observationToken: STORY_OBSERVATION_TOKEN,
+        };
+      },
       axisRunner: async (request) => {
         modelCalls += 1;
         return output(request.axis);
@@ -548,6 +628,7 @@ describe('runFinalReview', () => {
     });
     expect(result.exitCode).toBe(5);
     expect(result.message).toContain('机械检查结束后、模型调用前');
+    expect(observations).toBe(2);
     expect(modelCalls).toBe(0);
     expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
   });
@@ -561,15 +642,15 @@ describe('runFinalReview', () => {
         observations += 1;
         return {
           status: 'ready' as const,
-          digest:
-            observations < 3 ? STORY_VALIDATION_DIGEST : `sha256:${'d'.repeat(64)}`,
+          digest: observations < 7 ? STORY_VALIDATION_DIGEST : `sha256:${'f'.repeat(64)}`,
+          observationToken: STORY_OBSERVATION_TOKEN,
         };
       },
       axisRunner: async (request) => output(request.axis),
     });
     expect(result.exitCode).toBe(5);
     expect(result.message).toContain('Reviewer 模型结束后');
-    expect(observations).toBe(3);
+    expect(observations).toBe(7);
     expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
   });
 
@@ -582,16 +663,152 @@ describe('runFinalReview', () => {
         observations += 1;
         return {
           status: 'ready' as const,
-          digest:
-            observations < 4 ? STORY_VALIDATION_DIGEST : `sha256:${'e'.repeat(64)}`,
+          digest: observations < 11 ? STORY_VALIDATION_DIGEST : `sha256:${'f'.repeat(64)}`,
+          observationToken: STORY_OBSERVATION_TOKEN,
         };
       },
       axisRunner: async (request) => output(request.axis),
     });
     expect(result.exitCode).toBe(5);
     expect(result.message).toContain('最终 Review 状态落盘前');
-    expect(observations).toBe(4);
+    expect(observations).toBe(11);
     expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('invalidates the Review when authoritative Story inputs change while a deferral Issue is queried', async () => {
+    const ws = workspace();
+    const ctx = context();
+    const first = await runFinalReview({
+      ...options(ws, ctx),
+      axisRunner: async (request) =>
+        output(request.axis, request.axis === 'engineering' ? 'p1' : 'passed'),
+    });
+    expect(first.exitCode).toBe(4);
+    const findingId = first.state!.axes.flatMap((axis) => axis.findings)[0].id;
+    writeFileSync(
+      join(ws, 'review-decisions.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        decisions: [
+          {
+            findingId,
+            headSha: ctx.headSha,
+            reviewBindingDigest: digestReviewBinding(first.state!.binding),
+            action: 'p1-deferred',
+            operator: 'maintainer',
+            at: new Date().toISOString(),
+            issue: 12,
+          },
+        ],
+      }),
+    );
+
+    let issueCalls = 0;
+    let observationToken = STORY_OBSERVATION_TOKEN;
+    const expiry = new Date();
+    expiry.setUTCDate(expiry.getUTCDate() + 10);
+    const client = {
+      getIssue: async () => {
+        issueCalls += 1;
+        observationToken = CHANGED_STORY_OBSERVATION_TOKEN;
+        return {
+          number: 12,
+          state: 'open' as const,
+          title: 'defer',
+          body: [
+            '### 负责人',
+            'maintainer',
+            '### 原因',
+            '需要兼容窗口',
+            '### 到期日',
+            expiry.toISOString().slice(0, 10),
+            '### 跟进事项',
+            'issue-13',
+          ].join('\n'),
+          labels: ['quality-p1-deferral'],
+          url: 'https://example.test/issues/12',
+          isPullRequest: false,
+        };
+      },
+    } as unknown as GitHubReviewReadClient;
+    const second = await runFinalReview({
+      ...options(ws, ctx),
+      client,
+      observeStoryValidation: () => ({
+        status: 'ready' as const,
+        digest: STORY_VALIDATION_DIGEST,
+        observationToken,
+      }),
+      axisRunner: async (request) =>
+        output(request.axis, request.axis === 'engineering' ? 'p1' : 'passed'),
+    });
+
+    expect(issueCalls).toBe(1);
+    expect(second.exitCode).toBe(5);
+    expect(second.message).toContain('Review 裁决与延期 Issue 核验后');
+    expect(second.message).toContain('Story 验收权威输入发生变化');
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('revokes a newly persisted state when authoritative Story inputs change after its write', async () => {
+    const ws = workspace();
+    let observationToken = STORY_OBSERVATION_TOKEN;
+    const controlledSession = session(ws, (relativePath) => {
+      if (relativePath === REVIEW_STATE_FILE) {
+        observationToken = CHANGED_STORY_OBSERVATION_TOKEN;
+      }
+    });
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      session: controlledSession,
+      observeStoryValidation: () => ({
+        status: 'ready' as const,
+        digest: STORY_VALIDATION_DIGEST,
+        observationToken,
+      }),
+      axisRunner: async (request) => output(request.axis),
+    });
+
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('最终 Review 状态落盘后');
+    expect(result.message).toContain('刚写入的状态已撤销');
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('isolates the workspace when a changed post-write result cannot be revoked', async () => {
+    const ws = workspace();
+    let observationToken = STORY_OBSERVATION_TOKEN;
+    let stateWritten = false;
+    const controlledSession = session(
+      ws,
+      (relativePath) => {
+        if (relativePath === REVIEW_STATE_FILE) {
+          stateWritten = true;
+          observationToken = CHANGED_STORY_OBSERVATION_TOKEN;
+        }
+      },
+      (relativePath) => {
+        if (stateWritten && relativePath === REVIEW_STATE_FILE) {
+          throw new Error('fixture revoke failure');
+        }
+      },
+    );
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      session: controlledSession,
+      observeStoryValidation: () => ({
+        status: 'ready' as const,
+        digest: STORY_VALIDATION_DIGEST,
+        observationToken,
+      }),
+      axisRunner: async (request) => output(request.axis),
+    });
+
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('刚写入的状态无法安全撤销');
+    expect(result.message).toContain('workspace 已隔离');
+    expect(controlledSession.state).toBe('isolated');
+    expect(readFinalReviewState(ws).status).toBe('ready');
   });
 
   it('invalidates model results when the PR changes during the final remote query', async () => {
@@ -612,10 +829,37 @@ describe('runFinalReview', () => {
           : { ok: true as const };
       },
     });
-    expect(revalidations).toBe(2);
+    expect(revalidations).toBe(7);
     expect(result.exitCode).toBe(5);
-    expect(result.message).toContain('远端核验后的本轮 Review 已作废');
+    expect(result.message).toContain('远端核验后');
+    expect(result.message).toContain('远端查询期间 PR 正文发生变化');
+    expect(result.message).toContain('本轮 Review 已作废');
     expect(result.state).toBeUndefined();
+    expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('checks PR identity after the closing Runner version observation', async () => {
+    const ws = workspace();
+    let changed = false;
+    let runnerReads = 0;
+    const result = await runFinalReview({
+      ...options(ws, context()),
+      runnerVersion: undefined,
+      runnerVersionReader: async () => {
+        runnerReads += 1;
+        if (runnerReads === 2) changed = true;
+        return 'codex-test';
+      },
+      revalidate: () =>
+        changed
+          ? { ok: false as const, message: 'Runner 版本核对期间 PR 正文发生变化' }
+          : { ok: true as const },
+      axisRunner: async (request) => output(request.axis),
+    });
+
+    expect(runnerReads).toBe(2);
+    expect(result.exitCode).toBe(5);
+    expect(result.message).toContain('Runner 版本核对期间 PR 正文发生变化');
     expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
   });
 
@@ -634,6 +878,7 @@ describe('runFinalReview', () => {
     const observation = {
       git: async (args: readonly string[]) => {
         if (args[0] === 'fetch') return '';
+        if (args[0] === 'symbolic-ref') return ctx.branch;
         if (args[0] === 'rev-parse' && args[1] === 'HEAD') return ctx.headSha;
         if (args[0] === 'rev-parse') return ctx.baseSha;
         if (args[0] === 'status') {
@@ -727,6 +972,30 @@ describe('runFinalReview', () => {
     });
     expect(second.exitCode).toBe(1);
     expect(readFinalReviewState(ws)).toEqual({ status: 'missing' });
+  });
+
+  it('isolates the workspace when an old green result cannot be revoked at startup', async () => {
+    const ws = workspace();
+    const first = await runFinalReview({
+      ...options(ws, context()),
+      axisRunner: async (request) => output(request.axis),
+    });
+    expect(first.exitCode).toBe(0);
+
+    const controlledSession = session(ws, undefined, (relativePath) => {
+      if (relativePath === REVIEW_STATE_FILE) throw new Error('fixture startup revoke failure');
+    });
+    const second = await runFinalReview({
+      ...options(ws, context()),
+      session: controlledSession,
+      axisRunner: async (request) => output(request.axis),
+    });
+
+    expect(second.exitCode).toBe(5);
+    expect(second.message).toContain('无法先撤销旧 Final Review');
+    expect(second.message).toContain('workspace 已隔离');
+    expect(controlledSession.state).toBe('isolated');
+    expect(readFinalReviewState(ws).status).toBe('ready');
   });
 
   it('refuses a session that owns a different workspace', async () => {

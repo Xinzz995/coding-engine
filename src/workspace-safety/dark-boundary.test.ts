@@ -490,7 +490,8 @@ describe('workspace safety activation boundary', () => {
     // These are the fixed platform containment/identity transports owned by the coordinator. They
     // are the only production modules in a formal session graph allowed to launch or inspect an OS
     // process directly; application, Review and policy modules never enter this list.
-    const fixedSupervisorTransports = new Set([
+    const fixedPlatformTransports = new Set([
+      'workspace-safety/darwin-mount-table-transport.ts',
       'workspace-safety/identity.ts',
       'workspace-safety/posix-containment.ts',
       'workspace-safety/posix-supervisor.ts',
@@ -510,12 +511,12 @@ describe('workspace safety activation boundary', () => {
         )
         .map((violation) => violation.module),
     );
-    expect(requiredTransportExceptions).toEqual(fixedSupervisorTransports);
+    expect(requiredTransportExceptions).toEqual(fixedPlatformTransports);
     const violations = runtimeGraphViolations({
       roots,
       modules: sourceModuleGraph(),
       resolveLocal: resolveSourceGraphImport,
-      childProcessAllowlist: fixedSupervisorTransports,
+      childProcessAllowlist: fixedPlatformTransports,
     });
 
     expect(

@@ -1,6 +1,5 @@
 import { join, resolve } from 'node:path';
-import { existsSync, realpathSync } from 'node:fs';
-import { devNull } from 'node:os';
+import { existsSync } from 'node:fs';
 import { permissionWarning, type AgentKind } from './agent.js';
 import { appendEvidenceWithWriter, clipEvidenceDiagnostic } from './evidence.js';
 import type { ManagedGateContext } from './gate.js';
@@ -24,101 +23,22 @@ import {
 } from './state.js';
 import { checkTddPolicyManaged, readTddConfig, type TddConfig } from './tdd-gate.js';
 import { readGitHead } from './validation-protocol.js';
+import { digestCandidateStoryValidationEnvironment } from './story-validation-currentness.js';
 import {
   assessQualityRuntime,
-  parseQualityContract,
   qualityChecksMatchContract,
   readQualityContract,
-  QUALITY_CONTRACT_RELATIVE_PATH,
   type FrozenQualityChecks,
   type QualityContractReadResult,
 } from '../quality/contract.js';
+import { readTrackedQualityContractAtHead } from '../quality/tracked-contract.js';
 import { invalidateFinalReviewState, readFinalReviewState } from '../review/state.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
-import {
-  createValidationProcessEnvironment,
-  resolveValidationGitExecutable,
-  validationEnvironmentDigest,
-} from './clean-validation-checkout.js';
-import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 
 type QualityReader = NonNullable<LoopConfig['qualityContractReader']>;
 type ReadyQualityContract = Extract<QualityContractReadResult, { status: 'ready' }>;
-const MAX_TRACKED_QUALITY_CONTRACT_BYTES = 1024 * 1024;
-
-export async function readTrackedQualityContractAtHead(options: {
-  projectRoot: string;
-  head: string;
-  session: WorkspaceSession;
-  termination?: ManagedGateContext['termination'];
-}): Promise<QualityContractReadResult> {
-  const environment = createValidationProcessEnvironment(options.projectRoot, options.projectRoot);
-  Object.assign(environment, {
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: devNull,
-    GIT_TERMINAL_PROMPT: '0',
-  });
-  let git: string;
-  try {
-    git = resolveValidationGitExecutable(options.projectRoot, options.projectRoot, environment);
-  } catch (error) {
-    return {
-      status: 'io-error',
-      path: QUALITY_CONTRACT_RELATIVE_PATH,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-  const result = await runManagedWorkspaceProcess(options.session, {
-    kind: 'quality-check',
-    delegation: 'read-only-v1',
-    executable: git,
-    args: [
-      '--no-replace-objects',
-      'cat-file',
-      'blob',
-      `${options.head}:${QUALITY_CONTRACT_RELATIVE_PATH}`,
-    ],
-    cwd: realpathSync.native(options.projectRoot),
-    environment: environmentEntries(environment),
-    timeoutMs: 60_000,
-    termination: options.termination,
-  });
-  if (
-    result.verdict !== 'completed' ||
-    result.exitCode !== 0 ||
-    result.timedOut ||
-    result.processTreeNotEmpty
-  ) {
-    return {
-      status: 'io-error',
-      path: QUALITY_CONTRACT_RELATIVE_PATH,
-      error: Buffer.concat([result.stdout, result.stderr]).toString('utf8').slice(-2000).trim()
-        || '无法从当前 HEAD 读取质量契约',
-    };
-  }
-  if (result.stdout.byteLength > MAX_TRACKED_QUALITY_CONTRACT_BYTES) {
-    return {
-      status: 'io-error',
-      path: QUALITY_CONTRACT_RELATIVE_PATH,
-      error: `当前 HEAD 的质量契约超过 ${MAX_TRACKED_QUALITY_CONTRACT_BYTES} 字节`,
-    };
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(result.stdout.toString('utf8'));
-  } catch (error) {
-    return {
-      status: 'invalid-json',
-      path: QUALITY_CONTRACT_RELATIVE_PATH,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-  const parsed = parseQualityContract(value);
-  return parsed.status === 'ready'
-    ? { ...parsed, path: QUALITY_CONTRACT_RELATIVE_PATH }
-    : { ...parsed, path: QUALITY_CONTRACT_RELATIVE_PATH };
-}
+export { readTrackedQualityContractAtHead } from '../quality/tracked-contract.js';
 
 export type LoopPreflightResult =
   | { status: 'failed'; exitCode: number }
@@ -212,13 +132,14 @@ export async function runLoopPreflight(
       ...(termination ? { termination } : {}),
     });
     if (trackedQuality.status !== 'ready' || trackedQuality.digest !== qualityRead.digest) {
-      const observed = trackedQuality.status === 'ready'
-        ? trackedQuality.digest
-        : trackedQuality.status === 'invalid'
-          ? trackedQuality.errors.join('；')
-          : trackedQuality.status === 'missing'
-            ? 'missing'
-            : trackedQuality.error;
+      const observed =
+        trackedQuality.status === 'ready'
+          ? trackedQuality.digest
+          : trackedQuality.status === 'invalid'
+            ? trackedQuality.errors.join('；')
+            : trackedQuality.status === 'missing'
+              ? 'missing'
+              : trackedQuality.error;
       console.error(
         `❌ 工作树质量契约未绑定当前 HEAD（工作树 ${qualityRead.digest}，HEAD ${observed}）；` +
           '请先提交质量契约并重新运行',
@@ -228,15 +149,13 @@ export async function runLoopPreflight(
   }
 
   const tddRead = readTddConfig(bootPrd);
-  const validationAdditionalRefs =
-    tddRead.status === 'enabled' ? [tddRead.config.baselineRef] : [];
+  const validationAdditionalRefs = tddRead.status === 'enabled' ? [tddRead.config.baselineRef] : [];
   const currentValidationEnvironmentDigest =
     cfg.validationEnvironmentDigestForTests ??
-    validationEnvironmentDigest({
+    digestCandidateStoryValidationEnvironment({
       contract: qualityRead.contract,
-      head: bootGitHead,
-      additionalRefs: validationAdditionalRefs,
-      additionalPolicy: { tdd: tddRead.status === 'enabled' ? tddRead.config : null },
+      headSha: bootGitHead,
+      tddConfig: tddRead.status === 'enabled' ? tddRead.config : null,
     });
 
   // 先只在内存准备状态。文件缺失时从 legacy PRD 抽取候选；文件存在但损坏时按
@@ -341,11 +260,7 @@ export async function runLoopPreflight(
     }
   }
 
-  const instructions = renderLoopInstructions(
-    instructionSources,
-    workspace,
-    tddConfig !== null,
-  );
+  const instructions = renderLoopInstructions(instructionSources, workspace, tddConfig !== null);
   let modelPreflight: ModelPreflightResult;
   try {
     modelPreflight = await preflightModelRouting({

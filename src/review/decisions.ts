@@ -3,6 +3,55 @@ import type { QualityContract } from '../quality/contract.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import type { ReviewDecision, ReviewFinding } from './types.js';
 
+export interface CurrentP1DeferralReference {
+  findingId: string;
+  issue: number;
+}
+
+/**
+ * Rebuilds the static part of the blocking-finding verdict from the current decision file.
+ * A passed Final Review is not enough by itself: removing or replacing the bound decision file
+ * must not erase the Issue references that need live revalidation by status/report.
+ */
+export function currentBlockingDecisionProof(options: {
+  findings: ReviewFinding[];
+  decisions: ReviewDecision[];
+  headSha: string;
+  reviewBindingDigest: string;
+}): { deferrals: CurrentP1DeferralReference[]; errors: string[] } {
+  const deferrals: CurrentP1DeferralReference[] = [];
+  const errors: string[] = [];
+  for (const finding of options.findings) {
+    const blocking =
+      finding.severity === 'P0' || finding.severity === 'P1' || finding.requiresHumanDecision;
+    if (!blocking) continue;
+    const current = options.decisions
+      .filter(
+        (decision) =>
+          decision.findingId === finding.id &&
+          decision.headSha === options.headSha &&
+          decision.reviewBindingDigest === options.reviewBindingDigest,
+      )
+      .at(-1);
+    if (!current || current.action === 'fix-requested' || current.action === 'acknowledged') {
+      errors.push(`${finding.id} 缺少当前 Review 的有效裁决`);
+      continue;
+    }
+    if (current.action === 'counterevidence') {
+      if (!current.evidence || current.evidence.trim().length < 20) {
+        errors.push(`${finding.id} 的反证必须具体且不少于 20 个字符`);
+      }
+      continue;
+    }
+    if (finding.severity !== 'P1' || !current.issue) {
+      errors.push(`${finding.id} 只有 P1 finding 可通过有效 Issue 延期`);
+      continue;
+    }
+    deferrals.push({ findingId: finding.id, issue: current.issue });
+  }
+  return { deferrals, errors };
+}
+
 function section(body: string, name: string): string {
   const match = new RegExp(`^### ${name}\\s*\\n([^]*?)(?=^### |$)`, 'm').exec(body);
   const value = match?.[1]?.trim() ?? '';

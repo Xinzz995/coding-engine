@@ -53,6 +53,7 @@ function writeReadyReview(workspace: string): void {
         engineeringStandardsDigest: 'standards',
         qualityContractDigest: 'contract',
         validationEnvironmentDigest: `sha256:${'e'.repeat(64)}`,
+        storyValidationDigest: `sha256:${'f'.repeat(64)}`,
         codingXVersion: '0.34.0',
         runner: 'codex',
         model: 'review-model',

@@ -1,10 +1,23 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { collectStatus, renderStatusReport, renderStatusJson } from './status.js';
+import {
+  collectStatus as collectStatusProduction,
+  renderStatusReport,
+  renderStatusJson,
+} from './status.js';
 import { digest } from '../review/common.js';
 import { acceptanceHash, readGitHead } from '../engine/validation-protocol.js';
+import {
+  evaluateStoryValidationDisplay,
+  evaluateStoryValidationReceiptSet,
+  readDisplayState,
+} from '../engine/state.js';
+import { tryReadPrd } from '../engine/prd.js';
+import type { StoryValidationObservation } from '../review/story-validation-observation.js';
+import { readQualityContract } from '../quality/contract.js';
 import type {
   WorkspaceSafetyStatus,
   WorkspaceSafetyStatusSnapshot,
@@ -14,8 +27,65 @@ function makeWorkspace(): string {
   return mkdtempSync(join(tmpdir(), 'status-ws-'));
 }
 
-const CURRENT_GIT_HEAD = readGitHead(process.cwd());
-if (CURRENT_GIT_HEAD === null) throw new Error('status tests require a Git HEAD');
+const OBSERVED_GIT_HEAD = readGitHead(process.cwd());
+if (OBSERVED_GIT_HEAD === null) throw new Error('status tests require a Git HEAD');
+const CURRENT_GIT_HEAD: string = OBSERVED_GIT_HEAD;
+const TEST_ENVIRONMENT = `sha256:${'e'.repeat(64)}`;
+const TEST_CONTRACT_READ = readQualityContract(process.cwd());
+if (TEST_CONTRACT_READ.status !== 'ready') {
+  throw new Error('status tests require a quality contract');
+}
+const TEST_CONTRACT = TEST_CONTRACT_READ.contract;
+const TEST_CONTRACT_DIGEST = TEST_CONTRACT_READ.digest;
+
+function observedStatusOptions(
+  workspace: string,
+  currentGitHead = CURRENT_GIT_HEAD,
+): { currentGitHead: string; storyValidationObservation?: StoryValidationObservation } {
+  const prd = tryReadPrd(join(workspace, 'prd.json'));
+  if (!prd || !Array.isArray(prd.userStories)) return { currentGitHead };
+  const state = readDisplayState(join(workspace, 'state.json'), prd).state;
+  const display = evaluateStoryValidationDisplay(prd, state, currentGitHead, TEST_ENVIRONMENT);
+  const receiptSet = evaluateStoryValidationReceiptSet(
+    prd,
+    state,
+    currentGitHead,
+    TEST_ENVIRONMENT,
+  );
+  return {
+    currentGitHead,
+    storyValidationObservation: {
+      status: 'ready',
+      workspacePath: workspace,
+      observationToken: `sha256:${'f'.repeat(64)}`,
+      headSha: currentGitHead,
+      prd,
+      state: display.state,
+      display,
+      storyValidationEnvironmentDigest: TEST_ENVIRONMENT,
+      storyValidationDigest: receiptSet.digest,
+      workingContract: TEST_CONTRACT,
+      trackedContract: TEST_CONTRACT,
+      workingContractDigest: TEST_CONTRACT_DIGEST,
+      trackedContractDigest: TEST_CONTRACT_DIGEST,
+      tddConfig: null,
+      receiptSet,
+    },
+  };
+}
+
+/** Existing behavioral tests explicitly provide a completed managed observation fixture. */
+function collectStatus(
+  workspace: string,
+  options: { currentGitHead?: string | null } = {},
+): ReturnType<typeof collectStatusProduction> {
+  const head = options.currentGitHead ?? CURRENT_GIT_HEAD;
+  if (head === null) return collectStatusProduction(workspace, { currentGitHead: null });
+  return collectStatusProduction(workspace, {
+    ...options,
+    ...observedStatusOptions(workspace, head),
+  });
+}
 
 function writeReadyFinalReview(workspace: string, shadow = false): void {
   const risk = {
@@ -26,6 +96,7 @@ function writeReadyFinalReview(workspace: string, shadow = false): void {
     changedModules: ['src'],
   };
   const riskDigest = digest(risk);
+  const observed = observedStatusOptions(workspace, 'b'.repeat(40)).storyValidationObservation;
   writeFileSync(
     join(workspace, 'final-review.json'),
     JSON.stringify({
@@ -43,6 +114,7 @@ function writeReadyFinalReview(workspace: string, shadow = false): void {
         engineeringStandardsDigest: 'sha256:standards',
         qualityContractDigest: 'sha256:contract',
         validationEnvironmentDigest: `sha256:${'e'.repeat(64)}`,
+        storyValidationDigest: observed?.storyValidationDigest ?? `sha256:${'f'.repeat(64)}`,
         codingXVersion: '0.29.0',
         runner: 'codex',
         model: 'gpt-test',
@@ -209,6 +281,82 @@ describe('collectStatus', () => {
     }
   });
 
+  it('观察完成后 state、HEAD 或质量契约变化时同步撤销旧绿灯', () => {
+    const ws = makeWorkspace();
+    try {
+      const target = PRD.userStories[0];
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [target] }));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({ 'US-001': passedState(target) }));
+      const observed = observedStatusOptions(ws).storyValidationObservation;
+      if (!observed) throw new Error('expected Story observation');
+
+      const changedState = JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8')) as Record<
+        string,
+        { validationReceipt: { requestId: string } }
+      >;
+      changedState['US-001'].validationReceipt.requestId = 'changed-after-observation';
+      writeFileSync(join(ws, 'state.json'), JSON.stringify(changedState));
+      const stateReport = collectStatusProduction(ws, {
+        projectRoot: process.cwd(),
+        currentGitHead: CURRENT_GIT_HEAD,
+        storyValidationObservation: observed,
+      });
+      if (stateReport.status !== 'ok') throw new Error('expected state report');
+      expect(stateReport.stories[0].validated).toBe(false);
+      expect(stateReport.storyValidation.configurationError).toContain('state.json 已变化');
+
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({ 'US-001': passedState(target) }));
+      const headReport = collectStatusProduction(ws, {
+        projectRoot: process.cwd(),
+        currentGitHead: 'c'.repeat(40),
+        storyValidationObservation: observed,
+      });
+      if (headReport.status !== 'ok') throw new Error('expected head report');
+      expect(headReport.stories[0].validated).toBe(false);
+      expect(headReport.storyValidation.configurationError).toContain('Git HEAD 已变化');
+
+      const contractReport = collectStatusProduction(ws, {
+        projectRoot: process.cwd(),
+        currentGitHead: CURRENT_GIT_HEAD,
+        storyValidationObservation: {
+          ...observed,
+          workingContractDigest: `sha256:${'0'.repeat(64)}`,
+        },
+      });
+      if (contractReport.status !== 'ok') throw new Error('expected contract report');
+      expect(contractReport.stories[0].validated).toBe(false);
+      expect(contractReport.storyValidation.configurationError).toContain('质量契约已变化');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it.runIf(process.platform !== 'win32')('异常质量契约不会让 status 阻塞或沿用旧绿灯', () => {
+    const ws = makeWorkspace();
+    const project = makeWorkspace();
+    try {
+      const target = PRD.userStories[0];
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify({ ...PRD, userStories: [target] }));
+      writeFileSync(join(ws, 'state.json'), JSON.stringify({ 'US-001': passedState(target) }));
+      const observed = observedStatusOptions(ws).storyValidationObservation;
+      if (!observed) throw new Error('expected Story observation');
+      mkdirSync(join(project, '.coding-x'));
+      execFileSync('mkfifo', [join(project, '.coding-x', 'quality.json')]);
+
+      const report = collectStatusProduction(ws, {
+        projectRoot: project,
+        currentGitHead: CURRENT_GIT_HEAD,
+        storyValidationObservation: observed,
+      });
+      if (report.status !== 'ok') throw new Error('expected status report');
+      expect(report.storyValidation.current).toBe(false);
+      expect(report.storyValidation.configurationError).toContain('质量契约');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+
   it('只在内存中撤销不属于当前 HEAD 的旧绿灯', () => {
     const ws = makeWorkspace();
     try {
@@ -277,12 +425,14 @@ describe('collectStatus', () => {
 
       const report = collectStatus(ws, { currentGitHead: currentHead });
       if (report.status !== 'ok') throw new Error(`expected ok, got ${report.status}`);
-      expect(report.stories.map(({ id, passes, validated, validationReceipt }) => ({
-        id,
-        passes,
-        validated,
-        validationReceipt,
-      }))).toEqual([
+      expect(
+        report.stories.map(({ id, passes, validated, validationReceipt }) => ({
+          id,
+          passes,
+          validated,
+          validationReceipt,
+        })),
+      ).toEqual([
         { id: 'US-001', passes: true, validated: false, validationReceipt: null },
         {
           id: 'US-002',
@@ -713,7 +863,7 @@ describe('renderStatusReport', () => {
         configurationError: 'prd.json 必须包含至少一个 Story',
       });
       const { text, exitCode } = renderStatusReport(report);
-      expect(text).toContain('PRD Story 集合配置错误，验收无法验证');
+      expect(text).toContain('Story 验收配置或观察不可用');
       expect(text).not.toContain('全部 story 已通过');
       expect(exitCode).toBe(2);
     } finally {
@@ -736,7 +886,7 @@ describe('renderStatusReport', () => {
         configurationError: 'userStories[0] 的 Story ID 非法',
       });
       expect(renderStatusReport(report)).toMatchObject({ exitCode: 2 });
-      expect(renderStatusReport(report).text).toContain('验收无法验证');
+      expect(renderStatusReport(report).text).toContain('验收配置或观察不可用');
       expect(renderStatusJson(report)).toMatchObject({ exitCode: 2 });
     } finally {
       rmSync(ws, { recursive: true, force: true });
@@ -765,7 +915,7 @@ describe('renderStatusReport', () => {
 
       const textResult = renderStatusReport(report);
       expect(textResult).toMatchObject({ exitCode: 2 });
-      expect(textResult.text).toContain('PRD Story 集合配置错误，验收无法验证');
+      expect(textResult.text).toContain('Story 验收配置或观察不可用');
       expect(textResult.text).not.toContain('✅ US-001');
 
       const jsonResult = renderStatusJson(report);
@@ -775,9 +925,7 @@ describe('renderStatusReport', () => {
       };
       expect(jsonResult.exitCode).toBe(2);
       expect(json.stories.every((item) => !item.validated)).toBe(true);
-      expect(json.storyValidation.configurationError).toBe(
-        'userStories 包含重复 Story ID：US-001',
-      );
+      expect(json.storyValidation.configurationError).toBe('userStories 包含重复 Story ID：US-001');
       expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
     } finally {
       rmSync(ws, { recursive: true, force: true });
@@ -977,13 +1125,22 @@ describe('renderStatusReport', () => {
       writeFileSync(
         join(ws, 'evidence.jsonl'),
         JSON.stringify({
-          type: 'iteration', source: 'engine', at: '2026-08-02T11:00:00.000Z',
-          iteration: 6, storyId: 'US-001', builderRan: false, builderModel: null,
-          validatorRan: false, validatorModel: null, skippedValidator: false,
+          type: 'iteration',
+          source: 'engine',
+          at: '2026-08-02T11:00:00.000Z',
+          iteration: 6,
+          storyId: 'US-001',
+          builderRan: false,
+          builderModel: null,
+          validatorRan: false,
+          validatorModel: null,
+          skippedValidator: false,
           agentBlocked: false,
           validationHeadAbort: {
-            phase: 'validator-start', reason: 'head-unreadable',
-            expectedGitHead, actualGitHead: null,
+            phase: 'validator-start',
+            reason: 'head-unreadable',
+            expectedGitHead,
+            actualGitHead: null,
             diagnostic: 'Validator 请求建立前无法读取 HEAD',
           },
         }) + '\n',
@@ -1013,9 +1170,15 @@ describe('renderStatusReport', () => {
     const ws = makeWorkspace();
     const gitHead = 'a'.repeat(40);
     const baseIteration = {
-      type: 'iteration', source: 'engine', storyId: 'US-001',
-      builderRan: false, builderModel: null, validatorRan: false,
-      validatorModel: null, skippedValidator: false, agentBlocked: false,
+      type: 'iteration',
+      source: 'engine',
+      storyId: 'US-001',
+      builderRan: false,
+      builderModel: null,
+      validatorRan: false,
+      validatorModel: null,
+      skippedValidator: false,
+      agentBlocked: false,
     };
     try {
       writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
@@ -1024,17 +1187,28 @@ describe('renderStatusReport', () => {
         join(ws, 'evidence.jsonl'),
         [
           {
-            ...baseIteration, at: '2026-08-02T11:00:00.000Z', iteration: 6,
+            ...baseIteration,
+            at: '2026-08-02T11:00:00.000Z',
+            iteration: 6,
             validationHeadAbort: {
-              phase: 'quality-check-finish', reason: 'head-changed',
-              expectedGitHead: gitHead, actualGitHead: 'b'.repeat(40), diagnostic: 'changed',
+              phase: 'quality-check-finish',
+              reason: 'head-changed',
+              expectedGitHead: gitHead,
+              actualGitHead: 'b'.repeat(40),
+              diagnostic: 'changed',
             },
           },
           {
-            ...baseIteration, at: '2026-08-02T11:01:00.000Z', iteration: 7,
-            validatorRan: true, validationReceipt: true, validationProtocol: 'passed',
+            ...baseIteration,
+            at: '2026-08-02T11:01:00.000Z',
+            iteration: 7,
+            validatorRan: true,
+            validationReceipt: true,
+            validationProtocol: 'passed',
           },
-        ].map((record) => JSON.stringify(record)).join('\n') + '\n',
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
       );
 
       const report = collectStatus(ws);

@@ -5,9 +5,18 @@ import { tmpdir } from 'node:os';
 import { runInNewContext } from 'node:vm';
 import { execFileSync } from 'node:child_process';
 import { acceptanceHash } from '../engine/validation-protocol.js';
+import { tryReadPrd } from '../engine/prd.js';
+import {
+  evaluateStoryValidationDisplay,
+  evaluateStoryValidationReceiptSet,
+  readDisplayState,
+} from '../engine/state.js';
+import { readQualityContract } from '../quality/contract.js';
+import type { StoryValidationObservation } from '../review/story-validation-observation.js';
 import {
   setState,
   buildApiResponse,
+  buildApiResponseWithWorkspaceSafety,
   start,
   configureWorkspace,
   evaluateDashboardReviewCompletion,
@@ -43,6 +52,46 @@ function tempWorkspace(): string {
   );
   writeFileSync(join(dir, 'progress.md'), '## US-001\n- done');
   return dir;
+}
+
+const TEST_VALIDATION_ENVIRONMENT = `sha256:${'e'.repeat(64)}`;
+
+function readyStoryValidationObservation(
+  workspace: string,
+  headSha: string,
+  projectRoot = process.cwd(),
+): Extract<StoryValidationObservation, { status: 'ready' }> {
+  const prd = tryReadPrd(join(workspace, 'prd.json'));
+  if (!prd) throw new Error('dashboard observation fixture requires a readable PRD');
+  const state = readDisplayState(join(workspace, 'state.json'), prd).state;
+  const display = evaluateStoryValidationDisplay(prd, state, headSha, TEST_VALIDATION_ENVIRONMENT);
+  const receiptSet = evaluateStoryValidationReceiptSet(
+    prd,
+    state,
+    headSha,
+    TEST_VALIDATION_ENVIRONMENT,
+  );
+  const contract = readQualityContract(projectRoot);
+  if (contract.status !== 'ready') {
+    throw new Error('dashboard observation fixture requires a readable quality contract');
+  }
+  return {
+    status: 'ready',
+    workspacePath: workspace,
+    observationToken: `sha256:${'f'.repeat(64)}`,
+    headSha,
+    prd,
+    state: display.state,
+    display,
+    storyValidationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT,
+    storyValidationDigest: receiptSet.digest,
+    workingContract: contract.contract,
+    trackedContract: contract.contract,
+    workingContractDigest: contract.digest,
+    trackedContractDigest: contract.digest,
+    tddConfig: null,
+    receiptSet,
+  };
 }
 
 type DashboardStory = {
@@ -266,6 +315,52 @@ describe.each(dashboardAssets)('$label dashboard published-state contract', (ass
 });
 
 describe('buildApiResponse', () => {
+  it.runIf(process.platform !== 'win32')(
+    '异步入口遇到特殊状态文件时不会阻塞或保留旧绿灯',
+    async () => {
+      const ws = tempWorkspace();
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+      }).trim();
+      const observation = readyStoryValidationObservation(ws, head);
+      for (const filename of ['state.json', 'progress.md', 'final-review.json']) {
+        rmSync(join(ws, filename), { force: true });
+        execFileSync('mkfifo', [join(ws, filename)]);
+      }
+      configureWorkspace(ws, 50, process.cwd(), async () => observation);
+
+      const response = await buildApiResponseWithWorkspaceSafety();
+
+      expect(response.stateCorrupted).toBe(true);
+      expect(response.storyValidation.current).toBe(false);
+      expect(response.reviewCompletion.current).toBe(false);
+      expect(response.logs).toBe('');
+      expect(response.stories[0]?.validated).not.toBe(true);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    '异步入口遇到 PRD FIFO 时返回不可验证视图而不等待写端',
+    async () => {
+      const ws = tempWorkspace();
+      const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: process.cwd(),
+        encoding: 'utf8',
+      }).trim();
+      const observation = readyStoryValidationObservation(ws, head);
+      rmSync(join(ws, 'prd.json'));
+      execFileSync('mkfifo', [join(ws, 'prd.json')]);
+      configureWorkspace(ws, 50, process.cwd(), async () => observation);
+
+      const response = await buildApiResponseWithWorkspaceSafety();
+
+      expect(response.project).toBe('');
+      expect(response.stories).toEqual([]);
+      expect(response.storyValidation.current).toBe(false);
+    },
+  );
+
   it('只有绑定当前 HEAD 和整组 Story 凭证的可交付 Review 才保持完成态', () => {
     const head = 'a'.repeat(40);
     const receiptSet = `sha256:${'b'.repeat(64)}`;
@@ -299,8 +394,32 @@ describe('buildApiResponse', () => {
     });
   });
 
-  it('reflects state + workspace files', () => {
+  it('同步读取没有受管观察时保留实现候选，但撤销全部验收绿灯', () => {
     const ws = tempWorkspace();
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(
+      join(ws, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: {
+            schemaVersion: 2,
+            requestId: 'offline-dashboard-receipt',
+            gitHead: head,
+            acceptanceHash: acceptanceHash('US-001', []),
+            validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT,
+          },
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
     configureWorkspace(ws, 50);
     setState({ iteration: 3, phase: 'validating', currentStory: 'US-001' });
     const r = buildApiResponse();
@@ -311,8 +430,168 @@ describe('buildApiResponse', () => {
     expect(r.sourcePrd).toBe('docs/prds/prd-x.md');
     expect(r.stories.length).toBe(1);
     expect(r.stories[0].passes).toBe(true); // 状态来自 state.json
-    expect(r.stories[0].validated).toBe(false); // 旧 passed state 只保留实现候选
+    expect(r.stories[0].validated).toBe(false);
+    expect(r.stories[0].validationReceipt).toBeNull();
+    expect(r.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: 'Dashboard 未获得活跃受管 Story 当前性观察',
+    });
     expect(r.logs).toContain('US-001');
+  });
+
+  it('异步读取注入当前受管观察后可以展示当前验收结果', async () => {
+    const ws = tempWorkspace();
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(
+      join(ws, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: {
+            schemaVersion: 2,
+            requestId: 'managed-dashboard-receipt',
+            gitHead: head,
+            acceptanceHash: acceptanceHash('US-001', []),
+            validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT,
+          },
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const observation = readyStoryValidationObservation(ws, head);
+    const observer = vi.fn(async () => observation);
+    configureWorkspace(ws, 50, process.cwd(), observer);
+
+    const response = await buildApiResponseWithWorkspaceSafety();
+
+    expect(observer).toHaveBeenCalledOnce();
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    });
+    expect(response.stories[0]).toMatchObject({
+      passes: true,
+      validated: true,
+      validationReceipt: observation.state['US-001'].validationReceipt,
+    });
+  });
+
+  it.each([
+    ['其他 workspace', 'workspace', 'Story 当前性观察来自其他 workspace'],
+    ['旧 PRD', 'prd', 'Story 当前性观察后 prd.json 已变化'],
+  ] as const)('受管观察绑定%s时失败关闭', async (_label, mismatch, expectedError) => {
+    const ws = tempWorkspace();
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(
+      join(ws, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: {
+            schemaVersion: 2,
+            requestId: 'mismatched-dashboard-receipt',
+            gitHead: head,
+            acceptanceHash: acceptanceHash('US-001', []),
+            validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT,
+          },
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const observation = readyStoryValidationObservation(ws, head);
+    const mismatchedObservation =
+      mismatch === 'workspace'
+        ? { ...observation, workspacePath: tempWorkspace() }
+        : { ...observation, prd: { ...observation.prd, description: '观察后的旧描述' } };
+    configureWorkspace(ws, 50, process.cwd(), async () => mismatchedObservation);
+
+    const response = await buildApiResponseWithWorkspaceSafety();
+
+    expect(response.stories[0]).toMatchObject({
+      passes: true,
+      validated: false,
+      validationReceipt: null,
+    });
+    expect(response.storyValidation).toEqual({
+      gitHead: head,
+      current: false,
+      invalidStoryIds: ['US-001'],
+      configurationError: expectedError,
+    });
+  });
+
+  it('观察完成后 state、HEAD 或质量契约变化时撤销旧绿灯', async () => {
+    const ws = tempWorkspace();
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+    const writePassedState = (gitHead: string, requestId: string) => {
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: true,
+            validationReceipt: {
+              schemaVersion: 2,
+              requestId,
+              gitHead,
+              acceptanceHash: acceptanceHash('US-001', []),
+              validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT,
+            },
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
+    };
+
+    writePassedState(head, 'before-state-change');
+    const beforeStateChange = readyStoryValidationObservation(ws, head);
+    writePassedState(head, 'after-state-change');
+    configureWorkspace(ws, 50, process.cwd(), async () => beforeStateChange);
+    const stateResponse = await buildApiResponseWithWorkspaceSafety();
+    expect(stateResponse.stories[0].validated).toBe(false);
+    expect(stateResponse.storyValidation.configurationError).toContain('state.json 已变化');
+
+    const staleHead = 'c'.repeat(40);
+    writePassedState(staleHead, 'head-change');
+    const beforeHeadChange = readyStoryValidationObservation(ws, staleHead);
+    configureWorkspace(ws, 50, process.cwd(), async () => beforeHeadChange);
+    const headResponse = await buildApiResponseWithWorkspaceSafety();
+    expect(headResponse.stories[0].validated).toBe(false);
+    expect(headResponse.storyValidation.configurationError).toContain('Git HEAD 已变化');
+
+    writePassedState(head, 'contract-change');
+    const beforeContractChange = readyStoryValidationObservation(ws, head);
+    configureWorkspace(ws, 50, process.cwd(), async () => ({
+      ...beforeContractChange,
+      workingContractDigest: `sha256:${'0'.repeat(64)}`,
+    }));
+    const contractResponse = await buildApiResponseWithWorkspaceSafety();
+    expect(contractResponse.stories[0].validated).toBe(false);
+    expect(contractResponse.storyValidation.configurationError).toContain('质量契约已变化');
   });
 
   it('非法空 Story 集合不能显示为当前验收结果', () => {
@@ -468,7 +747,7 @@ describe('buildApiResponse', () => {
     expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
-  it('按项目当前 HEAD 只在内存中撤销过期的 Validator 绿灯', () => {
+  it('离线同步路径不尝试自行重建当前性观察', () => {
     const root = mkdtempSync(join(tmpdir(), 'dashboard-head-'));
     cleanup.push(() => rmSync(root, { recursive: true, force: true }));
     const ws = join(root, '.workspace');
@@ -530,13 +809,13 @@ describe('buildApiResponse', () => {
     expect(response.storyValidation).toEqual({
       gitHead: currentHead,
       current: false,
-      invalidStoryIds: ['US-001'],
-      configurationError: null,
+      invalidStoryIds: [],
+      configurationError: 'Dashboard 未获得活跃受管 Story 当前性观察',
     });
     expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });
 
-  it('混合 Story 对账时只撤销过期项，保留当前项和普通未完成项', () => {
+  it('离线同步路径对混合 Story 也不猜测任何验收绿灯', () => {
     const root = mkdtempSync(join(tmpdir(), 'dashboard-mixed-head-'));
     cleanup.push(() => rmSync(root, { recursive: true, force: true }));
     const ws = join(root, '.workspace');
@@ -557,8 +836,20 @@ describe('buildApiResponse', () => {
     const currentHead = git('rev-parse', 'HEAD');
     const stories = [
       { id: 'US-001', title: 'stale', description: 'd', acceptanceCriteria: ['ac-1'], priority: 1 },
-      { id: 'US-002', title: 'current', description: 'd', acceptanceCriteria: ['ac-2'], priority: 2 },
-      { id: 'US-003', title: 'unfinished', description: 'd', acceptanceCriteria: ['ac-3'], priority: 3 },
+      {
+        id: 'US-002',
+        title: 'current',
+        description: 'd',
+        acceptanceCriteria: ['ac-2'],
+        priority: 2,
+      },
+      {
+        id: 'US-003',
+        title: 'unfinished',
+        description: 'd',
+        acceptanceCriteria: ['ac-3'],
+        priority: 3,
+      },
     ];
     writeFileSync(
       join(ws, 'prd.json'),
@@ -614,26 +905,28 @@ describe('buildApiResponse', () => {
     configureWorkspace(ws, 50, root);
     const response = buildApiResponse();
 
-    expect(response.stories.map(({ id, passes, validated, validationReceipt }) => ({
-      id,
-      passes,
-      validated,
-      validationReceipt,
-    }))).toEqual([
+    expect(
+      response.stories.map(({ id, passes, validated, validationReceipt }) => ({
+        id,
+        passes,
+        validated,
+        validationReceipt,
+      })),
+    ).toEqual([
       { id: 'US-001', passes: true, validated: false, validationReceipt: null },
       {
         id: 'US-002',
         passes: true,
-        validated: true,
-        validationReceipt: persisted['US-002'].validationReceipt,
+        validated: false,
+        validationReceipt: null,
       },
       { id: 'US-003', passes: false, validated: false, validationReceipt: null },
     ]);
     expect(response.storyValidation).toEqual({
       gitHead: currentHead,
       current: false,
-      invalidStoryIds: ['US-001'],
-      configurationError: null,
+      invalidStoryIds: [],
+      configurationError: 'Dashboard 未获得活跃受管 Story 当前性观察',
     });
     expect(JSON.parse(readFileSync(join(ws, 'state.json'), 'utf8'))).toEqual(persisted);
   });
@@ -767,8 +1060,70 @@ describe('start', () => {
       probeEvidence: 'system',
       display: { label: '旧版工作区' },
     });
+    expect(body.stories[0]).toMatchObject({ passes: true, validated: false });
+    expect(body.storyValidation).toMatchObject({
+      current: false,
+      invalidStoryIds: [],
+      configurationError: 'Dashboard 未获得活跃受管 Story 当前性观察',
+    });
     expect(res.headers.get('content-type')).toContain('application/json');
     expect(res.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('通过 start 注入的受管观察驱动 HTTP API 当前结果', async () => {
+    const ws = tempWorkspace();
+    const pub = mkdtempSync(join(tmpdir(), 'pub-observed-'));
+    cleanup.push(() => rmSync(pub, { recursive: true, force: true }));
+    mkdirSync(pub, { recursive: true });
+    writeFileSync(join(pub, 'dashboard.html'), '<html>main</html>');
+    writeFileSync(join(pub, 'dashboard-p.html'), '<html>pixel</html>');
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(
+      join(ws, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          validationReceipt: {
+            schemaVersion: 2,
+            requestId: 'start-dashboard-receipt',
+            gitHead: head,
+            acceptanceHash: acceptanceHash('US-001', []),
+            validationEnvironmentDigest: TEST_VALIDATION_ENVIRONMENT,
+          },
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      }),
+    );
+    const observer = vi.fn(async () => readyStoryValidationObservation(ws, head));
+    const srv = start({
+      workspace: ws,
+      maxIterations: 50,
+      projectRoot: process.cwd(),
+      port: 0,
+      publicDir: pub,
+      storyValidationObserver: observer,
+    });
+    cleanup.push(() => srv.close());
+    const addr = await srv.ready;
+
+    const res = await fetch(`http://127.0.0.1:${addr.port}/api/state`);
+    const body = await res.json();
+
+    expect(observer).toHaveBeenCalledOnce();
+    expect(body.storyValidation).toEqual({
+      gitHead: head,
+      current: true,
+      invalidStoryIds: [],
+      configurationError: null,
+    });
+    expect(body.stories[0]).toMatchObject({ passes: true, validated: true });
   });
 
   it('keeps dashboard asset failures out of the HTTP response', async () => {

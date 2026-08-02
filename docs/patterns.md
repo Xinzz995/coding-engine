@@ -34,7 +34,7 @@ scope: root
 - 2026-07-22 workspace 是运行时边界，不是功能提交的一部分：`prd-to-json` 对用户给出的 workspace 参数只做只读 Git 隔离核对，并把同一个原始参数逐字传给 `workspace apply-prd`；skill 只在系统临时目录准备候选和请求，正式命令才在租约内写 workspace。builder 只显式 stage story 文件、检查暂存清单、提交成功后才回写 state/progress。自动化不得替用户修改 `.gitignore`、执行 `git rm --cached` 或重置既有暂存区。
 - 2026-07-22 收口副产物必须沿用主流程已经建立的信任来源：loop 自动报告只消费终轮 PRD guard 返回的冻结快照并显式标注来源，不能在裁决完成后重新读取 agent 可改写的磁盘 PRD；手动报告没有该信任来源，只能标成磁盘读取（ADR-014）。
 - 2026-07-22 会继续读写 workspace 的受管子进程，只有 coordinator 已确认 containment 清空且文件 delta 合法后才能结算并允许父进程继续写。POSIX 使用独占进程组，Windows 使用 Job Object；父进程崩溃、终止失败、越界变化或未完成 mutation 都保留隔离并要求显式恢复，不得把根进程退出当作集合清空证明（ADR-021）。
-- 2026-07-22 无人值守子进程的错误恢复不能依赖当时终端滚屏：stdout/stderr 用 pipe+tee 保持实时可见，同时只滚动保留统一上限的尾部；duration 必须覆盖超时后的整棵进程树收口。成功 transcript 不持久化，异常尾部才进入 evidence/status/report；provider 的人类可读 token/费用文案不得用正则伪装成稳定计量，需等结构化 adapter 合同（ADR-016）。
+- 2026-07-22 无人值守子进程的错误恢复不能依赖当时终端滚屏：stdout/stderr 用 pipe+tee 保持实时可见，同时只滚动保留统一上限的尾部；duration 必须覆盖超时后的受管进程集合收口。POSIX 主动 `setsid` 或其他平台 containment 逃逸是明确非目标，文案不得把它升级成操作系统沙箱或任意恶意后代的完整证明。成功 transcript 不持久化，异常尾部才进入 evidence/status/report；provider 的人类可读 token/费用文案不得用正则伪装成稳定计量，需等结构化 adapter 合同（ADR-016、021）。
 - 2026-07-22 skill 不直接改写 workspace，也不通过双 doctor 检查模拟互斥：只在系统临时目录生成一次性候选/请求，再调用固定的 `workspace apply-prd` 或 `workspace record-review-decision` 入口。正式命令必须在同一 session 中完成租约获取、实时输入重核和产品动作；租约或输入失效时保持零业务写入，不允许 skill 删除协议根、租约或恢复记录。
 - 2026-07-16 `--workspace` 是一个需要端到端保持身份的输入：CLI 只在边界 canonicalize 一次，skills/commands 对用户显式值原样透传，所有读写和安全分类都复用同一结果。不能在不同阶段分别 `join`、补默认值或改写拼写；绝对路径、相对路径和别名若在不同入口被解释成不同目录，会产生假阴性或绕开同一租约竞争（0.21.0 的 `join` 事故是历史反例）。
 - 2026-07-16 测试需要在异步流程的特定时刻采样外部状态（文件存在性等）时，用被测代码的可观察事件做同步点（如捕获特定日志行后再采样），不用固定毫秒 sleep——墙钟采样与子进程冷启动赛跑必抖（keepOpen 锁释放用例 50ms 采样 8 跑 4 挂；换「运行结束」日志行同步后确定性成立，10 连跑稳定，0.21.0 实证）。

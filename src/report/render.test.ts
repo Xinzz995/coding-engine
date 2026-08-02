@@ -95,7 +95,6 @@ describe('escapeHtml', () => {
     expect(escapeHtml('<a href="x">&</a>')).toBe('&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;');
   });
 });
-
 describe('renderMarkdownLite 六构造', () => {
   it('标题映射 h4-h6（报告自身占用 h1-h3）', () => {
     expect(renderMarkdownLite('# A')).toBe('<h4>A</h4>');
@@ -199,7 +198,7 @@ describe('renderReportHtml', () => {
         },
       }),
     );
-    expect(html).toContain('PRD Story 集合配置错误，验收无法验证');
+    expect(html).toContain('Story 验收配置或观察不可用：userStories 包含重复 Story ID：US-001');
     expect(html).toContain('🟨 待引擎验收');
     expect(html).not.toContain('✅ 通过');
   });

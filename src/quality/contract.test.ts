@@ -202,6 +202,23 @@ describe('parseQualityContract', () => {
     expect(result.digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
+  it('returns a detached deeply frozen contract snapshot', () => {
+    const input = clone();
+    const result = parseQualityContract(input);
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') return;
+    const originalDigest = result.digest;
+    input.generatedPaths.push('new-output/**');
+    input.localValidation.allowedPaths[0] = 'changed/**';
+    expect(result.contract.generatedPaths).toEqual(['dist/**', 'coverage/**']);
+    expect(result.contract.localValidation.allowedPaths).toEqual(['node_modules/**']);
+    expect(digestQualityContract(result.contract)).toBe(originalDigest);
+    expect(Object.isFrozen(result.contract)).toBe(true);
+    expect(Object.isFrozen(result.contract.generatedPaths)).toBe(true);
+    expect(Object.isFrozen(result.contract.localValidation)).toBe(true);
+    expect(() => result.contract.generatedPaths.push('forbidden/**')).toThrow();
+  });
+
   it('migrates a schema 1 default-branch contract from its own trusted job setup only', () => {
     const legacy = clone();
     legacy.schemaVersion = 1;
@@ -235,20 +252,23 @@ describe('parseQualityContract', () => {
     const legacy = clone();
     legacy.schemaVersion = 1;
     delete legacy.localValidation;
-    const platform = process.platform === 'darwin'
-      ? 'macos'
-      : process.platform === 'win32'
-        ? 'windows'
-        : 'linux';
+    const platform =
+      process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
     const samePlatform = legacy.github.jobs.find(
       (job: Record<string, unknown>) => job.platform === platform,
     );
     legacy.github.jobs.push({
       ...structuredClone(samePlatform),
       id: 'ambiguous-setup',
-      setup: [{
-        executable: 'node', args: ['unexpected.js'], cwd: '.', platforms: [platform], timeoutMs: 1,
-      }],
+      setup: [
+        {
+          executable: 'node',
+          args: ['unexpected.js'],
+          cwd: '.',
+          platforms: [platform],
+          timeoutMs: 1,
+        },
+      ],
     });
     const result = parseReviewBaseQualityContract(legacy);
     expect(result).toMatchObject({ status: 'invalid' });
@@ -276,9 +296,10 @@ describe('parseQualityContract', () => {
     delete legacy.localValidation;
     const otherPlatform = process.platform === 'linux' ? 'macos' : 'linux';
     for (const job of legacy.github.jobs) {
-      job.toolchains = job.platform === otherPlatform
-        ? [{ kind: 'python', version: '3.12' }]
-        : [{ kind: 'node', version: '22' }];
+      job.toolchains =
+        job.platform === otherPlatform
+          ? [{ kind: 'python', version: '3.12' }]
+          : [{ kind: 'node', version: '22' }];
     }
     const result = parseReviewBaseQualityContract(legacy);
     expect(result).toMatchObject({ status: 'invalid' });
@@ -336,9 +357,7 @@ describe('parseQualityContract', () => {
     const result = parseQualityContract(input);
     expect(result).toMatchObject({ status: 'invalid' });
     if (result.status === 'invalid') {
-      expect(result.errors).toContain(
-        'Python 项目的 localValidation.prepare 必须覆盖 linux',
-      );
+      expect(result.errors).toContain('Python 项目的 localValidation.prepare 必须覆盖 linux');
     }
   });
 
@@ -378,6 +397,8 @@ describe('parseQualityContract', () => {
     ['generatedPaths', ['packages/[ab]/dist/**'], '基目录必须是字面路径'],
     ['generatedPaths', ['packages/{api,web}/dist/**'], '基目录必须是字面路径'],
     ['generatedPaths', ['bundle.js'], '必须是明确目录的 /** 模式'],
+    ['generatedPaths', ['.git/**'], '不能允许 .git 控制目录'],
+    ['generatedPaths', ['cache/.GIT/**'], '不能允许 .git 控制目录'],
     ['localValidation.allowedPaths', ['**'], '不能允许整个项目根'],
     ['localValidation.allowedPaths', ['allowed-*/**'], '基目录必须是字面路径'],
     ['localValidation.allowedPaths', ['.*/**'], '基目录必须是字面路径'],
@@ -394,6 +415,24 @@ describe('parseQualityContract', () => {
     const result = parseQualityContract(input);
     expect(result).toMatchObject({ status: 'invalid' });
     if (result.status === 'invalid') expect(result.errors.join('\n')).toContain(expected);
+  });
+
+  it('bounds artifact path count and individual path length', () => {
+    const tooMany = clone();
+    tooMany.generatedPaths = Array.from({ length: 129 }, (_, index) => `out-${index}/**`);
+    const tooManyResult = parseQualityContract(tooMany);
+    expect(tooManyResult).toMatchObject({ status: 'invalid' });
+    if (tooManyResult.status === 'invalid') {
+      expect(tooManyResult.errors).toContain('generatedPaths 最多允许 128 项');
+    }
+
+    const tooLong = clone();
+    tooLong.localValidation.allowedPaths = [`${'a'.repeat(510)}/**`];
+    const tooLongResult = parseQualityContract(tooLong);
+    expect(tooLongResult).toMatchObject({ status: 'invalid' });
+    if (tooLongResult.status === 'invalid') {
+      expect(tooLongResult.errors.join('\n')).toContain('不能超过 512 个字符');
+    }
   });
 
   it('accepts an explicit release exemption only when protected refs are empty', () => {

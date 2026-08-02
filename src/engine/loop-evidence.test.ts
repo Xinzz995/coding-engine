@@ -5,12 +5,24 @@ import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
 import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from '../workspace-safety/types.js';
 import { readEvidence } from './evidence.js';
 import { runLoop as runProductionLoop } from './loop.js';
-import { setup, story, runLoop, fakeCounting, strictConfig } from './loop-test-support.js';
+import {
+  setup,
+  story,
+  runLoop,
+  fakeCounting,
+  strictConfig,
+  qualityContractWithNodeScript,
+  readyQualityContract,
+} from './loop-test-support.js';
+import { digest } from '../review/common.js';
 
 describe('runLoop evidence records', () => {
   it('writes gate-run (pass) and iteration records for a completing run', async () => {
+    const contract = qualityContractWithNodeScript('process.exit(0)', 'evidence-pass');
+    const contractDigest = digest(contract);
     const { projectRoot, workspace, instructionsDir } = setup([story()], {
-      qualityChecks: ['node -e "process.exit(0)"'],
+      qualityContractDigest: contractDigest,
+      qualityChecks: contract.checks,
     });
     const fake = join(workspace, 'fake.mjs');
     const calls = join(projectRoot, 'completing-evidence-calls.txt');
@@ -42,6 +54,7 @@ describe('runLoop evidence records', () => {
         instructionsDir,
         port: 0,
         openBrowser: false,
+        qualityContractReader: () => readyQualityContract(contract, contractDigest),
       });
       expect(code).toBe(0);
       const { records, skippedLines } = readEvidence(workspace);

@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { tryReadPrd, type StoryDifficulty } from '../engine/prd.js';
 import {
@@ -23,16 +24,13 @@ import {
   type WorkspaceSafetyStatusSnapshot,
 } from '../workspace-safety/status.js';
 import { readFinalReviewState, type ReviewStateRead } from '../review/state.js';
+import {
+  readWorkingQualityContractAuthority,
+  type StoryValidationObservation,
+} from '../review/story-validation-observation.js';
 
 export type Phase =
-  | 'idle'
-  | 'developing'
-  | 'gating'
-  | 'validating'
-  | 'done'
-  | 'blocked'
-  | 'shadow'
-  | 'error';
+  'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'blocked' | 'shadow' | 'error';
 
 export interface DashboardReviewCompletion {
   current: boolean;
@@ -64,7 +62,7 @@ export function evaluateDashboardReviewCompletion(
     return { current: false, reason: '最终 Review 对应的 Story 验收凭证集合已变化' };
   }
   if (review.status !== 'passed' || review.deliveryStatus !== 'ready' || review.shadow) {
-    return { current: false, reason: '最终 Review 尚未产生可交付结论' };
+    return { current: false, reason: '本次运行的最终 Review 尚未完成' };
   }
   return { current: true, reason: null };
 }
@@ -95,14 +93,17 @@ const state: State = {
 };
 let workspaceDir = '.workspace';
 let projectRootDir = process.cwd();
+let observeStoryValidation: (() => Promise<StoryValidationObservation>) | null = null;
 
 export function configureWorkspace(
   workspace: string,
   maxIterations: number,
   projectRoot = process.cwd(),
+  storyValidationObserver: (() => Promise<StoryValidationObservation>) | null = null,
 ): void {
   workspaceDir = workspace;
   projectRootDir = projectRoot;
+  observeStoryValidation = storyValidationObserver;
   state.maxIterations = maxIterations;
   state.iteration = 0;
   state.phase = 'idle';
@@ -163,20 +164,89 @@ function buildApiResponseForWorkspace(
   workspace: string,
   workspaceSafety: WorkspaceSafetyStatusSnapshot | null,
   projectRoot: string,
+  observed: StoryValidationObservation | null = null,
+  observationError: string | null = null,
 ): ApiResponse {
   const elapsed = state.startedAt ? Math.floor((Date.now() - state.startedAt) / 1000) : 0;
   const prd = tryReadPrd(join(workspace, 'prd.json'));
   const displayState = prd ? readDisplayState(join(workspace, 'state.json'), prd) : null;
-  const currentGitHead = readGitHead(projectRoot);
-  const storyValidation =
+  const fallbackHead = readGitHead(projectRoot);
+  const observationMatchesWorkspace =
+    observed !== null && resolve(observed.workspacePath) === resolve(workspace);
+  const observationMatchesPrd =
+    observationMatchesWorkspace &&
+    observed.prd !== null &&
+    prd !== null &&
+    isDeepStrictEqual(observed.prd, prd);
+  const observationMatchesState =
+    observationMatchesPrd &&
+    observed.status === 'ready' &&
+    displayState !== null &&
+    isDeepStrictEqual(
+      evaluateStoryValidationDisplay(
+        prd,
+        displayState.state,
+        observed.headSha,
+        observed.storyValidationEnvironmentDigest,
+      ),
+      observed.display,
+    );
+  const observationMatchesHead = observationMatchesState && observed.headSha === fallbackHead;
+  const currentContract = observationMatchesHead
+    ? readWorkingQualityContractAuthority(projectRoot)
+    : null;
+  const observationMatchesContract =
+    observationMatchesHead &&
+    currentContract?.status === 'ready' &&
+    observed.workingContractDigest === currentContract.digest;
+  const currentGitHead = fallbackHead;
+  const failedStoryValidation =
     prd && displayState
-      ? evaluateStoryValidationDisplay(prd, displayState.state, currentGitHead)
+      ? (() => {
+          const failed = evaluateStoryValidationDisplay(
+            prd,
+            displayState.state,
+            currentGitHead,
+            null,
+          );
+          const message =
+            observationError ??
+            (observed === null
+              ? 'Dashboard 未获得活跃受管 Story 当前性观察'
+              : !observationMatchesWorkspace
+                ? 'Story 当前性观察来自其他 workspace'
+                : !observationMatchesPrd
+                  ? 'Story 当前性观察后 prd.json 已变化'
+                  : observed.status === 'unverifiable'
+                    ? observed.message
+                    : !observationMatchesState
+                      ? 'Story 当前性观察后 state.json 已变化'
+                      : !observationMatchesHead
+                        ? 'Story 当前性观察后 Git HEAD 已变化'
+                        : !observationMatchesContract
+                          ? 'Story 当前性观察后工作树质量契约已变化或不可读取'
+                          : 'Story 当前性观察无法绑定 Dashboard 状态');
+          return {
+            ...failed,
+            currentness: {
+              ...failed.currentness,
+              current: false,
+              configurationError: failed.currentness.configurationError ?? message,
+            },
+          };
+        })()
       : null;
+  const storyValidation =
+    observationMatchesContract && observed.status === 'ready'
+      ? observed.display
+      : failedStoryValidation;
   const currentState = storyValidation?.state ?? null;
   const reviewCompletion = evaluateDashboardReviewCompletion(
     readFinalReviewState(workspace),
     currentGitHead,
-    storyValidation?.digest ?? null,
+    observationMatchesContract && observed.status === 'ready'
+      ? observed.storyValidationDigest
+      : null,
   );
   const logs = readProgress(join(workspace, 'progress.md'));
   return {
@@ -219,7 +289,22 @@ export async function buildApiResponseWithWorkspaceSafety(): Promise<ApiResponse
   const workspace = workspaceDir;
   const projectRoot = projectRootDir;
   const workspaceSafety = await inspectWorkspaceSafetyStatus(workspace);
-  return buildApiResponseForWorkspace(workspace, workspaceSafety, projectRoot);
+  let observed: StoryValidationObservation | null = null;
+  let observationError: string | null = null;
+  if (observeStoryValidation !== null) {
+    try {
+      observed = await observeStoryValidation();
+    } catch (error) {
+      observationError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  return buildApiResponseForWorkspace(
+    workspace,
+    workspaceSafety,
+    projectRoot,
+    observed,
+    observationError,
+  );
 }
 
 function defaultPublicDir(): string {
@@ -232,8 +317,14 @@ export function start(opts: {
   projectRoot?: string;
   port?: number;
   publicDir?: string;
+  storyValidationObserver?: () => Promise<StoryValidationObservation>;
 }): { close(): void; address(): { port: number }; ready: Promise<{ port: number }> } {
-  configureWorkspace(opts.workspace, opts.maxIterations, opts.projectRoot);
+  configureWorkspace(
+    opts.workspace,
+    opts.maxIterations,
+    opts.projectRoot,
+    opts.storyValidationObserver ?? null,
+  );
   const publicDir = opts.publicDir ?? defaultPublicDir();
   const requestedPort = opts.port ?? 7331;
 

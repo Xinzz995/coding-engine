@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { delimiter, isAbsolute, relative, resolve, sep } from 'node:path';
 import { resolveExecutablePath } from '../engine/agent.js';
 import {
   GitHubQualityError,
@@ -39,6 +39,48 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function environmentWithSinglePath(
+  environment: NodeJS.ProcessEnv,
+  directory: string,
+): NodeJS.ProcessEnv {
+  return Object.fromEntries([
+    ...Object.entries(environment).filter(([name]) => name.toUpperCase() !== 'PATH'),
+    ['PATH', directory],
+  ]);
+}
+
+function insideProjectRoot(projectRoot: string, executable: string): boolean {
+  const relation = relative(projectRoot, executable);
+  return (
+    relation === '' ||
+    (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+  );
+}
+
+/** @internal Infrastructure tools may come from the user's host PATH, never from PR files. */
+export function resolveReviewInfrastructureExecutable(
+  name: 'git' | 'gh',
+  projectRoot: string,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const root = realpathSync(resolve(projectRoot));
+  const pathEntry = Object.entries(environment).find(([key]) => key.toUpperCase() === 'PATH')?.[1];
+  for (const directory of (pathEntry ?? '').split(process.platform === 'win32' ? ';' : delimiter)) {
+    if (!directory) continue;
+    try {
+      const executable = resolveExecutablePath(
+        name,
+        root,
+        environmentWithSinglePath(environment, directory),
+      );
+      if (!insideProjectRoot(root, executable)) return executable;
+    } catch {
+      // Try the next host PATH entry. Project-owned or broken candidates are never fallback proof.
+    }
+  }
+  throw new WorkspaceSafetyError('invalid', `找不到项目目录之外的可信 ${name} 可执行文件`);
+}
+
 function commandFailure(
   executable: string,
   result: Awaited<ReturnType<typeof runManagedWorkspaceProcess>>,
@@ -73,7 +115,7 @@ async function runManagedReadCommand(options: {
     GIT_TERMINAL_PROMPT: '0',
   };
   const root = realpathSync(resolve(options.root));
-  const executable = resolveExecutablePath(options.executable, root, environment);
+  const executable = resolveReviewInfrastructureExecutable(options.executable, root, environment);
   const result = await runManagedWorkspaceProcess(options.session, {
     kind: 'final-review',
     delegation: 'read-only-v1',
