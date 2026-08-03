@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { delegationScope } from '../workspace-safety/operation-records.js';
 import { renderInstruction } from './loop.js';
 import { read } from './loop-test-support.js';
 
@@ -101,5 +102,31 @@ describe('instruction assets workspace commit isolation contract', () => {
     expect(content).toContain('不要使用 `git add .` 或 `git add -A`');
     expect(content).toContain('`git diff --cached --name-only`');
     expect(content).toContain('提交成功后再更新');
+  });
+
+  it('reserves the workspace for engine-governed state instead of general temporary artifacts', () => {
+    const content = read('builder.md');
+    expect(content).toContain('不是通用临时目录');
+    expect(content).toContain('不得在其中创建、修改或删除任何其他路径');
+    expect(content).toContain('系统临时目录或项目已声明的生成产物目录');
+    expect(content).toContain('并在返回前清理');
+
+    const listedPaths = content
+      .match(/除按下文规则写入 (?<paths>.+?) 外，不得/u)
+      ?.groups?.paths.matchAll(/`(?<path>[^`]+)`/gu);
+    expect(listedPaths).toBeDefined();
+    const promptPaths = [...(listedPaths ?? [])].map(({ groups }) =>
+      groups!.path.replace(/\/$/u, ''),
+    );
+    const contractPaths = delegationScope(
+      'builder',
+      'builder-v1',
+      'US-001',
+      undefined,
+      `sha256:${'a'.repeat(64)}`,
+      1,
+      undefined,
+    ).contract.rules.map(({ path }) => path);
+    expect(promptPaths.sort()).toEqual(contractPaths.sort());
   });
 });
