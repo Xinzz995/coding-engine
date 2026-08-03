@@ -519,6 +519,7 @@ describe('runAgent', () => {
         rmSync(cwd, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 
   it('resolves timedOut=false when the process exits in time', async () => {

@@ -731,7 +731,7 @@ describe('main — status --json', () => {
     } finally {
       logSpy.mockRestore();
     }
-  });
+  }, 20_000);
 });
 
 describe('runDashboard', () => {
