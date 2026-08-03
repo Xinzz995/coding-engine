@@ -21,9 +21,11 @@
    - 对 typecheck/test 类 AC，执行项目已有命令并核对真实退出结果。
    - 对浏览器类 AC，按下方浏览器流程实际操作和观察。
    - 对描述性 AC，结合代码检查、现有测试和必要的运行时验证；不能用“大概率正确”代替证据。
+   - 验证检出是引擎按当前提交建立、并会在返回后完整核对的一次性基线，不是通用临时目录。运行工具时优先使用其禁止缓存或把临时内容重定向到系统临时目录的选项；测试缓存、语言运行时字节码、覆盖率数据、静态检查缓存、构建和安装冒烟产物，只能写入系统临时目录或质量契约已声明的生成产物目录。
 3. 每一条 AC 都生成且只生成一个 check，按 `acIndex: 1..N` 排序。`evidence` 写本次实际观察到的命令/输出/行为，不能为空，也不能只写“看起来正确”。
 4. 全部 check 通过时 `verdict="passed"`；任一 check 未通过或无法验证时 `verdict="failed"`，对应 check 的 `passed=false` 并说明原因。不得用进程退出码代替 verdict。
-5. 按下方 schema 生成单个 JSON 对象；先写同目录临时文件，再 rename 到 request.resultPath，避免半截 JSON。写入成功后正常退出。
+5. 写结果前清理本轮在验证检出内创建、且质量契约未声明允许的全部目录和文件；被 Git 忽略也不构成保留理由。结合契约允许项核对 `git status --short --untracked-files=all --ignored=matching`，确认没有 Validator 创建的未声明路径，也没有跟踪文件变化。无法清理或无法确认时，不得写入 `verdict="passed"` 的结果；明确报错并退出，让引擎按不可验证处理。不得为获得干净状态而删除或还原项目原有的跟踪文件。
+6. 按下方 schema 生成单个 JSON 对象；先写同目录临时文件，再 rename 到 request.resultPath，避免半截 JSON。写入成功后正常退出。
 
 ## Validation result v1（字段必须恰好匹配）
 
@@ -72,6 +74,6 @@
 
 - 不得修改 `{{WORKSPACE}}/state.json`。`passes`、`validated`、`notes`、`retryCount`、`blocked`、`escalated` 全部由引擎根据 result 写入。
 - 不得修改 `{{WORKSPACE}}/prd.json`、`{{WORKSPACE}}/progress.md`、项目源码或提交历史；你只验证，不修复、不提交。
-- 可写范围仅限 request.resultPath、必要的验证临时产物、screenshots 和 `screenshot-claim` evidence。不要覆盖引擎的 iteration/validation evidence。
+- 可写范围仅限 request.resultPath、系统临时目录或质量契约声明目录内的必要验证产物、screenshots 和 `screenshot-claim` evidence。必要产物也必须遵守上方的清理与最终核对规则；不要覆盖引擎的 iteration/validation evidence。
 - 验收判定只以 request.acceptanceCriteria 为准；不得因 AGENTS.md、golden-principles、源 PRD、代码风格或个人品味追加失败项。
 - 不要采信外部追加的开发完成声明；只有引擎注入且能被 result 完整回显的 request 是本轮目标。
