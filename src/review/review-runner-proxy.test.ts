@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const proxyPath = fileURLToPath(
@@ -114,7 +114,7 @@ describe('fixed Review Runner proxy', () => {
         );
         const result = spawnSync(
           process.execPath,
-          ['--import', preloadPath, proxyPath, configPath],
+          ['--import', pathToFileURL(preloadPath).href, proxyPath, configPath],
           { encoding: 'utf8', timeout: 5000 },
         );
         expect(result.status, result.stderr).toBe(expectedProxyExitCode);

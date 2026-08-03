@@ -255,7 +255,8 @@ describe('runLoop clean validation checkout', () => {
       });
       expect(code).toBe(0);
       const canonicalProjectRoot = realpathSync.native(fixture.projectRoot);
-      expect(readFileSync(builderCwdMarker, 'utf8')).toBe(canonicalProjectRoot);
+      const builderRoot = readFileSync(builderCwdMarker, 'utf8');
+      expect(realpathSync.native(builderRoot)).toBe(canonicalProjectRoot);
       const validatorRoot = readFileSync(validatorCwdMarker, 'utf8');
       expect(relative(canonicalProjectRoot, validatorRoot).startsWith('..')).toBe(true);
       expect(JSON.parse(readFileSync(validatorVisibilityMarker, 'utf8'))).toEqual({
