@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   opendirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   type BigIntStats,
@@ -28,12 +29,20 @@ import {
 import {
   ExternalFileLinkSnapshotBudget,
   ExternalFileLinkSnapshotBudgetError,
-  externalFileTargetIdentityKey,
   sameExternalFileLinkIdentity,
-  snapshotManagedExternalFileLink,
+  snapshotManagedExternalFileLinks,
   type ExternalFileLinkIdentity,
+  type ManagedExternalFileLinkSnapshot,
 } from './external-file-link-identity.js';
 import { assertCleanValidationTreeHasNoMountPoints } from './clean-validation-mounts.js';
+import type { CleanValidationBackingFileSystemProof } from './clean-validation-mounts.js';
+import {
+  CleanValidationHardLinkProofError,
+  freezeCleanValidationHardLinks,
+  observeCleanValidationTopologyEntry,
+  snapshotCleanValidationHardLinks,
+  type CleanValidationHardLinkObservation,
+} from './clean-validation-hard-links.js';
 
 export { CLEAN_VALIDATION_CHECKOUT_VERSION, validationEnvironmentDigest };
 const TEMP_PREFIX = 'coding-x-validation-';
@@ -139,22 +148,17 @@ function pathInside(parent: string, candidate: string): boolean {
   return value === '' || (!value.startsWith(`..${sep}`) && value !== '..' && !isAbsolute(value));
 }
 
-interface ExternalFileTargetSnapshot {
-  readonly targetDigest: string;
-}
-
-async function observeManagedFileLink(
-  linkPath: string,
-  relativePath: string,
+async function observeManagedFileLinks(
+  links: readonly { readonly target: string; readonly path: string }[],
   context: string,
   budget: ExternalFileLinkSnapshotBudget,
   managed: ManagedGateContext,
   checkoutRoot: string,
   sourceRoot: string,
-) {
+): Promise<ManagedExternalFileLinkSnapshot[]> {
   try {
-    return await snapshotManagedExternalFileLink({
-      linkPath,
+    return await snapshotManagedExternalFileLinks({
+      linkPaths: links.map(({ target }) => target),
       checkoutRoot,
       sourceRoot,
       maxFileBytes: MAX_EXTERNAL_LINK_FILE_BYTES,
@@ -168,12 +172,12 @@ async function observeManagedFileLink(
     if (error instanceof ExternalFileLinkSnapshotBudgetError) {
       throw new CleanValidationCheckoutError(
         'artifact-boundary-violated',
-        `${context}${error.message}：${relativePath}`,
+        `${context}${error.message}`,
       );
     }
     throw new CleanValidationCheckoutError(
       'artifact-boundary-violated',
-      `${context}无法冻结外部普通文件链接：${relativePath}：${
+      `${context}无法冻结普通文件链接批次：${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -750,15 +754,19 @@ class ArtifactPathPolicy {
   }
 
   allows(path: string): boolean {
-    if (path.includes('\\')) return false;
+    return this.owningRoot(path) !== null;
+  }
+
+  owningRoot(path: string): string | null {
+    if (path.includes('\\')) return null;
     let candidate = path.replace(/\/$/u, '');
     while (candidate !== '') {
-      if (this.#roots.has(candidate)) return true;
+      if (this.#roots.has(candidate)) return candidate;
       const separator = candidate.lastIndexOf('/');
-      if (separator < 0) return false;
+      if (separator < 0) return null;
       candidate = candidate.slice(0, separator);
     }
-    return false;
+    return null;
   }
 }
 
@@ -787,28 +795,27 @@ async function assertSafeArtifactTopology(
     readonly managed: ManagedGateContext;
   },
 ): Promise<Map<string, ExternalFileLinkIdentity>> {
+  const assertNoMountPoints = (): CleanValidationBackingFileSystemProof => {
+    try {
+      return assertCleanValidationTreeHasNoMountPoints(root);
+    } catch (error) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+  const initialBackingFileSystem = assertNoMountPoints();
   const capturedExternalLinks = new Map<string, ExternalFileLinkIdentity>();
   const observedExternalLinks = new Set<string>();
-  const externalTargetSnapshots = new Map<string, ExternalFileTargetSnapshot>();
-  const externalLinkBudget = new ExternalFileLinkSnapshotBudget(
-    {
-      maxLinks: MAX_EXTERNAL_LINKS,
-      maxUniqueTargetBytes: MAX_EXTERNAL_LINK_TARGET_BYTES,
-      deadlineMs: EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS,
-    },
-    options.signal,
-  );
+  const managedLinks: Array<{ readonly target: string; readonly path: string }> = [];
+  const topology: CleanValidationHardLinkObservation[] = [];
   const checkpoint = (): void => {
-    try {
-      externalLinkBudget.checkpoint();
-    } catch (error) {
-      if (error instanceof ExternalFileLinkSnapshotBudgetError) {
-        throw new CleanValidationCheckoutError(
-          'artifact-boundary-violated',
-          `${context}${error.message}`,
-        );
-      }
-      throw error;
+    if (options.signal?.aborted) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}验证检出产物边界核对被中断`,
+      );
     }
   };
   let entries = 0;
@@ -839,64 +846,41 @@ async function assertSafeArtifactTopology(
           );
         }
         if (targetInfo.isSymbolicLink()) {
+          if (targetInfo.nlink !== 1n) {
+            throw new CleanValidationCheckoutError(
+              'artifact-boundary-violated',
+              `${context}验证检出含 hard-linked symbolic link：${path}`,
+            );
+          }
           if (policy.isRoot(path)) {
             throw new CleanValidationCheckoutError(
               'artifact-boundary-violated',
               `${context}允许的产物根不是普通目录：${path}`,
             );
           }
-          const observation = await observeManagedFileLink(
-            target,
-            path,
-            context,
-            externalLinkBudget,
-            options.managed,
-            root,
-            sourceRoot,
-          );
-          if (observation.scope === 'internal') continue;
-          if (observation.scope === 'source') {
+          let linkTarget: Buffer;
+          try {
+            linkTarget = readlinkSync(target, { encoding: 'buffer' });
+          } catch {
             throw new CleanValidationCheckoutError(
               'artifact-boundary-violated',
-              `${context}验证检出链接回开发工作树：${path}`,
+              `${context}验证检出符号链接在核对期间无法读取：${path}`,
             );
           }
-          const observed = observation.identity;
-          externalLinkBudget.countLink();
-          const targetKey = externalFileTargetIdentityKey(observed.resolvedPath, observed.target);
-          const firstTargetObservation = externalLinkBudget.reserveTarget(
-            targetKey,
-            Number(observed.target.size),
+          topology.push(
+            observeCleanValidationTopologyEntry(
+              path,
+              policy.owningRoot(path),
+              targetInfo,
+              linkTarget,
+            ),
           );
-          if (firstTargetObservation) {
-            externalTargetSnapshots.set(targetKey, {
-              targetDigest: observed.targetDigest,
-            });
-          } else if (
-            externalTargetSnapshots.get(targetKey)?.targetDigest !== observed.targetDigest
-          ) {
+          managedLinks.push({ target, path });
+          if (managedLinks.length > MAX_EXTERNAL_LINKS) {
             throw new CleanValidationCheckoutError(
               'artifact-boundary-violated',
-              `${context}外部普通文件链接目标去重身份不一致：${path}`,
+              `${context}需受管核对的普通文件链接超过 ${MAX_EXTERNAL_LINKS} 条`,
             );
-          }
-          if (options.capturePreparedExternalLinks && policy.allows(path)) {
-            capturedExternalLinks.set(path, observed);
-          } else {
-            const permitted = options.permittedExternalLinks.get(path);
-            if (!permitted) {
-              throw new CleanValidationCheckoutError(
-                'artifact-boundary-violated',
-                `${context}验证检出含未经准备阶段确认的外部链接：${path}`,
-              );
-            }
-            if (!sameExternalFileLinkIdentity(permitted, observed)) {
-              throw new CleanValidationCheckoutError(
-                'artifact-boundary-violated',
-                `${context}外部普通文件链接身份或内容发生变化：${path}`,
-              );
-            }
-            observedExternalLinks.add(path);
           }
           continue;
         }
@@ -907,6 +891,9 @@ async function assertSafeArtifactTopology(
           );
         }
         if (targetInfo.isDirectory()) {
+          topology.push(
+            observeCleanValidationTopologyEntry(path, policy.owningRoot(path), targetInfo),
+          );
           await visit(target, path);
           continue;
         }
@@ -916,18 +903,101 @@ async function assertSafeArtifactTopology(
             `${context}验证检出含特殊文件：${path}`,
           );
         }
-        if (targetInfo.nlink !== 1n) {
-          throw new CleanValidationCheckoutError(
-            'artifact-boundary-violated',
-            `${context}验证检出含 hard link：${path}`,
-          );
-        }
+        topology.push(
+          observeCleanValidationTopologyEntry(path, policy.owningRoot(path), targetInfo),
+        );
       }
     } finally {
       stream.closeSync();
     }
   };
-  await visit(root);
+  try {
+    await visit(root);
+  } catch (error) {
+    if (error instanceof CleanValidationHardLinkProofError) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}${error.message}`,
+      );
+    }
+    throw error;
+  }
+  const afterInitialScanFileSystem = assertNoMountPoints();
+  let initialHardLinkProof: ReturnType<typeof freezeCleanValidationHardLinks>;
+  try {
+    initialHardLinkProof = freezeCleanValidationHardLinks(topology);
+  } catch (error) {
+    if (error instanceof CleanValidationHardLinkProofError) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}${error.message}`,
+      );
+    }
+    throw error;
+  }
+  if (
+    initialHardLinkProof.groups > 0 &&
+    (!initialBackingFileSystem.hardLinksTrusted ||
+      initialBackingFileSystem.identity !== afterInitialScanFileSystem.identity)
+  ) {
+    throw new CleanValidationCheckoutError(
+      'artifact-boundary-violated',
+      `${context}无法在 ${initialBackingFileSystem.description} 上证明 hard link 组可信`,
+    );
+  }
+  const externalLinkBudget =
+    managedLinks.length === 0
+      ? null
+      : new ExternalFileLinkSnapshotBudget(
+          {
+            maxLinks: MAX_EXTERNAL_LINKS,
+            maxTargetReadBytes: MAX_EXTERNAL_LINK_TARGET_BYTES,
+            deadlineMs: EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS,
+          },
+          options.signal,
+        );
+  const managedObservations =
+    managedLinks.length === 0
+      ? []
+      : await observeManagedFileLinks(
+          managedLinks,
+          context,
+          externalLinkBudget!,
+          options.managed,
+          root,
+          sourceRoot,
+        );
+  for (let index = 0; index < managedLinks.length; index += 1) {
+    checkpoint();
+    const { path } = managedLinks[index];
+    const observation = managedObservations[index];
+    if (observation.scope === 'internal') continue;
+    if (observation.scope === 'source') {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}验证检出链接回开发工作树：${path}`,
+      );
+    }
+    const observed = observation.identity;
+    if (options.capturePreparedExternalLinks && policy.allows(path)) {
+      capturedExternalLinks.set(path, observed);
+    } else {
+      const permitted = options.permittedExternalLinks.get(path);
+      if (!permitted) {
+        throw new CleanValidationCheckoutError(
+          'artifact-boundary-violated',
+          `${context}验证检出含未经准备阶段确认的外部链接：${path}`,
+        );
+      }
+      if (!sameExternalFileLinkIdentity(permitted, observed)) {
+        throw new CleanValidationCheckoutError(
+          'artifact-boundary-violated',
+          `${context}外部普通文件链接身份或内容发生变化：${path}`,
+        );
+      }
+      observedExternalLinks.add(path);
+    }
+  }
   if (!options.capturePreparedExternalLinks) {
     const missing = [...options.permittedExternalLinks.keys()].filter(
       (path) => !observedExternalLinks.has(path),
@@ -940,9 +1010,36 @@ async function assertSafeArtifactTopology(
     }
   }
   try {
-    externalLinkBudget.assertDarwinMountTableCurrent();
+    externalLinkBudget?.assertDarwinMountTableCurrent();
+    const finalBackingFileSystem = assertNoMountPoints();
+    const finalHardLinkProof = snapshotCleanValidationHardLinks({
+      root,
+      owningRoot: (path) => policy.owningRoot(path),
+      maxEntries: MAX_VALIDATION_TREE_ENTRIES,
+      signal: options.signal,
+    });
+    const afterFinalScanFileSystem = assertNoMountPoints();
+    if (
+      finalHardLinkProof.digest !== initialHardLinkProof.digest ||
+      finalHardLinkProof.groups !== initialHardLinkProof.groups ||
+      finalBackingFileSystem.identity !== afterFinalScanFileSystem.identity ||
+      (finalHardLinkProof.groups > 0 &&
+        (!finalBackingFileSystem.hardLinksTrusted ||
+          finalBackingFileSystem.identity !== initialBackingFileSystem.identity))
+    ) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}验证检出整树拓扑、hard link 组或后备文件系统在核对期间发生变化`,
+      );
+    }
   } catch (error) {
     if (error instanceof ExternalFileLinkSnapshotBudgetError) {
+      throw new CleanValidationCheckoutError(
+        'artifact-boundary-violated',
+        `${context}${error.message}`,
+      );
+    }
+    if (error instanceof CleanValidationHardLinkProofError) {
       throw new CleanValidationCheckoutError(
         'artifact-boundary-violated',
         `${context}${error.message}`,

@@ -13,6 +13,24 @@ import {
   renderQualityGateWorkflow,
 } from './github-workflows.js';
 
+const CLEAN_VALIDATION_POLICY_PATHS = [
+  'src/engine/clean-validation-checkout.test.ts',
+  'src/engine/clean-validation-checkout.ts',
+  'src/engine/clean-validation-hard-links.test.ts',
+  'src/engine/clean-validation-hard-links.ts',
+  'src/engine/clean-validation-mounts.test.ts',
+  'src/engine/clean-validation-mounts.ts',
+  'src/engine/external-file-link-identity.test.ts',
+  'src/engine/external-file-link-identity.ts',
+  'src/workspace-safety/**',
+] as const;
+
+function policyPaths(contract: QualityContract): string[] {
+  return contract.risk.pathRules
+    .filter((rule) => rule.categories.includes('policy'))
+    .flatMap((rule) => rule.paths);
+}
+
 function codingEngineContract(): QualityContract {
   const result = readQualityContract(process.cwd());
   if (result.status !== 'ready') throw new Error(`contract fixture unavailable: ${result.status}`);
@@ -77,26 +95,24 @@ describe('coding-engine quality contract', () => {
   });
 
   it('protects every required Windows native proof suite and compiler policy with old rules', () => {
-    const policyPaths = codingEngineContract()
-      .risk.pathRules.filter((rule) => rule.categories.includes('policy'))
-      .flatMap((rule) => rule.paths);
-    expect(policyPaths).toEqual(
+    expect(policyPaths(codingEngineContract())).toEqual(
       expect.arrayContaining([
-        'src/workspace-safety/delegated-recovery.windows-crash.test.ts',
-        'src/workspace-safety/windows-reparse-point.windows.test.ts',
-        'src/workspace-safety/windows-review-temporary-domain.windows.test.ts',
-        'src/workspace-safety/windows-path-attributes-transport.test.ts',
-        'src/workspace-safety/windows-path-attributes-transport.ts',
-        'src/workspace-safety/windows-path-attributes.test.ts',
-        'src/workspace-safety/windows-path-attributes.ts',
-        'src/workspace-safety/windows-supervisor.crash.test.ts',
-        'src/workspace-safety/windows-supervisor-integration.test.ts',
-        'src/workspace-safety/windows-supervisor.test.ts',
+        'src/workspace-safety/**',
         'src/review/**',
         'src/status/runner-version-observation.ts',
         'tsconfig.json',
       ]),
     );
+  });
+
+  it('protects the clean-validation trust closure with old rules', () => {
+    expect(policyPaths(codingEngineContract())).toEqual(
+      expect.arrayContaining([...CLEAN_VALIDATION_POLICY_PATHS]),
+    );
+  });
+
+  it('protects the complete managed-process safety subsystem instead of a hand-maintained import list', () => {
+    expect(policyPaths(codingEngineContract())).toContain('src/workspace-safety/**');
   });
 });
 
@@ -208,9 +224,9 @@ describe('renderPolicyGuardWorkflow', () => {
       'docs/golden-principles.md',
       'native/windows-supervisor/**',
       'package.json',
+      ...CLEAN_VALIDATION_POLICY_PATHS,
       'src/review/**',
       'src/status/runner-version-observation.ts',
-      'src/workspace-safety/windows-review-temporary-domain.windows.test.ts',
       'tsup.config.ts',
       'vitest.config.ts',
     ]) {

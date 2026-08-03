@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
@@ -13,6 +14,7 @@ export interface ExternalFileStatIdentity {
   readonly dev: bigint;
   readonly ino: bigint;
   readonly uid: bigint;
+  readonly nlink: bigint;
   readonly mode: bigint;
   readonly size: bigint;
   readonly mtimeNs: bigint;
@@ -29,7 +31,7 @@ export interface ExternalFileLinkIdentity {
 
 export interface ExternalFileLinkSnapshotLimits {
   readonly maxLinks: number;
-  readonly maxUniqueTargetBytes: number;
+  readonly maxTargetReadBytes: number;
   readonly deadlineMs: number;
 }
 
@@ -75,6 +77,9 @@ const DARWIN_ORDINARY_LOCAL_FILE_SYSTEMS = new Set([
   'tmpfs',
   'udf',
 ]);
+const POSIX_FILE_TYPE_MASK = 0o170000n;
+const POSIX_REGULAR_FILE = 0o100000n;
+const POSIX_SYMBOLIC_LINK = 0o120000n;
 
 /** @internal 导出给平台 magic 回归测试；Darwin 数字类型一律不能作为放行依据。 */
 export function isExternalFileSystemMagicOrRemote(
@@ -91,28 +96,43 @@ function digestDarwinMountTable(bytes: Uint8Array): string {
 }
 
 /**
- * 一次拓扑核对共用一个预算。重复链接到同一个稳定目标只计一次字节，但每条链接
- * 都计数量；每个受管 helper 只获得同一个绝对期限的剩余时间。
+ * 一次拓扑核对共用一个预算。每条链接都计数量；每个受管 reader 只获得同一个绝对期限
+ * 和实际读取字节上限的剩余额度。同批稳定目标只读取一次，跨批重复目标保守地再次计费。
  */
 export class ExternalFileLinkSnapshotBudget {
   readonly #deadline: number;
-  readonly #targets = new Set<string>();
+  readonly #targets = new Map<string, { readonly bytes: number; readonly digest?: string }>();
   #darwinMountTableDigest: string | undefined;
   #links = 0;
-  #uniqueTargetBytes = 0;
+  #targetReadBytes = 0;
+  #readerBatchActive = false;
 
   constructor(
     private readonly limits: ExternalFileLinkSnapshotLimits,
     private readonly signal?: AbortSignal,
     now: () => number = () => performance.now(),
   ) {
+    if (
+      !Number.isSafeInteger(limits.maxLinks) ||
+      limits.maxLinks < 1 ||
+      !Number.isSafeInteger(limits.maxTargetReadBytes) ||
+      limits.maxTargetReadBytes < 0 ||
+      !Number.isSafeInteger(limits.deadlineMs) ||
+      limits.deadlineMs < 1
+    ) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对预算配置非法');
+    }
     this.now = now;
     this.#deadline = now() + limits.deadlineMs;
   }
 
   private readonly now: () => number;
+  #poisoned = false;
 
   checkpoint(): void {
+    if (this.#poisoned) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对预算已经失效');
+    }
     if (this.signal?.aborted) {
       throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对被中断');
     }
@@ -131,6 +151,41 @@ export class ExternalFileLinkSnapshotBudget {
     return remaining;
   }
 
+  maximumTargetReadBytes(): number {
+    return this.limits.maxTargetReadBytes;
+  }
+
+  beginReaderBatch(): number {
+    this.checkpoint();
+    if (this.#readerBatchActive) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对预算不能并发使用');
+    }
+    this.#readerBatchActive = true;
+    return this.limits.maxTargetReadBytes - this.#targetReadBytes;
+  }
+
+  finishReaderBatch(bytes: number): void {
+    if (!this.#readerBatchActive) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对批次没有活动预算');
+    }
+    this.#readerBatchActive = false;
+    if (!Number.isSafeInteger(bytes) || bytes < 0) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接实际读取大小非法');
+    }
+    if (this.#targetReadBytes + bytes > this.limits.maxTargetReadBytes) {
+      throw new ExternalFileLinkSnapshotBudgetError(
+        `外部普通文件链接实际读取累计超过 ${this.limits.maxTargetReadBytes} bytes`,
+      );
+    }
+    this.#targetReadBytes += bytes;
+    this.checkpoint();
+  }
+
+  poisonReaderBatch(): void {
+    this.#readerBatchActive = false;
+    this.#poisoned = true;
+  }
+
   countLink(): void {
     this.checkpoint();
     this.#links += 1;
@@ -142,18 +197,35 @@ export class ExternalFileLinkSnapshotBudget {
   }
 
   reserveTarget(identity: string, bytes: number): boolean {
+    return this.#reserveTarget(identity, bytes);
+  }
+
+  reserveTargetSnapshot(identity: string, bytes: number, digest: string): boolean {
+    if (!/^[0-9a-f]{64}$/u.test(digest)) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接目标摘要非法');
+    }
+    return this.#reserveTarget(identity, bytes, digest);
+  }
+
+  #reserveTarget(identity: string, bytes: number, digest?: string): boolean {
     this.checkpoint();
-    if (this.#targets.has(identity)) return false;
+    const previous = this.#targets.get(identity);
+    if (previous !== undefined) {
+      if (previous.bytes !== bytes) {
+        throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接目标去重大小不一致');
+      }
+      if (digest !== undefined && previous.digest !== undefined && previous.digest !== digest) {
+        throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接目标去重身份不一致');
+      }
+      if (digest !== undefined && previous.digest === undefined) {
+        this.#targets.set(identity, { bytes, digest });
+      }
+      return false;
+    }
     if (bytes < 0 || !Number.isSafeInteger(bytes)) {
       throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接目标大小非法');
     }
-    if (this.#uniqueTargetBytes + bytes > this.limits.maxUniqueTargetBytes) {
-      throw new ExternalFileLinkSnapshotBudgetError(
-        `外部普通文件链接唯一目标累计超过 ${this.limits.maxUniqueTargetBytes} bytes`,
-      );
-    }
-    this.#targets.add(identity);
-    this.#uniqueTargetBytes += bytes;
+    this.#targets.set(identity, { bytes, ...(digest === undefined ? {} : { digest }) });
     return true;
   }
 
@@ -220,6 +292,13 @@ export interface ManagedExternalFileLinkSnapshotOptions {
   readonly readerProgramForTests?: string;
 }
 
+export type ManagedExternalFileLinkBatchSnapshotOptions = Omit<
+  ManagedExternalFileLinkSnapshotOptions,
+  'linkPath'
+> & {
+  readonly linkPaths: readonly string[];
+};
+
 const EXTERNAL_FILE_LINK_READER = String.raw`
 'use strict';
 const crypto = require('node:crypto');
@@ -246,6 +325,7 @@ function identity(info) {
     dev: info.dev.toString(),
     ino: info.ino.toString(),
     uid: info.uid.toString(),
+    nlink: info.nlink.toString(),
     mode: info.mode.toString(),
     size: info.size.toString(),
     mtimeNs: info.mtimeNs.toString(),
@@ -263,6 +343,12 @@ function pathInside(parent, candidate) {
   return value === '' || (
     !value.startsWith('..' + path.sep) && value !== '..' && !path.isAbsolute(value)
   );
+}
+
+function pathTargetsGitControlDirectory(checkoutRoot, candidate) {
+  if (!pathInside(checkoutRoot, candidate)) return false;
+  const relativePath = path.relative(path.resolve(checkoutRoot), path.resolve(candidate));
+  return relativePath.split(path.sep)[0]?.toLowerCase() === '.git';
 }
 
 function decodedLinkTarget(target) {
@@ -355,11 +441,12 @@ function assertSupportedFileSystem(current, darwinMounts) {
   fail('external link filesystem classification is unsupported');
 }
 
-function resolveWithoutMagicLinks(original, darwinMounts) {
+function resolveWithoutMagicLinks(original, darwinMounts, checkoutRoot) {
   const first = decodedLinkTarget(original).text;
   let pendingPath = path.isAbsolute(first)
     ? path.resolve(first)
     : path.resolve(path.dirname(original), first);
+  let leftCheckout = !pathInside(checkoutRoot, pendingPath);
   let linkDepth = 1;
   while (true) {
     const parsed = path.parse(pendingPath);
@@ -378,6 +465,7 @@ function resolveWithoutMagicLinks(original, darwinMounts) {
         path.isAbsolute(target) ? target : path.resolve(path.dirname(current), target),
         ...components.slice(index + 1),
       );
+      if (!pathInside(checkoutRoot, pendingPath)) leftCheckout = true;
       restarted = true;
       break;
     }
@@ -386,63 +474,104 @@ function resolveWithoutMagicLinks(original, darwinMounts) {
     if (path.resolve(canonical) !== path.resolve(current)) {
       fail('external link changed while resolving');
     }
-    return canonical;
+    return { canonical, leftCheckout };
   }
 }
 
-let descriptor;
-try {
-  snapshot: {
-  const request = JSON.parse(Buffer.from(process.argv[1], 'base64url').toString('utf8'));
+function assertLinkProof(linkPath, proof, darwinMounts, checkoutRoot) {
+  const link = fs.lstatSync(linkPath, { bigint: true });
+  const linkTarget = decodedLinkTarget(linkPath).bytes;
+  const resolution = resolveWithoutMagicLinks(linkPath, darwinMounts, checkoutRoot);
+  const resolvedPath = resolution.canonical;
+  const target = fs.lstatSync(resolvedPath, { bigint: true });
   if (
-    request.darwinMountTableDigest !== null &&
-    (typeof request.darwinMountTableDigest !== 'string' || !/^[0-9a-f]{64}$/.test(request.darwinMountTableDigest))
-  ) fail('trusted macOS mount table digest is invalid');
-  let darwinMounts = [];
-  let assertDarwinMountTableCurrent = () => {};
-  if (process.platform === 'darwin') {
-    if (request.darwinMountTableDigest === null) fail('trusted macOS mount table is unavailable');
-    const expectedDigest = request.darwinMountTableDigest;
-    const readCurrent = () => {
-      const bytes = readDarwinMountTableBytes();
-      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-      if (digest !== expectedDigest) fail('macOS mount table changed during external link review');
-      return bytes;
-    };
-    darwinMounts = parseDarwinMountTable(readCurrent());
-    assertDarwinMountTableCurrent = () => { readCurrent(); };
+    !link.isSymbolicLink() || link.nlink !== 1n ||
+    !same(proof.link, link) ||
+    crypto.createHash('sha256').update(linkTarget).digest('hex') !== proof.linkTargetDigest ||
+    resolvedPath !== proof.resolvedPath ||
+    resolution.leftCheckout !== proof.leftCheckout ||
+    !same(proof.target, target)
+  ) fail('link identity changed before the batch completed');
+}
+
+function snapshotLink(request, linkPath, darwinMounts, batchTargetBudget) {
+  let descriptor;
+  try {
+  const linkBefore = fs.lstatSync(linkPath, { bigint: true });
+  if (!linkBefore.isSymbolicLink() || linkBefore.nlink !== 1n) {
+    fail('external link is not a single-name symbolic link');
   }
-  const linkBefore = fs.lstatSync(request.linkPath, { bigint: true });
-  if (!linkBefore.isSymbolicLink()) fail('external link identity changed before resolution');
-  const linkTargetBefore = decodedLinkTarget(request.linkPath).bytes;
-  const resolvedPath = resolveWithoutMagicLinks(request.linkPath, darwinMounts);
+  const linkTargetBefore = decodedLinkTarget(linkPath).bytes;
+  const resolution = resolveWithoutMagicLinks(linkPath, darwinMounts, request.checkoutRoot);
+  const resolvedPath = resolution.canonical;
   const scope = pathInside(request.checkoutRoot, resolvedPath)
     ? 'internal'
     : pathInside(request.sourceRoot, resolvedPath)
       ? 'source'
       : 'external';
 
-  if (scope !== 'external') {
-    const linkAfter = fs.lstatSync(request.linkPath, { bigint: true });
-    const linkTargetAfter = decodedLinkTarget(request.linkPath).bytes;
-    if (
-      !same(identity(linkBefore), linkAfter) ||
-      !linkTargetBefore.equals(linkTargetAfter) ||
-      resolveWithoutMagicLinks(request.linkPath, darwinMounts) !== resolvedPath
-    ) fail('link changed while classifying');
-    assertDarwinMountTableCurrent();
-    process.stdout.write(JSON.stringify({ schemaVersion: 1, scope, resolvedPath }));
-    break snapshot;
+  if (scope === 'internal' && pathTargetsGitControlDirectory(request.checkoutRoot, resolvedPath)) {
+    fail('link resolves into Git control directory');
+  }
+  if (scope === 'internal' && resolution.leftCheckout) {
+    fail('internal link resolution left the validation checkout');
   }
 
   const targetBefore = fs.lstatSync(resolvedPath, { bigint: true });
+  if (scope === 'internal' && targetBefore.isDirectory() && !targetBefore.isSymbolicLink()) {
+    const proof = {
+      resolvedPath,
+      link: identity(linkBefore),
+      linkTargetDigest: crypto.createHash('sha256').update(linkTargetBefore).digest('hex'),
+      target: identity(targetBefore),
+      leftCheckout: resolution.leftCheckout,
+    };
+    assertLinkProof(linkPath, proof, darwinMounts, request.checkoutRoot);
+    return { result: { scope, resolvedPath }, proof };
+  }
   const expectedSize = Number(targetBefore.size);
   if (
     !targetBefore.isFile() || targetBefore.isSymbolicLink() ||
     !Number.isSafeInteger(expectedSize) || expectedSize < 0 || expectedSize > request.maxFileBytes
   ) {
-    fail('external link target is not a bounded ordinary file');
+    fail('link target is not a bounded ordinary file');
   }
+  const proof = {
+    resolvedPath,
+    link: identity(linkBefore),
+    linkTargetDigest: crypto.createHash('sha256').update(linkTargetBefore).digest('hex'),
+    target: identity(targetBefore),
+    leftCheckout: resolution.leftCheckout,
+  };
+
+  if (scope !== 'external') {
+    assertLinkProof(linkPath, proof, darwinMounts, request.checkoutRoot);
+    return { result: { scope, resolvedPath }, proof };
+  }
+
+  const targetKey = [resolvedPath, ...Object.values(identity(targetBefore))].join('\0');
+  const cachedDigest = batchTargetBudget.targets.get(targetKey);
+  if (cachedDigest !== undefined) {
+    assertLinkProof(linkPath, proof, darwinMounts, request.checkoutRoot);
+    return {
+      result: {
+        scope: 'external',
+        resolvedPath,
+        link: proof.link,
+        linkTargetDigest: proof.linkTargetDigest,
+        target: proof.target,
+        bytesRead: expectedSize,
+        eof: true,
+        targetDigest: cachedDigest,
+      },
+      proof,
+    };
+  }
+  if (batchTargetBudget.bytes + expectedSize > request.maxTargetReadBytes) {
+    fail('external link batch reads exceed the remaining shared byte limit');
+  }
+  batchTargetBudget.bytes += expectedSize;
+
   descriptor = fs.openSync(resolvedPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const openedBefore = fs.fstatSync(descriptor, { bigint: true });
   if (!openedBefore.isFile() || !same(identity(targetBefore), openedBefore)) {
@@ -473,50 +602,140 @@ try {
   }
 
   const openedAfter = fs.fstatSync(descriptor, { bigint: true });
-  const targetAfter = fs.lstatSync(resolvedPath, { bigint: true });
-  const linkAfter = fs.lstatSync(request.linkPath, { bigint: true });
-  const linkTargetAfter = decodedLinkTarget(request.linkPath).bytes;
-  if (
-    !same(identity(targetBefore), openedAfter) ||
-    !same(identity(targetBefore), targetAfter) ||
-    !same(identity(linkBefore), linkAfter) ||
-    !linkTargetBefore.equals(linkTargetAfter) ||
-    resolveWithoutMagicLinks(request.linkPath, darwinMounts) !== resolvedPath
-  ) {
+  if (!same(identity(targetBefore), openedAfter)) {
     fail('external file identity changed while reading');
   }
-  assertDarwinMountTableCurrent();
-  process.stdout.write(JSON.stringify({
-    schemaVersion: 1,
-    scope: 'external',
-    resolvedPath,
-    link: identity(linkBefore),
-    linkTargetDigest: crypto.createHash('sha256').update(linkTargetBefore).digest('hex'),
-    target: identity(targetBefore),
-    bytesRead: offset,
-    eof: true,
-    targetDigest: digest.digest('hex'),
-  }));
+  assertLinkProof(linkPath, proof, darwinMounts, request.checkoutRoot);
+  const targetDigest = digest.digest('hex');
+  batchTargetBudget.targets.set(targetKey, targetDigest);
+  return {
+    result: {
+      scope: 'external',
+      resolvedPath,
+      link: proof.link,
+      linkTargetDigest: proof.linkTargetDigest,
+      target: proof.target,
+      bytesRead: offset,
+      eof: true,
+      targetDigest,
+    },
+    proof,
+  };
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
   }
+}
+
+let requestDigest = null;
+let failedIndex = null;
+try {
+  const rawRequest = process.argv[1];
+  requestDigest = crypto.createHash('sha256').update(rawRequest).digest('hex');
+  const request = JSON.parse(rawRequest);
+  if (
+    request.schemaVersion !== 2 ||
+    !Array.isArray(request.links) || request.links.length < 1 || request.links.length > 1024 ||
+    request.links.some((entry) => !entry || typeof entry !== 'object' || !Number.isSafeInteger(entry.index) || entry.index < 0 || typeof entry.relativePath !== 'string' || entry.relativePath.length < 1 || entry.relativePath.length > 32767 || path.isAbsolute(entry.relativePath) || entry.relativePath.includes('\0')) ||
+    typeof request.checkoutRoot !== 'string' || !path.isAbsolute(request.checkoutRoot) ||
+    typeof request.sourceRoot !== 'string' || !path.isAbsolute(request.sourceRoot) ||
+    !Number.isSafeInteger(request.maxFileBytes) || request.maxFileBytes < 0 ||
+    !Number.isSafeInteger(request.maxTargetReadBytes) || request.maxTargetReadBytes < 0
+  ) fail('external link batch request is invalid');
+  if (
+    new Set(request.links.map((entry) => entry.index)).size !== request.links.length ||
+    new Set(request.links.map((entry) => entry.relativePath)).size !== request.links.length
+  ) fail('external link batch request contains duplicate entries');
+  request.checkoutRoot = path.resolve(request.checkoutRoot);
+  request.sourceRoot = path.resolve(request.sourceRoot);
+  const linkPaths = request.links.map((entry) => path.resolve(request.checkoutRoot, entry.relativePath));
+  if (linkPaths.some((value) => value === request.checkoutRoot || !pathInside(request.checkoutRoot, value))) {
+    fail('external link batch path leaves checkout');
+  }
+  if (
+    request.darwinMountTableDigest !== null &&
+    (typeof request.darwinMountTableDigest !== 'string' || !/^[0-9a-f]{64}$/.test(request.darwinMountTableDigest))
+  ) fail('trusted macOS mount table digest is invalid');
+  let darwinMounts = [];
+  let assertDarwinMountTableCurrent = () => {};
+  if (process.platform === 'darwin') {
+    if (request.darwinMountTableDigest === null) fail('trusted macOS mount table is unavailable');
+    const expectedDigest = request.darwinMountTableDigest;
+    const readCurrent = () => {
+      const bytes = readDarwinMountTableBytes();
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      if (digest !== expectedDigest) fail('macOS mount table changed during external link review');
+      return bytes;
+    };
+    darwinMounts = parseDarwinMountTable(readCurrent());
+    assertDarwinMountTableCurrent = () => { readCurrent(); };
+  }
+  const batchTargetBudget = { targets: new Map(), bytes: 0 };
+  const observations = linkPaths.map((linkPath, offset) => {
+    failedIndex = request.links[offset].index;
+    try {
+      return snapshotLink(request, linkPath, darwinMounts, batchTargetBudget);
+    } catch (error) {
+      fail('link ' + failedIndex + ' failed: ' + (error instanceof Error ? error.message : String(error)));
+    }
+  });
+  for (let offset = 0; offset < observations.length; offset += 1) {
+    failedIndex = request.links[offset].index;
+    assertLinkProof(
+      linkPaths[offset],
+      observations[offset].proof,
+      darwinMounts,
+      request.checkoutRoot,
+    );
+  }
+  assertDarwinMountTableCurrent();
+  failedIndex = null;
+  const items = observations.map((observation, offset) => ({
+    index: request.links[offset].index,
+    ...observation.result,
+  }));
+  const response = JSON.stringify({ schemaVersion: 2, requestDigest, ok: true, items });
+  if (Buffer.byteLength(response, 'utf8') > 16 * 1024 * 1024) {
+    fail('external link batch response exceeds 16 MiB');
+  }
+  process.stdout.write(response);
 } catch (error) {
-  process.stderr.write(error instanceof Error ? error.message : String(error));
+  const diagnostic = (error instanceof Error ? error.message : String(error)).slice(-1000);
+  process.stdout.write(JSON.stringify({
+    schemaVersion: 2,
+    requestDigest,
+    ok: false,
+    failedIndex,
+    diagnostic,
+  }));
   process.exitCode = 1;
-} finally {
-  if (descriptor !== undefined) fs.closeSync(descriptor);
 }
 `;
+
+/** @internal 只供在生产 reader 上注入确定性竞态的回归测试。 */
+export function externalFileLinkReaderProgramForTests(): string {
+  return EXTERNAL_FILE_LINK_READER;
+}
 
 function parsedStatIdentity(value: unknown): ExternalFileStatIdentity | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
-  const fields = ['dev', 'ino', 'uid', 'mode', 'size', 'mtimeNs', 'ctimeNs'] as const;
-  if (!fields.every((field) => typeof record[field] === 'string' && /^\d+$/u.test(record[field]))) {
+  const fields = ['dev', 'ino', 'uid', 'nlink', 'mode', 'size', 'mtimeNs', 'ctimeNs'] as const;
+  if (
+    Object.keys(record).length !== fields.length ||
+    !fields.every(
+      (field) =>
+        typeof record[field] === 'string' &&
+        record[field].length <= 32 &&
+        /^(?:0|[1-9]\d*)$/u.test(record[field]),
+    )
+  ) {
     return null;
   }
   return {
     dev: BigInt(record.dev as string),
     ino: BigInt(record.ino as string),
     uid: BigInt(record.uid as string),
+    nlink: BigInt(record.nlink as string),
     mode: BigInt(record.mode as string),
     size: BigInt(record.size as string),
     mtimeNs: BigInt(record.mtimeNs as string),
@@ -524,29 +743,76 @@ function parsedStatIdentity(value: unknown): ExternalFileStatIdentity | null {
   };
 }
 
-function parseExternalFileLinkSnapshot(bytes: Buffer): ManagedExternalFileLinkSnapshot {
-  let value: unknown;
-  try {
-    value = JSON.parse(bytes.toString('utf8'));
-  } catch {
-    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对结果无法解析');
-  }
+function hasOnlyKeys(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function lexicalPathInside(parent: string, candidate: string): boolean {
+  const value = relative(resolve(parent), resolve(candidate));
+  return value === '' || (!value.startsWith(`..${sep}`) && value !== '..' && !isAbsolute(value));
+}
+
+function parseExternalFileLinkSnapshotValue(
+  value: unknown,
+  options: {
+    readonly expectedIndex: number;
+    readonly checkoutRoot: string;
+    readonly sourceRoot: string;
+    readonly maxFileBytes: number;
+  },
+): ManagedExternalFileLinkSnapshot {
   if (!value || typeof value !== 'object') {
     throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对结果形状非法');
   }
   const record = value as Record<string, unknown>;
-  if (record.schemaVersion !== 1 || typeof record.resolvedPath !== 'string') {
+  if (
+    record.index !== options.expectedIndex ||
+    typeof record.resolvedPath !== 'string' ||
+    record.resolvedPath.length < 1 ||
+    record.resolvedPath.length > 32_767 ||
+    record.resolvedPath.includes('\0') ||
+    !isAbsolute(record.resolvedPath)
+  ) {
     throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对结果缺少身份');
   }
+  const insideCheckout = lexicalPathInside(options.checkoutRoot, record.resolvedPath);
+  const insideSource = lexicalPathInside(options.sourceRoot, record.resolvedPath);
   if (record.scope === 'internal' || record.scope === 'source') {
+    if (
+      !hasOnlyKeys(record, ['index', 'scope', 'resolvedPath']) ||
+      (record.scope === 'internal' ? !insideCheckout : insideCheckout || !insideSource)
+    ) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对 scope 与路径不一致');
+    }
     return { scope: record.scope, resolvedPath: record.resolvedPath };
   }
   const link = parsedStatIdentity(record.link);
   const target = parsedStatIdentity(record.target);
   if (
     record.scope !== 'external' ||
+    !hasOnlyKeys(record, [
+      'index',
+      'scope',
+      'resolvedPath',
+      'link',
+      'linkTargetDigest',
+      'target',
+      'bytesRead',
+      'eof',
+      'targetDigest',
+    ]) ||
+    insideCheckout ||
+    insideSource ||
     !link ||
     !target ||
+    link.nlink !== 1n ||
+    (link.mode & POSIX_FILE_TYPE_MASK) !== POSIX_SYMBOLIC_LINK ||
+    target.nlink < 1n ||
+    (target.mode & POSIX_FILE_TYPE_MASK) !== POSIX_REGULAR_FILE ||
+    target.size > BigInt(options.maxFileBytes) ||
+    target.size > BigInt(Number.MAX_SAFE_INTEGER) ||
     record.bytesRead !== Number(target.size) ||
     record.eof !== true ||
     typeof record.linkTargetDigest !== 'string' ||
@@ -570,64 +836,329 @@ function parseExternalFileLinkSnapshot(bytes: Buffer): ManagedExternalFileLinkSn
   };
 }
 
-/**
- * 外部目标的链接链解析、magic 检查、身份、内容、EOF 与复核全部在固定受管子进程中
- * 完成。主进程只消费结构化快照；supervisor 无法收口时沿既有协议隔离 workspace。
- */
-export async function snapshotManagedExternalFileLink(
-  options: ManagedExternalFileLinkSnapshotOptions,
-): Promise<ManagedExternalFileLinkSnapshot> {
-  if (!Number.isSafeInteger(options.maxFileBytes) || options.maxFileBytes < 0) {
-    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接单文件上限非法');
+function parseExternalFileLinkBatchSnapshot(
+  bytes: Buffer,
+  options: {
+    readonly requestDigest: string;
+    readonly firstIndex: number;
+    readonly count: number;
+    readonly checkoutRoot: string;
+    readonly sourceRoot: string;
+    readonly maxFileBytes: number;
+  },
+): ManagedExternalFileLinkSnapshot[] {
+  if (bytes.length < 1 || bytes.length > 16 * 1024 * 1024) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接批量核对结果大小非法');
   }
-  const request = Buffer.from(
-    JSON.stringify({
-      linkPath: options.linkPath,
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接批量核对结果不是有效 UTF-8');
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接批量核对结果无法解析');
+  }
+  if (!value || typeof value !== 'object') {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接批量核对结果形状非法');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !hasOnlyKeys(record, ['schemaVersion', 'requestDigest', 'ok', 'items']) ||
+    record.schemaVersion !== 2 ||
+    record.requestDigest !== options.requestDigest ||
+    record.ok !== true ||
+    !Array.isArray(record.items) ||
+    record.items.length !== options.count
+  ) {
+    throw new ExternalFileLinkSnapshotBudgetError(
+      '外部普通文件链接批量核对结果数量、版本或请求摘要非法',
+    );
+  }
+  return record.items.map((item, offset) =>
+    parseExternalFileLinkSnapshotValue(item, {
+      expectedIndex: options.firstIndex + offset,
       checkoutRoot: options.checkoutRoot,
       sourceRoot: options.sourceRoot,
       maxFileBytes: options.maxFileBytes,
-      darwinMountTableDigest: options.budget.darwinMountTableDigest(),
     }),
-    'utf8',
-  ).toString('base64url');
-  const readerProgram = options.readerProgramForTests ?? EXTERNAL_FILE_LINK_READER;
-  let args: string[];
-  try {
-    args = inlineCommonJsArguments(readerProgram, request);
-  } catch (error) {
-    if (error instanceof InlineProgramTransportError) {
-      throw new ExternalFileLinkSnapshotBudgetError(
-        `外部普通文件链接 reader 无法固定传输：${error.message}`,
-      );
-    }
-    throw error;
-  }
-  const result = await runManagedWorkspaceProcess(options.session, {
-    kind: options.kind,
-    delegation: 'read-only-v1',
-    executable: process.execPath,
-    // 固定 reader 从当前受信任进程内存分块传输，避免先检查脚本路径、再由 Node 重新打开的竞态。
-    args,
-    cwd: options.cwd,
-    environment: [],
-    timeoutMs: options.budget.remainingMs(),
-    ...(options.termination ? { termination: options.termination } : {}),
+  );
+}
+
+/** @internal 只供批量协议的损坏结果回归；生产入口始终由受管 reader 调用私有解析器。 */
+export function parseExternalFileLinkBatchSnapshotForTests(
+  bytes: Uint8Array,
+  options: {
+    readonly requestDigest: string;
+    readonly firstIndex: number;
+    readonly count: number;
+    readonly checkoutRoot: string;
+    readonly sourceRoot: string;
+    readonly maxFileBytes: number;
+  },
+): ManagedExternalFileLinkSnapshot[] {
+  return parseExternalFileLinkBatchSnapshot(Buffer.from(bytes), options);
+}
+
+interface ManagedExternalFileLinkBatch {
+  readonly links: readonly { readonly index: number; readonly relativePath: string }[];
+  readonly firstIndex: number;
+  readonly count: number;
+}
+
+function managedExternalFileLinkRequest(options: {
+  readonly readerProgram: string;
+  readonly links: readonly { readonly index: number; readonly relativePath: string }[];
+  readonly checkoutRoot: string;
+  readonly sourceRoot: string;
+  readonly maxFileBytes: number;
+  readonly maxTargetReadBytes: number;
+  readonly darwinMountTableDigest: string | null;
+}): { readonly args: string[]; readonly requestDigest: string } {
+  const request = JSON.stringify({
+    schemaVersion: 2,
+    links: options.links,
+    checkoutRoot: options.checkoutRoot,
+    sourceRoot: options.sourceRoot,
+    maxFileBytes: options.maxFileBytes,
+    maxTargetReadBytes: options.maxTargetReadBytes,
+    darwinMountTableDigest: options.darwinMountTableDigest,
   });
-  options.budget.checkpoint();
+  return {
+    args: inlineCommonJsArguments(options.readerProgram, request),
+    requestDigest: createHash('sha256').update(request).digest('hex'),
+  };
+}
+
+function managedLinkRelativePath(checkoutRoot: string, linkPath: string): string {
+  const root = resolve(checkoutRoot);
+  const link = resolve(linkPath);
+  const value = relative(root, link);
   if (
-    result.verdict !== 'completed' ||
-    result.exitCode !== 0 ||
-    result.timedOut ||
-    result.processTreeNotEmpty
+    value === '' ||
+    value === '..' ||
+    value.startsWith(`..${sep}`) ||
+    isAbsolute(value) ||
+    value.includes('\0')
   ) {
-    const diagnostic = Buffer.concat([result.stdout, result.stderr]).toString('utf8').slice(-500);
+    throw new ExternalFileLinkSnapshotBudgetError('受管普通文件链接路径不在验证检出内');
+  }
+  return value;
+}
+
+function managedExternalFileLinkBatches(options: {
+  readonly readerProgram: string;
+  readonly relativePaths: readonly string[];
+  readonly checkoutRoot: string;
+  readonly sourceRoot: string;
+  readonly maxFileBytes: number;
+  readonly maxTargetReadBytes: number;
+  readonly darwinMountTableDigest: string | null;
+}): ManagedExternalFileLinkBatch[] {
+  const argsFor = (
+    links: readonly { readonly index: number; readonly relativePath: string }[],
+  ): { readonly args: string[]; readonly requestDigest: string } =>
+    managedExternalFileLinkRequest({
+      readerProgram: options.readerProgram,
+      links,
+      checkoutRoot: options.checkoutRoot,
+      sourceRoot: options.sourceRoot,
+      maxFileBytes: options.maxFileBytes,
+      maxTargetReadBytes: options.maxTargetReadBytes,
+      darwinMountTableDigest: options.darwinMountTableDigest,
+    });
+  const batches: ManagedExternalFileLinkBatch[] = [];
+  let currentLinks: Array<{ readonly index: number; readonly relativePath: string }> = [];
+  let current: { readonly args: string[]; readonly requestDigest: string } | undefined;
+  for (let index = 0; index < options.relativePaths.length; index += 1) {
+    const link = { index, relativePath: options.relativePaths[index] };
+    try {
+      current = argsFor([...currentLinks, link]);
+      currentLinks.push(link);
+    } catch (error) {
+      if (!(error instanceof InlineProgramTransportError)) throw error;
+      if (currentLinks.length === 0 || current === undefined) {
+        throw new ExternalFileLinkSnapshotBudgetError(
+          `外部普通文件链接 reader 无法固定传输：${error.message}`,
+        );
+      }
+      batches.push({
+        links: currentLinks,
+        firstIndex: currentLinks[0].index,
+        count: currentLinks.length,
+      });
+      currentLinks = [link];
+      try {
+        current = argsFor(currentLinks);
+      } catch (singleError) {
+        if (singleError instanceof InlineProgramTransportError) {
+          throw new ExternalFileLinkSnapshotBudgetError(
+            `外部普通文件链接 reader 无法固定传输：${singleError.message}`,
+          );
+        }
+        throw singleError;
+      }
+    }
+  }
+  if (currentLinks.length > 0 && current !== undefined) {
+    batches.push({
+      links: currentLinks,
+      firstIndex: currentLinks[0].index,
+      count: currentLinks.length,
+    });
+  }
+  return batches;
+}
+
+/**
+ * 多条链接按真实 24k 命令行上限贪心分批；每批在同一个固定受管 reader 中依次解析，
+ * 所有批次共享调用方的绝对期限。主进程只消费结构化快照，不读取链接目标。
+ */
+export async function snapshotManagedExternalFileLinks(
+  options: ManagedExternalFileLinkBatchSnapshotOptions,
+): Promise<ManagedExternalFileLinkSnapshot[]> {
+  if (!canSnapshotExternalFileLinks(process.platform)) {
     throw new ExternalFileLinkSnapshotBudgetError(
-      result.timedOut
-        ? '外部普通文件链接核对超过统一期限'
-        : `外部普通文件链接核对失败${diagnostic ? `：${diagnostic}` : ''}`,
+      `当前平台 ${process.platform} 尚未完成普通文件链接可信绑定验证`,
     );
   }
-  return parseExternalFileLinkSnapshot(result.stdout);
+  if (!Number.isSafeInteger(options.maxFileBytes) || options.maxFileBytes < 0) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接单文件上限非法');
+  }
+  if (options.linkPaths.length < 1 || options.linkPaths.length > 1024) {
+    throw new ExternalFileLinkSnapshotBudgetError('受管普通文件链接批量数量必须在 1 到 1024 之间');
+  }
+  const checkoutRoot = resolve(options.checkoutRoot);
+  const sourceRoot = resolve(options.sourceRoot);
+  const relativePaths = options.linkPaths.map((path) =>
+    managedLinkRelativePath(checkoutRoot, path),
+  );
+  if (new Set(relativePaths).size !== relativePaths.length) {
+    throw new ExternalFileLinkSnapshotBudgetError('受管普通文件链接批量路径重复');
+  }
+  for (const _path of relativePaths) options.budget.countLink();
+  const readerProgram = options.readerProgramForTests ?? EXTERNAL_FILE_LINK_READER;
+  const batches = managedExternalFileLinkBatches({
+    readerProgram,
+    relativePaths,
+    checkoutRoot,
+    sourceRoot,
+    maxFileBytes: options.maxFileBytes,
+    maxTargetReadBytes: options.budget.maximumTargetReadBytes(),
+    darwinMountTableDigest: options.budget.darwinMountTableDigest(),
+  });
+  const snapshots: ManagedExternalFileLinkSnapshot[] = [];
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index];
+    let budgetGranted = false;
+    try {
+      const maxTargetReadBytes = options.budget.beginReaderBatch();
+      budgetGranted = true;
+      const request = managedExternalFileLinkRequest({
+        readerProgram,
+        links: batch.links,
+        checkoutRoot,
+        sourceRoot,
+        maxFileBytes: options.maxFileBytes,
+        maxTargetReadBytes,
+        darwinMountTableDigest: options.budget.darwinMountTableDigest(),
+      });
+      const result = await runManagedWorkspaceProcess(options.session, {
+        kind: options.kind,
+        delegation: 'read-only-v1',
+        executable: process.execPath,
+        // 固定 reader 从当前受信任进程内存分块传输，避免先检查脚本路径、再由 Node 重新打开的竞态。
+        args: request.args,
+        cwd: options.cwd,
+        environment: [],
+        timeoutMs: options.budget.remainingMs(),
+        ...(options.termination ? { termination: options.termination } : {}),
+      });
+      options.budget.checkpoint();
+      if (
+        result.verdict !== 'completed' ||
+        result.exitCode !== 0 ||
+        result.timedOut ||
+        result.processTreeNotEmpty ||
+        result.stderr.length !== 0
+      ) {
+        const diagnostic = Buffer.concat([result.stdout, result.stderr])
+          .toString('utf8')
+          .slice(-500);
+        throw new ExternalFileLinkSnapshotBudgetError(
+          result.timedOut
+            ? '外部普通文件链接核对超过统一期限'
+            : `外部普通文件链接批次 ${index + 1}/${batches.length} 核对失败${
+                diagnostic ? `：${diagnostic}` : ''
+              }`,
+        );
+      }
+      const parsed = parseExternalFileLinkBatchSnapshot(result.stdout, {
+        requestDigest: request.requestDigest,
+        firstIndex: batch.firstIndex,
+        count: batch.count,
+        checkoutRoot,
+        sourceRoot,
+        maxFileBytes: options.maxFileBytes,
+      });
+      const batchTargets = new Map<string, number>();
+      for (const snapshot of parsed) {
+        if (snapshot.scope !== 'external') continue;
+        const key = externalFileTargetIdentityKey(
+          snapshot.identity.resolvedPath,
+          snapshot.identity.target,
+        );
+        const bytes = Number(snapshot.identity.target.size);
+        const previous = batchTargets.get(key);
+        if (previous !== undefined && previous !== bytes) {
+          throw new ExternalFileLinkSnapshotBudgetError(
+            '外部普通文件链接批次目标大小不一致',
+          );
+        }
+        batchTargets.set(key, bytes);
+      }
+      let batchReadBytes = 0;
+      for (const bytes of batchTargets.values()) {
+        if (!Number.isSafeInteger(batchReadBytes + bytes)) {
+          throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接实际读取累计非法');
+        }
+        batchReadBytes += bytes;
+      }
+      options.budget.finishReaderBatch(batchReadBytes);
+      for (const snapshot of parsed) {
+        if (snapshot.scope !== 'external') continue;
+        const key = externalFileTargetIdentityKey(
+          snapshot.identity.resolvedPath,
+          snapshot.identity.target,
+        );
+        options.budget.reserveTargetSnapshot(
+          key,
+          Number(snapshot.identity.target.size),
+          snapshot.identity.targetDigest,
+        );
+      }
+      snapshots.push(...parsed);
+    } catch (error) {
+      if (budgetGranted) options.budget.poisonReaderBatch();
+      throw error;
+    }
+  }
+  if (snapshots.length !== options.linkPaths.length) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接批量核对结果不完整');
+  }
+  return snapshots;
+}
+
+/** 单链接兼容入口复用同一批量协议，不再为拓扑中的每条链接分别启动受管操作。 */
+export async function snapshotManagedExternalFileLink(
+  options: ManagedExternalFileLinkSnapshotOptions,
+): Promise<ManagedExternalFileLinkSnapshot> {
+  const snapshots = await snapshotManagedExternalFileLinks({
+    ...options,
+    linkPaths: [options.linkPath],
+  });
+  return snapshots[0];
 }
 
 export function externalFileTargetIdentityKey(
@@ -639,6 +1170,7 @@ export function externalFileTargetIdentityKey(
     identity.dev,
     identity.ino,
     identity.uid,
+    identity.nlink,
     identity.mode,
     identity.size,
     identity.mtimeNs,
@@ -648,7 +1180,7 @@ export function externalFileTargetIdentityKey(
 
 /** Windows reparse point 的目标绑定语义尚未完成真实平台验证，因此暂时拒绝。 */
 export function canSnapshotExternalFileLinks(platform: NodeJS.Platform): boolean {
-  return platform !== 'win32';
+  return platform === 'linux' || platform === 'darwin';
 }
 
 function sameExternalFileStatIdentity(
@@ -659,6 +1191,7 @@ function sameExternalFileStatIdentity(
     left.dev === right.dev &&
     left.ino === right.ino &&
     left.uid === right.uid &&
+    left.nlink === right.nlink &&
     left.mode === right.mode &&
     left.size === right.size &&
     left.mtimeNs === right.mtimeNs &&

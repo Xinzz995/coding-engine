@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -16,9 +18,12 @@ import {
   ExternalFileLinkSnapshotBudget,
   ExternalFileLinkSnapshotBudgetError,
   canSnapshotExternalFileLinks,
+  externalFileLinkReaderProgramForTests,
   isExternalFileSystemMagicOrRemote,
+  parseExternalFileLinkBatchSnapshotForTests,
   sameExternalFileLinkIdentity,
   snapshotManagedExternalFileLink,
+  snapshotManagedExternalFileLinks,
   type ExternalFileLinkIdentity,
 } from './external-file-link-identity.js';
 
@@ -28,6 +33,7 @@ describe('external file link identity', () => {
       dev: 1n,
       ino: 2n,
       uid: 3n,
+      nlink: 1n,
       mode: 0o100755n,
       size: 9n,
       mtimeNs: 4n,
@@ -57,21 +63,112 @@ describe('external file link identity', () => {
   });
 });
 
+describe('external file link batch response parser', () => {
+  const requestDigest = 'd'.repeat(64);
+  const protocolRoot = join(tmpdir(), 'coding-x-link-protocol');
+  const checkoutRoot = join(protocolRoot, 'checkout');
+  const sourceRoot = join(protocolRoot, 'source');
+  const link = {
+    dev: '1',
+    ino: '2',
+    uid: '3',
+    nlink: '1',
+    mode: String(0o120777),
+    size: '6',
+    mtimeNs: '4',
+    ctimeNs: '5',
+  };
+  const target = {
+    ...link,
+    ino: '3',
+    mode: String(0o100644),
+    size: '8',
+  };
+  const item = {
+    index: 0,
+    scope: 'external',
+    resolvedPath: join(protocolRoot, 'external'),
+    link,
+    linkTargetDigest: 'a'.repeat(64),
+    target,
+    bytesRead: 8,
+    eof: true,
+    targetDigest: 'b'.repeat(64),
+  };
+  const response = {
+    schemaVersion: 2,
+    requestDigest,
+    ok: true,
+    items: [item],
+  };
+  const parse = (bytes: Uint8Array) =>
+    parseExternalFileLinkBatchSnapshotForTests(bytes, {
+      requestDigest,
+      firstIndex: 0,
+      count: 1,
+      checkoutRoot,
+      sourceRoot,
+      maxFileBytes: 1024,
+    });
+  const encoded = (value: unknown): Buffer => Buffer.from(JSON.stringify(value));
+
+  it('accepts one exact external-file result with possible POSIX identities', () => {
+    expect(parse(encoded(response))).toMatchObject([{ scope: 'external' }]);
+  });
+
+  it.each([
+    ['zero link count', { ...item, link: { ...link, nlink: '0' } }],
+    ['ordinary-file link mode', { ...item, link: { ...link, mode: String(0o100644) } }],
+    ['zero target link count', { ...item, target: { ...target, nlink: '0' } }],
+    ['symbolic-link target mode', { ...item, target: { ...target, mode: String(0o120777) } }],
+  ])(
+    'rejects an impossible %s even when digest and EOF fields look valid',
+    (_name, invalidItem) => {
+      expect(() => parse(encoded({ ...response, items: [invalidItem] }))).toThrow(/身份/u);
+    },
+  );
+
+  it.each([
+    ['invalid JSON', Buffer.from('{')],
+    ['invalid UTF-8', Buffer.from([0xff])],
+    ['oversized response', Buffer.alloc(16 * 1024 * 1024 + 1)],
+    ['wrong schema', encoded({ ...response, schemaVersion: 3 })],
+    ['missing item', encoded({ ...response, items: [] })],
+    ['extra item', encoded({ ...response, items: [item, { ...item, index: 1 }] })],
+    ['extra top-level field', encoded({ ...response, unexpected: true })],
+    ['extra item field', encoded({ ...response, items: [{ ...item, unexpected: true }] })],
+  ])('rejects %s', (_name, bytes) => {
+    expect(() => parse(bytes)).toThrow(/大小|UTF-8|解析|非法|身份/u);
+  });
+});
+
 describe('external file link snapshot budget', () => {
   const limits = {
     maxLinks: 2,
-    maxUniqueTargetBytes: 10,
+    maxTargetReadBytes: 10,
     deadlineMs: 30,
   };
 
-  it('counts every link but charges duplicate stable targets only once', () => {
+  it('counts every link and retains one consistent digest record per stable target', () => {
     const budget = new ExternalFileLinkSnapshotBudget(limits, undefined, () => 0);
     budget.countLink();
     budget.countLink();
     expect(budget.reserveTarget('same-target', 8)).toBe(true);
     expect(budget.reserveTarget('same-target', 8)).toBe(false);
     expect(() => budget.countLink()).toThrow(/超过 2 条/u);
-    expect(() => budget.reserveTarget('different-target', 3)).toThrow(/累计超过 10 bytes/u);
+    expect(budget.reserveTarget('different-target', 3)).toBe(true);
+  });
+
+  it('grants each reader only the remaining physical-read budget and rejects concurrent reuse', () => {
+    const budget = new ExternalFileLinkSnapshotBudget(limits, undefined, () => 0);
+    expect(budget.beginReaderBatch()).toBe(10);
+    expect(() => budget.beginReaderBatch()).toThrow(/不能并发/u);
+    budget.finishReaderBatch(8);
+    expect(budget.beginReaderBatch()).toBe(2);
+    budget.finishReaderBatch(2);
+    expect(budget.beginReaderBatch()).toBe(0);
+    budget.poisonReaderBatch();
+    expect(() => budget.checkpoint()).toThrow(/已经失效/u);
   });
 
   it('uses one absolute deadline and checks interruption at every checkpoint', () => {
@@ -110,7 +207,7 @@ describe('external file link snapshot budget', () => {
       try {
         const budget = new ExternalFileLinkSnapshotBudget({
           maxLinks: 1,
-          maxUniqueTargetBytes: 1024,
+          maxTargetReadBytes: 1024,
           deadlineMs: 5_000,
         });
         await expect(
@@ -134,6 +231,622 @@ describe('external file link snapshot budget', () => {
   );
 
   it.runIf(process.platform !== 'win32')(
+    'keeps symlink-and-parent traversal on the managed fail-closed path',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-external-folding-'));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      const bin = join(checkoutRoot, 'bin');
+      const external = join(root, 'external');
+      mkdirSync(join(checkoutRoot, 'pkg'), { recursive: true });
+      mkdirSync(bin);
+      mkdirSync(sourceRoot);
+      mkdirSync(join(external, 'subdir'), { recursive: true });
+      mkdirSync(join(external, 'pkg'), { recursive: true });
+      writeFileSync(join(checkoutRoot, 'pkg', 'cli.js'), 'internal\n');
+      writeFileSync(join(external, 'pkg', 'cli.js'), 'external\n');
+      symlinkSync(join(external, 'subdir'), join(checkoutRoot, 'alias'), 'dir');
+      const linkPath = join(bin, 'tool');
+      symlinkSync('../alias/../pkg/cli.js', linkPath);
+      expect(realpathSync.native(linkPath)).toBe(
+        realpathSync.native(join(external, 'pkg', 'cli.js')),
+      );
+      const managed = await createManagedProcessTestSession();
+      try {
+        const budget = new ExternalFileLinkSnapshotBudget({
+          maxLinks: 1,
+          maxTargetReadBytes: 1024,
+          deadlineMs: 5_000,
+        });
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).rejects.toThrow(/changed while resolving/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'rejects an apparently internal target when its resolution chain leaves and re-enters checkout',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-link-reentry-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(join(checkoutRoot, 'target'), 'content\n');
+      symlinkSync(checkoutRoot, join(sourceRoot, 'back'), 'dir');
+      const linkPath = join(checkoutRoot, 'tool');
+      symlinkSync(join(sourceRoot, 'back', 'target'), linkPath);
+      expect(realpathSync.native(linkPath)).toBe(join(checkoutRoot, 'target'));
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 1,
+              maxTargetReadBytes: 1024,
+              deadlineMs: 5_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).rejects.toThrow(/internal link resolution left the validation checkout/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'accepts a stable internal directory link for standard toolchain layouts',
+    async () => {
+      const root = realpathSync.native(
+        mkdtempSync(join(tmpdir(), 'coding-x-internal-directory-link-')),
+      );
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(join(checkoutRoot, 'package'), { recursive: true });
+      mkdirSync(sourceRoot);
+      const linkPath = join(checkoutRoot, 'package-link');
+      symlinkSync('package', linkPath, 'dir');
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 1,
+              maxTargetReadBytes: 1024,
+              deadlineMs: 5_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).resolves.toEqual({ scope: 'internal', resolvedPath: join(checkoutRoot, 'package') });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'rejects a symbolic-link inode that has more than one directory name',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-hard-symlink-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(join(checkoutRoot, 'target'), 'content\n');
+      const first = join(checkoutRoot, 'first');
+      symlinkSync('target', first);
+      execFileSync('/bin/ln', ['-P', first, join(checkoutRoot, 'second')]);
+      expect(lstatSync(first).isSymbolicLink()).toBe(true);
+      expect(lstatSync(first).nlink).toBe(2);
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath: first,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 1,
+              maxTargetReadBytes: 1024,
+              deadlineMs: 5_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).rejects.toThrow(/single-name symbolic link/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'rechecks an earlier link at the end of its reader batch',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-batch-recheck-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(join(checkoutRoot, 'first-target'), 'first\n');
+      writeFileSync(join(checkoutRoot, 'second-target'), 'second\n');
+      const linkPath = join(checkoutRoot, 'tool');
+      symlinkSync('first-target', linkPath);
+      const marker = join(root, 'ready');
+      const finalProofLoop = '  for (let offset = 0; offset < observations.length; offset += 1) {';
+      const productionReader = externalFileLinkReaderProgramForTests();
+      const delayedReader = productionReader.replace(
+        finalProofLoop,
+        `  fs.writeFileSync(${JSON.stringify(marker)}, 'ready');\n` +
+          '  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);\n' +
+          finalProofLoop,
+      );
+      expect(delayedReader).not.toBe(productionReader);
+      const managed = await createManagedProcessTestSession();
+      try {
+        const reviewing = snapshotManagedExternalFileLink({
+          linkPath,
+          checkoutRoot,
+          sourceRoot,
+          maxFileBytes: 1024,
+          budget: new ExternalFileLinkSnapshotBudget({
+            maxLinks: 1,
+            maxTargetReadBytes: 1024,
+            deadlineMs: 10_000,
+          }),
+          session: managed.session,
+          kind: 'quality-check',
+          cwd: checkoutRoot,
+          readerProgramForTests: delayedReader,
+        });
+        for (let attempt = 0; attempt < 200 && !existsSync(marker); attempt += 1) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+        }
+        expect(existsSync(marker)).toBe(true);
+        rmSync(linkPath);
+        symlinkSync('second-target', linkPath);
+        await expect(reviewing).rejects.toThrow(/identity changed before the batch completed/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'charges every internal link to the shared batch budget before launching the reader',
+    async () => {
+      const root = realpathSync.native(
+        mkdtempSync(join(tmpdir(), 'coding-x-internal-link-budget-')),
+      );
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(join(checkoutRoot, 'target'), 'content\n');
+      const links = [join(checkoutRoot, 'first'), join(checkoutRoot, 'second')];
+      for (const link of links) symlinkSync('target', link);
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLinks({
+            linkPaths: links,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 1,
+              maxTargetReadBytes: 1024,
+              deadlineMs: 5_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).rejects.toThrow(/超过 1 条/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'charges a repeated external target again when separate reader calls share a budget',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-shared-link-budget-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      const target = join(root, 'target');
+      writeFileSync(target, 'content\n');
+      const links = [join(checkoutRoot, 'first'), join(checkoutRoot, 'second')];
+      for (const link of links) symlinkSync(target, link);
+      const managed = await createManagedProcessTestSession();
+      try {
+        const budget = new ExternalFileLinkSnapshotBudget({
+          maxLinks: 2,
+          maxTargetReadBytes: 8,
+          deadlineMs: 10_000,
+        });
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath: links[0],
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).resolves.toMatchObject({ scope: 'external' });
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath: links[1],
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).rejects.toThrow(/remaining shared byte limit/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'reads one stable external target only once when multiple links share a reader batch',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-batch-link-cache-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      const target = join(root, 'target');
+      writeFileSync(target, 'content\n');
+      const links = [join(checkoutRoot, 'first'), join(checkoutRoot, 'second')];
+      for (const link of links) symlinkSync(target, link);
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLinks({
+            linkPaths: links,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 2,
+              maxTargetReadBytes: 8,
+              deadlineMs: 10_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).resolves.toMatchObject([{ scope: 'external' }, { scope: 'external' }]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'enforces the physical external target read limit inside one reader batch',
+    async () => {
+      const root = realpathSync.native(
+        mkdtempSync(join(tmpdir(), 'coding-x-batch-target-budget-')),
+      );
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      const links = [join(checkoutRoot, 'first'), join(checkoutRoot, 'second')];
+      for (let index = 0; index < links.length; index += 1) {
+        const target = join(root, `target-${index}`);
+        writeFileSync(target, '123456');
+        symlinkSync(target, links[index]);
+      }
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLinks({
+            linkPaths: links,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 2,
+              maxTargetReadBytes: 10,
+              deadlineMs: 5_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+          }),
+        ).rejects.toThrow(/reads exceed/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'rejects a batch response bound to a different request digest',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-batch-digest-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLinks({
+            linkPaths: [join(checkoutRoot, 'tool')],
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 1,
+              maxTargetReadBytes: 1024,
+              deadlineMs: 5_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            readerProgramForTests: `
+              const path = require('node:path');
+              const request = JSON.parse(process.argv[1]);
+              process.stdout.write(JSON.stringify({
+                schemaVersion: 2,
+                requestDigest: '${'0'.repeat(64)}',
+                ok: true,
+                items: request.links.map((entry) => ({
+                  index: entry.index,
+                  scope: 'internal',
+                  resolvedPath: path.resolve(request.checkoutRoot, entry.relativePath),
+                })),
+              }));
+            `,
+          }),
+        ).rejects.toThrow(/请求摘要/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'rejects a batch response whose result indexes are out of order',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-batch-order-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLinks({
+            linkPaths: [join(checkoutRoot, 'first'), join(checkoutRoot, 'second')],
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget: new ExternalFileLinkSnapshotBudget({
+              maxLinks: 2,
+              maxTargetReadBytes: 0,
+              deadlineMs: 5_000,
+            }),
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            readerProgramForTests: `
+              const crypto = require('node:crypto');
+              const path = require('node:path');
+              const raw = process.argv[1];
+              const request = JSON.parse(raw);
+              process.stdout.write(JSON.stringify({
+                schemaVersion: 2,
+                requestDigest: crypto.createHash('sha256').update(raw).digest('hex'),
+                ok: true,
+                items: request.links.map((entry) => ({
+                  index: entry.index,
+                  scope: 'internal',
+                  resolvedPath: path.resolve(request.checkoutRoot, entry.relativePath),
+                })).reverse(),
+              }));
+            `,
+          }),
+        ).rejects.toThrow(/结果缺少身份/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'splits oversized requests while preserving every result in input order',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-batch-split-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      const longDirectory = 'long-segment-'.repeat(40);
+      const linkPaths = Array.from({ length: 100 }, (_, index) =>
+        join(checkoutRoot, longDirectory, `tool-${index}`),
+      );
+      const managed = await createManagedProcessTestSession();
+      try {
+        const snapshots = await snapshotManagedExternalFileLinks({
+          linkPaths,
+          checkoutRoot,
+          sourceRoot,
+          maxFileBytes: 1024,
+          budget: new ExternalFileLinkSnapshotBudget({
+            maxLinks: 100,
+            maxTargetReadBytes: 0,
+            deadlineMs: 20_000,
+          }),
+          session: managed.session,
+          kind: 'quality-check',
+          cwd: checkoutRoot,
+          readerProgramForTests: `
+            const crypto = require('node:crypto');
+            const path = require('node:path');
+            const raw = process.argv[1];
+            const request = JSON.parse(raw);
+            process.stdout.write(JSON.stringify({
+              schemaVersion: 2,
+              requestDigest: crypto.createHash('sha256').update(raw).digest('hex'),
+              ok: true,
+              items: request.links.map((entry) => ({
+                index: entry.index,
+                scope: 'internal',
+                resolvedPath: path.resolve(request.checkoutRoot, entry.relativePath),
+              })),
+            }));
+          `,
+        });
+
+        expect(snapshots).toHaveLength(linkPaths.length);
+        expect(snapshots.every((snapshot) => snapshot.scope === 'internal')).toBe(true);
+        expect(snapshots.at(-1)).toMatchObject({
+          scope: 'internal',
+          resolvedPath: linkPaths.at(-1),
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'grants a later reader batch only the physical-read bytes left by earlier batches',
+    async () => {
+      const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-batch-read-cap-')));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      const longDirectory = 'long-segment-'.repeat(40);
+      const linkPaths = Array.from({ length: 100 }, (_, index) =>
+        join(checkoutRoot, longDirectory, `tool-${index}`),
+      );
+      const managed = await createManagedProcessTestSession();
+      const budget = new ExternalFileLinkSnapshotBudget({
+        maxLinks: 100,
+        maxTargetReadBytes: 10,
+        deadlineMs: 20_000,
+      });
+      try {
+        await expect(
+          snapshotManagedExternalFileLinks({
+            linkPaths,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            readerProgramForTests: `
+              const crypto = require('node:crypto');
+              const path = require('node:path');
+              const raw = process.argv[1];
+              const request = JSON.parse(raw);
+              if (request.maxTargetReadBytes < 6) {
+                process.stderr.write('later batch received only the remaining read grant');
+                process.exit(1);
+              }
+              const target = {
+                dev: '1', ino: '2', uid: '3', nlink: '1', mode: '33188', size: '6',
+                mtimeNs: '4', ctimeNs: '5',
+              };
+              process.stdout.write(JSON.stringify({
+                schemaVersion: 2,
+                requestDigest: crypto.createHash('sha256').update(raw).digest('hex'),
+                ok: true,
+                items: request.links.map((entry) => ({
+                  index: entry.index,
+                  scope: 'external',
+                  resolvedPath: path.resolve(request.checkoutRoot, '..', 'shared-target'),
+                  link: { ...target, ino: String(1000 + entry.index), mode: '41471' },
+                  linkTargetDigest: 'a'.repeat(64),
+                  target,
+                  bytesRead: 6,
+                  eof: true,
+                  targetDigest: 'b'.repeat(64),
+                })),
+              }));
+            `,
+          }),
+        ).rejects.toThrow(/remaining read grant/u);
+        expect(() => budget.checkpoint()).toThrow(/已经失效/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'captures an ordinary external file with the built-in production reader',
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'coding-x-external-happy-'));
@@ -149,7 +862,7 @@ describe('external file link snapshot budget', () => {
       try {
         const budget = new ExternalFileLinkSnapshotBudget({
           maxLinks: 1,
-          maxUniqueTargetBytes: 1024,
+          maxTargetReadBytes: 1024,
           deadlineMs: 5_000,
         });
         const observed = await snapshotManagedExternalFileLink({
@@ -194,7 +907,7 @@ describe('external file link snapshot budget', () => {
       try {
         const budget = new ExternalFileLinkSnapshotBudget({
           maxLinks: 1,
-          maxUniqueTargetBytes: 1024,
+          maxTargetReadBytes: 1024,
           deadlineMs: 100,
         });
         await expect(
@@ -231,31 +944,32 @@ describe('external file link snapshot budget', () => {
       const target = join(root, 'target');
       writeFileSync(target, 'content\n');
       symlinkSync(target, linkPath);
-      const stat = {
+      const targetStat = {
         dev: '1',
         ino: '2',
         uid: '3',
+        nlink: '1',
         mode: '33188',
         size: '8',
         mtimeNs: '4',
         ctimeNs: '5',
       };
-      const output = JSON.stringify({
-        schemaVersion: 1,
+      const linkStat = { ...targetStat, ino: '3', mode: String(0o120777), size: '6' };
+      const item = {
         scope: 'external',
         resolvedPath: target,
-        link: stat,
+        link: linkStat,
         linkTargetDigest: 'a'.repeat(64),
-        target: stat,
+        target: targetStat,
         bytesRead: 8,
         eof: false,
         targetDigest: 'b'.repeat(64),
-      });
+      };
       const managed = await createManagedProcessTestSession();
       try {
         const budget = new ExternalFileLinkSnapshotBudget({
           maxLinks: 1,
-          maxUniqueTargetBytes: 1024,
+          maxTargetReadBytes: 1024,
           deadlineMs: 5_000,
         });
         await expect(
@@ -268,7 +982,17 @@ describe('external file link snapshot budget', () => {
             session: managed.session,
             kind: 'quality-check',
             cwd: checkoutRoot,
-            readerProgramForTests: `process.stdout.write(${JSON.stringify(output)})`,
+            readerProgramForTests: `
+              const crypto = require('node:crypto');
+              const raw = process.argv[1];
+              const request = JSON.parse(raw);
+              process.stdout.write(JSON.stringify({
+                schemaVersion: 2,
+                requestDigest: crypto.createHash('sha256').update(raw).digest('hex'),
+                ok: true,
+                items: [{ index: request.links[0].index, ...${JSON.stringify(item)} }],
+              }));
+            `,
           }),
         ).rejects.toThrow(/精确大小和 EOF/u);
       } finally {
@@ -283,6 +1007,7 @@ describe('external file link snapshot budget', () => {
     expect(canSnapshotExternalFileLinks('win32')).toBe(false);
     expect(canSnapshotExternalFileLinks('linux')).toBe(true);
     expect(canSnapshotExternalFileLinks('darwin')).toBe(true);
+    expect(canSnapshotExternalFileLinks('freebsd')).toBe(false);
   });
 
   it('rejects known Linux and macOS magic or remote filesystems without an allowlist', () => {

@@ -22,8 +22,18 @@ import {
   CleanValidationCheckoutManager,
   createCleanValidationCheckout,
 } from './clean-validation-checkout.js';
+import { assertCleanValidationTreeHasNoMountPoints } from './clean-validation-mounts.js';
 
 const roots: string[] = [];
+const LIVE_TEMPORARY_HARD_LINKS_TRUSTED = (() => {
+  if (process.platform !== 'linux' && process.platform !== 'darwin') return false;
+  const root = mkdtempSync(join(tmpdir(), 'coding-x-hard-link-platform-'));
+  try {
+    return assertCleanValidationTreeHasNoMountPoints(root).hardLinksTrusted;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+})();
 
 function repository(files: Record<string, string>): { root: string; head: () => string } {
   const root = mkdtempSync(join(tmpdir(), 'coding-x-clean-source-'));
@@ -175,6 +185,117 @@ describe.runIf(
       await managed.close();
     }
   }, 60_000);
+
+  it.runIf(LIVE_TEMPORARY_HARD_LINKS_TRUSTED)(
+    'accepts complete hard link groups contained in one declared artifact root',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+      try {
+        checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        const first = join(checkout.root, 'node_modules', 'esbuild', 'bin', 'esbuild');
+        const firstAlias = join(
+          checkout.root,
+          'node_modules',
+          '@esbuild',
+          'platform',
+          'bin',
+          'esbuild',
+        );
+        const second = join(checkout.root, 'node_modules', 'tsx', 'node_modules', 'esbuild', 'bin');
+        const secondAlias = join(
+          checkout.root,
+          'node_modules',
+          'tsx',
+          'node_modules',
+          '@esbuild',
+          'platform',
+          'bin',
+        );
+        mkdirSync(dirname(first), { recursive: true });
+        mkdirSync(dirname(firstAlias), { recursive: true });
+        mkdirSync(dirname(second), { recursive: true });
+        mkdirSync(dirname(secondAlias), { recursive: true });
+        writeFileSync(first, 'first binary\n');
+        linkSync(first, firstAlias);
+        writeFileSync(second, 'second binary\n');
+        linkSync(second, secondAlias);
+
+        await expect(checkout.assertCurrent('完整 hard link 组测试')).resolves.toBeUndefined();
+      } finally {
+        checkout?.cleanup();
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'rejects a complete hard link group that crosses declared artifact roots',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+      try {
+        checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        const dependency = join(checkout.root, 'node_modules', 'shared.bin');
+        const output = join(checkout.root, 'dist', 'shared.bin');
+        mkdirSync(dirname(dependency), { recursive: true });
+        mkdirSync(dirname(output), { recursive: true });
+        writeFileSync(dependency, 'shared\n');
+        linkSync(dependency, output);
+
+        await expect(checkout.assertCurrent('跨产物根 hard link 测试')).rejects.toMatchObject({
+          code: 'artifact-boundary-violated',
+          message: expect.stringContaining('跨越多个产物根'),
+        });
+      } finally {
+        checkout?.cleanup();
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'rejects a hard link group that aliases tracked source into an artifact root',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+      try {
+        checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        const alias = join(checkout.root, 'node_modules', 'source-alias.txt');
+        mkdirSync(dirname(alias), { recursive: true });
+        linkSync(join(checkout.root, 'source.txt'), alias);
+
+        await expect(checkout.assertCurrent('源码 hard link 别名测试')).rejects.toMatchObject({
+          code: 'artifact-boundary-violated',
+          message: expect.stringContaining('包含未声明为产物的路径'),
+        });
+      } finally {
+        checkout?.cleanup();
+        await managed.close();
+      }
+    },
+    60_000,
+  );
 
   it.runIf(process.platform !== 'win32')(
     'rejects a special file in an allowed artifact tree',
@@ -397,7 +518,7 @@ describe.runIf(
         managed: { session: managed.session, kind: 'quality-check' },
       });
       const hiddenObjectDirectory = join(objectCheckout.root, '.git', 'objects', 'aa');
-      mkdirSync(hiddenObjectDirectory);
+      mkdirSync(hiddenObjectDirectory, { recursive: true });
       writeFileSync(join(hiddenObjectDirectory, '0'.repeat(38)), 'hidden object state');
       await expect(
         objectCheckout.assertCurrent('Git object DB 隐藏状态测试'),
@@ -611,6 +732,83 @@ describe.runIf(
   );
 
   it.runIf(process.platform !== 'win32')(
+    'rejects a prepared link into the checkout Git control file',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract({
+              prepare: [
+                {
+                  executable: process.execPath,
+                  args: [
+                    '-e',
+                    "require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync('../.git', 'node_modules/git-control')",
+                  ],
+                  cwd: '.',
+                  platforms: ['linux', 'macos'],
+                  timeoutMs: 5_000,
+                },
+              ],
+            }),
+            managed: { session: managed.session, kind: 'quality-check' },
+          }),
+        ).rejects.toMatchObject({
+          code: 'artifact-boundary-violated',
+          message: expect.stringMatching(/Git control directory|Git 控制/u),
+        });
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'accepts many stable npm-style links to plain files inside the checkout',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      try {
+        const checkout = await createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract({
+            prepare: [
+              {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  "const fs=require('node:fs'); fs.mkdirSync('node_modules/.bin',{recursive:true}); for(let i=0;i<64;i++){fs.mkdirSync('node_modules/tool-'+i,{recursive:true}); fs.writeFileSync('node_modules/tool-'+i+'/cli.js','tool '+i+'\\n'); fs.symlinkSync('../tool-'+i+'/cli.js','node_modules/.bin/tool-'+i)}",
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos'],
+                timeoutMs: 10_000,
+              },
+            ],
+          }),
+          managed: { session: managed.session, kind: 'quality-check' },
+        });
+        try {
+          await checkout.assertCurrent('大量内部命令链接复核');
+          expect(realpathSync(join(checkout.root, 'node_modules', '.bin', 'tool-63'))).toBe(
+            join(checkout.root, 'node_modules', 'tool-63', 'cli.js'),
+          );
+        } finally {
+          expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+        }
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'bounds prepared external file links even when they share one target',
     async () => {
       const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
@@ -636,7 +834,10 @@ describe.runIf(
             }),
             managed: { session: managed.session, kind: 'quality-check' },
           }),
-        ).rejects.toMatchObject({ code: 'artifact-boundary-violated' });
+        ).rejects.toMatchObject({
+          code: 'artifact-boundary-violated',
+          message: expect.stringContaining('需受管核对的普通文件链接超过 1024 条'),
+        });
       } finally {
         await managed.close();
       }
