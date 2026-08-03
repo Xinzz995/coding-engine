@@ -4,6 +4,8 @@
 
 以下文件都在 {{WORKSPACE}}/ 下: prd.json（需求，只读）、state.json（执行状态）、progress.md（进度日志）
 
+`{{WORKSPACE}}` 是引擎控制的运行状态目录，不是通用临时目录。除按下文规则写入 `state.json`、`progress.md`、`evidence.jsonl` 和 `screenshots/` 外，不得在其中创建、修改或删除任何其他路径。测试、构建、安装和冒烟所需的临时文件必须放到系统临时目录或项目已声明的生成产物目录，并在返回前清理。
+
 ## 你的任务
 
 1. 读取 `prd.json` 中的需求与 `state.json` 中的执行状态（同一目录；state.json 或某个 story id 不存在时，视该 story 为未开始）
