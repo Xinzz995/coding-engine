@@ -75,6 +75,25 @@ function dataBytes(operationId = OPERATION_ID): Buffer {
 }
 
 describe('supervisor protocol', () => {
+  it('round-trips an optional absolute executable argv0 without weakening strict fields', () => {
+    const parsed = parseSupervisorData(
+      encodeSupervisorData({
+        operationId: OPERATION_ID,
+        target: {
+          executable: '/usr/bin/python3',
+          executableArgv0: '/tmp/project/.venv/bin/python',
+          args: ['-c', 'pass'],
+          cwd: '/tmp/project',
+          environment: [],
+        },
+      }),
+    );
+    expect(parsed.target).toMatchObject({
+      executable: '/usr/bin/python3',
+      executableArgv0: '/tmp/project/.venv/bin/python',
+    });
+  });
+
   it('keeps a legal DATA message below 64 KiB even when canonical base64 exceeds 4096 chars', () => {
     const bytes = encodeSupervisorData({
       operationId: OPERATION_ID,

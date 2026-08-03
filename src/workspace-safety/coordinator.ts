@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import type { DelegatedSemanticCandidate } from '../contracts/delegated-operation-contract.js';
 import { runWorkspaceOperationControlled, type OperationDelegationScope } from './operation.js';
 import { readDarkPosixHelperBundle, runDarkPosixSupervisedOperation } from './posix-supervisor.js';
@@ -19,6 +20,11 @@ export type { ManagedSupervisorTimeouts } from './supervisor-timeouts.js';
 
 export type ManagedWorkspaceProcessOptions = OperationDelegationScope & {
   readonly executable: string;
+  /**
+   * POSIX 目标进程看到的绝对 argv[0]。真实执行文件仍由 executable 的 canonical path 固定；
+   * 该字段只保留 Python venv 等依赖链接入口路径的运行时语义。
+   */
+  readonly executableArgv0?: string;
   readonly args: readonly string[];
   readonly cwd: string;
   readonly environment: readonly { readonly name: string; readonly value: string }[];
@@ -95,8 +101,19 @@ export async function runManagedWorkspaceProcess(
   options: ManagedWorkspaceProcessOptions,
 ): Promise<ManagedWorkspaceProcessResult> {
   const platform = assertSupportedPlatform();
+  const executable = canonicalManagedProcessPath(options.executable);
+  let executableArgv0: string | undefined;
+  if (options.executableArgv0 !== undefined) {
+    if (!isAbsolute(options.executableArgv0)) {
+      throw new WorkspaceSafetyError('invalid', '受管子进程 argv[0] 必须是绝对路径');
+    }
+    executableArgv0 = resolve(options.executableArgv0);
+    if (canonicalManagedProcessPath(executableArgv0) !== executable) {
+      throw new WorkspaceSafetyError('invalid', '受管子进程 argv[0] 与真实执行文件不一致');
+    }
+  }
   const target = {
-    executable: canonicalManagedProcessPath(options.executable),
+    executable,
     args: options.args,
     cwd: canonicalManagedProcessPath(options.cwd),
     environment: options.environment,
@@ -121,7 +138,7 @@ export async function runManagedWorkspaceProcess(
         });
       }
       return await runDarkPosixSupervisedOperation(operation, {
-        target,
+        target: { ...target, executableArgv0: executableArgv0 ?? executable },
         commandTimeoutMs: options.timeoutMs,
         termination: options.termination,
         timeouts: mapManagedTimeoutsToPosix(options.supervisorTimeouts),

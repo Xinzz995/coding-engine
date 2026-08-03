@@ -42,6 +42,7 @@ export type ContainmentDescriptor =
 
 export interface SupervisorTarget {
   readonly executable: string;
+  readonly executableArgv0?: string;
   readonly args: readonly string[];
   readonly cwd: string;
   readonly environment: readonly { readonly name: string; readonly value: string }[];
@@ -303,7 +304,14 @@ export function parseContainmentDescriptor(value: unknown): ContainmentDescripto
 
 function parseTarget(value: unknown): SupervisorTarget {
   const record = asRecord(value, 'target');
-  exactKeys(record, ['executable', 'args', 'cwd', 'environment'], 'target');
+  const hasExecutableArgv0 = Object.hasOwn(record, 'executableArgv0');
+  exactKeys(
+    record,
+    hasExecutableArgv0
+      ? ['executable', 'executableArgv0', 'args', 'cwd', 'environment']
+      : ['executable', 'args', 'cwd', 'environment'],
+    'target',
+  );
   if (!Array.isArray(record.args) || record.args.length > MAX_ARGUMENTS) {
     return invalid('target.args must be a bounded array');
   }
@@ -325,6 +333,14 @@ function parseTarget(value: unknown): SupervisorTarget {
   });
   return {
     executable: boundedString(record.executable, 'target.executable'),
+    ...(hasExecutableArgv0
+      ? {
+          executableArgv0: boundedString(
+            record.executableArgv0,
+            'target.executableArgv0',
+          ),
+        }
+      : {}),
     args: record.args.map((entry, index) => boundedString(entry, `target.args[${index}]`, true)),
     cwd: boundedString(record.cwd, 'target.cwd'),
     environment,

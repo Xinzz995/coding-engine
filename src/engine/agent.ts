@@ -75,6 +75,22 @@ export function resolveExecutablePath(
   environment: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
+  return resolveExecutableInvocation(name, cwd, environment, platform).canonicalPath;
+}
+
+export interface ResolvedExecutableInvocation {
+  /** 传给目标进程的绝对 argv[0]；保留虚拟环境等链接入口语义。 */
+  readonly invocationPath: string;
+  /** 用于执行与信任边界核验的真实程序路径。 */
+  readonly canonicalPath: string;
+}
+
+export function resolveExecutableInvocation(
+  name: string,
+  cwd: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): ResolvedExecutableInvocation {
   const candidates: string[] = [];
   if (isAbsolute(name)) {
     candidates.push(name);
@@ -94,8 +110,12 @@ export function resolveExecutablePath(
   }
   for (const candidate of candidates) {
     try {
-      accessSync(candidate, constants.X_OK);
-      return realpathSync.native(candidate);
+      const invocationPath = isAbsolute(candidate) ? resolve(candidate) : resolve(cwd, candidate);
+      accessSync(invocationPath, constants.X_OK);
+      return {
+        invocationPath,
+        canonicalPath: realpathSync.native(invocationPath),
+      };
     } catch {
       // Try the next candidate.
     }

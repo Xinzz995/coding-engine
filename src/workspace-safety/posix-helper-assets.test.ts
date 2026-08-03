@@ -306,6 +306,7 @@ describe.runIf(process.platform !== 'win32')('fixed POSIX helper assets', () => 
         type: 'CONFIG',
         target: {
           executable: process.execPath,
+          executableArgv0: process.execPath,
           args: ['-e', 'setInterval(() => {}, 1000)'],
           cwd: '/',
           environment: [],

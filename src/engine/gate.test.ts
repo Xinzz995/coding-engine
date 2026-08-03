@@ -625,6 +625,93 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
   );
 
   it.runIf(process.platform !== 'win32')(
+    'preserves a declared executable symlink as argv0 while executing its canonical target',
+    async () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'contract-executable-argv0-')));
+      const executable = join(root, '.venv', 'bin', 'python');
+      mkdirSync(join(root, '.venv', 'bin'), { recursive: true });
+      symlinkSync(process.execPath, executable);
+      try {
+        const result = await runManagedContractQualityChecks(
+          contractWith({
+            checks: [
+              {
+                id: 'argv0-sensitive-runtime',
+                module: 'root',
+                command: {
+                  executable: '.venv/bin/python',
+                  args: [
+                    '-e',
+                    `if (process.argv0 !== ${JSON.stringify(executable)}) { console.error(process.argv0); process.exit(9); }`,
+                  ],
+                  cwd: '.',
+                  platforms: ['linux', 'macos'],
+                  timeoutMs: 5_000,
+                },
+              },
+            ],
+          }),
+          root,
+          process.platform === 'darwin' ? 'macos' : 'linux',
+        );
+        expect(result).toMatchObject({ ok: true, total: 1, ran: 1 });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'still rejects an executable symlink declared inside the forbidden developer tree',
+    async () => {
+      const container = mkdtempSync(join(tmpdir(), 'contract-executable-forbidden-'));
+      const source = join(container, 'developer');
+      const validationRoot = join(container, 'validation');
+      mkdirSync(source);
+      mkdirSync(validationRoot);
+      const executable = join(source, 'runtime');
+      symlinkSync(process.execPath, executable);
+      const fixture = await createManagedProcessTestSession();
+      try {
+        const result = await runContractQualityChecks(
+          contractWith({
+            checks: [
+              {
+                id: 'forbidden-executable-link',
+                module: 'root',
+                command: {
+                  executable,
+                  args: ['-e', 'process.exit(0)'],
+                  cwd: '.',
+                  platforms: ['linux', 'macos'],
+                  timeoutMs: 5_000,
+                },
+              },
+            ],
+          }),
+          validationRoot,
+          process.platform === 'darwin' ? 'macos' : 'linux',
+          {
+            session: fixture.session,
+            kind: 'quality-check',
+            forbiddenExecutableRoot: source,
+          },
+        );
+        expect(result).toMatchObject({
+          ok: false,
+          failure: { exitCode: null, timedOut: false },
+        });
+        expect(result.failure?.outputTail).toContain('验证命令解析到开发工作树');
+      } finally {
+        await fixture.close();
+        rmSync(container, { recursive: true, force: true });
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
     'runs an explicitly declared POSIX shell script and never infers shell from executable args',
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'contract-shell-'));
