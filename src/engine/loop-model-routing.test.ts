@@ -12,6 +12,7 @@ import {
   routedStory,
   modelConfig,
   catalogWith,
+  FAKE_RUNNER_INPUT_SOURCE,
   runLoop,
   strictConfig,
 } from './loop-test-support.js';
@@ -28,7 +29,8 @@ describe('runLoop model routing', { timeout: 30_000, concurrent: false }, () => 
       fake,
       `
       import { writeFileSync, appendFileSync, readFileSync, existsSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
+      ${FAKE_RUNNER_INPUT_SOURCE}
+      appendFileSync(${JSON.stringify(argvLog)}, runnerArgv.join(' ') + '\\n');
       const call = existsSync(${JSON.stringify(calls)})
         ? Number(readFileSync(${JSON.stringify(calls)}, 'utf8')) + 1
         : 1;
@@ -264,7 +266,8 @@ describe('runLoop model routing', { timeout: 30_000, concurrent: false }, () => 
       fake,
       `
       import { appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
+      ${FAKE_RUNNER_INPUT_SOURCE}
+      appendFileSync(${JSON.stringify(argvLog)}, runnerArgv.join(' ') + '\\n');
       // progress.md 每次调用递增写入：让每轮都有非空转产出，本用例只关心 models 警告去重，
       // 不是 Task 5 的 no-op 检测——真空转会跳过 validator，把 builder+validator 各跑一次的假设打破。
       appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'x');
@@ -429,7 +432,8 @@ describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: 
       fake,
       `
       import { appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
+      ${FAKE_RUNNER_INPUT_SOURCE}
+      appendFileSync(${JSON.stringify(argvLog)}, runnerArgv.join(' ') + '\\n');
       process.exit(0);
     `,
     );
@@ -473,7 +477,8 @@ describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: 
       fake,
       `
       import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
+      ${FAKE_RUNNER_INPUT_SOURCE}
+      appendFileSync(${JSON.stringify(argvLog)}, runnerArgv.join(' ') + '\\n');
       const path = ${JSON.stringify(join(workspace, 'state.json'))};
       const state = JSON.parse(readFileSync(path, 'utf-8'));
       state['US-001'].passes = true;
@@ -522,10 +527,11 @@ describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: 
       fake,
       `
       import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      ${FAKE_RUNNER_INPUT_SOURCE}
       const callsPath = ${JSON.stringify(calls)};
       const count = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf-8')) + 1 : 1;
       writeFileSync(callsPath, String(count));
-      appendFileSync(${JSON.stringify(argvLog)}, process.argv.slice(2, -1).join(' ') + '\\n');
+      appendFileSync(${JSON.stringify(argvLog)}, runnerArgv.join(' ') + '\\n');
       const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
       if (count % 2 === 1) {
         const state = JSON.parse(readFileSync(statePath, 'utf-8'));
@@ -533,7 +539,6 @@ describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: 
         writeFileSync(statePath, JSON.stringify(state));
         appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder progress\\n');
       } else {
-        const prompt = process.argv.at(-1) ?? '';
         const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
         const jsonAt = prompt.indexOf('{', markerAt);
         const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);

@@ -35,6 +35,19 @@ import {
 } from '../workspace-safety/types.js';
 import { workspaceDirectoryIdentity } from '../workspace-safety/filesystem.js';
 
+/** Test Runner shim: production Codex/Claude receive prompts on stdin; Cursor uses its last arg. */
+export const FAKE_RUNNER_INPUT_SOURCE = String.raw`
+const codingXPromptChunks = [];
+for await (const chunk of process.stdin) codingXPromptChunks.push(chunk);
+const codingXStdinPrompt = Buffer.concat(codingXPromptChunks).toString('utf8');
+const prompt = codingXStdinPrompt.length > 0
+  ? codingXStdinPrompt
+  : (process.argv.at(-1) ?? '');
+const runnerArgv = codingXStdinPrompt.length > 0
+  ? process.argv.slice(2)
+  : process.argv.slice(2, -1);
+`;
+
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 export const TEST_VALIDATION_ENVIRONMENT_DIGEST = `sha256:${'e'.repeat(64)}`;
 export const TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST = bindStoryValidationRuntimeIdentity(
@@ -402,6 +415,7 @@ export function fakeBoundValidator(
     fake,
     String.raw`
     import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+    ${FAKE_RUNNER_INPUT_SOURCE}
     const statePath = ${JSON.stringify(statePath)};
     let call = 1;
     try { call = Number(readFileSync(${JSON.stringify(calls)}, 'utf8')) + 1; } catch {}
@@ -417,7 +431,7 @@ export function fakeBoundValidator(
       const cwdMarker = ${JSON.stringify(options.builderCwdMarker ?? null)};
       const promptMarker = ${JSON.stringify(options.builderPromptMarker ?? null)};
       if (cwdMarker !== null) writeFileSync(cwdMarker, process.cwd());
-      if (promptMarker !== null) writeFileSync(promptMarker, process.argv.at(-1) ?? '');
+      if (promptMarker !== null) writeFileSync(promptMarker, prompt);
       const state = JSON.parse(readFileSync(statePath, 'utf8'));
       state['US-001'].passes = true;
       state['US-001'].validated = false;
@@ -440,7 +454,6 @@ export function fakeBoundValidator(
         path: process.env.PATH ?? '',
       }));
     }
-    const prompt = process.argv.at(-1) ?? '';
     const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
     const jsonAt = prompt.indexOf('{', markerAt);
     const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);

@@ -12,7 +12,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
-  buildAgentArgs,
+  agentTemporaryRetentionFailure,
+  buildManagedAgentArgs,
   resolveBinary,
   resolveExecutablePath,
   resolveRunnerExecutablePath,
@@ -20,6 +21,12 @@ import {
   runAgent,
 } from './agent.js';
 import { createManagedProcessTestSession } from './managed-process-test-support.js';
+import { createValidationRequest, renderValidatorInstruction } from './validation-protocol.js';
+import {
+  ReviewTemporaryDirectory,
+  ReviewTemporaryDirectoryError,
+} from '../review/temporary-directory.js';
+import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fake = join(here, '__fixtures__', 'fake-agent.mjs');
@@ -84,64 +91,32 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
   }
 }
 
-describe('buildAgentArgs', () => {
-  it('builds claude print command by default', () => {
-    expect(buildAgentArgs('claude', 'P')).toEqual([
-      'claude',
-      '--print',
-      '--dangerously-skip-permissions',
-      'P',
-    ]);
-  });
-  it('builds codex exec command', () => {
-    expect(buildAgentArgs('codex', 'P')).toEqual([
-      'codex',
-      'exec',
-      '--dangerously-bypass-approvals-and-sandbox',
-      'P',
-    ]);
-  });
-  it('builds cursor headless force command', () => {
-    const original = process.env.CODING_X_CURSOR_BIN;
-    process.env.CODING_X_CURSOR_BIN = 'agent';
-    try {
-      expect(buildAgentArgs('cursor', 'P')).toEqual(['agent', '-p', '--force', 'P']);
-    } finally {
-      if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
-      else process.env.CODING_X_CURSOR_BIN = original;
-    }
-  });
-  it('appends --model before the prompt for claude when a model is given', () => {
-    expect(buildAgentArgs('claude', 'P', 'opus')).toEqual([
-      'claude',
-      '--print',
-      '--dangerously-skip-permissions',
-      '--model',
-      'opus',
-      'P',
-    ]);
-  });
-  it('appends --model before the prompt for codex when a model is given', () => {
-    expect(buildAgentArgs('codex', 'P', 'gpt-5')).toEqual([
+describe('buildManagedAgentArgs', () => {
+  it('uses stdin for Codex and Claude while keeping Cursor prompt-free for the proxy', () => {
+    expect(buildManagedAgentArgs('codex', 'gpt-5')).toEqual([
       'codex',
       'exec',
       '--dangerously-bypass-approvals-and-sandbox',
       '--model',
       'gpt-5',
-      'P',
+      '-',
     ]);
-  });
-  it('appends --model before the prompt for cursor when a model is given', () => {
+    expect(buildManagedAgentArgs('claude', 'opus')).toEqual([
+      'claude',
+      '--print',
+      '--dangerously-skip-permissions',
+      '--model',
+      'opus',
+    ]);
     const original = process.env.CODING_X_CURSOR_BIN;
     process.env.CODING_X_CURSOR_BIN = 'agent';
     try {
-      expect(buildAgentArgs('cursor', 'P', 'composer-1')).toEqual([
+      expect(buildManagedAgentArgs('cursor', 'composer-1')).toEqual([
         'agent',
         '-p',
         '--force',
         '--model',
         'composer-1',
-        'P',
       ]);
     } finally {
       if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
@@ -285,14 +260,7 @@ describe('resolveRunnerExecutablePath', () => {
     chmodSync(executable, 0o755);
     try {
       expect(
-        resolveRunnerInvocation(
-          'codex',
-          executable,
-          ['exec', 'prompt'],
-          dir,
-          process.env,
-          'win32',
-        ),
+        resolveRunnerInvocation('codex', executable, ['exec', 'prompt'], dir, process.env, 'win32'),
       ).toEqual({
         executable: realpathSync.native(executable),
         args: ['exec', 'prompt'],
@@ -356,6 +324,73 @@ describe('runAgent', () => {
     }
   });
 
+  it('preserves a workspace safety failure when the prompt invocation directory must be retained', () => {
+    const original = new WorkspaceSafetyError('invalid', 'fixture workspace failure');
+    const preserved = agentTemporaryRetentionFailure(original, {
+      status: 'retained',
+      location: { status: 'verified', path: '/bounded/fixture-path' },
+      reason: 'fixture retention reason',
+      protection: {
+        status: 'restricted',
+        mechanism: 'posix-bound-descriptor-v1',
+        scope: 'retained-root-at-closeout',
+      },
+    });
+
+    expect(preserved).toBeInstanceOf(WorkspaceSafetyError);
+    expect(preserved).toMatchObject({ code: 'invalid', cause: original });
+    expect(preserved.message.startsWith(original.message)).toBe(true);
+    expect(preserved.message.match(/fixture workspace failure/gu)).toHaveLength(1);
+    expect(preserved.message).toContain('Agent Runner 临时域已保留');
+  });
+
+  it('stops immediately when the protected prompt invocation directory cannot be established', async () => {
+    const originalBin = process.env.CODING_X_CLAUDE_BIN;
+    const original = new ReviewTemporaryDirectoryError('fixture invocation setup failed');
+    const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation(() => {
+      throw original;
+    });
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake} ok`;
+    try {
+      let observed: unknown;
+      try {
+        await runManagedAgent({
+          kind: 'claude',
+          prompt: 'fixture prompt',
+          cwd: here,
+          timeoutMs: 5000,
+        });
+      } catch (error) {
+        observed = error;
+      }
+      expect(observed).toBeInstanceOf(WorkspaceSafetyError);
+      expect(observed).toMatchObject({ code: 'isolated', cause: original });
+      expect((observed as Error).message).toContain('fixture invocation setup failed');
+    } finally {
+      createSpy.mockRestore();
+      if (originalBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+      else process.env.CODING_X_CLAUDE_BIN = originalBin;
+    }
+  });
+
+  it('rejects an oversized Cursor prompt without retrying or truncating it', async () => {
+    const originalBin = process.env.CODING_X_CURSOR_BIN;
+    process.env.CODING_X_CURSOR_BIN = `node ${fake} ok`;
+    try {
+      await expect(
+        runManagedAgent({
+          kind: 'cursor',
+          prompt: 'x'.repeat(16 * 1024 + 1),
+          cwd: here,
+          timeoutMs: 5000,
+        }),
+      ).rejects.toMatchObject({ name: 'WorkspaceSafetyError', code: 'invalid' });
+    } finally {
+      if (originalBin === undefined) delete process.env.CODING_X_CURSOR_BIN;
+      else process.env.CODING_X_CURSOR_BIN = originalBin;
+    }
+  });
+
   it('merges explicit coding-x context into the child environment', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-env-'));
     const script = join(cwd, 'capture-env.mjs');
@@ -394,6 +429,98 @@ describe('runAgent', () => {
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    ['builder.md', undefined],
+    ['validator.md', 'fixture-model'],
+  ] as const)(
+    'delivers the complete packaged %s prompt through every managed Runner',
+    async (instructionFile, model) => {
+      const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-prompt-'));
+      const script = join(cwd, 'capture-prompt.mjs');
+      const basePrompt = readFileSync(
+        join(here, '../../assets/instructions', instructionFile),
+        'utf8',
+      );
+      const prompt =
+        instructionFile === 'validator.md'
+          ? renderValidatorInstruction(
+              basePrompt,
+              createValidationRequest(
+                {
+                  id: 'US-001',
+                  acceptanceCriteria: Array.from(
+                    { length: 9 },
+                    (_, index) => `验收标准 ${index + 1}：逐项核对真实产物与当前提交绑定。`,
+                  ),
+                },
+                join(cwd, '.workspace'),
+                'a'.repeat(40),
+                '11111111-1111-4111-8111-111111111111',
+              ),
+            )
+          : basePrompt;
+      expect(prompt.length).toBeGreaterThan(4096);
+      writeFileSync(
+        script,
+        `
+        import { writeFileSync } from 'node:fs';
+        const chunks = [];
+        process.stdin.on('data', (chunk) => chunks.push(chunk));
+        process.stdin.on('end', () => {
+          const stdinPrompt = Buffer.concat(chunks).toString('utf8');
+          const received = process.env.CODING_X_TEST_RUNNER === 'cursor'
+            ? process.argv.at(-1)
+            : stdinPrompt;
+          writeFileSync(
+            process.env.CODING_X_TEST_PROMPT_OUTPUT,
+            JSON.stringify({ prompt: received, argv: process.argv.slice(2) }),
+          );
+        });
+        process.stdin.resume();
+      `,
+      );
+      const runners = [
+        ['codex', 'CODING_X_CODEX_BIN'],
+        ['claude', 'CODING_X_CLAUDE_BIN'],
+        ['cursor', 'CODING_X_CURSOR_BIN'],
+      ] as const;
+      try {
+        for (const [kind, variable] of runners) {
+          const output = join(cwd, `${kind}-${instructionFile}.json`);
+          const original = process.env[variable];
+          process.env[variable] = `node ${script}`;
+          try {
+            const result = await runManagedAgent({
+              kind,
+              prompt,
+              cwd,
+              timeoutMs: 5000,
+              ...(model ? { model } : {}),
+              env: {
+                CODING_X_TEST_RUNNER: kind,
+                CODING_X_TEST_PROMPT_OUTPUT: output,
+              },
+            });
+            expect(result).toMatchObject({ timedOut: false, exitCode: 0 });
+            const captured = JSON.parse(readFileSync(output, 'utf8')) as {
+              prompt: string;
+              argv: string[];
+            };
+            expect(captured.prompt).toBe(prompt);
+            if (kind !== 'cursor') expect(captured.argv).not.toContain(prompt);
+            if (model) expect(captured.argv).toContain(model);
+          } finally {
+            if (original === undefined) delete process.env[variable];
+            else process.env[variable] = original;
+          }
+        }
+      } finally {
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
   it('resolves timedOut=false when the process exits in time', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} ok`;

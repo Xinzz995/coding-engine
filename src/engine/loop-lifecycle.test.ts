@@ -27,6 +27,7 @@ import {
   strictConfig,
   fakeBoundValidator,
   fakeCounting,
+  FAKE_RUNNER_INPUT_SOURCE,
   previousFinalReview,
   validationReceiptFor,
   TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST,
@@ -120,7 +121,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       String.raw`
       import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
       import { execFileSync } from 'node:child_process';
-      const prompt = process.argv.at(-1) ?? '';
+      ${FAKE_RUNNER_INPUT_SOURCE}
       const statePath = ${JSON.stringify(statePath)};
       if (!prompt.includes('ENGINE-BOUND VALIDATION REQUEST')) {
         const state = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -460,7 +461,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
   it('renders the actual workspace into the agent prompt instead of a hardcoded path', async () => {
     // The instruction files use the {{WORKSPACE}} placeholder so a custom
     // --workspace path reaches the agent. This fake records the prompt it
-    // received (its last argv) so we can assert the placeholder was substituted
+    // received through the managed Runner transport so we can assert the placeholder was substituted
     // with the real workspace value and no literal {{WORKSPACE}} leaks through.
     const { workspace, instructionsDir } = setup([story()]);
     writeFileSync(
@@ -491,7 +492,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
     ]);
     expect(existsSync(join(workspace, WORKSPACE_MARKER_FILE))).toBe(true);
     // 用真实 stub 文件而非 `node -e` 一行式：后者的脚本字符串后面还跟着
-    // buildAgentArgs 拼的 --print --dangerously-skip-permissions 等参数，
+    // 受管 Runner 调用拼的 --print --dangerously-skip-permissions 等参数，
     // node 会把它们当成自己的 CLI 选项重新解析（非脚本 argv），导致
     // "bad option" 报错、以非 0 码退出——`-e` 从未真正跑到 process.exit(0)。
     // 旧实现只看 timedOut 不看 exitCode，这个假崩溃被无声吞掉；

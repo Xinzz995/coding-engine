@@ -1,13 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   resolveBinary,
   resolveExecutablePath,
@@ -23,16 +16,15 @@ import {
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import type { ReviewPackage } from './package.js';
+import { createRunnerInvocation } from './runner-invocation.js';
 import {
   describeReviewTemporaryRetention,
   ReviewTemporaryDirectory,
   ReviewTemporaryDirectoryError,
-  type ReviewTemporaryCleanupResult,
 } from './temporary-directory.js';
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
 const MAX_RUNNER_OUTPUT_BYTES = 4 * 1024 * 1024;
-const MAX_CURSOR_PROMPT_BYTES = 16 * 1024;
 const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v5';
 const FINAL_REVIEW_OPERATION = {
   kind: 'final-review',
@@ -124,11 +116,7 @@ export function reviewRunnerEnvironment(
     kind === 'codex'
       ? ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_HOME']
       : kind === 'claude'
-        ? [
-            'ANTHROPIC_API_KEY',
-            'GOOGLE_APPLICATION_CREDENTIALS',
-            'CLOUD_ML_REGION',
-          ]
+        ? ['ANTHROPIC_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'CLOUD_ML_REGION']
         : ['CURSOR_API_KEY', 'CURSOR_API_ENDPOINT'];
   const exact = new Map(
     [...baselineExactNames, ...runnerExactNames].map((name) => [
@@ -137,11 +125,7 @@ export function reviewRunnerEnvironment(
     ]),
   );
   const prefixes =
-    kind === 'codex'
-      ? []
-      : kind === 'claude'
-        ? ['CLAUDE_CODE_', 'AWS_', 'ANTHROPIC_VERTEX_']
-        : [];
+    kind === 'codex' ? [] : kind === 'claude' ? ['CLAUDE_CODE_', 'AWS_', 'ANTHROPIC_VERTEX_'] : [];
   const result: NodeJS.ProcessEnv = {};
   const selected = new Set<string>();
   for (const [key, value] of Object.entries(environment)) {
@@ -283,88 +267,6 @@ function runnerArgs(options: {
   ];
 }
 
-function reviewRunnerProxyAssetPath(): string {
-  const candidates = [
-    fileURLToPath(new URL('./workspace-safety/review-runner-proxy.mjs', import.meta.url)),
-    fileURLToPath(
-      new URL('../../assets/workspace-safety/review-runner-proxy.mjs', import.meta.url),
-    ),
-  ];
-  const path = candidates.find((candidate) => existsSync(candidate));
-  if (!path) throw new Error('缺少固定 Review Runner 代理资产');
-  return path;
-}
-
-function createRunnerInvocation(options: {
-  runner: AgentKind;
-  executable: string;
-  args: string[];
-  cwd: string;
-  prompt: string;
-  projectRoot: string;
-}): {
-  root: string;
-  proxyPath: string;
-  configPath: string;
-  temporary: ReviewTemporaryDirectory;
-  cleanup(): ReviewTemporaryCleanupResult;
-} {
-  const promptBytes = Buffer.byteLength(options.prompt);
-  if (options.runner === 'cursor' && promptBytes > MAX_CURSOR_PROMPT_BYTES) {
-    throw new Error(
-      `Cursor Review 提示词 ${promptBytes} bytes 超过固定参数上限 ` +
-        `${MAX_CURSOR_PROMPT_BYTES} bytes；不会截断，请拆分 PR 或改用支持 stdin 的 Runner`,
-    );
-  }
-  const temporary = ReviewTemporaryDirectory.create({
-    prefix: 'coding-x-review-invocation-',
-    projectRoot: options.projectRoot,
-  });
-  const root = temporary.root;
-  const proxyPath = join(root, 'review-runner-proxy.mjs');
-  const promptPath = join(root, 'prompt.txt');
-  const configPath = join(root, 'proxy-config.json');
-  try {
-    const proxy = readFileSync(reviewRunnerProxyAssetPath());
-    const prompt = Buffer.from(options.prompt, 'utf8');
-    writeFileSync(proxyPath, proxy, { mode: 0o400 });
-    writeFileSync(promptPath, options.prompt, { encoding: 'utf8', mode: 0o400 });
-    const config = `${JSON.stringify({
-        schemaVersion: 1,
-        runner: options.runner,
-        executable: options.executable,
-        args: options.args,
-        cwd: resolve(options.cwd),
-        promptPath,
-        promptMode: options.runner === 'cursor' ? 'argument' : 'stdin',
-      })}\n`;
-    writeFileSync(configPath, config, { encoding: 'utf8', mode: 0o400 });
-    chmodSync(root, 0o500);
-    temporary.sealExactTree({
-      files: [
-        { path: 'review-runner-proxy.mjs', bytes: proxy, maximumBytes: 4 * 1024 * 1024 },
-        { path: 'prompt.txt', bytes: prompt, maximumBytes: 3 * 1024 * 1024 },
-        { path: 'proxy-config.json', bytes: Buffer.from(config), maximumBytes: 256 * 1024 },
-      ],
-    });
-  } catch (error) {
-    const cleanup = temporary.cleanup();
-    throw new ReviewTemporaryDirectoryError(
-      `${error instanceof Error ? error.message : String(error)}；` +
-        (cleanup.status !== 'removed'
-          ? `Runner 调用初始化现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`
-          : 'Runner 调用初始化现场已安全清理'),
-    );
-  }
-  return {
-    root,
-    proxyPath,
-    configPath,
-    temporary,
-    cleanup: () => temporary.cleanup(),
-  };
-}
-
 async function runProcess(options: {
   session: WorkspaceSession;
   runner: AgentKind;
@@ -395,6 +297,7 @@ async function runProcess(options: {
     cwd,
     prompt: options.prompt,
     projectRoot: options.projectRoot,
+    prefix: 'coding-x-review-invocation-',
   });
   const temporaryUses = [...(options.temporaryUses ?? []), invocation.temporary];
   let processResult: ProcessResult | undefined;
@@ -998,7 +901,8 @@ export async function runSafeReviewAxis(options: {
         error instanceof ReviewTemporaryDirectoryError ||
         error instanceof WorkspaceSafetyError ||
         options.termination?.signal.aborted
-      ) break;
+      )
+        break;
       if (attempt === 2) break;
     }
   }

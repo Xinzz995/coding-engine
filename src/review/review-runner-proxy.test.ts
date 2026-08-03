@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const proxyPath = fileURLToPath(
@@ -14,6 +14,7 @@ function withInvocation(
   runner: 'codex' | 'cursor',
   prompt: string,
   run: (configPath: string) => void,
+  argsOverride?: readonly string[],
 ): void {
   const root = mkdtempSync(join(tmpdir(), 'review-runner-proxy-test-'));
   try {
@@ -27,14 +28,15 @@ function withInvocation(
         runner,
         executable: process.execPath,
         args:
-          runner === 'cursor'
+          argsOverride ??
+          (runner === 'cursor'
             ? ['-e', 'process.stdout.write(process.argv[1])']
             : [
                 '-e',
                 'const values=[];process.stdin.on("data",c=>values.push(c));' +
                   'process.stdin.on("end",()=>process.stdout.write(Buffer.concat(values)));',
                 '',
-              ],
+              ]),
         cwd: root,
         promptPath,
         promptMode: runner === 'cursor' ? 'argument' : 'stdin',
@@ -82,6 +84,48 @@ describe('fixed Review Runner proxy', () => {
       expect(result.stderr).toContain('exceeds the fixed');
     });
   });
+
+  it.each([
+    [23, 23],
+    [0, 126],
+  ])(
+    'settles a deterministic stdin EPIPE with child exit %i as proxy exit %i',
+    (childExitCode, expectedProxyExitCode) => {
+      withInvocation('codex', 'fixture prompt', (configPath) => {
+        const preloadPath = join(dirname(configPath), 'fake-spawn-preload.mjs');
+        writeFileSync(
+          preloadPath,
+          `
+          import childProcess from 'node:child_process';
+          import { EventEmitter } from 'node:events';
+          import { syncBuiltinESMExports } from 'node:module';
+          childProcess.spawn = () => {
+            const child = new EventEmitter();
+            child.stdin = new EventEmitter();
+            child.stdin.end = () => queueMicrotask(() => {
+              const error = Object.assign(new Error('fixture broken pipe'), { code: 'EPIPE' });
+              child.stdin.emit('error', error);
+              queueMicrotask(() => child.emit('close', ${childExitCode}, null));
+            });
+            return child;
+          };
+          syncBuiltinESMExports();
+        `,
+        );
+        const result = spawnSync(
+          process.execPath,
+          ['--import', pathToFileURL(preloadPath).href, proxyPath, configPath],
+          { encoding: 'utf8', timeout: 5000 },
+        );
+        expect(result.status, result.stderr).toBe(expectedProxyExitCode);
+        if (childExitCode === 0) {
+          expect(result.stderr).toContain('failed to deliver runner input');
+        } else {
+          expect(result.stderr).toBe('');
+        }
+      });
+    },
+  );
 
   it.runIf(process.platform !== 'win32')(
     'refuses a config path that resolves through a symbolic link',

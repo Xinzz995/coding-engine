@@ -52,6 +52,9 @@ scope: root
 | 知识生命周期           | `commands/compound-docs.md`                                                                                                                                        | 基于代码/git/workspace 取证做沉淀、活知识熵 GC 与状态收尾；物理归档有独立授权门，完成态文档迁入冷档案并同步导航                                                                                                                                                                                                                                                                                                                              |
 | 知识库模板             | `templates/`                                                                                                                                                       | /init-docs、/compound-docs 使用的 AGENTS/docs 模板；冷档案 README 只在首次实际归档时生成                                                                                                                                                                                                                                                                                                                                                     |
 
+`src/review/runner-invocation.ts` 是 Builder、Validator 与最终 Review 共用的密封 Runner
+调用层：完整提示词不进入 supervisor DATA，三者仍由各自的受管 operation 裁决。
+
 ## 分层与依赖方向
 
 cli → quality + engine + workspace-safety。run 在 loop 入口取得 session；agent/gate/tdd/review 只通过

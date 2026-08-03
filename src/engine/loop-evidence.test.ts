@@ -10,6 +10,7 @@ import {
   story,
   runLoop,
   fakeCounting,
+  FAKE_RUNNER_INPUT_SOURCE,
   strictConfig,
   qualityContractWithNodeScript,
   readyQualityContract,
@@ -139,6 +140,7 @@ describe('runLoop evidence records', () => {
       fake,
       `
       import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+      ${FAKE_RUNNER_INPUT_SOURCE}
       const callsPath = ${JSON.stringify(calls)};
       const count = existsSync(callsPath) ? Number(readFileSync(callsPath, 'utf-8')) + 1 : 1;
       writeFileSync(callsPath, String(count));
@@ -150,7 +152,6 @@ describe('runLoop evidence records', () => {
         appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder progress ' + count + '\\n');
         writeFileSync(statePath, JSON.stringify(state));
       } else {
-        const prompt = process.argv.at(-1) ?? '';
         const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
         const jsonAt = prompt.indexOf('{', markerAt);
         const fenceAt = prompt.indexOf(String.fromCharCode(10, 96, 96, 96), jsonAt);

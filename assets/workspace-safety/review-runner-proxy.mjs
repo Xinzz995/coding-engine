@@ -149,13 +149,26 @@ async function main() {
     shell: false,
     stdio: ['pipe', 'inherit', 'inherit'],
   });
-  child.once('error', (error) => fail(`failed to start runner: ${error.message}`));
-  child.once('exit', (code, signal) => {
+  let spawnFailed = false;
+  let inputFailure = null;
+  child.once('error', (error) => {
+    spawnFailed = true;
+    fail(`failed to start runner: ${error.message}`);
+  });
+  child.once('close', (code, signal) => {
+    if (spawnFailed) return;
     if (signal !== null) {
       process.kill(process.pid, signal);
       return;
     }
+    if (code === 0 && inputFailure !== null) {
+      fail(`failed to deliver runner input: ${inputFailure.message}`);
+      return;
+    }
     process.exitCode = code ?? 1;
+  });
+  child.stdin.once('error', (error) => {
+    inputFailure = error;
   });
   if (config.promptMode === 'stdin') child.stdin.end(prompt);
   else child.stdin.end();
