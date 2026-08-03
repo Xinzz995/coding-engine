@@ -67,6 +67,58 @@ describe.runIf(
     await session.close();
   }, 20_000);
 
+  it.runIf(process.platform !== 'win32')(
+    'executes the canonical target while preserving a verified symlink argv0',
+    async () => {
+      const executableRoot = mkdtempSync(join(tmpdir(), 'coding-x-managed-argv0-'));
+      roots.push(executableRoot);
+      const executableArgv0 = join(executableRoot, 'venv-python-shape');
+      symlinkSync(process.execPath, executableArgv0);
+      const { session, workspace } = await readySession();
+      const result = await runManagedWorkspaceProcess(session, {
+        kind: 'quality-check',
+        delegation: 'read-only-v1',
+        executable: process.execPath,
+        executableArgv0,
+        args: ['-e', 'process.stdout.write(process.argv0)'],
+        cwd: workspace,
+        environment: environmentEntries(process.env),
+        timeoutMs: 5_000,
+      });
+
+      expect(result).toMatchObject({ verdict: 'completed', exitCode: 0 });
+      expect(result.stdout.toString('utf8')).toBe(executableArgv0);
+      await session.close();
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects argv0 that does not resolve to the fixed executable',
+    async () => {
+      const executableRoot = mkdtempSync(join(tmpdir(), 'coding-x-managed-wrong-argv0-'));
+      roots.push(executableRoot);
+      const executableArgv0 = join(executableRoot, 'wrong-runtime');
+      symlinkSync('/bin/sh', executableArgv0);
+      const { session, workspace } = await readySession();
+
+      await expect(
+        runManagedWorkspaceProcess(session, {
+          kind: 'quality-check',
+          delegation: 'read-only-v1',
+          executable: process.execPath,
+          executableArgv0,
+          args: [],
+          cwd: workspace,
+          environment: environmentEntries(process.env),
+          timeoutMs: 5_000,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid' });
+      expect(session.state).toBe('open');
+      await session.close();
+    },
+  );
+
   it('rejects an unavailable target before installing an operation', async () => {
     const { workspace, session } = await readySession();
     const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);

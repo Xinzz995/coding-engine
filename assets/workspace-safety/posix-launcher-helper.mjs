@@ -26,12 +26,14 @@ function exactKeys(value, expected) {
 }
 
 function parseTarget(value) {
-  if (!exactKeys(value, ['executable', 'args', 'cwd', 'environment'])) {
+  if (!exactKeys(value, ['executable', 'executableArgv0', 'args', 'cwd', 'environment'])) {
     throw new Error('invalid launcher target shape');
   }
   if (
     typeof value.executable !== 'string' ||
     value.executable.length === 0 ||
+    typeof value.executableArgv0 !== 'string' ||
+    value.executableArgv0.length === 0 ||
     typeof value.cwd !== 'string' ||
     value.cwd.length === 0 ||
     !Array.isArray(value.args) ||
@@ -57,6 +59,7 @@ function parseTarget(value) {
   }
   return {
     executable: value.executable,
+    executableArgv0: value.executableArgv0,
     args: [...value.args],
     cwd: value.cwd,
     environment,
@@ -99,6 +102,7 @@ process.on('message', (message) => {
       }
       state = 'starting';
       root = spawn(target.executable, target.args, {
+        argv0: target.executableArgv0 ?? target.executable,
         cwd: target.cwd,
         env: target.environment,
         detached: false,

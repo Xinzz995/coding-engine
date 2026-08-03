@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,7 @@ import {
   agentTemporaryRetentionFailure,
   buildManagedAgentArgs,
   resolveBinary,
+  resolveExecutableInvocation,
   resolveExecutablePath,
   resolveRunnerExecutablePath,
   resolveRunnerInvocation,
@@ -168,6 +170,24 @@ describe('resolveBinary', () => {
 });
 
 describe('resolveExecutablePath', () => {
+  it.runIf(process.platform !== 'win32')(
+    'keeps the absolute symlink entry separately from the canonical executable',
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'coding-x-executable-invocation-'));
+      const executable = join(dir, 'runtime');
+      symlinkSync(process.execPath, executable);
+      try {
+        expect(resolveExecutableInvocation(executable, dir)).toEqual({
+          invocationPath: executable,
+          canonicalPath: realpathSync.native(process.execPath),
+        });
+        expect(resolveExecutablePath(executable, dir)).toBe(realpathSync.native(process.execPath));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('uses Windows environment names case-insensitively without duplicating an existing suffix', () => {
     const dir = mkdtempSync(join(tmpdir(), 'coding-x-windows-bin-'));
     const executable = join(dir, 'cmd.exe');

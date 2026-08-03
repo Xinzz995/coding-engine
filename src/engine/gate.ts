@@ -4,7 +4,7 @@ import { INITIAL_STORY_STATE } from './state.js';
 import { realpathSync } from 'node:fs';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
-import { resolveExecutablePath } from './agent.js';
+import { resolveExecutableInvocation } from './agent.js';
 import type { ValidationCheck } from './validation-protocol.js';
 import type {
   FrozenQualityChecks,
@@ -151,9 +151,12 @@ function runSpawnedGate(
     }
   }
   let resolvedExecutable: string;
+  let executableArgv0: string;
   let resolvedCwd: string;
   try {
-    resolvedExecutable = resolveExecutablePath(executable, spec.cwd, environment);
+    const resolved = resolveExecutableInvocation(executable, spec.cwd, environment);
+    resolvedExecutable = resolved.canonicalPath;
+    executableArgv0 = resolved.invocationPath;
     resolvedCwd = realpathSync(spec.cwd);
     if (managed.forbiddenExecutableRoot) {
       const forbiddenInput = resolve(managed.forbiddenExecutableRoot);
@@ -183,7 +186,11 @@ function runSpawnedGate(
           .map((entry) => entry.replace(/^[('"`]+|[)'"`]+$/gu, ''))
           .some(candidateReferencesForbiddenRoot);
       };
-      if (referencesForbiddenRoot(resolvedExecutable) || args.some(referencesForbiddenRoot)) {
+      if (
+        referencesForbiddenRoot(executableArgv0) ||
+        referencesForbiddenRoot(resolvedExecutable) ||
+        args.some(referencesForbiddenRoot)
+      ) {
         throw new Error('验证命令解析到开发工作树，不能作为干净验证输入');
       }
     }
@@ -199,6 +206,7 @@ function runSpawnedGate(
     kind: managed.kind,
     delegation: 'read-only-v1',
     executable: resolvedExecutable,
+    executableArgv0,
     args,
     cwd: resolvedCwd,
     environment: environmentEntries(environment),

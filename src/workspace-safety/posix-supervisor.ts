@@ -918,8 +918,16 @@ export async function runDarkPosixSupervisedOperation(
   try {
     terminationTrigger = createTerminationTrigger(options.commandTimeoutMs, options.termination);
     throwIfPrestartInterrupted(terminationTrigger);
-    if (!isAbsolute(options.target.executable) || !isAbsolute(options.target.cwd)) {
-      invalid('target executable and cwd must be absolute');
+    const target = {
+      ...options.target,
+      executableArgv0: options.target.executableArgv0 ?? options.target.executable,
+    };
+    if (
+      !isAbsolute(target.executable) ||
+      !isAbsolute(target.executableArgv0) ||
+      !isAbsolute(target.cwd)
+    ) {
+      invalid('target executable, argv0 and cwd must be absolute');
     }
     const timeouts = resolveTimeouts(options.timeouts);
     resolvedTimeouts = timeouts;
@@ -956,7 +964,7 @@ export async function runDarkPosixSupervisedOperation(
 
     const dataBytes = encodeSupervisorData({
       operationId: operation.operationId,
-      target: options.target,
+      target,
     });
     await processHandle.sendBefore(
       {

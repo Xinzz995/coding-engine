@@ -450,13 +450,14 @@ export const waitUntil = (predicate, timeoutMs, pollMs = 25) =>
   waitUntilDeadline(predicate, deadlineAfter(timeoutMs), pollMs);
 
 export function parseTarget(value) {
-  if (!exactKeys(value, ['executable', 'args', 'cwd', 'environment'])) {
+  if (!exactKeys(value, ['executable', 'executableArgv0', 'args', 'cwd', 'environment'])) {
     throw new Error('target has unknown or missing fields');
   }
   const executable = boundedString(value.executable, 'target executable');
+  const executableArgv0 = boundedString(value.executableArgv0, 'target executable argv0');
   const cwd = boundedString(value.cwd, 'target cwd');
-  if (!isAbsolute(executable) || !isAbsolute(cwd)) {
-    throw new Error('target executable and cwd must be absolute');
+  if (!isAbsolute(executable) || !isAbsolute(executableArgv0) || !isAbsolute(cwd)) {
+    throw new Error('target executable, argv0 and cwd must be absolute');
   }
   if (!Array.isArray(value.args) || value.args.length > 256) throw new Error('target args invalid');
   if (!Array.isArray(value.environment) || value.environment.length > 256) {
@@ -475,6 +476,7 @@ export function parseTarget(value) {
   });
   return {
     executable,
+    executableArgv0,
     cwd,
     args: value.args.map((argument) => boundedString(argument, 'target argument', true)),
     environment,

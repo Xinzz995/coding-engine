@@ -22,6 +22,9 @@ const MAX_HELPER_STDERR_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 
 export type WindowsContainment = Extract<ContainmentDescriptor, { platform: 'windows-job-v1' }>;
+type WindowsSupervisorTarget = Omit<SupervisorTarget, 'executableArgv0'> & {
+  readonly executableArgv0?: never;
+};
 type StrictRecord = Record<string, unknown>;
 
 export interface WindowsSupervisorHooks {
@@ -57,7 +60,7 @@ export interface WindowsSupervisorHooks {
 }
 
 export interface RunDarkWindowsSupervisedOperationOptions {
-  readonly target: SupervisorTarget;
+  readonly target: WindowsSupervisorTarget;
   readonly commandTimeoutMs?: number;
   readonly termination?: {
     readonly signal: AbortSignal;
