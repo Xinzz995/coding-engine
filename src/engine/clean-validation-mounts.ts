@@ -2,9 +2,11 @@ import {
   closeSync,
   constants as fsConstants,
   fstatSync,
+  lstatSync,
   openSync,
   readSync,
   realpathSync,
+  statfsSync,
 } from 'node:fs';
 import { isAbsolute, posix, relative, resolve, sep } from 'node:path';
 import { readDarwinMountTable } from '../workspace-safety/darwin-mount-table-transport.js';
@@ -24,10 +26,48 @@ const DARWIN_ORDINARY_LOCAL_FILE_SYSTEMS = new Set([
   'udf',
 ]);
 
+const DARWIN_TRUSTED_HARD_LINK_FILE_SYSTEMS = new Set(['apfs', 'hfs']);
+const LINUX_TRUSTED_HARD_LINK_FILE_SYSTEMS = new Set<bigint>([
+  0xef53n, // ext2/ext3/ext4
+  0x58465342n, // XFS
+  0x9123683en, // Btrfs
+  0x01021994n, // tmpfs
+]);
+
+/** @internal 只供窄文件系统正面列表回归。 */
+export function isTrustedLinuxHardLinkFileSystemForTests(type: bigint): boolean {
+  return LINUX_TRUSTED_HARD_LINK_FILE_SYSTEMS.has(type);
+}
+
+/** @internal 只供 macOS 硬链接文件系统类型回归；卷的 local/fskit 属性仍单独核对。 */
+export function isTrustedDarwinHardLinkFileSystemForTests(type: string): boolean {
+  return DARWIN_TRUSTED_HARD_LINK_FILE_SYSTEMS.has(type.toLowerCase());
+}
+
+/** @internal 只供根目录与挂载表运行时文件系统身份绑定回归。 */
+export function isTrustedDarwinHardLinkBackingForTests(
+  type: string,
+  rootRuntimeType: bigint,
+  selectedRuntimeType: bigint,
+  trustedLocalMount: boolean,
+): boolean {
+  return (
+    trustedLocalMount &&
+    isTrustedDarwinHardLinkFileSystemForTests(type) &&
+    rootRuntimeType === selectedRuntimeType
+  );
+}
+
 interface DarwinMountEntry {
   readonly path: string;
   readonly type: string;
   readonly options: ReadonlySet<string>;
+}
+
+export interface CleanValidationBackingFileSystemProof {
+  readonly identity: string;
+  readonly hardLinksTrusted: boolean;
+  readonly description: string;
 }
 
 export class CleanValidationMountProofError extends Error {
@@ -183,6 +223,22 @@ function isTrustedLocalDarwinMount(entry: DarwinMountEntry): boolean {
   );
 }
 
+function selectedDarwinMount(
+  entries: readonly DarwinMountEntry[],
+  target: string,
+): DarwinMountEntry | undefined {
+  const candidate = supportedPosixMountPath(target, 'macOS 目标');
+  let selected: DarwinMountEntry | undefined;
+  for (const entry of entries) {
+    const child = posix.relative(entry.path, candidate);
+    if (child !== '' && (child === '..' || child.startsWith('../') || posix.isAbsolute(child))) {
+      continue;
+    }
+    if (selected === undefined || entry.path.length > selected.path.length) selected = entry;
+  }
+  return selected;
+}
+
 /** @internal 只供证明本地卷筛选不依赖易变的 Darwin f_type 编号。 */
 export function parseTrustedLocalDarwinMountPathsForTests(bytes: Uint8Array): string[] {
   return parseDarwinMountEntries(bytes)
@@ -195,15 +251,7 @@ export function isPathOnTrustedLocalDarwinMountForTests(
   bytes: Uint8Array,
   target: string,
 ): boolean {
-  const candidate = supportedPosixMountPath(target, 'macOS 目标');
-  let selected: DarwinMountEntry | undefined;
-  for (const entry of parseDarwinMountEntries(bytes)) {
-    const child = posix.relative(entry.path, candidate);
-    if (child !== '' && (child === '..' || child.startsWith('../') || posix.isAbsolute(child))) {
-      continue;
-    }
-    if (selected === undefined || entry.path.length > selected.path.length) selected = entry;
-  }
+  const selected = selectedDarwinMount(parseDarwinMountEntries(bytes), target);
   return selected !== undefined && isTrustedLocalDarwinMount(selected);
 }
 
@@ -227,26 +275,79 @@ export function assertNoMountedPathsAtOrBelowForTests(
  * 使用固定系统工具读取 getmntinfo 输出，Windows 则要求整棵树不存在 reparse point。
  * 任一平台无法完整证明时均抛错，不降级为普通目录遍历。
  */
-export function assertCleanValidationTreeHasNoMountPoints(root: string): void {
-  const canonicalRoot = realpathSync.native(resolve(root));
+export function assertCleanValidationTreeHasNoMountPoints(
+  root: string,
+): CleanValidationBackingFileSystemProof {
   try {
+    const suppliedRoot = resolve(root);
+    const suppliedRootInfo = lstatSync(suppliedRoot, { bigint: true });
+    if (!suppliedRootInfo.isDirectory() || suppliedRootInfo.isSymbolicLink()) {
+      throw invalid('传入的验证临时根最终分量不是普通目录');
+    }
+    const canonicalRoot = realpathSync.native(suppliedRoot);
+    const canonicalRootInfo = lstatSync(canonicalRoot, { bigint: true });
+    if (!canonicalRootInfo.isDirectory() || canonicalRootInfo.isSymbolicLink()) {
+      throw invalid('验证临时根不是普通目录');
+    }
+    if (
+      suppliedRootInfo.dev !== canonicalRootInfo.dev ||
+      suppliedRootInfo.ino !== canonicalRootInfo.ino ||
+      suppliedRootInfo.uid !== canonicalRootInfo.uid
+    ) {
+      throw invalid('传入的验证临时根与解析后的目录身份不一致');
+    }
+    const suppliedRootIdentity = [suppliedRootInfo.dev, suppliedRootInfo.ino, suppliedRootInfo.uid]
+      .map((value) => value.toString())
+      .join(':');
+    const canonicalRootIdentity = [
+      canonicalRootInfo.dev,
+      canonicalRootInfo.ino,
+      canonicalRootInfo.uid,
+    ]
+      .map((value) => value.toString())
+      .join(':');
+    const rootIdentity = `${suppliedRootIdentity}:${canonicalRoot}:${canonicalRootIdentity}`;
     if (process.platform === 'linux') {
-      assertNoMountedPathsAtOrBelowForTests(
-        canonicalRoot,
-        parseLinuxMountInfoForTests(boundedRead(`/proc/${process.pid}/mountinfo`)),
-      );
-      return;
+      const mountPaths = parseLinuxMountInfoForTests(boundedRead(`/proc/${process.pid}/mountinfo`));
+      assertNoMountedPathsAtOrBelowForTests(canonicalRoot, mountPaths);
+      const type = statfsSync(canonicalRoot, { bigint: true }).type;
+      return {
+        identity: `linux:${rootIdentity}:${type.toString(16)}`,
+        hardLinksTrusted: isTrustedLinuxHardLinkFileSystemForTests(type),
+        description: `Linux filesystem 0x${type.toString(16)}`,
+      };
     }
     if (process.platform === 'darwin') {
+      const mountTable = readDarwinMountTable();
+      const entries = parseDarwinMountEntries(mountTable);
       assertNoMountedPathsAtOrBelowForTests(
         canonicalRoot,
-        parseDarwinMountOutputForTests(readDarwinMountTable()),
+        entries.map((entry) => entry.path),
       );
-      return;
+      const selected = selectedDarwinMount(entries, canonicalRoot);
+      if (selected === undefined) throw invalid('macOS 无法定位验证临时根所属卷');
+      const type = statfsSync(canonicalRoot, { bigint: true }).type;
+      const selectedRuntimeType = statfsSync(selected.path, { bigint: true }).type;
+      const normalizedType = selected.type.toLowerCase();
+      const options = [...selected.options].sort().join(',');
+      return {
+        identity: `darwin:${rootIdentity}:${selected.path}:${normalizedType}:${options}:${type.toString(16)}:${selectedRuntimeType.toString(16)}`,
+        hardLinksTrusted: isTrustedDarwinHardLinkBackingForTests(
+          normalizedType,
+          type,
+          selectedRuntimeType,
+          isTrustedLocalDarwinMount(selected),
+        ),
+        description: `macOS ${normalizedType} volume`,
+      };
     }
     if (process.platform === 'win32') {
       assertWindowsWorkspaceTreeHasNoReparsePoints(canonicalRoot);
-      return;
+      return {
+        identity: `win32:${rootIdentity}`,
+        hardLinksTrusted: false,
+        description: 'Windows filesystem',
+      };
     }
     throw invalid(`当前平台 ${process.platform} 不受支持`);
   } catch (error) {

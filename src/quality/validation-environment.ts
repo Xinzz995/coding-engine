@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { QualityContract, QualityPlatform } from './contract.js';
 
-export const CLEAN_VALIDATION_CHECKOUT_VERSION = 'clean-checkout-v1' as const;
+export const CLEAN_VALIDATION_CHECKOUT_VERSION = 'clean-checkout-v2' as const;
 
 function currentQualityPlatform(): QualityPlatform {
   if (process.platform === 'linux') return 'linux';

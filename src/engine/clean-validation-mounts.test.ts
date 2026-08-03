@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,9 @@ import {
   assertCleanValidationTreeHasNoMountPoints,
   assertNoMountedPathsAtOrBelowForTests,
   isPathOnTrustedLocalDarwinMountForTests,
+  isTrustedDarwinHardLinkBackingForTests,
+  isTrustedDarwinHardLinkFileSystemForTests,
+  isTrustedLinuxHardLinkFileSystemForTests,
   parseDarwinMountOutputForTests,
   parseTrustedLocalDarwinMountPathsForTests,
   parseLinuxMountInfoForTests,
@@ -26,6 +29,22 @@ afterEach(() => {
 });
 
 describe('clean validation mount proof', () => {
+  it('uses a narrow positive list for filesystems with trusted hard-link counts', () => {
+    for (const type of [0xef53n, 0x58465342n, 0x9123683en, 0x01021994n]) {
+      expect(isTrustedLinuxHardLinkFileSystemForTests(type)).toBe(true);
+    }
+    for (const type of [0x794c7630n, 0x65735546n, 0x6969n, 0x12345678n]) {
+      expect(isTrustedLinuxHardLinkFileSystemForTests(type)).toBe(false);
+    }
+    expect(isTrustedDarwinHardLinkFileSystemForTests('apfs')).toBe(true);
+    expect(isTrustedDarwinHardLinkFileSystemForTests('HFS')).toBe(true);
+    expect(isTrustedDarwinHardLinkFileSystemForTests('exfat')).toBe(false);
+    expect(isTrustedDarwinHardLinkFileSystemForTests('macfuse')).toBe(false);
+    expect(isTrustedDarwinHardLinkBackingForTests('apfs', 0x1an, 0x1an, true)).toBe(true);
+    expect(isTrustedDarwinHardLinkBackingForTests('apfs', 0x1an, 0x19n, true)).toBe(false);
+    expect(isTrustedDarwinHardLinkBackingForTests('apfs', 0x1an, 0x1an, false)).toBe(false);
+  });
+
   it('parses escaped Linux mountinfo paths and rejects malformed records', () => {
     expect(
       parseLinuxMountInfoForTests(
@@ -80,10 +99,7 @@ describe('clean validation mount proof', () => {
         '',
       ].join('\n'),
     );
-    expect(parseTrustedLocalDarwinMountPathsForTests(table)).toEqual([
-      '/',
-      '/Volumes/portable',
-    ]);
+    expect(parseTrustedLocalDarwinMountPathsForTests(table)).toEqual(['/', '/Volumes/portable']);
     expect(isPathOnTrustedLocalDarwinMountForTests(table, '/private/tmp/tool')).toBe(true);
     expect(isPathOnTrustedLocalDarwinMountForTests(table, '/Volumes/portable/tool')).toBe(true);
     expect(isPathOnTrustedLocalDarwinMountForTests(table, '/Volumes/share/tool')).toBe(false);
@@ -117,6 +133,31 @@ describe('clean validation mount proof', () => {
     roots.push(root);
     expect(() => assertCleanValidationTreeHasNoMountPoints(root)).not.toThrow();
   });
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'allows an intermediate path link but rejects moving the root and linking its final name back',
+    () => {
+      const container = mkdtempSync(join(tmpdir(), 'coding-x-mount-root-identity-'));
+      roots.push(container);
+      const realParent = join(container, 'real-parent');
+      const parentAlias = join(container, 'parent-alias');
+      const root = join(realParent, 'checkout');
+      const movedRoot = join(realParent, 'moved-checkout');
+      mkdirSync(root, { recursive: true });
+      symlinkSync(realParent, parentAlias, 'dir');
+      const rootThroughIntermediateLink = join(parentAlias, 'checkout');
+
+      expect(() =>
+        assertCleanValidationTreeHasNoMountPoints(rootThroughIntermediateLink),
+      ).not.toThrow();
+
+      renameSync(root, movedRoot);
+      symlinkSync(movedRoot, root, 'dir');
+      expect(() => assertCleanValidationTreeHasNoMountPoints(rootThroughIntermediateLink)).toThrow(
+        /最终分量不是普通目录/u,
+      );
+    },
+  );
 
   it.runIf(process.platform === 'linux' && process.env.CODING_X_RUN_LINUX_MOUNT_PROOF === '1')(
     'rejects a real Linux bind mount before recursive cleanup',
