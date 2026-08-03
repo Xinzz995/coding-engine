@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { delegationScope } from '../workspace-safety/operation-records.js';
 import { renderInstruction } from './loop.js';
@@ -128,5 +132,48 @@ describe('instruction assets workspace commit isolation contract', () => {
       undefined,
     ).contract.rules.map(({ path }) => path);
     expect(promptPaths.sort()).toEqual(contractPaths.sort());
+  });
+});
+
+describe('instruction assets Validator artifact isolation contract', () => {
+  it('requires cache-free validation and a clean checkout before a passed claim', () => {
+    const content = read('validator.md');
+    expect(content).toContain('不是通用临时目录');
+    expect(content).toContain('禁止缓存或把临时内容重定向到系统临时目录');
+    expect(content).toContain('测试缓存、语言运行时字节码、覆盖率数据、静态检查缓存');
+    expect(content).toContain('系统临时目录或质量契约已声明的生成产物目录');
+    expect(content).toContain('被 Git 忽略也不构成保留理由');
+    expect(content).toContain('`git status --short --untracked-files=all --ignored=matching`');
+    expect(content).toContain('不得写入 `verdict="passed"`');
+    expect(content).toContain('不得为获得干净状态而删除或还原项目原有的跟踪文件');
+  });
+
+  it('prescribes a status probe that reveals ignored Validator caches', () => {
+    const root = mkdtempSync(join(tmpdir(), 'coding-x-validator-artifacts-'));
+    try {
+      execFileSync('git', ['init', '--quiet'], { cwd: root });
+      writeFileSync(join(root, '.gitignore'), '__pycache__/\n.pytest_cache/\n');
+      mkdirSync(join(root, '__pycache__'));
+      writeFileSync(join(root, '__pycache__/module.pyc'), 'cache');
+      mkdirSync(join(root, '.pytest_cache'));
+      writeFileSync(join(root, '.pytest_cache/state'), 'cache');
+
+      const ordinary = execFileSync('git', ['status', '--short', '--untracked-files=all'], {
+        cwd: root,
+        encoding: 'utf8',
+      });
+      expect(ordinary).not.toContain('__pycache__');
+      expect(ordinary).not.toContain('.pytest_cache');
+
+      const complete = execFileSync(
+        'git',
+        ['status', '--short', '--untracked-files=all', '--ignored=matching'],
+        { cwd: root, encoding: 'utf8' },
+      );
+      expect(complete).toContain('!! __pycache__/');
+      expect(complete).toContain('!! .pytest_cache/');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
