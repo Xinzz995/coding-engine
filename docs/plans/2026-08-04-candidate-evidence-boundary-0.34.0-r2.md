@@ -76,5 +76,5 @@ shadow、Developer、Validator、三层 Review 或 GitHub CI 证据。
 | 候选身份 | 四项值逐字匹配，且明确要求同时匹配。 |
 | 证据边界 | 表格分别标明已直接核对、仍须产生和不由本 PR 完成的项目。 |
 | shadow 语义 | 正式版本不一致失败，三项健康 shadow 结果均为退出 `7`，且没有把 `7` 写成通过或交付。 |
-| 受管范围 | `git diff --name-only main...HEAD` 只列出需求来源和本计划。 |
+| 受管范围 | `git diff --name-only origin/main...HEAD` 只列出需求来源和本计划。 |
 | 仓库检查 | `npm run repository-health`、`npm run typecheck` 通过。 |
