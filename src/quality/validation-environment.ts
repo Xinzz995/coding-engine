@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { QualityContract, QualityPlatform } from './contract.js';
 
-export const CLEAN_VALIDATION_CHECKOUT_VERSION = 'clean-checkout-v2' as const;
+export const CLEAN_VALIDATION_CHECKOUT_VERSION = 'clean-checkout-v3' as const;
 
 function currentQualityPlatform(): QualityPlatform {
   if (process.platform === 'linux') return 'linux';
@@ -21,6 +21,13 @@ function canonicalize(value: unknown): unknown {
   );
 }
 
+export function normalizeValidationAdditionalRefs(
+  head: string,
+  additionalRefs: readonly string[] = [],
+): string[] {
+  return [...new Set(additionalRefs)].filter((ref) => ref !== head).sort();
+}
+
 /** 绑定 checkout 协议、平台、精确提交与经默认分支裁决的准备/产物边界。 */
 export function validationEnvironmentDigest(options: {
   readonly contract: Pick<QualityContract, 'checks' | 'generatedPaths' | 'localValidation'>;
@@ -37,7 +44,7 @@ export function validationEnvironmentDigest(options: {
     localValidation: options.contract.localValidation,
     generatedPaths: options.contract.generatedPaths,
     checks: options.contract.checks,
-    additionalRefs: [...new Set(options.additionalRefs ?? [])].sort(),
+    additionalRefs: normalizeValidationAdditionalRefs(options.head, options.additionalRefs),
     additionalPolicy: options.additionalPolicy ?? null,
   });
   return `sha256:${createHash('sha256').update(JSON.stringify(data)).digest('hex')}`;

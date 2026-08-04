@@ -1,7 +1,7 @@
 ---
 title: 022-clean-checkout-validation
 status: active
-updated: 2026-08-03
+updated: 2026-08-04
 scope: root
 ---
 
@@ -23,7 +23,15 @@ ADR-015 把 Validator 结果绑定到 Git HEAD 与验收标准，ADR-021 又保�
 - workspace 保持原绝对路径，Validator 结果和引擎状态只回到受控 workspace；
 - 质量契约 schema v2 显式保存本地 prepare 命令和允许产物目录，不能从 GitHub setup 暗推；
 - 检出关闭系统/全局 Git 配置和 hooks，在 materialize 前拒绝 submodule、LFS/custom filter 与
-  working-tree encoding；首版不静默降级复制工作树；
+  working-tree encoding；首版不静默降级复制工作树；目标 HEAD 与附加提交必须从非 shallow 来源
+  获取完整可达祖先，从而保留逐路径 Git 历史语义，但不抓取无关分支或标签，也不通过 alternates
+  继续依赖开发仓库对象目录；来源为 shallow、partial/promisor、缺失对象、replace refs 或 grafts
+  时返回不可验证，Git 自动补取和替换历史能力始终关闭；目标提交集合限制为 16 个，fetch 前把去重
+  可达对象限制为 10 万个，并按每个对象未压缩大小加 1% 和 1 KiB 固定余量计算不超过 1 GiB 的
+  保守容量预算，不用可能低估目标占用的源仓库 delta 压缩值；fetch 后再证明目标对象集合精确一致、
+  ref namespace 为空且目标对象
+  文件实际大小不超过 1 GiB；正式本地验证要求 Git 2.29 或更高版本，任一所需能力缺失、输出损坏或
+  预算超限均返回不可验证；历史准备与工作树 materialize 共用十分钟绝对截止时间，不能按子进程重置；
 - 每个阶段前后机械核对 detached HEAD、index/tracked tree 与新增/ignored 产物边界；项目生成物和
   本地依赖只能出现在契约的明确目录模式中；
 - 允许目录的基路径必须是字面目录，不能用 glob 扩大边界；prepare 产生的项目外目录链接一律拒绝，
@@ -62,8 +70,8 @@ Windows 的外部文件链接身份尚未完成真实平台证明，首版直接
 拓扑核对前后都重新证明检出根本身未被替换、检出树没有挂载点，并复核整树摘要、hard link 组和后备
 文件系统身份。前后快照能发现持续存在的新增挂载点或别名，但不声称能够发现扫描期间出现后又立即
 消失的瞬时同用户竞态。
-clean checkout 协议版本为 `clean-checkout-v2`；版本进入
-环境摘要，因此 v1 环境下签发的旧 Story 回执和旧 Final Review 都不能继续作为当前结果。
+clean checkout 协议版本为 `clean-checkout-v3`；版本进入
+环境摘要，因此 v1/v2 环境下签发的旧 Story 回执和旧 Final Review 都不能继续作为当前结果。
 
 环境摘要只证明控制平面可重算的执行合同：checkout 协议版本、平台、HEAD、完整机械检查、完整 TDD
 政策、prepare 命令和允许目录。正式运行还要求工作树契约的规范摘要等于每个待验证 HEAD 中已跟踪
