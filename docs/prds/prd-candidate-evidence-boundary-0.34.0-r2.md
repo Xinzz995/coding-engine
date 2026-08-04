@@ -70,7 +70,7 @@ Developer、Validator、三层 Review、GitHub CI、外部试点、npm staging�
 - [ ] 新增且只新增目标计划 `docs/plans/2026-08-04-candidate-evidence-boundary-0.34.0-r2.md`；其 frontmatter 为 `status: active`、`updated: 2026-08-04`、`scope: root`。
 - [ ] 目标计划逐字包含 `coding-x@0.34.0`、运行 `30914071363`、main 提交 `08d9539d1cca986a9ed2ff2b4f1498ac849988b3` 和 SHA-256 `4a0a616e33a48a54f574c44a31d3d510fb380a247d90d2cfd1e459f02dcd8c54`，并声明四项必须同时匹配。
 - [ ] 目标计划逐字包含本轮固定绝对 CLI `/private/tmp/coding-x-dogfood-0.34-r5.eDvI6T/engine-install/node_modules/coding-x/dist/cli.js`，且 workspace init、doctor、apply-prd、run 不得换用其他入口。
-- [ ] 目标计划用表格分别标明：候选构建与本地摘要已经直接核对；本 PR 的 shadow、Developer、Validator、三层 Review 和 GitHub CI 仍须产生；Go/Python、npm staging、公开发布、标签、Release 与合并不由本 PR 完成。
+- [ ] 目标计划用表格分别标明：候选构建与本地摘要已经直接核对；本 PR 的 shadow、Developer、Validator、三层 Review 和 GitHub CI 仍须产生；Go/Python、npm staging、公开发布、标签、Release 与合并不由本 PR 完成；每项同时提供可定位证据或预期落点。
 - [ ] 目标计划明确同一绝对候选 CLI 按顺序贯穿 workspace init 和三项 shadow 操作；正式 doctor/apply-prd 因 `0.33.3` 固定版本不一致而失败；shadow doctor/apply-prd/run 健康时均退出 7，且退出 7 永远不表示通过或可交付。
 - [ ] 目标计划明确本 PR 保持开放、不触发 npm staging、不修改 PR #65、不使用维护者真实 checkout。
 - [ ] 相对 `main` 的受管改动只有本 PRD 和目标计划，不修改代码、测试、工作流、质量契约、依赖、版本或发布文件。
