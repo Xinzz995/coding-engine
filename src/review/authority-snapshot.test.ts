@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { TextEncoder } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createManagedProcessTestSession } from '../engine/managed-process-test-support.js';
+import { readTddConfig } from '../engine/tdd-gate.js';
 import { readQualityContract } from '../quality/contract.js';
 import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import { ACTIVE_LEASE_DIR, PROTOCOL_ROOT_DIR } from '../workspace-safety/types.js';
@@ -106,7 +107,7 @@ function result(ctx = context()): ReviewAuthoritySnapshotResult {
     }),
     pullRequestJson: JSON.stringify({
       number: ctx.pullRequest.number,
-      head: { sha: ctx.pullRequest.headSha },
+      head: { sha: ctx.pullRequest.headSha, ref: ctx.branch },
       base: { sha: ctx.pullRequest.baseSha, ref: ctx.pullRequest.baseBranch },
       html_url: ctx.pullRequest.url,
       title: ctx.pullRequest.title,
@@ -248,6 +249,15 @@ describe('authority snapshot currentness verdict', () => {
     dirty.statusBase64 = Buffer.from(' M src/index.ts\0').toString('base64');
     expect(evaluate(dirty)).toContain('工作树产生未允许改动：src/index.ts');
   });
+
+  it('binds the pull request source branch to the local feature branch', () => {
+    const branch = result();
+    branch.pullRequestJson = JSON.stringify({
+      ...JSON.parse(branch.pullRequestJson),
+      head: { sha: HEAD_SHA, ref: 'other/branch' },
+    });
+    expect(evaluate(branch)).toContain('PR 来源分支发生变化');
+  });
 });
 
 function sha256(value: string | Uint8Array): string {
@@ -299,7 +309,7 @@ function fakeGh(path: string, ctx: ReviewPreflightContext): string {
   const pullRequest = JSON.stringify({
     state: 'open',
     number: ctx.pullRequest.number,
-    head: { sha: ctx.pullRequest.headSha },
+    head: { sha: ctx.pullRequest.headSha, ref: ctx.branch },
     base: { sha: ctx.pullRequest.baseSha, ref: ctx.pullRequest.baseBranch },
     html_url: ctx.pullRequest.url,
     title: ctx.pullRequest.title,
@@ -320,7 +330,10 @@ else process.exit(9);`,
   );
 }
 
-async function realManagedFixture(runnerBody: string) {
+async function realManagedFixture(
+  runnerBody: string,
+  prdValue: Record<string, unknown> = { stories: [] },
+) {
   const projectRoot = mkdtempSync(join(tmpdir(), 'authority-snapshot-project-'));
   const executableRoot = mkdtempSync(join(tmpdir(), 'authority-snapshot-bin-'));
   roots.push(projectRoot, executableRoot);
@@ -343,7 +356,7 @@ async function realManagedFixture(runnerBody: string) {
     { cwd: projectRoot },
   );
   const managed = await createManagedProcessTestSession();
-  writeFileSync(join(managed.workspacePath, 'prd.json'), '{"stories":[]}\n');
+  writeFileSync(join(managed.workspacePath, 'prd.json'), `${JSON.stringify(prdValue)}\n`);
   writeFileSync(join(managed.workspacePath, 'state.json'), '{}\n');
   const identity = {
     workspacePath: realpathSync.native(managed.workspacePath),
@@ -352,7 +365,7 @@ async function realManagedFixture(runnerBody: string) {
     state: `ready:${sha256(readFileSync(join(managed.workspacePath, 'state.json')))}`,
     workingContract: sha256(readFileSync(join(projectRoot, '.coding-x', 'quality.json'))),
     trackedContract: sha256(readFileSync(join(projectRoot, '.coding-x', 'quality.json'))),
-    tdd: sha256(JSON.stringify({ status: 'disabled' })),
+    tdd: sha256(JSON.stringify(readTddConfig(prdValue as never))),
   };
   return {
     managed,
@@ -535,6 +548,214 @@ describe.runIf(process.platform !== 'win32')('real managed authority snapshot', 
       await fixture.managed.close();
     }
   });
+
+  it('gives runner, git and gh only their required credential environments', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const runnerEnvironmentPath = join(fixture.executableRoot, 'runner-environment.json');
+    const gitEnvironmentPath = join(fixture.executableRoot, 'git-environment.json');
+    const ghEnvironmentPath = join(fixture.executableRoot, 'gh-environment.json');
+    const delegate = (path: string, target: string, capturePath: string): string =>
+      executable(
+        path,
+        `const { spawnSync } = require('node:child_process');
+require('node:fs').writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(process.env));
+const result = spawnSync(${JSON.stringify(target)}, process.argv.slice(2), { encoding: 'buffer', env: process.env });
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);`,
+      );
+    const git = delegate(
+      join(fixture.executableRoot, 'capturing-git'),
+      fixture.git,
+      gitEnvironmentPath,
+    );
+    const gh = delegate(
+      join(fixture.executableRoot, 'capturing-gh'),
+      fixture.gh,
+      ghEnvironmentPath,
+    );
+    const runner = executable(
+      join(fixture.executableRoot, 'capturing-runner'),
+      `require('node:fs').writeFileSync(${JSON.stringify(runnerEnvironmentPath)}, JSON.stringify(process.env)); process.stdout.write('codex 1.2.3\\n');`,
+    );
+    const injected = {
+      CODEX_API_KEY: 'codex-secret',
+      OPENAI_API_KEY: 'openai-secret',
+      CODEX_HOME: fixture.executableRoot,
+      GH_TOKEN: 'gh-secret',
+      GITHUB_TOKEN: 'github-secret',
+      GH_ENTERPRISE_TOKEN: 'enterprise-secret',
+      GH_HOST: 'github.example.invalid',
+    } as const;
+    const previous = Object.fromEntries(
+      Object.keys(injected).map((name) => [name, process.env[name]]),
+    );
+    Object.assign(process.env, injected);
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'credential environment checkpoint',
+          executablesForTests: { git, gh, runner },
+        }),
+      ).resolves.toBeNull();
+
+      const runnerEnvironment = JSON.parse(readFileSync(runnerEnvironmentPath, 'utf8')) as Record<
+        string,
+        string
+      >;
+      const gitEnvironment = JSON.parse(readFileSync(gitEnvironmentPath, 'utf8')) as Record<
+        string,
+        string
+      >;
+      const ghEnvironment = JSON.parse(readFileSync(ghEnvironmentPath, 'utf8')) as Record<
+        string,
+        string
+      >;
+      expect(runnerEnvironment).toMatchObject({
+        CODEX_API_KEY: injected.CODEX_API_KEY,
+        OPENAI_API_KEY: injected.OPENAI_API_KEY,
+        CODEX_HOME: injected.CODEX_HOME,
+      });
+      for (const name of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GH_HOST']) {
+        expect(runnerEnvironment[name]).toBeUndefined();
+        expect(gitEnvironment[name]).toBeUndefined();
+      }
+      for (const name of ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_HOME']) {
+        expect(gitEnvironment[name]).toBeUndefined();
+        expect(ghEnvironment[name]).toBeUndefined();
+      }
+      expect(ghEnvironment).toMatchObject({
+        GH_TOKEN: injected.GH_TOKEN,
+        GITHUB_TOKEN: injected.GITHUB_TOKEN,
+        GH_ENTERPRISE_TOKEN: injected.GH_ENTERPRISE_TOKEN,
+        GH_HOST: injected.GH_HOST,
+      });
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await fixture.managed.close();
+    }
+  });
+
+  it('enforces a hard per-child timeout when the Runner ignores SIGTERM', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('unused\\n');`);
+    const target = join(fixture.executableRoot, 'ignore-term-runner.mjs');
+    writeFileSync(
+      target,
+      `process.on('SIGTERM', () => {}); setTimeout(() => process.stdout.write('codex 1.2.3\\n'), 3000);\n`,
+    );
+    writeFileSync(
+      fixture.runner,
+      `#!/bin/sh
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
+`,
+    );
+    chmodSync(fixture.runner, 0o755);
+    let helperDurationMs = 0;
+    const directProcess: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      const startedAt = Date.now();
+      const outcome = spawnSync(options.executable, options.args, {
+        cwd: options.cwd,
+        env: Object.fromEntries(options.environment.map(({ name, value }) => [name, value])),
+        encoding: 'buffer',
+        timeout: 5_000,
+        killSignal: 'SIGKILL',
+      });
+      helperDurationMs = Date.now() - startedAt;
+      return {
+        verdict: 'completed',
+        exitCode: outcome.status,
+        signal: outcome.signal,
+        stdout: Buffer.from(outcome.stdout ?? []),
+        stderr: Buffer.from(outcome.stderr ?? []),
+        timedOut: false,
+        processTreeNotEmpty: false,
+        terminationReason: null,
+        durationMs: helperDurationMs,
+      };
+    };
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'hard child timeout checkpoint',
+          timeoutMs: 1_000,
+          managedProcess: directProcess,
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/authority snapshot/u);
+      expect(helperDurationMs).toBeLessThan(2_200);
+    } finally {
+      await fixture.managed.close();
+    }
+  });
+
+  it('lets the outer supervisor discover and settle descendants after a hard child timeout', async () => {
+    const before = new Set(
+      readdirSync(tmpdir()).filter((name) => name.startsWith('coding-x-review-authority-')),
+    );
+    const fixture = await realManagedFixture(`process.stdout.write('unused\\n');`);
+    const target = join(fixture.executableRoot, 'timeout-descendant-runner.mjs');
+    writeFileSync(
+      target,
+      `import { spawn } from 'node:child_process';
+process.on('SIGTERM', () => {});
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: false, stdio: 'ignore' });
+child.unref();
+setTimeout(() => process.stdout.write('codex 1.2.3\\n'), 3000);
+`,
+    );
+    writeFileSync(
+      fixture.runner,
+      `#!/bin/sh
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
+`,
+    );
+    chmodSync(fixture.runner, 0o755);
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'hard timeout descendant checkpoint',
+          timeoutMs: 1_000,
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/后代进程|未完整结算|临时域/u);
+      await expect(fixture.managed.close()).resolves.toBeUndefined();
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+      for (const name of readdirSync(tmpdir())) {
+        if (!name.startsWith('coding-x-review-authority-') || before.has(name)) continue;
+        const path = join(tmpdir(), name);
+        chmodSync(path, 0o700);
+        roots.push(path);
+      }
+    }
+  }, 20_000);
 
   it('fails closed when the Runner version command writes into the project', async () => {
     const fixture = await realManagedFixture(
@@ -731,6 +952,41 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
     }
   });
 
+  it('normalizes legal TDD policyFiles key order like readTddConfig', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`, {
+      stories: [],
+      tdd: {
+        coverageCheck: 'node coverage-check.mjs',
+        sourcePathspecs: ['src/**'],
+        policyFiles: [{ sha256: 'f'.repeat(64), path: 'coverage-policy.json' }],
+        baselineRef: 'a'.repeat(40),
+        forbiddenAddedPatterns: ['istanbul ignore'],
+      },
+    });
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'TDD policyFiles order checkpoint',
+          executablesForTests: {
+            git: fixture.git,
+            gh: fixture.gh,
+            runner: fixture.runner,
+          },
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      await fixture.managed.close();
+    }
+  });
+
   it('fails closed when ordinary source changes after the first status sample', async () => {
     const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
     const marker = join(fixture.executableRoot, 'status-seen');
@@ -822,7 +1078,7 @@ process.exit(result.status ?? 1);`,
     const pullRequest = JSON.stringify({
       state: 'open',
       number: fixture.ctx.pullRequest.number,
-      head: { sha: fixture.ctx.pullRequest.headSha },
+      head: { sha: fixture.ctx.pullRequest.headSha, ref: fixture.ctx.branch },
       base: {
         sha: fixture.ctx.pullRequest.baseSha,
         ref: fixture.ctx.pullRequest.baseBranch,

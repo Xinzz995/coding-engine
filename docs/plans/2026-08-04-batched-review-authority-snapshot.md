@@ -36,16 +36,22 @@ GitHub Issue #151 跟踪本轮修复；后续提交与 PR 必须关联该 Issue�
 2. 一个受管 Node helper 顺序完成所有读取。它只使用 Node 核心模块和父进程解析出的项目外绝对
    `git`、`gh`、Runner 路径；不使用 shell，不导入项目模块，不读取 package.json、Git hooks、项目
    Agent 配置或 Runner 项目配置。唯一读取的本地 Git 配置事实是 origin，用于保留既有仓库身份核对；
-   每个检查点通过头尾两次 `gh repo view` 复核本地 origin 解析出的仓库身份。
+   每个检查点通过头尾两次 `gh repo view` 复核本地 origin 解析出的仓库身份。helper 根是唯一持有合并
+   认证环境的固定可信代码，并为子进程派生互不混用的最小环境：Runner 不得取得 GitHub 凭据，Git 不得
+   取得 GitHub 或模型凭据，GitHub CLI 不得取得模型凭据。
 3. Story 权威文件在同一 helper 中前后各稳定读取一次；PRD、state、工作树/HEAD 质量契约和由 PRD
    派生的 TDD 配置进入与初始 Story 观察同形的摘要。裁决文件只打开一次，以同一稳定 descriptor
-   读取的字节完成解析和摘要；不先 fingerprint 再重新打开。helper 只输出有界摘要与当前性字段。
+   读取的字节完成解析和摘要；不先 fingerprint 再重新打开。TDD `policyFiles` 始终重建为固定的
+   `{path, sha256}` 字段顺序，与 `readTddConfig` 的规范形状一致。helper 只输出有界摘要与当前性字段。
 4. 远端 base 改用 GitHub API 的默认分支提交身份，不在 currentness 检查点执行 `git fetch`，因此
    helper 对项目仓库保持只读。preflight 仍负责首次 fetch、祖先关系和完整上下文建立。工作树状态在
    远端读取前后各采样一次，最终一次放在 Story、裁决、分支、HEAD 和尾部仓库身份读取之后；任一轮出现
-   未允许改动，或两轮规范状态字节不完全一致（包括允许生成路径发生变化），都失败关闭。
+   未允许改动，或两轮规范状态字节不完全一致（包括允许生成路径发生变化），都失败关闭。PR 还必须
+   保持 `head.ref` 与当前本地功能分支一致，不能只靠 PR 编号和 head SHA 间接绑定。
 5. Runner `--version` 在固定临时域中运行。helper 返回后，临时域仍须通过既有身份、固定树和安全
-   清理核对；写入、替换、超时、外部终止或后代残留都撤销观察结果。
+   清理核对；每个子命令超时都用强制终止信号结束直接子进程，不依赖可被忽略的温和信号，也不按 PID
+   手工追杀；整个受管 operation 继续负责发现、终止和结算任何残留后代。写入、替换、超时、外部终止
+   或后代残留都撤销观察结果。
 6. 每个检查点都重新启动一个受管 operation；没有跨检查点缓存。第一轮结果也必须与 preflight、
    初始 Story 观察和初始 Runner 版本对账，不能成为新的自签基线。
 7. 测试 seam 只能替换整个 authority-snapshot 结果，不能让生产路径退回十个独立观察。旧细粒度

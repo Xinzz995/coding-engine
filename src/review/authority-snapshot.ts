@@ -112,6 +112,20 @@ if (!Number.isSafeInteger(request.pullRequestNumber) || request.pullRequestNumbe
 if (typeof request.phase !== 'string' || request.phase.length < 1 || request.phase.length > 256 || !/^[0-9a-f-]{36}$/u.test(request.nonce)) throw new Error('request checkpoint identity is invalid');
 const sha256 = (value) => 'sha256:' + createHash('sha256').update(value).digest('hex');
 const same = (a, b) => a.dev === b.dev && a.ino === b.ino && a.nlink === b.nlink && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
+const withoutEnvironment = (environment, exactNames, prefixes = []) => {
+  const exact = new Set(exactNames.map((name) => name.toUpperCase()));
+  const normalizedPrefixes = prefixes.map((prefix) => prefix.toUpperCase());
+  return Object.fromEntries(Object.entries(environment).filter(([name]) => {
+    const normalized = name.toUpperCase();
+    return !exact.has(normalized) && !normalizedPrefixes.some((prefix) => normalized.startsWith(prefix));
+  }));
+};
+const githubEnvironmentNames = ['GH_TOKEN','GITHUB_TOKEN','GH_ENTERPRISE_TOKEN','GH_HOST'];
+const modelEnvironmentNames = ['CODEX_API_KEY','OPENAI_API_KEY','CODEX_HOME','ANTHROPIC_API_KEY','GOOGLE_APPLICATION_CREDENTIALS','CLOUD_ML_REGION','CURSOR_API_KEY','CURSOR_API_ENDPOINT'];
+const modelEnvironmentPrefixes = ['CLAUDE_CODE_','AWS_','ANTHROPIC_VERTEX_'];
+const runnerEnvironment = withoutEnvironment(process.env, githubEnvironmentNames);
+const gitEnvironment = withoutEnvironment(process.env, [...githubEnvironmentNames, ...modelEnvironmentNames], modelEnvironmentPrefixes);
+const githubEnvironment = withoutEnvironment(process.env, modelEnvironmentNames, modelEnvironmentPrefixes);
 const stableRead = (path, maximumBytes, missingAllowed = false) => {
   let before;
   try { before = lstatSync(path, { bigint: true }); }
@@ -153,10 +167,10 @@ const stableFingerprint = (path, maximumBytes) => {
   return result.fingerprint;
 };
 let childProcessCount = 0;
-const run = (executable, args, cwd, maximumBytes) => {
+const run = (executable, args, cwd, maximumBytes, environment) => {
   childProcessCount += 1;
   if (childProcessCount > ${AUTHORITY_CHILD_PROCESS_BUDGET}) throw new Error('authority child process budget exceeded');
-  const result = spawnSync(executable, args, { cwd, env: process.env, encoding: 'buffer', timeout: request.timeoutMs, maxBuffer: maximumBytes + 1, windowsHide: true, shell: false });
+  const result = spawnSync(executable, args, { cwd, env: environment, encoding: 'buffer', timeout: request.timeoutMs, killSignal: 'SIGKILL', maxBuffer: maximumBytes + 1, windowsHide: true, shell: false });
   if (result.error) throw result.error;
   if (result.signal) throw new Error(executable + ' terminated by ' + result.signal);
   if (result.status !== 0) throw new Error(executable + ' exited ' + result.status + ': ' + Buffer.from(result.stderr ?? []).toString('utf8').slice(-2000));
@@ -164,14 +178,15 @@ const run = (executable, args, cwd, maximumBytes) => {
   if (stdout.length > maximumBytes) throw new Error(executable + ' output exceeded byte budget');
   return stdout;
 };
-const git = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}) => run(request.git, ['--no-replace-objects','-c','core.hooksPath=${GIT_NULL_CONFIG_PATH}','-c','core.fsmonitor=false', ...args], request.projectRoot, maximumBytes);
-const gh = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}, cwd = request.runnerDirectory) => run(request.gh, args, cwd, maximumBytes);
+const git = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}) => run(request.git, ['--no-replace-objects','-c','core.hooksPath=${GIT_NULL_CONFIG_PATH}','-c','core.fsmonitor=false', ...args], request.projectRoot, maximumBytes, gitEnvironment);
+const gh = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}, cwd = request.runnerDirectory) => run(request.gh, args, cwd, maximumBytes, githubEnvironment);
 const tddFingerprint = (prdBytes) => {
   const prd = JSON.parse(prdBytes.toString('utf8'));
   if (!Object.prototype.hasOwnProperty.call(prd, 'tdd')) return sha256(JSON.stringify({ status: 'disabled' }));
   const raw = prd.tdd;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('tdd authority is invalid');
-  const result = { status: 'enabled', config: { coverageCheck: raw.coverageCheck, sourcePathspecs: raw.sourcePathspecs, policyFiles: raw.policyFiles, baselineRef: raw.baselineRef, forbiddenAddedPatterns: raw.forbiddenAddedPatterns } };
+  const policyFiles = Array.isArray(raw.policyFiles) ? raw.policyFiles.map((item) => (!item || typeof item !== 'object' || Array.isArray(item) ? item : { path: item.path, sha256: item.sha256 })) : raw.policyFiles;
+  const result = { status: 'enabled', config: { coverageCheck: raw.coverageCheck, sourcePathspecs: raw.sourcePathspecs, policyFiles, baselineRef: raw.baselineRef, forbiddenAddedPatterns: raw.forbiddenAddedPatterns } };
   return sha256(JSON.stringify(result));
 };
 const story = () => {
@@ -198,7 +213,7 @@ const decisionDigest = () => {
 };
 const storyBeforeDigest = story();
 const branchBefore = git(['symbolic-ref','--quiet','--short','HEAD'], 4096).toString('utf8').trim();
-const runnerVersionOutput = run(request.runner, ['--version'], request.runnerDirectory, 4 * 1024 * 1024).toString('utf8').trim();
+const runnerVersionOutput = run(request.runner, ['--version'], request.runnerDirectory, 4 * 1024 * 1024, runnerEnvironment).toString('utf8').trim();
 if (!runnerVersionOutput) throw new Error('runner version is empty');
 const runnerVersion = runnerVersionOutput.split(/\r?\n/u)[0].trim();
 const repositoryJson = gh(['repo','view','--json','nameWithOwner,defaultBranchRef,isPrivate'], ${CHILD_OUTPUT_MAX_BYTES}, request.projectRoot).toString('utf8');
@@ -207,7 +222,7 @@ const branchValue = JSON.parse(branchJson);
 if (!branchValue || !branchValue.commit || typeof branchValue.commit.sha !== 'string') throw new Error('default branch response is invalid');
 const pullRequestJson = gh(['api','-H','Accept: application/vnd.github+json','-H','X-GitHub-Api-Version: 2022-11-28','repos/' + request.repository + '/pulls/' + request.pullRequestNumber]).toString('utf8');
 const pullRequestValue = JSON.parse(pullRequestJson);
-if (!pullRequestValue || typeof pullRequestValue.state !== 'string') throw new Error('pull request response is invalid');
+if (!pullRequestValue || typeof pullRequestValue.state !== 'string' || !pullRequestValue.head || typeof pullRequestValue.head.ref !== 'string') throw new Error('pull request response is invalid');
 const statusBefore = git(['status','--porcelain=v1','-z','--untracked-files=all']);
 const decisionsDigest = request.includeDecisions ? decisionDigest() : null;
 const storyAfterDigest = story();
@@ -606,9 +621,18 @@ export function evaluateReviewAuthoritySnapshot(
   if (result.pullRequestState !== 'open') {
     return '评审期间绑定的开放 PR 消失或编号发生变化';
   }
-  const current = completePullRequest(
-    parseGitHubPullRequest(parseJson(result.pullRequestJson, 'GitHub PR 响应')),
-  );
+  const pullRequestValue = parseJson(result.pullRequestJson, 'GitHub PR 响应');
+  if (
+    !isRecord(pullRequestValue) ||
+    !isRecord(pullRequestValue.head) ||
+    typeof pullRequestValue.head.ref !== 'string'
+  ) {
+    throw new Error('GitHub PR 响应缺少来源分支');
+  }
+  if (normalizeText(pullRequestValue.head.ref) !== normalizeText(options.context.branch)) {
+    return '评审期间 PR 来源分支发生变化';
+  }
+  const current = completePullRequest(parseGitHubPullRequest(pullRequestValue));
   if (!current) return '评审期间绑定的开放 PR 消失或编号发生变化';
   const pullRequestError = equalPullRequest(current, options.context.pullRequest);
   if (pullRequestError !== null) return pullRequestError;
