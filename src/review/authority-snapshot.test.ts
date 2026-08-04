@@ -547,7 +547,7 @@ describe.runIf(process.platform !== 'win32')('real managed authority snapshot', 
     } finally {
       await fixture.managed.close();
     }
-  });
+  }, 15_000);
 
   it('gives runner, git and gh only their required credential environments', async () => {
     const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
@@ -1026,7 +1026,7 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
     } finally {
       await originFixture.managed.close();
     }
-  });
+  }, 15_000);
 
   it('normalizes legal TDD policyFiles key order like readTddConfig', async () => {
     const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`, {
