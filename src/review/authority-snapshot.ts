@@ -5,6 +5,7 @@ import { TextDecoder } from 'node:util';
 import { resolveBinary, resolveRunnerExecutablePath, type AgentKind } from '../engine/agent.js';
 import { GIT_NULL_CONFIG_PATH } from '../engine/git-environment.js';
 import {
+  classifyCommandError,
   parseGitHubPullRequest,
   parseGitHubRepository,
   type GitHubPullRequestInfo,
@@ -13,11 +14,13 @@ import {
   environmentEntries,
   runManagedWorkspaceProcess,
   type ManagedWorkspaceProcessOptions,
+  type ManagedWorkspaceProcessResult,
 } from '../workspace-safety/coordinator.js';
 import { inlineModuleArguments } from '../workspace-safety/inline-program.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { normalizeText } from './common.js';
+import { runBoundedGitHubReadRetry } from './github-read-retry.js';
 import { confirmTemporaryUsesAfterSettledProcessFailure } from './managed-temporary-use.js';
 import { resolveReviewInfrastructureExecutable } from './managed-observation.js';
 import {
@@ -41,8 +44,23 @@ const CHILD_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const AUTHORITY_CHILD_PROCESS_BUDGET = 14;
 const MINIMUM_OPERATION_OVERHEAD_MS = 10_000;
+const AUTHORITY_GITHUB_STEP_FAILURE =
+  /^(?:github-repository|github-default-branch|github-pull-request|github-api):/u;
 type ManagedProcessRunner = typeof runManagedWorkspaceProcess;
 type ManagedTermination = ManagedWorkspaceProcessOptions['termination'];
+type ReviewTemporaryDirectoryFactory = (
+  options: Parameters<typeof ReviewTemporaryDirectory.create>[0],
+) => ReviewTemporaryDirectory;
+
+class ReviewAuthorityGitHubReadError extends Error {
+  constructor(
+    message: string,
+    readonly commandDetail: string,
+  ) {
+    super(message);
+    this.name = 'ReviewAuthorityGitHubReadError';
+  }
+}
 
 export interface ReviewAuthoritySnapshotRequest {
   readonly phase: string;
@@ -71,6 +89,26 @@ export interface ReviewAuthoritySnapshotResult {
   statusBeforeBase64: string;
   statusBase64: string;
   decisionsDigest: string | null;
+}
+
+interface ReviewAuthoritySnapshotOptions {
+  session: WorkspaceSession;
+  context: ReviewPreflightContext;
+  workspace: string;
+  runner: AgentKind;
+  expectedRunnerVersion: string;
+  expectedStoryAuthorityInputDigest: string;
+  expectedDecisionsDigest: string;
+  includeDecisions: boolean;
+  phase: string;
+  termination?: ManagedTermination;
+  timeoutMs?: number;
+  /** @internal Full-operation test seam. */
+  managedProcess?: ManagedProcessRunner;
+  /** @internal Trusted executable fixtures outside the project. */
+  executablesForTests?: { git: string; gh: string; runner: string };
+  /** @internal Injects one real temporary domain with deterministic cleanup behavior. */
+  createTemporaryForTests?: ReviewTemporaryDirectoryFactory;
 }
 
 interface HelperRequest {
@@ -467,27 +505,24 @@ function snapshotEnvironment(runner: AgentKind): NodeJS.ProcessEnv {
   };
 }
 
-export async function verifyReviewAuthoritySnapshot(options: {
-  session: WorkspaceSession;
-  context: ReviewPreflightContext;
-  workspace: string;
-  runner: AgentKind;
-  expectedRunnerVersion: string;
-  expectedStoryAuthorityInputDigest: string;
-  expectedDecisionsDigest: string;
-  includeDecisions: boolean;
-  phase: string;
-  termination?: ManagedTermination;
-  timeoutMs?: number;
-  /** @internal Full-operation test seam. */
-  managedProcess?: ManagedProcessRunner;
-  /** @internal Trusted executable fixtures outside the project. */
-  executablesForTests?: { git: string; gh: string; runner: string };
-}): Promise<string | null> {
+function naturalAuthorityRootFailure(observed: ManagedWorkspaceProcessResult): boolean {
+  return (
+    observed.verdict === 'root-failed' &&
+    observed.exitCode !== null &&
+    observed.signal === null &&
+    !observed.timedOut &&
+    !observed.processTreeNotEmpty &&
+    observed.terminationReason === null
+  );
+}
+
+async function verifyReviewAuthoritySnapshotAttempt(
+  options: ReviewAuthoritySnapshotOptions,
+): Promise<string | null> {
   const root = realpathSync.native(resolve(options.context.root));
   const workspace = realpathSync.native(resolve(options.workspace));
   const { childTimeoutMs, operationTimeoutMs } = authorityTimeouts(options.timeoutMs);
-  const temporary = ReviewTemporaryDirectory.create({
+  const temporary = (options.createTemporaryForTests ?? ReviewTemporaryDirectory.create)({
     prefix: 'coding-x-review-authority-',
     projectRoot: root,
   });
@@ -558,14 +593,17 @@ export async function verifyReviewAuthoritySnapshot(options: {
     }
     temporary.confirmManagedUseSettled();
     if (observed.verdict === 'root-failed' || observed.exitCode !== 0) {
-      throw new Error(
-        `authority snapshot 失败（退出码 ${observed.exitCode ?? 'null'}）：${Buffer.concat([
-          observed.stdout,
-          observed.stderr,
-        ])
-          .toString('utf8')
-          .slice(-2000)}`,
-      );
+      const commandDetail = Buffer.concat([observed.stdout, observed.stderr])
+        .toString('utf8')
+        .slice(-2000);
+      const message = `authority snapshot 失败（退出码 ${observed.exitCode ?? 'null'}）：${commandDetail}`;
+      if (
+        naturalAuthorityRootFailure(observed) &&
+        AUTHORITY_GITHUB_STEP_FAILURE.test(commandDetail.trimStart())
+      ) {
+        throw new ReviewAuthorityGitHubReadError(message, commandDetail);
+      }
+      throw new Error(message);
     }
     result = parseReviewAuthoritySnapshotResult(observed.stdout, requestDigest);
   } catch (error) {
@@ -592,6 +630,37 @@ export async function verifyReviewAuthoritySnapshot(options: {
     throw new Error('authority snapshot 未返回结果');
 
   return evaluateReviewAuthoritySnapshot(result, options);
+}
+
+export async function verifyReviewAuthoritySnapshot(
+  options: ReviewAuthoritySnapshotOptions,
+): Promise<string | null> {
+  const termination = options.termination;
+  return await runBoundedGitHubReadRetry({
+    operationName: 'Review 权威快照的 GitHub 读取',
+    attempt: async (attempt) => {
+      try {
+        return { status: 'complete', value: await verifyReviewAuthoritySnapshotAttempt(options) };
+      } catch (error) {
+        if (!(error instanceof ReviewAuthorityGitHubReadError)) throw error;
+        const failure = classifyCommandError(
+          error.commandDetail,
+          attempt,
+          !termination?.signal.aborted,
+        );
+        if (failure.kind !== 'transient' || !failure.retryable) throw failure;
+        return { status: 'retry', failure };
+      }
+    },
+    ...(termination
+      ? {
+          termination: {
+            signal: termination.signal,
+            error: () => new Error(`Review 权威快照已被中断（${termination.reason}）`),
+          },
+        }
+      : {}),
+  });
 }
 
 export function evaluateReviewAuthoritySnapshot(

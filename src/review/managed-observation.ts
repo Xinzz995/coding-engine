@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { delimiter, isAbsolute, relative, resolve, sep } from 'node:path';
 import { resolveExecutablePath } from '../engine/agent.js';
 import {
+  classifyCommandError,
   GitHubQualityError,
   parseGitHubCheckRun,
   parseGitHubImmutableReleases,
@@ -17,10 +18,16 @@ import {
   type GitHubReviewReadClient,
   type GitHubRuleset,
 } from '../quality/github.js';
-import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
+import {
+  environmentEntries,
+  runManagedWorkspaceProcess,
+  type ManagedWorkspaceProcessOptions,
+  type ManagedWorkspaceProcessResult,
+} from '../workspace-safety/coordinator.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
+import { runBoundedGitHubReadRetry } from './github-read-retry.js';
 
 const DEFAULT_READ_TIMEOUT_MS = 30_000;
 const MAX_OBSERVATION_BYTES = 16 * 1024 * 1024;
@@ -81,23 +88,31 @@ export function resolveReviewInfrastructureExecutable(
   throw new WorkspaceSafetyError('invalid', `找不到项目目录之外的可信 ${name} 可执行文件`);
 }
 
-function commandFailure(
-  executable: string,
-  result: Awaited<ReturnType<typeof runManagedWorkspaceProcess>>,
-): never {
+function commandFailureError(executable: string, result: ManagedWorkspaceProcessResult): Error {
   const detail = Buffer.concat([result.stdout, result.stderr]).toString('utf8').trim();
   if (result.timedOut) {
-    throw new WorkspaceSafetyError('invalid', `${executable} 只读观察超时`);
+    return new WorkspaceSafetyError('invalid', `${executable} 只读观察超时`);
   }
   if (result.processTreeNotEmpty) {
-    throw new WorkspaceSafetyError(
+    return new WorkspaceSafetyError(
       'isolated',
       `${executable} 根进程结束后仍有后代进程；拒绝观察结果`,
     );
   }
-  throw new Error(
+  return new Error(
     `${executable} 只读观察失败${result.exitCode === null ? '' : `（退出码 ${result.exitCode}）`}` +
       `${detail === '' ? '' : `：${detail}`}`,
+  );
+}
+
+function naturalRootFailure(result: ManagedWorkspaceProcessResult): boolean {
+  return (
+    result.verdict === 'root-failed' &&
+    result.exitCode !== null &&
+    result.signal === null &&
+    !result.timedOut &&
+    !result.processTreeNotEmpty &&
+    result.terminationReason === null
   );
 }
 
@@ -116,7 +131,7 @@ async function runManagedReadCommand(options: {
   };
   const root = realpathSync(resolve(options.root));
   const executable = resolveReviewInfrastructureExecutable(options.executable, root, environment);
-  const result = await runManagedWorkspaceProcess(options.session, {
+  const invocation: ManagedWorkspaceProcessOptions = {
     kind: 'final-review',
     delegation: 'read-only-v1',
     executable,
@@ -125,9 +140,39 @@ async function runManagedReadCommand(options: {
     environment: environmentEntries(environment),
     timeoutMs: DEFAULT_READ_TIMEOUT_MS,
     termination: options.termination,
-  });
+  };
+  const termination = options.termination;
+  const result =
+    options.executable === 'gh'
+      ? await runBoundedGitHubReadRetry({
+          operationName: 'GitHub 只读观察',
+          attempt: async (attempt) => {
+            const observed = await runManagedWorkspaceProcess(options.session, invocation);
+            if (observed.verdict === 'completed' && observed.exitCode === 0) {
+              return { status: 'complete', value: observed };
+            }
+            const error = commandFailureError('gh', observed);
+            if (!naturalRootFailure(observed)) throw error;
+            const failure = classifyCommandError(error, attempt, !termination?.signal.aborted);
+            if (failure.kind !== 'transient' || !failure.retryable) throw failure;
+            return { status: 'retry', failure };
+          },
+          ...(termination
+            ? {
+                termination: {
+                  signal: termination.signal,
+                  error: () => {
+                    const reason =
+                      termination.reason === 'user-interrupt' ? '用户中断' : '父流程关闭';
+                    return new Error(`GitHub 只读观察已被中断（${reason}）`);
+                  },
+                },
+              }
+            : {}),
+        })
+      : await runManagedWorkspaceProcess(options.session, invocation);
   if (result.verdict !== 'completed' || result.exitCode !== 0) {
-    commandFailure(options.executable, result);
+    throw commandFailureError(options.executable, result);
   }
   const maximumBytes = options.maximumBytes ?? 8 * 1024 * 1024;
   if (maximumBytes < 1 || maximumBytes > MAX_OBSERVATION_BYTES) {
