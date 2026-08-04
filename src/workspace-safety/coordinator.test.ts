@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspace } from './bootstrap.js';
 import { acquireWorkspaceLease } from './lease.js';
 import { QUARANTINE_FILE } from './quarantine.js';
+import { observeManagedProcessSettlement } from './operation.js';
 import { createWorkspaceSession } from './session.js';
 import {
   canonicalManagedProcessPath,
@@ -123,17 +124,20 @@ describe.runIf(
     const { workspace, session } = await readySession();
     const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
 
-    await expect(
-      runManagedWorkspaceProcess(session, {
-        kind: 'quality-check',
-        delegation: 'read-only-v1',
-        executable: join(workspace, 'missing-executable'),
-        args: [],
-        cwd: workspace,
-        environment: environmentEntries(process.env),
-        timeoutMs: 5_000,
-      }),
-    ).rejects.toMatchObject({ code: 'invalid' });
+    const failure = await runManagedWorkspaceProcess(session, {
+      kind: 'quality-check',
+      delegation: 'read-only-v1',
+      executable: join(workspace, 'missing-executable'),
+      args: [],
+      cwd: workspace,
+      environment: environmentEntries(process.env),
+      timeoutMs: 5_000,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ code: 'invalid' });
+    expect(observeManagedProcessSettlement(failure)).toEqual({ status: 'unknown' });
 
     expect(existsSync(operation)).toBe(false);
     expect(session.state).toBe('open');
@@ -145,19 +149,25 @@ describe.runIf(
     const { workspace, session } = await readySession();
     const target = join(workspace, 'must-not-exist.txt');
 
-    await expect(
-      within(
-        runManagedWorkspaceProcess(session, {
-          kind: 'quality-check',
-          delegation: 'read-only-v1',
-          executable: process.execPath,
-          args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(target)}, 'unexpected')`],
-          cwd: workspace,
-          environment: environmentEntries(process.env),
-          timeoutMs: 5_000,
-        }),
-      ),
-    ).rejects.toMatchObject({ code: 'isolated' });
+    const failure = await within(
+      runManagedWorkspaceProcess(session, {
+        kind: 'quality-check',
+        delegation: 'read-only-v1',
+        executable: process.execPath,
+        args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(target)}, 'unexpected')`],
+        cwd: workspace,
+        environment: environmentEntries(process.env),
+        timeoutMs: 5_000,
+      }),
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ code: 'isolated' });
+    expect(observeManagedProcessSettlement(failure)).toMatchObject({
+      status: 'confirmed',
+      drainReason: 'natural',
+    });
 
     expect(existsSync(target)).toBe(true);
     expect(session.state).toBe('isolated');

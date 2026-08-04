@@ -78,6 +78,8 @@ import {
   type ArmedSafetyBinding,
   type BoundSupervisorDescriptor,
   type ContainmentDescriptor,
+  type DrainedProof,
+  type DrainedReason,
   type DrainedReceipt,
   type PreparedBoundSafetyBinding,
 } from './supervisor-protocol.js';
@@ -90,6 +92,49 @@ import {
   type QuarantineReason,
   WorkspaceSafetyError,
 } from './types.js';
+
+export type ManagedProcessSettlementObservation =
+  | { readonly status: 'unknown' }
+  | {
+      readonly status: 'confirmed';
+      readonly proof: DrainedProof;
+      readonly drainReason: DrainedReason;
+    };
+
+const UNKNOWN_MANAGED_PROCESS_SETTLEMENT = Object.freeze({ status: 'unknown' } as const);
+const managedProcessSettlements = new WeakMap<
+  WorkspaceSafetyError,
+  Exclude<ManagedProcessSettlementObservation, { readonly status: 'unknown' }>
+>();
+
+export function observeManagedProcessSettlement(
+  error: unknown,
+): ManagedProcessSettlementObservation {
+  if (!(error instanceof WorkspaceSafetyError)) return UNKNOWN_MANAGED_PROCESS_SETTLEMENT;
+  return managedProcessSettlements.get(error) ?? UNKNOWN_MANAGED_PROCESS_SETTLEMENT;
+}
+
+function withConfirmedManagedProcessSettlement(
+  error: unknown,
+  receipt: Pick<DrainedReceipt, 'proof' | 'drainReason'>,
+): WorkspaceSafetyError {
+  const wrapped = new WorkspaceSafetyError(
+    error instanceof WorkspaceSafetyError ? error.code : 'isolated',
+    error instanceof Error ? error.message : '受管进程结算后的 workspace 操作失败',
+  );
+  managedProcessSettlements.set(
+    wrapped,
+    Object.freeze({
+      status: 'confirmed',
+      proof: receipt.proof,
+      drainReason: receipt.drainReason,
+    }),
+  );
+  if (error instanceof Error) {
+    Object.defineProperty(wrapped, 'cause', { value: error, configurable: true });
+  }
+  return wrapped;
+}
 
 export {
   ACTIVE_CHILD_FILE,
@@ -619,10 +664,14 @@ export class WorkspaceOperationHandleControlled {
         );
       }
       const receipt = parseDrainedReceipt(this.#receiptBytes);
-      return this.#settle(
-        receipt.proof === 'never-started-containment-empty-v1',
-        'armed settlement refused because the semantic delta was not accepted',
-      );
+      try {
+        return await this.#settle(
+          receipt.proof === 'never-started-containment-empty-v1',
+          'armed settlement refused because the semantic delta was not accepted',
+        );
+      } catch (error) {
+        throw withConfirmedManagedProcessSettlement(error, receipt);
+      }
     });
   }
 

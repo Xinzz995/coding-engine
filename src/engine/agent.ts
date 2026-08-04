@@ -2,6 +2,7 @@ import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
 import { createRunnerInvocation } from '../review/runner-invocation.js';
+import { confirmTemporaryUsesAfterSettledProcessFailure } from '../review/managed-temporary-use.js';
 import {
   describeReviewTemporaryRetention,
   ReviewTemporaryDirectoryError,
@@ -351,6 +352,11 @@ export async function runAgent(opts: {
     invocation.temporary.confirmManagedUseSettled();
   } catch (error) {
     failure = error;
+    confirmTemporaryUsesAfterSettledProcessFailure(
+      error,
+      [invocation.temporary],
+      ['natural', 'timeout', 'user-interrupt', 'parent-shutdown'],
+    );
   }
 
   const cleanup = invocation.cleanup();

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -29,6 +30,7 @@ import {
   ReviewTemporaryDirectoryError,
 } from '../review/temporary-directory.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
+import { observeManagedProcessSettlement } from '../workspace-safety/operation.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fake = join(here, '__fixtures__', 'fake-agent.mjs');
@@ -359,10 +361,166 @@ describe('runAgent', () => {
 
     expect(preserved).toBeInstanceOf(WorkspaceSafetyError);
     expect(preserved).toMatchObject({ code: 'invalid', cause: original });
+    expect(observeManagedProcessSettlement(preserved)).toEqual({ status: 'unknown' });
     expect(preserved.message.startsWith(original.message)).toBe(true);
     expect(preserved.message.match(/fixture workspace failure/gu)).toHaveLength(1);
     expect(preserved.message).toContain('Agent Runner 临时域已保留');
   });
+
+  it('cleans the invocation domain after proven process closeout without hiding a workspace rejection', async () => {
+    const fixture = await createManagedProcessTestSession();
+    const progress = join(fixture.workspacePath, 'progress.md');
+    writeFileSync(progress, '# Ralph Progress\n\n');
+    writeFileSync(
+      join(fixture.workspacePath, 'state.json'),
+      `${JSON.stringify(
+        {
+          'US-001': {
+            passes: false,
+            validated: false,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    mkdirSync(join(fixture.workspacePath, 'screenshots'));
+    const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let invocationRoot: string | undefined;
+    const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = originalCreate(options);
+      if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+      return temporary;
+    });
+    try {
+      let observed: unknown;
+      try {
+        await runAgent({
+          kind: 'claude',
+          prompt: 'fixture prompt',
+          cwd: fixture.workspacePath,
+          timeoutMs: 5_000,
+          env: {
+            CODING_X_CLAUDE_BIN: `node ${fake} prepend-progress`,
+            CODING_X_FAKE_PROGRESS_PATH: progress,
+          },
+          managed: {
+            session: fixture.session,
+            operation: {
+              kind: 'builder',
+              delegation: 'builder-v1',
+              storyId: 'US-001',
+              acceptanceHash: `sha256:${'a'.repeat(64)}`,
+              checkCount: 1,
+            },
+          },
+        });
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(WorkspaceSafetyError);
+      expect(observed).toMatchObject({
+        code: 'isolated',
+      });
+      expect(observeManagedProcessSettlement(observed)).toMatchObject({
+        status: 'confirmed',
+        drainReason: 'natural',
+      });
+      expect((observed as Error).message).toContain('semantic delta was not accepted');
+      expect((observed as Error).message).not.toContain('process-unsettled');
+      expect((observed as Error).message).not.toContain('Agent Runner 临时域已保留');
+      expect(invocationRoot).toBeDefined();
+      expect(existsSync(invocationRoot!)).toBe(false);
+      expect(fixture.session.state).toBe('isolated');
+    } finally {
+      createSpy.mockRestore();
+      await fixture.close().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('retains the invocation domain when a rejected workspace change also leaves a descendant', async () => {
+    const fixture = await createManagedProcessTestSession();
+    const progress = join(fixture.workspacePath, 'progress.md');
+    writeFileSync(progress, '# Ralph Progress\n\n');
+    writeFileSync(
+      join(fixture.workspacePath, 'state.json'),
+      `${JSON.stringify(
+        {
+          'US-001': {
+            passes: false,
+            validated: false,
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    mkdirSync(join(fixture.workspacePath, 'screenshots'));
+    const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let invocationRoot: string | undefined;
+    const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = originalCreate(options);
+      if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+      return temporary;
+    });
+    try {
+      let observed: unknown;
+      try {
+        await runAgent({
+          kind: 'claude',
+          prompt: 'fixture prompt',
+          cwd: fixture.workspacePath,
+          timeoutMs: 15_000,
+          env: {
+            CODING_X_CLAUDE_BIN: `node ${fake} prepend-progress-with-descendant`,
+            CODING_X_FAKE_PROGRESS_PATH: progress,
+          },
+          managed: {
+            session: fixture.session,
+            operation: {
+              kind: 'builder',
+              delegation: 'builder-v1',
+              storyId: 'US-001',
+              acceptanceHash: `sha256:${'b'.repeat(64)}`,
+              checkCount: 1,
+            },
+          },
+        });
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(WorkspaceSafetyError);
+      expect(observeManagedProcessSettlement(observed)).toEqual({ status: 'unknown' });
+      expect(
+        observeManagedProcessSettlement((observed as Error & { cause?: unknown }).cause),
+      ).toMatchObject({
+        status: 'confirmed',
+        drainReason: 'process-tree-not-empty',
+      });
+      expect((observed as Error).message).toContain('semantic delta was not accepted');
+      expect((observed as Error).message).toContain('Agent Runner 临时域已保留');
+      expect(invocationRoot).toBeDefined();
+      expect(existsSync(invocationRoot!)).toBe(true);
+      expect(fixture.session.state).toBe('isolated');
+    } finally {
+      createSpy.mockRestore();
+      await fixture.close().catch(() => undefined);
+      if (invocationRoot && existsSync(invocationRoot)) {
+        chmodSync(invocationRoot, 0o700);
+        rmSync(invocationRoot, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
 
   it('stops immediately when the protected prompt invocation directory cannot be established', async () => {
     const originalBin = process.env.CODING_X_CLAUDE_BIN;

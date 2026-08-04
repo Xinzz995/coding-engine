@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // Stub agent. Behavior controlled by argv:
@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 //   node fake-agent.mjs stubborn-child -> ignores SIGTERM until SIGKILL
 //   node fake-agent.mjs diagnostic     -> writes stdout/stderr then exits 1
 //   node fake-agent.mjs long-diagnostic -> writes > evidence bound then exits 1
+//   node fake-agent.mjs prepend-progress -> violates the append-only workspace contract
+//   node fake-agent.mjs prepend-progress-with-descendant -> also leaves a live descendant
 const mode = process.argv[2];
 if (mode === 'hang') {
   setInterval(() => {}, 1000);
@@ -35,6 +37,17 @@ if (mode === 'hang') {
 } else if (mode === 'long-diagnostic') {
   process.stderr.write(`${'x'.repeat(2500)}TAIL-END\n`);
   process.exit(1);
+} else if (mode === 'prepend-progress' || mode === 'prepend-progress-with-descendant') {
+  const path = process.env.CODING_X_FAKE_PROGRESS_PATH;
+  if (!path) throw new Error('CODING_X_FAKE_PROGRESS_PATH is required');
+  writeFileSync(path, `injected-before-prefix\n${readFileSync(path, 'utf8')}`);
+  if (mode === 'prepend-progress-with-descendant') {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    child.unref();
+  }
+  process.exit(0);
 } else {
   process.exit(0);
 }

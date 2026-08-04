@@ -18,6 +18,7 @@ import { inlineModuleArguments } from '../workspace-safety/inline-program.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { normalizeText } from './common.js';
+import { confirmTemporaryUsesAfterSettledProcessFailure } from './managed-temporary-use.js';
 import { resolveReviewInfrastructureExecutable } from './managed-observation.js';
 import {
   allowedDirtyPath,
@@ -569,6 +570,7 @@ export async function verifyReviewAuthoritySnapshot(options: {
     result = parseReviewAuthoritySnapshotResult(observed.stdout, requestDigest);
   } catch (error) {
     failure = error;
+    confirmTemporaryUsesAfterSettledProcessFailure(error, [temporary], ['natural']);
   }
   const cleanup = temporary.cleanup();
   if (cleanup.status !== 'removed') {
