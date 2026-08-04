@@ -15,9 +15,9 @@ scope: root
 | 身份字段 | 已直接核对的值 |
 | --- | --- |
 | 版本 | `0.34.0` |
-| candidate run | `30869625191` |
-| main 提交 | `f97e36654dd85dad54953e898d1bc43a0a9908c4` |
-| 压缩包 SHA-256 | `f24e4511aad71a287e725d3467f8505f094988304c84147e07b0452a74ee7616` |
+| candidate run | `30881034010` |
+| main 提交 | `d76bea55d7e4e46ab6b540578d890321d67cce65` |
+| 压缩包 SHA-256 | `570b73564cc678040f22ff162cb2911d81f1398785391e77d84341633c18b776` |
 
 ## 证据边界
 
@@ -42,8 +42,9 @@ shadow、Developer、Validator、三层 Review 或 GitHub CI 证据。
 
 ## Shadow 路径的非交付语义
 
-一次候选流程必须先选定一个同一绝对候选 CLI 路径，并让这一个路径贯穿 `doctor`、`workspace apply-prd`
-和 `run` 三步；不得在三步之间替换为其他 CLI、版本或位置。
+本轮固定绝对候选 CLI 是
+`/private/tmp/coding-x-dogfood-0.34-r3.wNlyro/engine-install/node_modules/coding-x/dist/cli.js`。这一个路径必须
+贯穿 `doctor`、`workspace apply-prd` 和 `run` 三步；不得在三步之间替换为其他 CLI、版本或位置。
 
 | 入口 | 预期语义 |
 | --- | --- |

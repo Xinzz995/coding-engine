@@ -10,9 +10,9 @@ scope: root
 ## Context
 
 本轮只为 coding-engine 的全新自托管 Dogfood 建立一份可核对的候选证据边界。唯一候选是
-`coding-x@0.34.0`，来自 GitHub Actions 运行 `30869625191`，绑定 `main` 提交
-`f97e36654dd85dad54953e898d1bc43a0a9908c4`，压缩包 SHA-256 为
-`f24e4511aad71a287e725d3467f8505f094988304c84147e07b0452a74ee7616`。
+`coding-x@0.34.0`，来自 GitHub Actions 运行 `30881034010`，绑定 `main` 提交
+`d76bea55d7e4e46ab6b540578d890321d67cce65`，压缩包 SHA-256 为
+`570b73564cc678040f22ff162cb2911d81f1398785391e77d84341633c18b776`。
 
 候选构建成功和本地压缩包摘要一致，只证明候选字节身份已经建立；它们不证明本 PR 的
 Developer、Validator、三层 Review、GitHub CI、外部试点、npm staging、公开发布或合并已经
@@ -37,7 +37,9 @@ Developer、Validator、三层 Review、GitHub CI、外部试点、npm staging�
 
 1. 新增 `docs/plans/2026-08-04-candidate-evidence-boundary-0.34.0-r2.md`，以表格列出证据阶段、
    可定位证据和当前结论。
-2. 文档必须逐字记录版本、candidate run、main 提交和 SHA-256，并声明四项身份必须同时匹配。
+2. 文档必须逐字记录版本、candidate run、main 提交和 SHA-256，并声明四项身份必须同时匹配；
+   本轮三步固定使用绝对 CLI
+   `/private/tmp/coding-x-dogfood-0.34-r3.wNlyro/engine-install/node_modules/coding-x/dist/cli.js`。
 3. 文档必须把候选构建成功、本地摘要复核与本轮尚待产生的 shadow、Agent、Review、CI 证据
    分开；Go/Python、staging、公开发布与合并继续标为本 PR 之外。
 4. 文档必须说明：同一绝对候选 CLI 贯穿 doctor、apply-prd 和 run；正式 doctor/apply-prd
@@ -66,7 +68,8 @@ Developer、Validator、三层 Review、GitHub CI、外部试点、npm staging�
 #### Acceptance Criteria
 
 - [ ] 新增且只新增目标计划 `docs/plans/2026-08-04-candidate-evidence-boundary-0.34.0-r2.md`；其 frontmatter 为 `status: active`、`updated: 2026-08-04`、`scope: root`。
-- [ ] 目标计划逐字包含 `0.34.0`、运行 `30869625191`、main 提交 `f97e36654dd85dad54953e898d1bc43a0a9908c4` 和 SHA-256 `f24e4511aad71a287e725d3467f8505f094988304c84147e07b0452a74ee7616`，并声明四项必须同时匹配。
+- [ ] 目标计划逐字包含 `0.34.0`、运行 `30881034010`、main 提交 `d76bea55d7e4e46ab6b540578d890321d67cce65` 和 SHA-256 `570b73564cc678040f22ff162cb2911d81f1398785391e77d84341633c18b776`，并声明四项必须同时匹配。
+- [ ] 目标计划逐字包含本轮固定绝对 CLI `/private/tmp/coding-x-dogfood-0.34-r3.wNlyro/engine-install/node_modules/coding-x/dist/cli.js`，且 doctor、apply-prd、run 不得换用其他入口。
 - [ ] 目标计划用表格分别标明：候选构建与本地摘要已经直接核对；本 PR 的 shadow、Developer、Validator、三层 Review 和 GitHub CI 仍须产生；Go/Python、npm staging、公开发布、标签、Release 与合并不由本 PR 完成。
 - [ ] 目标计划明确同一绝对候选 CLI 贯穿三步；正式 doctor/apply-prd 因 `0.33.3` 固定版本不一致而失败；shadow doctor/apply-prd/run 健康时均退出 7，且退出 7 永远不表示通过或可交付。
 - [ ] 目标计划明确本 PR 保持开放、不触发 npm staging、不修改 PR #65、不使用维护者真实 checkout。
