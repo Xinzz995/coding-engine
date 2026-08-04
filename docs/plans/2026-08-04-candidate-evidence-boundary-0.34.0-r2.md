@@ -9,8 +9,8 @@ scope: root
 
 ## 候选身份
 
-本轮唯一候选的身份由下列四项共同组成。只有四项**同时匹配**，后续证据才可以绑定到该候选；任一项
-不匹配都必须停止，不能用其他运行、提交或压缩包替代。
+本轮唯一候选的身份由下列四项共同组成。四项身份必须**同时匹配**，后续证据才可以绑定到该候选；
+任一项不匹配都必须停止，不能用其他运行、提交或压缩包替代。
 
 | 身份字段 | 已直接核对的值 |
 | --- | --- |
@@ -44,7 +44,8 @@ shadow、Developer、Validator、三层 Review 或 GitHub CI 证据。
 
 本轮固定绝对候选 CLI 是
 `/private/tmp/coding-x-dogfood-0.34-r5.eDvI6T/engine-install/node_modules/coding-x/dist/cli.js`。这一个路径必须
-贯穿 `doctor`、`workspace apply-prd` 和 `run` 三步；不得在三步之间替换为其他 CLI、版本或位置。
+贯穿 `doctor`、`apply-prd` 和 `run` 三步（`apply-prd` 的完整命令形态为 `workspace apply-prd`）；三步均不得
+换用其他入口、CLI、版本或位置。
 
 | 入口 | 预期语义 |
 | --- | --- |
