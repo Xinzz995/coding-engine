@@ -14,7 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TextEncoder } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createManagedProcessTestSession } from '../engine/managed-process-test-support.js';
 import { readTddConfig } from '../engine/tdd-gate.js';
 import { readQualityContract } from '../quality/contract.js';
@@ -31,6 +31,7 @@ import {
 import { runFinalReview } from './final-review.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { RUNNER_TOOL_POLICY_VERSION } from './runner.js';
+import { ReviewTemporaryDirectory } from './temporary-directory.js';
 
 const REQUEST_DIGEST = `sha256:${'1'.repeat(64)}`;
 const STORY_DIGEST = `sha256:${'2'.repeat(64)}`;
@@ -331,6 +332,76 @@ else process.exit(9);`,
   );
 }
 
+function flakyGh(options: {
+  path: string;
+  delegate: string;
+  failCalls: readonly number[];
+  detail: string;
+}): { executable: string; counter: string } {
+  const counter = `${options.path}.count`;
+  return {
+    counter,
+    executable: executable(
+      options.path,
+      `const { existsSync, readFileSync, writeFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const counter = ${JSON.stringify(counter)};
+const count = existsSync(counter) ? Number(readFileSync(counter, 'utf8')) + 1 : 1;
+writeFileSync(counter, String(count));
+if (${JSON.stringify([...options.failCalls])}.includes(count)) {
+  process.stderr.write(${JSON.stringify(options.detail)});
+  process.exit(1);
+}
+const result = spawnSync(${JSON.stringify(options.delegate)}, process.argv.slice(2), { encoding: 'buffer', env: process.env });
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);`,
+    ),
+  };
+}
+
+function armedFlakyGh(options: { path: string; delegate: string; arm: string; detail: string }): {
+  executable: string;
+  failure: string;
+} {
+  const failure = `${options.path}.failed`;
+  return {
+    failure,
+    executable: executable(
+      options.path,
+      `const { existsSync, writeFileSync } = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const failure = ${JSON.stringify(failure)};
+if (existsSync(${JSON.stringify(options.arm)}) && !existsSync(failure)) {
+  writeFileSync(failure, 'failed once');
+  process.stderr.write(${JSON.stringify(options.detail)});
+  process.exit(1);
+}
+const result = spawnSync(${JSON.stringify(options.delegate)}, process.argv.slice(2), { encoding: 'buffer', env: process.env });
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);`,
+    ),
+  };
+}
+
+type ManagedResult = Awaited<ReturnType<typeof runManagedWorkspaceProcess>>;
+
+function managedResult(overrides: Partial<ManagedResult> = {}): ManagedResult {
+  return {
+    verdict: 'completed',
+    exitCode: 0,
+    signal: null,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.alloc(0),
+    timedOut: false,
+    processTreeNotEmpty: false,
+    terminationReason: null,
+    durationMs: 1,
+    ...overrides,
+  };
+}
+
 async function realManagedFixture(
   runnerBody: string,
   prdValue: Record<string, unknown> = { stories: [] },
@@ -457,6 +528,98 @@ describe.runIf(process.platform !== 'win32')('real managed authority snapshot', 
     }
   }, 30_000);
 
+  it('retries a transient closing snapshot without rerunning any Review axis', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const arm = join(fixture.executableRoot, 'arm-closing-snapshot');
+    const gh = armedFlakyGh({
+      path: join(fixture.executableRoot, 'closing-snapshot-eof-gh'),
+      delegate: fixture.gh,
+      arm,
+      detail: 'Post "https://api.github.com/graphql": EOF',
+    });
+    const settled = join(
+      fixture.managed.workspacePath,
+      PROTOCOL_ROOT_DIR,
+      ACTIVE_LEASE_DIR,
+      'settled-operations',
+    );
+    const storyValidationDigest = `sha256:${'4'.repeat(64)}`;
+    const axes: string[] = [];
+    try {
+      const outcome = await runFinalReview({
+        root: fixture.projectRoot,
+        workspace: fixture.managed.workspacePath,
+        session: fixture.managed.session,
+        currentContract: fixture.ctx.baseContract,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex 1.2.3',
+        storyValidationDigest,
+        observeStoryValidation: () => ({
+          status: 'ready' as const,
+          digest: storyValidationDigest,
+          observationToken: `sha256:${'5'.repeat(64)}`,
+          authorityInputDigest: fixture.expectedStoryDigest,
+        }),
+        preflight: () => ({ status: 'ready' as const, context: fixture.ctx }),
+        gate: async () => ({
+          ok: true,
+          failure: null,
+          total: 1,
+          ran: 1,
+          ms: 1,
+          skipped: [],
+        }),
+        probe: async () => ({
+          ok: true,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex 1.2.3',
+          policyVersion: RUNNER_TOOL_POLICY_VERSION,
+          durationMs: 1,
+          failures: [],
+        }),
+        axisRunner: async ({ axis }) => {
+          axes.push(axis);
+          return {
+            runner: 'codex',
+            model: 'review-model',
+            runnerVersion: 'codex 1.2.3',
+            durationMs: 1,
+            attempts: 1,
+            output: {
+              status: 'passed',
+              summary: `${axis} passed`,
+              requestDeepReview: false,
+              findings: [],
+            },
+          };
+        },
+        remote: () => {
+          writeFileSync(arm, 'armed');
+          return {
+            status: 'ready',
+            checks: [],
+            rulesetErrors: [],
+            checkedAt: '2026-08-05T00:00:00.000Z',
+          };
+        },
+        authoritySnapshotExecutablesForTests: {
+          git: fixture.git,
+          gh: gh.executable,
+          runner: fixture.runner,
+        },
+      });
+
+      expect(outcome.exitCode).toBe(0);
+      expect(axes).toEqual(['spec', 'engineering', 'deep']);
+      expect(readdirSync(settled)).toHaveLength(11);
+      expect(readFileSync(gh.failure, 'utf8')).toBe('failed once');
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 30_000);
+
   it('uses exactly one managed operation for all authority reads', async () => {
     const fixture = await realManagedFixture(
       `if (process.argv[2] !== '--version') process.exit(8); process.stdout.write('codex 1.2.3\\n');`,
@@ -549,6 +712,372 @@ describe.runIf(process.platform !== 'win32')('real managed authority snapshot', 
       await fixture.managed.close();
     }
   }, 15_000);
+
+  it('retries one complete authority snapshot after a transient GraphQL EOF', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const gh = flakyGh({
+      path: join(fixture.executableRoot, 'flaky-gh'),
+      delegate: fixture.gh,
+      failCalls: [1],
+      detail: 'Post "https://api.github.com/graphql": EOF',
+    });
+    const attempts: Array<{
+      root: string;
+      nonce: unknown;
+      requestDigest?: string;
+      childProcessCount?: number;
+    }> = [];
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      const decoded = inlinePayload(options.args);
+      const outcome = await runManagedWorkspaceProcess(session, options);
+      let output: { requestDigest?: string; childProcessCount?: number } = {};
+      if (outcome.exitCode === 0) {
+        output = JSON.parse(outcome.stdout.toString('utf8')) as typeof output;
+      }
+      attempts.push({
+        root: options.cwd,
+        nonce: decoded.request.nonce,
+        ...output,
+      });
+      return outcome;
+    };
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'transient GraphQL checkpoint',
+          managedProcess,
+          executablesForTests: { git: fixture.git, gh: gh.executable, runner: fixture.runner },
+        }),
+      ).resolves.toBeNull();
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0].root).not.toBe(attempts[1].root);
+      expect(attempts[0].nonce).not.toBe(attempts[1].nonce);
+      expect(attempts[1]).toMatchObject({ childProcessCount: 14 });
+      expect(attempts[1].requestDigest).toMatch(/^sha256:[a-f0-9]{64}$/u);
+      for (const attempt of attempts) expect(existsSync(attempt.root)).toBe(false);
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 20_000);
+
+  it('stops during the real authority backoff without starting another managed read', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const gh = flakyGh({
+      path: join(fixture.executableRoot, 'backoff-interruption-gh'),
+      delegate: fixture.gh,
+      failCalls: [1],
+      detail: 'Post "https://api.github.com/graphql": EOF',
+    });
+    const controller = new AbortController();
+    const attemptRoots: string[] = [];
+    let managedCalls = 0;
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      managedCalls++;
+      attemptRoots.push(options.cwd);
+      const outcome = await runManagedWorkspaceProcess(session, options);
+      if (managedCalls === 1) setImmediate(() => controller.abort());
+      return outcome;
+    };
+    const settled = join(
+      fixture.managed.workspacePath,
+      PROTOCOL_ROOT_DIR,
+      ACTIVE_LEASE_DIR,
+      'settled-operations',
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'backoff interruption checkpoint',
+          termination: { signal: controller.signal, reason: 'user-interrupt' },
+          managedProcess,
+          executablesForTests: { git: fixture.git, gh: gh.executable, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/Review 权威快照已被中断/u);
+
+      expect(managedCalls).toBe(1);
+      expect(attemptRoots).toHaveLength(1);
+      expect(existsSync(attemptRoots[0])).toBe(false);
+      expect(readdirSync(settled)).toHaveLength(1);
+      expect(readFileSync(gh.counter, 'utf8')).toBe('1');
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 20_000);
+
+  it('fails closed when local authority identity changes before the retry', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const gh = flakyGh({
+      path: join(fixture.executableRoot, 'local-drift-gh'),
+      delegate: fixture.gh,
+      failCalls: [1],
+      detail: 'Post "https://api.github.com/graphql": EOF',
+    });
+    let calls = 0;
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      calls++;
+      const outcome = await runManagedWorkspaceProcess(session, options);
+      if (calls === 1) {
+        writeFileSync(join(fixture.managed.workspacePath, 'state.json'), '{"changed":true}\n');
+      }
+      return outcome;
+    };
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'local drift after EOF checkpoint',
+          managedProcess,
+          executablesForTests: { git: fixture.git, gh: gh.executable, runner: fixture.runner },
+        }),
+      ).resolves.toContain('Story 验收权威输入发生变化');
+      expect(calls).toBe(2);
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 20_000);
+
+  it('fails closed when remote pull request identity changes before the retry', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const changedContext: ReviewPreflightContext = {
+      ...fixture.ctx,
+      pullRequest: { ...fixture.ctx.pullRequest, body: 'changed during retry' },
+    };
+    const changedGh = fakeGh(join(fixture.executableRoot, 'changed-pr-gh'), changedContext);
+    const gh = flakyGh({
+      path: join(fixture.executableRoot, 'remote-drift-gh'),
+      delegate: changedGh,
+      failCalls: [1],
+      detail: 'Post "https://api.github.com/graphql": EOF',
+    });
+    let calls = 0;
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      calls++;
+      return await runManagedWorkspaceProcess(session, options);
+    };
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'remote drift after EOF checkpoint',
+          managedProcess,
+          executablesForTests: { git: fixture.git, gh: gh.executable, runner: fixture.runner },
+        }),
+      ).resolves.toContain('PR 标题或正文发生变化');
+      expect(calls).toBe(2);
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 20_000);
+
+  it('does not retry a GitHub EOF after authority temporary cleanup becomes unverifiable', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const gh = flakyGh({
+      path: join(fixture.executableRoot, 'cleanup-failure-gh'),
+      delegate: fixture.gh,
+      failCalls: [1],
+      detail: 'Post "https://api.github.com/graphql": EOF',
+    });
+    const temporaries: ReviewTemporaryDirectory[] = [];
+    const cleanupSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+    let calls = 0;
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'cleanup failure after EOF checkpoint',
+          managedProcess: async (session, options) => {
+            calls++;
+            return await runManagedWorkspaceProcess(session, options);
+          },
+          executablesForTests: { git: fixture.git, gh: gh.executable, runner: fixture.runner },
+          createTemporaryForTests: (options) => {
+            const temporary = ReviewTemporaryDirectory.create(options);
+            temporaries.push(temporary);
+            cleanupSpies.push(
+              vi.spyOn(temporary, 'cleanup').mockImplementationOnce(() => ({
+                status: 'unverifiable',
+                location: { status: 'unverifiable', candidates: [temporary.root] },
+                reason: 'injected authority cleanup failure',
+                protection: { status: 'unverifiable', reason: 'identity-or-tree-unverified' },
+              })),
+            );
+            return temporary;
+          },
+        }),
+      ).rejects.toThrow(/injected authority cleanup failure/u);
+      expect(calls).toBe(1);
+    } finally {
+      for (const cleanupSpy of cleanupSpies) cleanupSpy.mockRestore();
+      for (const temporary of temporaries) {
+        expect(temporary.cleanup()).toEqual({ status: 'removed' });
+      }
+      await fixture.managed.close();
+    }
+  }, 20_000);
+
+  it('does not retry a signalled helper even when stderr starts with a GitHub EOF', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    let calls = 0;
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'signalled GitHub EOF checkpoint',
+          managedProcess: async () => {
+            calls++;
+            return managedResult({
+              verdict: 'root-failed',
+              exitCode: null,
+              signal: 'SIGTERM',
+              stderr: Buffer.from(
+                'github-repository: exited null: Post "https://api.github.com/graphql": EOF',
+              ),
+            });
+          },
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/github-repository.*EOF/su);
+      expect(calls).toBe(1);
+    } finally {
+      await fixture.managed.close();
+    }
+  });
+
+  it('fails closed after three transient authority snapshot attempts', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const gh = flakyGh({
+      path: join(fixture.executableRoot, 'always-eof-gh'),
+      delegate: fixture.gh,
+      failCalls: [1, 2, 3],
+      detail: 'Post "https://api.github.com/graphql": EOF',
+    });
+    const roots: string[] = [];
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      roots.push(options.cwd);
+      return await runManagedWorkspaceProcess(session, options);
+    };
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'exhausted GraphQL checkpoint',
+          managedProcess,
+          executablesForTests: { git: fixture.git, gh: gh.executable, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/连续 3 次失败.*EOF/su);
+      expect(roots).toHaveLength(3);
+      for (const root of roots) expect(existsSync(root)).toBe(false);
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 20_000);
+
+  it('does not retry a permanent GitHub error or a non-GitHub EOF', async () => {
+    const fixture = await realManagedFixture(
+      `process.stderr.write('runner EOF\\ngithub-repository: Post https://api.github.com/graphql: EOF'); process.exit(23);`,
+    );
+    const forbidden = flakyGh({
+      path: join(fixture.executableRoot, 'forbidden-gh'),
+      delegate: fixture.gh,
+      failCalls: [1],
+      detail: 'gh: HTTP 403: Resource not accessible by integration',
+    });
+    let managedCalls = 0;
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      managedCalls += 1;
+      return await runManagedWorkspaceProcess(session, options);
+    };
+    const base = {
+      session: fixture.managed.session,
+      context: fixture.ctx,
+      workspace: fixture.managed.workspacePath,
+      runner: 'codex' as const,
+      expectedRunnerVersion: 'codex 1.2.3',
+      expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+      expectedDecisionsDigest: DECISIONS_DIGEST,
+      includeDecisions: false,
+      phase: 'permanent checkpoint',
+      managedProcess,
+    };
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          ...base,
+          executablesForTests: {
+            git: fixture.git,
+            gh: forbidden.executable,
+            runner: executable(
+              join(fixture.executableRoot, 'passing-runner'),
+              `process.stdout.write('codex 1.2.3\\n');`,
+            ),
+          },
+        }),
+      ).rejects.toThrow(/权限不足|403/u);
+      expect(managedCalls).toBe(1);
+
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          ...base,
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/runner EOF/u);
+      expect(managedCalls).toBe(2);
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 20_000);
 
   it('gives runner, git and gh only their required credential environments', async () => {
     const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
