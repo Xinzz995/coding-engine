@@ -21,7 +21,12 @@ import { readDarkPosixHelperBundle, runDarkPosixSupervisedOperation } from './po
 import { waitForPosixProcessGroupEmpty } from './posix-containment.js';
 import { parseQuarantineRecord, QUARANTINE_FILE } from './quarantine.js';
 import { createWorkspaceSession, type WorkspaceSession } from './session.js';
-import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from './types.js';
+import {
+  ACTIVE_LEASE_DIR,
+  OPERATION_DIR,
+  PROTOCOL_ROOT_DIR,
+  WorkspaceSafetyError,
+} from './types.js';
 
 const OWNER_ID = '00000000-0000-4000-8000-000000000010';
 const OPERATION_ID = '00000000-0000-4000-8000-000000000020';
@@ -272,10 +277,12 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
 
   it('bounds ACK/final exit when a drained supervisor remains alive', async () => {
     const state = await setup();
-    const startedAt = performance.now();
+    let drainedAt: number | undefined;
+    let drainedSupervisorPid: number | undefined;
+    let failure: unknown;
 
-    await expect(
-      runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+    try {
+      await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
         runDarkPosixSupervisedOperation(operation, {
           target: {
             executable: process.execPath,
@@ -284,20 +291,40 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
             environment: [],
           },
           commandTimeoutMs: 2000,
-          timeouts: { handshakeMs: 2000, termMs: 50, killMs: 300, ackMs: 100, pollMs: 10 },
+          timeouts: { handshakeMs: 2000, termMs: 50, killMs: 300, ackMs: 1000, pollMs: 10 },
           hooks: {
             onDrained: ({ supervisorPid }) => {
+              drainedAt = performance.now();
+              drainedSupervisorPid = supervisorPid;
               process.kill(supervisorPid, 'SIGSTOP');
             },
           },
         }),
-      ),
-    ).rejects.toMatchObject({
-      code: 'isolated',
-      message: expect.stringMatching(/post-drain|ACK|exit/u),
-    });
+      );
+    } catch (error) {
+      failure = error;
+    }
+    const failedAt = performance.now();
 
-    expect(performance.now() - startedAt).toBeLessThan(1500);
+    expect(drainedAt).toBeTypeOf('number');
+    expect(drainedSupervisorPid).toBeTypeOf('number');
+    if (drainedAt === undefined || drainedSupervisorPid === undefined) {
+      throw new Error('POSIX supervisor never reached the onDrained fault injection');
+    }
+    expect(drainedSupervisorPid).toBeGreaterThan(0);
+    if (!(failure instanceof WorkspaceSafetyError)) {
+      if (failure instanceof Error) throw failure;
+      throw new Error(
+        failure === undefined
+          ? 'POSIX closeout unexpectedly completed after SIGSTOP'
+          : 'POSIX closeout rejected with a non-Error value',
+      );
+    }
+    expect(failure.code).toBe('isolated');
+    expect(failure.message, `完整 POSIX closeout 错误：${failure.message}`).toMatch(
+      /post-drain|ACK|exit/u,
+    );
+    expect(failedAt - drainedAt).toBeLessThan(1500);
     const active = operationPath(state.workspace);
     expect(existsSync(join(active, DRAINED_RECEIPT_FILE))).toBe(true);
     expect(existsSync(join(active, QUARANTINE_FILE))).toBe(false);
