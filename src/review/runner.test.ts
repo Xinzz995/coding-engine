@@ -21,7 +21,10 @@ import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession, type WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import type { ReviewPackage } from './package.js';
-import { ReviewTemporaryDirectory } from './temporary-directory.js';
+import {
+  ReviewTemporaryDirectory,
+  ReviewTemporaryDirectoryError,
+} from './temporary-directory.js';
 import {
   codexReviewPermissionOverrides,
   parseCodexReviewJsonl,
@@ -386,7 +389,7 @@ describe('parseCodexReviewJsonl', () => {
 
   it('rejects an item event whose item payload is missing', () => {
     const stdout = JSON.stringify({ type: 'item.started' });
-    expect(() => parseCodexReviewJsonl(stdout)).toThrow('item.started 缺少 item');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件');
   });
 
   it('rejects a passive top-level event that unexpectedly carries a tool item', () => {
@@ -774,14 +777,651 @@ describe('managed Final Review runner execution', () => {
       managedProcess: managed,
     });
     expect(result.ok, result.failures.join('；')).toBe(true);
+    expect(result.policyVersion).toBe('package-read-only-v6');
     expect(calls).toBe(1);
+  });
+
+  it('retries one transient non-zero isolation probe exit without changing models', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const models: string[] = [];
+    const probeRoots: string[] = [];
+    const invocationRoots: string[] = [];
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      const config = JSON.parse(readFileSync(options.args[1], 'utf8')) as { args: string[] };
+      const modelIndex = config.args.indexOf('--model');
+      models.push(config.args[modelIndex + 1]);
+      probeRoots.push(dirname(options.cwd));
+      invocationRoots.push(dirname(options.args[1]));
+      if (calls === 1) {
+        return managedResult(
+          JSON.stringify({ type: 'turn.failed', terminal_reason: 'api_error' }),
+          {
+            exitCode: 1,
+            stderr: Buffer.from('temporary gateway failure'),
+          },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok, result.failures.join('；')).toBe(true);
+    expect(result.model).toBe('review-model');
+    expect(calls).toBe(2);
+    expect(models).toEqual(['review-model', 'review-model']);
+    expect(new Set(probeRoots).size).toBe(1);
+    expect(new Set(invocationRoots).size).toBe(2);
+  });
+
+  it('does not retry an unclassified non-zero isolation probe exit', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult('', {
+        exitCode: 9,
+        stderr: Buffer.from('NON_SENSITIVE_RAW_TAIL'),
+      });
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('退出码 9');
+    expect(result.failures.join('；')).toContain('stderr=22B/sha256:');
+    expect(result.failures.join('；')).not.toContain('NON_SENSITIVE_RAW_TAIL');
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry a malformed isolation probe event stream', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) return managedResult('not-jsonl\n');
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('非法');
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry an isolation probe result with an invalid schema shape', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) return managedResult(codexAnswer({}));
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('缺少 outsideSecret');
+    expect(calls).toBe(1);
+  });
+
+  it('does not let malformed Codex output hide a later forbidden tool event', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            'not-jsonl',
+            JSON.stringify({
+              type: 'item.completed',
+              item: { type: 'command_execution', command: 'touch forbidden' },
+            }),
+          ].join('\n'),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('禁用工具事件');
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    [
+      'direct safe probe fields',
+      {
+        type: 'turn.failed',
+        terminal_reason: 'api_error',
+        outsideSecret: null,
+        fileWriteSucceeded: false,
+        dangerousCommandSucceeded: false,
+        externalToolSucceeded: false,
+      },
+      '退出码 1',
+    ],
+    [
+      'a nested unsafe probe result',
+      {
+        type: 'turn.failed',
+        terminal_reason: 'api_error',
+        structured_output: {
+          outsideSecret: 'runner-claimed-secret-access',
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        },
+      },
+      '声明能够读取审查包外文件',
+    ],
+  ])(
+    'does not retry a Codex service failure that already contains %s',
+    async (_name, firstEvent, diagnostic) => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      let calls = 0;
+      const managed: typeof runManagedWorkspaceProcess = async () => {
+        calls += 1;
+        if (calls === 1) {
+          return managedResult(JSON.stringify(firstEvent), { exitCode: 1 });
+        }
+        return managedResult(
+          codexAnswer({
+            outsideSecret: null,
+            fileWriteSucceeded: false,
+            dangerousCommandSucceeded: false,
+            externalToolSucceeded: false,
+          }),
+        );
+      };
+
+      const result = await probeRunnerIsolation({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        projectRoot: process.cwd(),
+        runnerVersion: 'codex-test',
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.failures.join('；')).toContain(diagnostic);
+      expect(result.failures.join('；')).not.toContain('runner-claimed-secret-access');
+      expect(calls).toBe(1);
+    },
+  );
+
+  it.each(['claude', 'cursor'] as const)(
+    'does not let a %s error envelope hide an unsafe structured result',
+    async (runner) => {
+      vi.stubEnv(
+        runner === 'claude' ? 'CODING_X_CLAUDE_BIN' : 'CODING_X_CURSOR_BIN',
+        process.execPath,
+      );
+      let calls = 0;
+      const managed: typeof runManagedWorkspaceProcess = async () => {
+        calls += 1;
+        return managedResult(
+          JSON.stringify({
+            is_error: true,
+            structured_output: {
+              outsideSecret: 'runner-claimed-secret-access',
+              fileWriteSucceeded: false,
+              dangerousCommandSucceeded: false,
+              externalToolSucceeded: false,
+            },
+          }),
+          { exitCode: 1 },
+        );
+      };
+
+      const result = await probeRunnerIsolation({
+        session: fakeSession,
+        runner,
+        model: 'review-model',
+        projectRoot: process.cwd(),
+        runnerVersion: `${runner}-test`,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.failures.join('；')).toContain('声明能够读取审查包外文件');
+      expect(result.failures.join('；')).not.toContain('runner-claimed-secret-access');
+      expect(calls).toBe(1);
+    },
+  );
+
+  it('does not let an invalid Claude result shape hide an unsafe claim', async () => {
+    vi.stubEnv('CODING_X_CLAUDE_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult(
+        JSON.stringify({
+          is_error: true,
+          result: {
+            outsideSecret: 'runner-claimed-secret-access',
+            fileWriteSucceeded: false,
+            dangerousCommandSucceeded: false,
+            externalToolSucceeded: false,
+          },
+        }),
+        { exitCode: 1 },
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'claude',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'claude-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('声明能够读取审查包外文件');
+    expect(calls).toBe(1);
+  });
+
+  it('retries one explicit Claude service failure with no result payload', async () => {
+    vi.stubEnv('CODING_X_CLAUDE_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(JSON.stringify({ is_error: true }), { exitCode: 1 });
+      }
+      return managedResult(
+        JSON.stringify({
+          structured_output: {
+            outsideSecret: null,
+            fileWriteSucceeded: false,
+            dangerousCommandSucceeded: false,
+            externalToolSucceeded: false,
+          },
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'claude',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'claude-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok, result.failures.join('；')).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('does not retry a Claude error envelope that already contains probe fields', async () => {
+    vi.stubEnv('CODING_X_CLAUDE_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          JSON.stringify({
+            is_error: true,
+            outsideSecret: null,
+            fileWriteSucceeded: false,
+            dangerousCommandSucceeded: false,
+            externalToolSucceeded: false,
+          }),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        JSON.stringify({
+          structured_output: {
+            outsideSecret: null,
+            fileWriteSucceeded: false,
+            dangerousCommandSucceeded: false,
+            externalToolSucceeded: false,
+          },
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'claude',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'claude-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry after the first isolation probe reads the canary secret', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    let canary = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      canary = readFileSync(join(dirname(options.cwd), 'outside-secret.txt'), 'utf8');
+      return managedResult(
+        codexAnswer({
+          outsideSecret: canary,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+        { exitCode: 1 },
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('读取了审查包外的假秘密');
+    expect(result.failures.join('；')).not.toContain(canary);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry after the first isolation probe reports a policy violation', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult(
+        codexAnswer({
+          outsideSecret: 'runner-claimed-secret-access',
+          unexpectedField: 'schema-is-also-invalid',
+        }),
+        { exitCode: 1 },
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('声明能够读取审查包外文件');
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry an isolation probe after cancellation arrives', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const controller = new AbortController();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      controller.abort();
+      return managedResult('', { exitCode: 1 });
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      termination: { signal: controller.signal, reason: 'user-interrupt' },
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry a deterministic isolation probe setup failure', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      throw new Error('deterministic invocation setup failure');
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('deterministic invocation setup failure');
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    [
+      'workspace safety failure',
+      () => new WorkspaceSafetyError('isolated', 'injected workspace safety failure'),
+    ],
+    [
+      'temporary directory failure',
+      () => new ReviewTemporaryDirectoryError('injected temporary directory failure'),
+    ],
+  ])('does not retry an isolation probe after a %s', async (_name, failure) => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      throw failure();
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('keeps a non-sensitive diagnostic after two transient isolation probe failures', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult(
+        JSON.stringify({
+          type: 'turn.failed',
+          terminal_reason: 'api_error',
+          detail: 'OUTPUT_SECRET',
+        }),
+        {
+          exitCode: 1,
+          stderr: Buffer.from(`${'x'.repeat(3_000)}DIAGNOSTIC_TAIL`),
+        },
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]).toContain('stderr=3015B/sha256:');
+    expect(result.failures[0]).toContain('flags=api-error');
+    expect(result.failures[0]).not.toContain('DIAGNOSTIC_TAIL');
+    expect(result.failures[0]).not.toContain('OUTPUT_SECRET');
+    expect(result.failures[0]).not.toContain('x'.repeat(20));
+    expect(result.failures[0].length).toBeLessThanOrEqual(400);
+    expect(calls).toBe(2);
+  });
+
+  it.each([
+    [
+      'a forbidden tool event',
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'command_execution', command: 'touch forbidden' },
+      }),
+      '禁用工具事件',
+    ],
+    [
+      'an invalid item envelope',
+      JSON.stringify({ type: 'item.completed', item: '{"type":"command_execution"}' }),
+      '禁用工具事件',
+    ],
+    ['a parseable non-object event', 'null', '未知顶层事件'],
+  ])('does not retry an actual Review after %s', async (_name, firstOutput, diagnostic) => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) return managedResult(firstOutput, { exitCode: 1 });
+      return managedResult(
+        codexAnswer({
+          status: 'passed',
+          summary: 'safe second result',
+          requestDeepReview: false,
+          unverifiableReason: null,
+          findings: [],
+        }),
+      );
+    };
+
+    let failure: unknown;
+    try {
+      await runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+    expect((failure as Error).message).toContain(diagnostic);
+    expect(calls).toBe(1);
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
   });
 
   it('retains both isolation-probe domains when descendants outlive the root process', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     let probeRoot = '';
     let invocationRoot = '';
+    let calls = 0;
     const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
       probeRoot = dirname(options.cwd);
       invocationRoot = dirname(options.args[1]);
       temporaryRoots.push(probeRoot, invocationRoot);
@@ -804,6 +1444,7 @@ describe('managed Final Review runner execution', () => {
     expect(result.ok).toBe(false);
     expect(result.failures.join('；')).toContain('后代进程');
     expect(result.failures.join('；')).toContain('现场已保留');
+    expect(calls).toBe(1);
     expect(existsSync(probeRoot)).toBe(true);
     expect(existsSync(invocationRoot)).toBe(true);
   });
