@@ -647,6 +647,71 @@ process.exit(result.status ?? 1);`,
     }
   });
 
+  it('reports a settled helper failure without misclassifying the process lifecycle', async () => {
+    const fixture = await realManagedFixture(
+      `require('node:fs').writeSync(2, 'authority-root-failed-marker:' + 'x'.repeat(3000) + ':tail-marker\\n'); process.exit(23);`,
+    );
+    let authorityRoot = '';
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      authorityRoot = options.cwd;
+      return await runManagedWorkspaceProcess(session, options);
+    };
+    const settled = join(
+      fixture.managed.workspacePath,
+      PROTOCOL_ROOT_DIR,
+      ACTIVE_LEASE_DIR,
+      'settled-operations',
+    );
+    try {
+      let failure: unknown;
+      try {
+        await verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'settled root failure checkpoint',
+          managedProcess,
+          executablesForTests: {
+            git: fixture.git,
+            gh: fixture.gh,
+            runner: fixture.runner,
+          },
+        });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(Error);
+      const message = (failure as Error).message;
+      expect(message).toContain('authority-root-failed-marker');
+      expect(message).toContain('tail-marker');
+      expect(message).toContain('runner-version');
+      expect(message).toContain('exited 23');
+      expect(message).not.toContain('process-unsettled');
+      expect(message).not.toContain('未完整结算');
+
+      const operations = readdirSync(settled);
+      expect(operations).toHaveLength(1);
+      const receipt = JSON.parse(
+        readFileSync(join(settled, operations[0], 'drained-receipt.json'), 'utf8'),
+      ) as { drainReason?: string; proof?: string };
+      expect(receipt).toMatchObject({
+        drainReason: 'natural',
+        proof: 'posix-group-empty-and-pipes-eof-v1',
+      });
+
+      expect(authorityRoot).not.toBe('');
+      expect(existsSync(authorityRoot)).toBe(false);
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+    }
+  });
+
   it('enforces a hard per-child timeout when the Runner ignores SIGTERM', async () => {
     const fixture = await realManagedFixture(`process.stdout.write('unused\\n');`);
     const target = join(fixture.executableRoot, 'ignore-term-runner.mjs');
@@ -708,10 +773,12 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
   });
 
   it('lets the outer supervisor discover and settle descendants after a hard child timeout', async () => {
-    const before = new Set(
-      readdirSync(tmpdir()).filter((name) => name.startsWith('coding-x-review-authority-')),
-    );
     const fixture = await realManagedFixture(`process.stdout.write('unused\\n');`);
+    let authorityRoot = '';
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      authorityRoot = options.cwd;
+      return await runManagedWorkspaceProcess(session, options);
+    };
     const target = join(fixture.executableRoot, 'timeout-descendant-runner.mjs');
     writeFileSync(
       target,
@@ -742,17 +809,16 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
           includeDecisions: false,
           phase: 'hard timeout descendant checkpoint',
           timeoutMs: 1_000,
+          managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
         }),
       ).rejects.toThrow(/后代进程|未完整结算|临时域/u);
       await expect(fixture.managed.close()).resolves.toBeUndefined();
     } finally {
       await fixture.managed.close().catch(() => undefined);
-      for (const name of readdirSync(tmpdir())) {
-        if (!name.startsWith('coding-x-review-authority-') || before.has(name)) continue;
-        const path = join(tmpdir(), name);
-        chmodSync(path, 0o700);
-        roots.push(path);
+      if (authorityRoot !== '' && existsSync(authorityRoot)) {
+        chmodSync(authorityRoot, 0o700);
+        roots.push(authorityRoot);
       }
     }
   }, 20_000);
@@ -792,6 +858,11 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: false, stdio: 'ignore' });
 child.unref(); process.stdout.write('codex 1.2.3\\n');`,
     );
+    let authorityRoot = '';
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      authorityRoot = options.cwd;
+      return await runManagedWorkspaceProcess(session, options);
+    };
     try {
       await expect(
         verifyReviewAuthoritySnapshot({
@@ -805,21 +876,28 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
           includeDecisions: false,
           phase: 'test checkpoint',
           timeoutMs: 2_000,
+          managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
         }),
       ).rejects.toThrow(/后代进程|未完整结算/u);
     } finally {
       await fixture.managed.close().catch(() => undefined);
+      if (authorityRoot !== '' && existsSync(authorityRoot)) {
+        chmodSync(authorityRoot, 0o700);
+        roots.push(authorityRoot);
+      }
     }
   }, 15_000);
 
   it('fails closed when the Runner writes into its sealed temporary domain', async () => {
-    const before = new Set(
-      readdirSync(tmpdir()).filter((name) => name.startsWith('coding-x-review-authority-')),
-    );
     const fixture = await realManagedFixture(
       `require('node:fs').writeFileSync(require('node:path').join(process.cwd(), 'pollution'), 'x'); process.stdout.write('codex 1.2.3\\n');`,
     );
+    let authorityRoot = '';
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      authorityRoot = options.cwd;
+      return await runManagedWorkspaceProcess(session, options);
+    };
     try {
       await expect(
         verifyReviewAuthoritySnapshot({
@@ -832,25 +910,24 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
           expectedDecisionsDigest: DECISIONS_DIGEST,
           includeDecisions: false,
           phase: 'temporary write checkpoint',
+          managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
         }),
-      ).rejects.toThrow(/临时域|目录树/u);
+      ).rejects.toThrow(/runner-version[\s\S]*(?:EACCES|permission denied)/u);
+      expect(authorityRoot).not.toBe('');
+      expect(existsSync(authorityRoot)).toBe(false);
     } finally {
       await fixture.managed.close().catch(() => undefined);
-      for (const name of readdirSync(tmpdir())) {
-        if (!name.startsWith('coding-x-review-authority-') || before.has(name)) continue;
-        const path = join(tmpdir(), name);
-        chmodSync(path, 0o700);
-        roots.push(path);
-      }
     }
   });
 
   it('fails closed when a descendant writes an undelegated workspace file', async () => {
-    const before = new Set(
-      readdirSync(tmpdir()).filter((name) => name.startsWith('coding-x-review-authority-')),
-    );
     const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    let authorityRoot = '';
+    const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+      authorityRoot = options.cwd;
+      return await runManagedWorkspaceProcess(session, options);
+    };
     const rogue = join(fixture.managed.workspacePath, 'rogue.txt');
     writeFileSync(
       fixture.runner,
@@ -868,16 +945,15 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
           expectedDecisionsDigest: DECISIONS_DIGEST,
           includeDecisions: false,
           phase: 'workspace write checkpoint',
+          managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
         }),
       ).rejects.toThrow(/workspace|越界|未完整结算|临时域/u);
     } finally {
       await fixture.managed.close().catch(() => undefined);
-      for (const name of readdirSync(tmpdir())) {
-        if (!name.startsWith('coding-x-review-authority-') || before.has(name)) continue;
-        const path = join(tmpdir(), name);
-        chmodSync(path, 0o700);
-        roots.push(path);
+      if (authorityRoot !== '' && existsSync(authorityRoot)) {
+        chmodSync(authorityRoot, 0o700);
+        roots.push(authorityRoot);
       }
     }
   });
