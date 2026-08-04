@@ -20,6 +20,14 @@ export const ordinaryWindowsIdentityTransportAlias = {
   ),
 };
 
+export const ordinaryWindowsTestSetupPath = fileURLToPath(
+  new URL('./src/workspace-safety/ordinary-windows-test-setup.ts', import.meta.url),
+);
+
+export function ordinaryWindowsTestSetupFiles(platform: NodeJS.Platform): string[] {
+  return platform === 'win32' ? [ordinaryWindowsTestSetupPath] : [];
+}
+
 const windowsNativeSuitePaths = REQUIRED_WINDOWS_NATIVE_SUITES.map(
   (name) => `src/workspace-safety/${name}`,
 );
@@ -41,6 +49,7 @@ export default defineConfig({
         ? windowsNativeSuitePaths
         : ['src/workspace-safety/windows-reparse-point.windows.test.ts'],
     environment: 'node',
+    setupFiles: ordinaryWindowsTestSetupFiles(process.platform),
     // 安全回归会启动大量真实进程树、临时 Git 仓库和本机检查器；按文件并行会争抢
     // 进程与 CPU，并让原本用于判定隔离失败的短超时产生级联假失败。保留完整测试集
     // 和原超时阈值，在所有平台按文件顺序执行。
