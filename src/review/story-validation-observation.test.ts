@@ -178,6 +178,7 @@ describe('observeStoryValidationCurrentnessControlled', () => {
     expect(result).toMatchObject({
       status: 'ready',
       observationToken: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      authorityInputDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       storyValidationDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
     });
     expect(source.readHead).toHaveBeenCalledTimes(2);

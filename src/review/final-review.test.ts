@@ -243,6 +243,7 @@ function options(ws: string, ctx: ReviewPreflightContext) {
     probe: probe as typeof import('./runner.js').probeRunnerIsolation,
     remote: () => readyRemote,
     revalidate: () => ({ ok: true as const }),
+    legacyAuthorityVerificationForTests: true,
     storyValidationDigest: STORY_VALIDATION_DIGEST,
     observeStoryValidation: () => ({
       status: 'ready' as const,
@@ -548,6 +549,37 @@ describe('runFinalReview', () => {
     expect(result.exitCode).toBe(5);
     expect(result.message).toContain('本轮 Review 已作废');
     expect(result.state).toBeUndefined();
+  });
+
+  it('keeps all ten high-risk currentness checkpoints while batching each into one authority snapshot', async () => {
+    const phases: Array<{ phase: string; includeDecisions: boolean }> = [];
+    const ctx = context({
+      changedFiles: ['src/review/final-review.ts'],
+      files: [{ path: 'src/review/final-review.ts', base: 'old', head: 'new timeout handling' }],
+      diff: '+new timeout handling',
+    });
+    const result = await runFinalReview({
+      ...options(workspace(), ctx),
+      axisRunner: async (request) => output(request.axis),
+      authoritySnapshotVerifier: async (request) => {
+        phases.push(request);
+        return null;
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(phases).toEqual([
+      { phase: 'Runner 隔离探测前', includeDecisions: false },
+      { phase: 'Runner 隔离探测结束后', includeDecisions: false },
+      { phase: 'spec Review 结束后', includeDecisions: false },
+      { phase: 'engineering Review 结束后', includeDecisions: false },
+      { phase: 'deep Review 结束后', includeDecisions: false },
+      { phase: '评审结束时', includeDecisions: true },
+      { phase: 'Review 裁决与延期 Issue 核验后', includeDecisions: true },
+      { phase: '远端核验后', includeDecisions: true },
+      { phase: '最终 Review 状态落盘前', includeDecisions: true },
+      { phase: '最终 Review 状态落盘后', includeDecisions: true },
+    ]);
   });
 
   it('stops before engineering when the authoritative Story inputs change during spec Review', async () => {
