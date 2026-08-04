@@ -14,13 +14,16 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, relative } from 'node:path';
+import { delimiter, dirname, join, relative, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { QualityContract } from '../quality/contract.js';
+import { runDoctor } from '../doctor/doctor.js';
 import { createManagedProcessTestSession } from './managed-process-test-support.js';
 import {
   CleanValidationCheckoutManager,
   createCleanValidationCheckout,
+  remainingCleanValidationGitTimeoutForTests,
 } from './clean-validation-checkout.js';
 import { assertCleanValidationTreeHasNoMountPoints } from './clean-validation-mounts.js';
 
@@ -87,6 +90,15 @@ afterEach(() => {
 describe.runIf(
   process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32',
 )('clean validation checkout', () => {
+  it('shares one absolute timeout across both Git establishment phases', () => {
+    const deadline = 600_000;
+    expect(remainingCleanValidationGitTimeoutForTests(deadline, 0)).toBe(600_000);
+    expect(remainingCleanValidationGitTimeoutForTests(deadline, 425_000)).toBe(175_000);
+    expect(() => remainingCleanValidationGitTimeoutForTests(deadline, deadline)).toThrow(
+      '十分钟总时限',
+    );
+  });
+
   it('excludes ignored developer files and accepts only declared artifact directories', async () => {
     const source = repository({
       '.gitignore': '.env\n.claude/\nnode_modules/\nignored-source.js\ndist/\n',
@@ -134,6 +146,537 @@ describe.runIf(
       await managed.close();
     }
   }, 60_000);
+
+  it('preserves the source repository commit that last changed each tracked path', async () => {
+    const source = repository({ 'stable.txt': 'first commit\n' });
+    const stableCommit = source.head();
+    writeFileSync(join(source.root, 'later.txt'), 'second commit\n');
+    execFileSync('git', ['add', 'later.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'later change'], { cwd: source.root });
+    const head = source.head();
+    const managed = await createManagedProcessTestSession();
+    let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+    try {
+      checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head,
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      expect(
+        execFileSync('git', ['rev-list', '-1', 'HEAD', '--', 'stable.txt'], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe(stableCommit);
+      expect(
+        execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe('false');
+    } finally {
+      checkout?.cleanup();
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('preserves reachable path history in a SHA-256 repository', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'coding-x-clean-sha256-source-'));
+    roots.push(root);
+    execFileSync('git', ['init', '-q', '-b', 'main', '--object-format=sha256'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'clean validation test'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'clean-validation@example.invalid'], {
+      cwd: root,
+    });
+    writeFileSync(join(root, 'stable.txt'), 'first commit\n');
+    execFileSync('git', ['add', 'stable.txt'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'first'], { cwd: root });
+    const stableCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(join(root, 'later.txt'), 'second commit\n');
+    execFileSync('git', ['add', 'later.txt'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'later'], { cwd: root });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: root,
+      encoding: 'utf8',
+    }).trim();
+    expect(head).toHaveLength(64);
+
+    const managed = await createManagedProcessTestSession();
+    let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+    try {
+      checkout = await createCleanValidationCheckout({
+        sourceRoot: root,
+        head,
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      expect(
+        execFileSync('git', ['rev-list', '-1', 'HEAD', '--', 'stable.txt'], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe(stableCommit);
+    } finally {
+      checkout?.cleanup();
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('does not make repository health treat unchanged documents as changed at HEAD', async () => {
+    const source = repository({
+      'docs/decision.md': [
+        '---',
+        'title: retained history',
+        'status: active',
+        'updated: 2026-07-03',
+        'scope: root',
+        '---',
+        '',
+        '# Still current',
+      ].join('\n'),
+    });
+    execFileSync('git', ['commit', '--amend', '-q', '--no-edit', '--date=2026-07-03T00:00:00Z'], {
+      cwd: source.root,
+      env: { ...process.env, GIT_COMMITTER_DATE: '2026-07-03T00:00:00Z' },
+    });
+    writeFileSync(join(source.root, 'later.txt'), 'unrelated change\n');
+    execFileSync('git', ['add', 'later.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'later change'], {
+      cwd: source.root,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_DATE: '2026-08-04T00:00:00Z',
+        GIT_COMMITTER_DATE: '2026-08-04T00:00:00Z',
+      },
+    });
+    const managed = await createManagedProcessTestSession();
+    let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+    try {
+      checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      expect(runDoctor(checkout.root, { staleDays: 30 }).freshness?.issues).toEqual([]);
+    } finally {
+      checkout?.cleanup();
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('fails closed when the developer repository has only shallow history', async () => {
+    const source = repository({ 'stable.txt': 'first commit\n' });
+    writeFileSync(join(source.root, 'later.txt'), 'second commit\n');
+    execFileSync('git', ['add', 'later.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'later change'], { cwd: source.root });
+    const shallowRoot = mkdtempSync(join(tmpdir(), 'coding-x-clean-shallow-'));
+    roots.push(shallowRoot);
+    rmSync(shallowRoot, { recursive: true });
+    execFileSync(
+      'git',
+      ['clone', '-q', '--depth=1', pathToFileURL(source.root).href, shallowRoot],
+      { cwd: tmpdir() },
+    );
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: shallowRoot,
+      encoding: 'utf8',
+    }).trim();
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: shallowRoot,
+          head,
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'history-unverifiable',
+        message: expect.stringContaining('shallow'),
+      });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('fails closed without lazy fetching when the developer repository is partial/promisor', async () => {
+    const source = repository({ 'source.txt': 'tracked payload\n'.repeat(24_000) });
+    execFileSync('git', ['config', 'uploadpack.allowFilter', 'true'], { cwd: source.root });
+    const blob = execFileSync('git', ['rev-parse', 'HEAD:source.txt'], {
+      cwd: source.root,
+      encoding: 'utf8',
+    }).trim();
+    const partialRoot = mkdtempSync(join(tmpdir(), 'coding-x-clean-partial-'));
+    roots.push(partialRoot);
+    rmSync(partialRoot, { recursive: true });
+    execFileSync(
+      'git',
+      [
+        'clone',
+        '-q',
+        '--filter=blob:none',
+        '--no-checkout',
+        pathToFileURL(source.root).href,
+        partialRoot,
+      ],
+      { cwd: tmpdir() },
+    );
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: partialRoot,
+      encoding: 'utf8',
+    }).trim();
+    const localObjects = (): string[] =>
+      execFileSync('git', ['cat-file', '--batch-all-objects', '--batch-check=%(objectname)'], {
+        cwd: partialRoot,
+        encoding: 'utf8',
+        env: { ...process.env, GIT_NO_LAZY_FETCH: '1' },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+        .split(/\r?\n/u)
+        .filter(Boolean)
+        .sort();
+    const objectsBefore = localObjects();
+    expect(objectsBefore).not.toContain(blob);
+    const missingPromisor = pathToFileURL(join(partialRoot, 'missing-promisor-source')).href;
+    execFileSync('git', ['remote', 'set-url', 'origin', missingPromisor], { cwd: partialRoot });
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: partialRoot,
+          head,
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'history-unverifiable',
+        message: expect.stringContaining('partial/promisor'),
+      });
+      expect(localObjects()).toEqual(objectsBefore);
+      expect(localObjects()).not.toContain(blob);
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('detects promisor configuration stored in config.worktree', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    execFileSync('git', ['config', 'extensions.worktreeConfig', 'true'], { cwd: source.root });
+    execFileSync('git', ['config', '--worktree', 'remote.trap.promisor', 'true'], {
+      cwd: source.root,
+    });
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'history-unverifiable',
+        message: expect.stringContaining('partial/promisor'),
+      });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('fails closed when a reachable source object is missing', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const blob = execFileSync('git', ['rev-parse', 'HEAD:source.txt'], {
+      cwd: source.root,
+      encoding: 'utf8',
+    }).trim();
+    const objectPath = execFileSync(
+      'git',
+      ['rev-parse', '--git-path', `objects/${blob.slice(0, 2)}/${blob.slice(2)}`],
+      { cwd: source.root, encoding: 'utf8' },
+    ).trim();
+    rmSync(resolve(source.root, objectPath));
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'history-unverifiable',
+        message: expect.stringContaining('历史'),
+      });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('rejects source replace refs instead of preflighting a different history graph', async () => {
+    const source = repository({ 'stable.txt': 'first commit\n' });
+    const original = source.head();
+    writeFileSync(join(source.root, 'later.txt'), 'second commit\n');
+    execFileSync('git', ['add', 'later.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'later change'], { cwd: source.root });
+    execFileSync('git', ['replace', source.head(), original], { cwd: source.root });
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'history-unverifiable',
+        message: expect.stringContaining('replace refs'),
+      });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('rejects source grafts instead of preflighting a rewritten ancestry', async () => {
+    const source = repository({ 'stable.txt': 'first commit\n' });
+    writeFileSync(join(source.root, 'later.txt'), 'second commit\n');
+    execFileSync('git', ['add', 'later.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'later change'], { cwd: source.root });
+    const graftPath = execFileSync('git', ['rev-parse', '--git-path', 'info/grafts'], {
+      cwd: source.root,
+      encoding: 'utf8',
+    }).trim();
+    const absoluteGraftPath = resolve(source.root, graftPath);
+    mkdirSync(dirname(absoluteGraftPath), { recursive: true });
+    writeFileSync(absoluteGraftPath, `${source.head()}\n`);
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'history-unverifiable',
+        message: expect.stringContaining('grafts'),
+      });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('fetches only requested ancestry without copying unrelated refs or tag objects', async () => {
+    const source = repository({ 'base.txt': 'base\n' });
+    const base = source.head();
+    writeFileSync(join(source.root, 'main.txt'), 'main\n');
+    execFileSync('git', ['add', 'main.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'main change'], { cwd: source.root });
+    const main = source.head();
+
+    execFileSync('git', ['checkout', '-q', '-b', 'additional', base], { cwd: source.root });
+    writeFileSync(join(source.root, 'additional.txt'), 'additional\n');
+    execFileSync('git', ['add', 'additional.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'additional change'], { cwd: source.root });
+    const additional = source.head();
+
+    execFileSync('git', ['checkout', '-q', '-b', 'unrelated', base], { cwd: source.root });
+    writeFileSync(join(source.root, 'unrelated.txt'), 'unrelated\n');
+    execFileSync('git', ['add', 'unrelated.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'unrelated change'], { cwd: source.root });
+    const unrelated = source.head();
+    const unrelatedBlob = execFileSync('git', ['rev-parse', 'HEAD:unrelated.txt'], {
+      cwd: source.root,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync('git', ['tag', '-a', 'unrelated-tag', '-m', 'unrelated tag'], {
+      cwd: source.root,
+    });
+    const unrelatedTag = execFileSync('git', ['rev-parse', 'unrelated-tag'], {
+      cwd: source.root,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync('git', ['checkout', '-q', 'main'], { cwd: source.root });
+
+    const managed = await createManagedProcessTestSession();
+    let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+    try {
+      checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: main,
+        additionalRefs: [additional],
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      expect(
+        execFileSync('git', ['merge-base', main, additional], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe(base);
+      expect(
+        execFileSync('git', ['for-each-ref', '--format=%(refname)'], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        }),
+      ).toBe('');
+      for (const object of [unrelated, unrelatedBlob, unrelatedTag]) {
+        expect(() =>
+          execFileSync('git', ['cat-file', '-e', object], {
+            cwd: checkout!.root,
+            stdio: 'ignore',
+          }),
+        ).toThrow();
+      }
+    } finally {
+      checkout?.cleanup();
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('bounds history by logical object size even when source delta storage is tiny', async () => {
+    const source = repository({ 'anchor.txt': 'anchor\n' });
+    const basePayload = Buffer.alloc(1024 * 1024);
+    let state = 0x12345678;
+    for (let index = 0; index < basePayload.length; index += 1) {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      basePayload[index] = state & 0xff;
+    }
+    const changedPayload = Buffer.from(basePayload);
+    for (let index = 0; index < 64; index += 1) changedPayload[1024 + index] ^= 0xff;
+    const writeObject = (args: string[], input: Buffer | string): string =>
+      execFileSync('git', args, {
+        cwd: source.root,
+        input,
+        encoding: 'utf8',
+      }).trim();
+    const firstBlob = writeObject(['hash-object', '-w', '--stdin'], basePayload);
+    const secondBlob = writeObject(['hash-object', '-w', '--stdin'], changedPayload);
+    const firstTree = writeObject(['mktree'], `100644 blob ${firstBlob}\tpayload.bin\n`);
+    const secondTree = writeObject(['mktree'], `100644 blob ${secondBlob}\tpayload.bin\n`);
+    const firstCommit = execFileSync('git', ['commit-tree', firstTree, '-m', 'delta first'], {
+      cwd: source.root,
+      encoding: 'utf8',
+    }).trim();
+    const secondCommit = execFileSync('git', ['commit-tree', secondTree, '-m', 'delta second'], {
+      cwd: source.root,
+      encoding: 'utf8',
+    }).trim();
+    execFileSync('git', ['update-ref', 'refs/heads/delta-first', firstCommit], {
+      cwd: source.root,
+    });
+    execFileSync('git', ['update-ref', 'refs/heads/delta-second', secondCommit], {
+      cwd: source.root,
+    });
+    execFileSync('git', ['repack', '-q', '-a', '-d', '-f', '--window=250', '--depth=50'], {
+      cwd: source.root,
+    });
+    const metadata = writeObject(
+      ['cat-file', '--batch-check=%(objectname) %(objectsize) %(objectsize:disk) %(deltabase)'],
+      `${firstBlob}\n${secondBlob}\n`,
+    )
+      .split(/\r?\n/u)
+      .map((line) => line.split(' '));
+    const delta = metadata.find(
+      ([object, , , deltaBase]) =>
+        (object === firstBlob || object === secondBlob) && !/^0+$/u.test(deltaBase),
+    );
+    expect(delta, 'fixture must contain a packed delta').toBeDefined();
+    const target = delta![0] === firstBlob ? firstCommit : secondCommit;
+    const maxBytes = 64 * 1024;
+    expect(Number(delta![2])).toBeLessThan(maxBytes);
+    expect(Number(delta![1])).toBeGreaterThan(maxBytes);
+
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: target,
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+          historyLimitsForTests: { maxBytes },
+          repositoryUrlForTests: pathToFileURL(join(source.root, 'does-not-exist.git')).href,
+        }),
+      ).rejects.toMatchObject({
+        code: 'history-unverifiable',
+        message: expect.stringContaining('保守容量估算'),
+      });
+    } finally {
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('rejects an unbounded number of requested history roots', async () => {
+    const source = repository({ 'source.txt': 'tracked\n' });
+    const additionalRefs = Array.from({ length: 16 }, (_, index) =>
+      (index + 1).toString(16).padStart(40, '0'),
+    );
+    const managed = await createManagedProcessTestSession();
+    try {
+      await expect(
+        createCleanValidationCheckout({
+          sourceRoot: source.root,
+          head: source.head(),
+          additionalRefs,
+          contract: contract(),
+          managed: { session: managed.session, kind: 'quality-check' },
+        }),
+      ).rejects.toMatchObject({
+        code: 'invalid-source',
+        message: expect.stringContaining('16'),
+      });
+    } finally {
+      await managed.close();
+    }
+  });
+
+  it.each([
+    {
+      label: 'reachable object count',
+      limits: { maxObjects: 1 },
+      diagnostic: 'Git 对象',
+    },
+    {
+      label: 'reachable object conservative capacity',
+      limits: { maxBytes: 1 },
+      diagnostic: 'Git 历史保守容量估算',
+    },
+  ])(
+    'fails closed before fetch when $label exceeds its budget',
+    async ({ limits, diagnostic }) => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const missingRepository = pathToFileURL(join(source.root, 'does-not-exist.git')).href;
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract(),
+            managed: { session: managed.session, kind: 'quality-check' },
+            historyLimitsForTests: limits,
+            repositoryUrlForTests: missingRepository,
+          }),
+        ).rejects.toMatchObject({
+          code: 'history-unverifiable',
+          message: expect.stringContaining(diagnostic),
+        });
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
 
   it.runIf(process.platform !== 'win32')(
     'does not treat a POSIX backslash filename as a child of an allowed directory',
@@ -398,8 +941,9 @@ describe.runIf(
       await expect(first.assertCurrent('tracked 改写测试')).rejects.toMatchObject({
         code: 'tracked-content-changed',
       });
-      const sameHead = await manager.acquire(h1);
+      const sameHead = await manager.acquire(h1, [h1, h1]);
       expect(sameHead.root).not.toBe(first.root);
+      expect(sameHead.additionalRefs).toEqual([]);
       expect(existsSync(first.root)).toBe(false);
       expect(existsSync(join(sameHead.root, 'node_modules'))).toBe(false);
       writeFileSync(join(source.root, 'source.txt'), 'H2\n');

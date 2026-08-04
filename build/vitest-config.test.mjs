@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import ordinaryVitestConfig, {
   ordinaryWindowsPathAttributesTransportAlias,
+  ordinaryWindowsTestSetupFiles,
+  ordinaryWindowsTestSetupPath,
 } from '../vitest.config.ts';
 import nativeWindowsVitestConfig, {
   nativeWindowsPathAttributesTransportAlias,
@@ -40,6 +42,20 @@ describe('Vitest process-suite scheduling', () => {
   it('keeps ordinary and native suites serial on every platform', () => {
     expect(ordinaryVitestConfig.test?.fileParallelism).toBe(false);
     expect(nativeWindowsVitestConfig.test?.fileParallelism).toBe(false);
+  });
+
+  it('resets the bounded test transport only in ordinary Windows tests', () => {
+    const expected = fileURLToPath(
+      new URL('../src/workspace-safety/ordinary-windows-test-setup.ts', import.meta.url),
+    );
+
+    expect(ordinaryWindowsTestSetupPath).toBe(expected);
+    expect(ordinaryWindowsTestSetupFiles('win32')).toEqual([expected]);
+    expect(ordinaryWindowsTestSetupFiles('linux')).toEqual([]);
+    expect(ordinaryVitestConfig.test?.setupFiles).toEqual(
+      ordinaryWindowsTestSetupFiles(process.platform),
+    );
+    expect(nativeWindowsVitestConfig.test?.setupFiles ?? []).not.toContain(expected);
   });
 });
 

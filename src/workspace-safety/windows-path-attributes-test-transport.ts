@@ -13,7 +13,7 @@ import type { WindowsPathAttributeTransportOptions } from './windows-path-attrib
 
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
-const MAX_TEST_INVOCATIONS = 10_000;
+export const WINDOWS_PATH_ATTRIBUTE_TEST_MAX_INVOCATIONS = 10_000;
 let invocationCount = 0;
 
 function invalid(message: string): never {
@@ -161,7 +161,9 @@ export function invokeWindowsPathAttributeHelper(
   options: WindowsPathAttributeTransportOptions,
 ): Buffer {
   invocationCount += 1;
-  if (invocationCount > MAX_TEST_INVOCATIONS) invalid('test helper invocation bound exceeded');
+  if (invocationCount > WINDOWS_PATH_ATTRIBUTE_TEST_MAX_INVOCATIONS) {
+    invalid('test helper invocation bound exceeded');
+  }
   const request = JSON.parse(options.requestBytes.toString('utf8')) as {
     readonly schemaVersion: number;
     readonly mode: string;
@@ -261,4 +263,8 @@ export function invokeWindowsPathAttributeHelper(
     }),
     'utf8',
   );
+}
+
+export function resetWindowsPathAttributeTestTransport(): void {
+  invocationCount = 0;
 }

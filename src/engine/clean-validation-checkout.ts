@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import type { ManagedGateContext } from './gate.js';
 import { runContractPrepareCommands } from './gate.js';
@@ -19,6 +20,7 @@ import { isGitHead } from '../contracts/validation-contract.js';
 import { snapshotQualityContract, type QualityContract } from '../quality/contract.js';
 import {
   CLEAN_VALIDATION_CHECKOUT_VERSION,
+  normalizeValidationAdditionalRefs,
   validationEnvironmentDigest,
 } from '../quality/validation-environment.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
@@ -48,10 +50,14 @@ export { CLEAN_VALIDATION_CHECKOUT_VERSION, validationEnvironmentDigest };
 const TEMP_PREFIX = 'coding-x-validation-';
 const GIT_TIMEOUT_MS = 10 * 60_000;
 const MAX_GIT_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_GIT_HISTORY_METADATA_BYTES = 16 * 1024 * 1024;
 // 与 Windows 固定路径检查器的公开上限一致，保证任何平台都能完成同一棵树的收口证明。
 const MAX_VALIDATION_TREE_ENTRIES = 100_000;
 const MAX_GIT_CONTROL_ENTRIES = 20_000;
 const MAX_GIT_CONTROL_BYTES = 32 * 1024 * 1024;
+const MAX_GIT_HISTORY_OBJECTS = 100_000;
+const MAX_GIT_HISTORY_BYTES = 1024 * 1024 * 1024;
+const MAX_GIT_HISTORY_REFS = 16;
 const MAX_EXTERNAL_LINK_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_EXTERNAL_LINKS = 1024;
 const MAX_EXTERNAL_LINK_TARGET_BYTES = 1024 * 1024 * 1024;
@@ -60,6 +66,7 @@ const EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS = 30_000;
 export type CleanValidationCheckoutErrorCode =
   | 'invalid-source'
   | 'unsupported-git-content'
+  | 'history-unverifiable'
   | 'git-failed'
   | 'prepare-failed'
   | 'identity-changed'
@@ -92,6 +99,13 @@ export interface CleanValidationCheckoutOptions {
   readonly managed: ManagedGateContext;
   /** @internal 精确清理测试观察；生产不设置。 */
   readonly onContainerCreatedForTests?: (path: string) => void;
+  /** @internal 只允许收紧生产历史预算，用于边界回归；生产不设置。 */
+  readonly historyLimitsForTests?: {
+    readonly maxObjects?: number;
+    readonly maxBytes?: number;
+  };
+  /** @internal 用不可读取的来源证明预算拒绝发生在 fetch 之前；生产不设置。 */
+  readonly repositoryUrlForTests?: string;
 }
 
 export interface CleanValidationCheckoutCleanup {
@@ -141,6 +155,17 @@ function sameDirectoryIdentity(left: DirectoryIdentity, right: BigIntStats): boo
     left.ino === right.ino &&
     left.uid === right.uid
   );
+}
+
+function restrictedHistoryLimit(value: number | undefined, maximum: number, name: string): number {
+  if (value === undefined) return maximum;
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new CleanValidationCheckoutError(
+      'invalid-source',
+      `${name} 测试上限必须是 1 到 ${maximum} 的安全整数`,
+    );
+  }
+  return value;
 }
 
 function pathInside(parent: string, candidate: string): boolean {
@@ -361,12 +386,283 @@ function safeGitEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     GIT_LFS_SKIP_SMUDGE: '1',
     GIT_ATTR_NOSYSTEM: '1',
     GIT_OPTIONAL_LOCKS: '0',
+    GIT_NO_LAZY_FETCH: '1',
+    GIT_NO_REPLACE_OBJECTS: '1',
   };
 }
 
 function diagnostic(stdout: Buffer, stderr: Buffer): string {
   return Buffer.concat([stdout, stderr]).toString('utf8').slice(-2000).trim();
 }
+
+function remainingGitEstablishmentTimeout(deadlineMs: number, nowMs = performance.now()): number {
+  const remaining = Math.ceil(deadlineMs - nowMs);
+  if (!Number.isSafeInteger(remaining) || remaining <= 0) {
+    throw new CleanValidationCheckoutError('git-failed', 'Git 建立验证检出超过十分钟总时限');
+  }
+  return Math.min(GIT_TIMEOUT_MS, remaining);
+}
+
+/** @internal 证明两段 Git 建立流程共用同一绝对截止时间。 */
+export function remainingCleanValidationGitTimeoutForTests(
+  deadlineMs: number,
+  nowMs: number,
+): number {
+  return remainingGitEstablishmentTimeout(deadlineMs, nowMs);
+}
+
+const MANAGED_GIT_HISTORY_HELPER = String.raw`
+import { spawnSync } from 'node:child_process';
+import { lstatSync, mkdirSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+const request = JSON.parse(process.argv[1]);
+const fail = (code, diagnostic) => {
+  process.stdout.write(JSON.stringify({ ok: false, code, diagnostic }));
+  process.exit(0);
+};
+const historyFail = (diagnostic) => fail('history-unverifiable', diagnostic);
+const invoke = (args, input, allowNoMatch = false) => {
+  const result = spawnSync(request.git, args, {
+    cwd: request.root,
+    env: process.env,
+    encoding: null,
+    input,
+    maxBuffer: ${MAX_GIT_HISTORY_METADATA_BYTES},
+    windowsHide: true,
+  });
+  const stdout = Buffer.from(result.stdout ?? []);
+  const stderr = Buffer.from(result.stderr ?? []);
+  if (
+    result.error ||
+    (result.status !== 0 && !(allowNoMatch && result.status === 1))
+  ) {
+    throw new Error(
+      Buffer.concat([stdout, stderr]).toString('utf8').slice(-2000) ||
+      result.error?.message || args[0],
+    );
+  }
+  return result.status === 0 ? stdout : Buffer.alloc(0);
+};
+const run = (args) => invoke(args);
+const historyRun = (args, input) => {
+  try {
+    return invoke(args, input);
+  } catch (error) {
+    historyFail(
+      '本机 Git 无法安全核对完整历史：' +
+      (error instanceof Error ? error.message : String(error)),
+    );
+  }
+};
+const historyOptional = (args) => {
+  try {
+    return invoke(args, undefined, true);
+  } catch (error) {
+    historyFail(
+      '本机 Git 无法安全读取历史配置：' +
+      (error instanceof Error ? error.message : String(error)),
+    );
+  }
+};
+const parseObjectIds = (bytes, pattern, context) => {
+  const lines = bytes.toString('utf8').split(/\r?\n/u).filter(Boolean);
+  const missing = lines.filter((line) => line.startsWith('?'));
+  if (missing.length > 0) {
+    historyFail(context + '缺少 ' + missing.length + ' 个可达 Git 对象，来源历史不完整');
+  }
+  if (lines.length === 0 || lines.some((line) => !pattern.test(line))) {
+    historyFail(context + '对象清单无法安全解析或当前 Git 不支持所需能力');
+  }
+  return [...new Set(lines)];
+};
+const reachable = (directory, refs, pattern, context) => parseObjectIds(
+  historyRun([
+    '-C', directory, 'rev-list', '--objects', '--no-object-names', '--missing=print', ...refs,
+  ]),
+  pattern,
+  context,
+);
+const allObjects = (directory, pattern) => parseObjectIds(
+  historyRun([
+    '-C', directory, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname)',
+  ]),
+  pattern,
+  '验证检出',
+);
+const sameSet = (left, right) => {
+  if (left.length !== right.length) return false;
+  const values = new Set(right);
+  return left.every((value) => values.has(value));
+};
+const conservativeBytes = (directory, objects, pattern) => {
+  const lines = historyRun(
+    [
+      '-C', directory, 'cat-file',
+      '--batch-check=%(objectname) %(objecttype) %(objectsize)',
+    ],
+    Buffer.from(objects.join('\n') + '\n', 'utf8'),
+  ).toString('utf8').split(/\r?\n/u).filter(Boolean);
+  if (lines.length !== objects.length) historyFail('Git 对象容量清单数量不一致');
+  let total = 0n;
+  for (let index = 0; index < objects.length; index += 1) {
+    const match = lines[index].match(/^([0-9a-f]+) (commit|tree|blob|tag) (\d+)$/u);
+    if (!match || !pattern.test(match[1]) || match[1] !== objects[index]) {
+      historyFail('Git 对象容量清单无法解析或对象在核对期间变化');
+    }
+    const size = BigInt(match[3]);
+    total += size + ((size + 99n) / 100n) + 1024n;
+  }
+  return total;
+};
+const objectStorageBytes = (directory, maxBytes, maxEntries) => {
+  let total = 0n;
+  let entries = 0;
+  const visit = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      entries += 1;
+      if (entries > maxEntries) historyFail('验证检出 Git objects 条目超过安全上限');
+      const target = join(current, entry.name);
+      const info = lstatSync(target, { bigint: true });
+      if (info.isSymbolicLink()) historyFail('验证检出 Git objects 不得包含符号链接');
+      if (info.isDirectory()) visit(target);
+      else if (info.isFile()) {
+        total += info.size;
+        if (total > maxBytes) {
+          historyFail(
+            '验证检出 Git 对象实际占用 ' + total.toString() +
+            ' 字节，超过安全上限 ' + maxBytes.toString(),
+          );
+        }
+      }
+      else historyFail('验证检出 Git objects 包含特殊文件');
+    }
+  };
+  try {
+    visit(directory);
+  } catch (error) {
+    historyFail(
+      '无法完整复核验证检出 Git objects：' +
+      (error instanceof Error ? error.message : String(error)),
+    );
+  }
+  return total;
+};
+try {
+  if (
+    !Array.isArray(request.refs) || request.refs.length === 0 ||
+    request.refs.length > ${MAX_GIT_HISTORY_REFS} ||
+    request.refs.some((ref) => typeof ref !== 'string') ||
+    !Number.isSafeInteger(request.maxHistoryObjects) || request.maxHistoryObjects < 1 ||
+    !Number.isSafeInteger(request.maxHistoryBytes) || request.maxHistoryBytes < 1
+  ) throw new Error('Git 历史预算请求非法');
+  const objectFormat = historyRun([
+    '-C', request.sourceRoot, 'rev-parse', '--show-object-format',
+  ]).toString('utf8').trim();
+  if (objectFormat !== 'sha1' && objectFormat !== 'sha256') {
+    historyFail('不支持的 Git object format：' + objectFormat);
+  }
+  let shallow;
+  try {
+    shallow = run([
+      '-C', request.sourceRoot, 'rev-parse', '--is-shallow-repository',
+    ]).toString('utf8').trim();
+  } catch (error) {
+    historyFail(
+      '本机 Git 无法确认来源历史是否完整：' +
+      (error instanceof Error ? error.message : String(error)),
+    );
+  }
+  if (shallow !== 'false') {
+    historyFail(
+      shallow === 'true'
+        ? '开发仓库是 shallow repository，无法证明逐路径 Git 历史完整'
+        : '无法确认开发仓库是否具有完整 Git 历史',
+    );
+  }
+  if (
+    historyOptional([
+      '-C', request.sourceRoot, 'config', '--get', 'extensions.partialClone',
+    ]).byteLength > 0 ||
+    historyOptional([
+      '-C', request.sourceRoot, 'config', '--get-regexp',
+      '^remote[.].*[.]promisor$',
+    ]).byteLength > 0 ||
+    historyOptional([
+      '-C', request.sourceRoot, 'config', '--get-regexp',
+      '^remote[.].*[.]partialclonefilter$',
+    ]).byteLength > 0
+  ) {
+    historyFail('开发仓库是 partial/promisor repository；本地验证不会联网补取缺失历史');
+  }
+  const replacementRefs = historyRun([
+    '-C', request.sourceRoot, 'for-each-ref', '--format=%(refname)', 'refs/replace/',
+  ]).toString('utf8').split(/\r?\n/u).filter(Boolean);
+  if (replacementRefs.length > 0) {
+    historyFail('开发仓库启用了 replace refs，无法证明验证历史语义一致');
+  }
+  const graftText = historyRun([
+    '-C', request.sourceRoot, 'rev-parse', '--git-path', 'info/grafts',
+  ]).toString('utf8').replace(/\r?\n$/u, '');
+  if (graftText === '' || /[\r\n]/u.test(graftText)) {
+    historyFail('无法安全解析开发仓库的 grafts 路径');
+  }
+  const graftPath = resolve(request.sourceRoot, graftText);
+  try {
+    lstatSync(graftPath);
+    historyFail('开发仓库存在 info/grafts，无法证明验证历史语义一致');
+  } catch (error) {
+    if (!error || typeof error !== 'object' || error.code !== 'ENOENT') {
+      historyFail('无法确认开发仓库是否存在 info/grafts');
+    }
+  }
+  const pattern = objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u;
+  const expected = reachable(request.sourceRoot, request.refs, pattern, '开发仓库');
+  if (expected.length > request.maxHistoryObjects) {
+    historyFail(
+      '目标提交可达 Git 对象 ' + expected.length +
+      ' 个，超过安全上限 ' + request.maxHistoryObjects,
+    );
+  }
+  const estimatedBytes = conservativeBytes(request.sourceRoot, expected, pattern);
+  if (estimatedBytes > BigInt(request.maxHistoryBytes)) {
+    historyFail(
+      '目标提交可达 Git 历史保守容量估算 ' + estimatedBytes.toString() +
+      ' 字节，超过安全上限 ' + request.maxHistoryBytes,
+    );
+  }
+  run(['init', '--quiet', ...(objectFormat === 'sha256' ? ['--object-format=sha256'] : [])]);
+  const hooksPath = join(request.root, '.git', 'coding-x-empty-hooks');
+  mkdirSync(hooksPath, { recursive: true });
+  run([
+    '-c', 'core.hooksPath=' + hooksPath,
+    '-c', 'protocol.file.allow=always',
+    '-c', 'protocol.version=2',
+    'fetch', '--quiet', '--no-tags', '--no-recurse-submodules',
+    '--no-write-fetch-head', request.repositoryUrl, ...request.refs,
+  ]);
+  const fetchedReachable = reachable(request.root, request.refs, pattern, '验证检出');
+  const fetchedAll = allObjects(request.root, pattern);
+  if (!sameSet(expected, fetchedReachable) || !sameSet(expected, fetchedAll)) {
+    historyFail('验证检出的 Git 对象与预检历史不一致，可能包含缺失或无关对象');
+  }
+  const fetchedRefs = historyRun([
+    'for-each-ref', '--format=%(refname)',
+  ]).toString('utf8').split(/\r?\n/u).filter(Boolean);
+  if (fetchedRefs.length > 0) historyFail('验证检出意外复制了来源仓库的 ref namespace');
+  objectStorageBytes(
+    join(request.root, '.git', 'objects'),
+    BigInt(request.maxHistoryBytes),
+    request.maxHistoryObjects + 1024,
+  );
+  process.stdout.write(JSON.stringify({ ok: true, objectFormat }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    code: 'git-failed',
+    diagnostic: error instanceof Error ? error.message : String(error),
+  }));
+}
+`;
 
 const MANAGED_GIT_HELPER = String.raw`
 import { spawnSync } from 'node:child_process';
@@ -535,23 +831,15 @@ const blobHash = (entry) => {
 };
 try {
   if (request.mode === 'create') {
-    const objectFormat = run([
-      '-C', request.sourceRoot, 'rev-parse', '--show-object-format',
-    ]).toString('utf8').trim();
-    if (objectFormat !== 'sha1' && objectFormat !== 'sha256') {
+    const objectFormat = run(['rev-parse', '--show-object-format']).toString('utf8').trim();
+    if (
+      (objectFormat !== 'sha1' && objectFormat !== 'sha256') ||
+      objectFormat !== request.objectFormat
+    ) {
       throw new Error('不支持的 Git object format：' + objectFormat);
     }
-    run(['init', '--quiet', ...(objectFormat === 'sha256' ? ['--object-format=sha256'] : [])]);
     const hooksPath = join(request.root, '.git', 'coding-x-empty-hooks');
     mkdirSync(hooksPath, { recursive: true });
-    for (const ref of request.refs) {
-      run([
-        '-c', 'core.hooksPath=' + hooksPath,
-        '-c', 'protocol.file.allow=always',
-        'fetch', '--quiet', '--no-tags', '--no-recurse-submodules', '--depth=1',
-        '--no-write-fetch-head', request.repositoryUrl, ref,
-      ]);
-    }
     const entries = treeEntries(request.head);
     const gitlink = entries.find((entry) => entry.mode === '160000');
     if (gitlink) {
@@ -675,14 +963,19 @@ interface GitHelperResult {
 }
 
 async function runGitHelper(options: {
+  readonly program?: string;
   readonly request: Record<string, unknown>;
   readonly cwd: string;
   readonly environment: NodeJS.ProcessEnv;
   readonly managed: ManagedGateContext;
+  readonly timeoutMs?: number;
 }): Promise<GitHelperResult> {
   let args: string[];
   try {
-    args = inlineModuleArguments(MANAGED_GIT_HELPER, JSON.stringify(options.request));
+    args = inlineModuleArguments(
+      options.program ?? MANAGED_GIT_HELPER,
+      JSON.stringify(options.request),
+    );
   } catch (error) {
     if (error instanceof InlineProgramTransportError) {
       throw new CleanValidationCheckoutError(
@@ -700,7 +993,7 @@ async function runGitHelper(options: {
     args,
     cwd: options.cwd,
     environment: environmentEntries(options.environment),
-    timeoutMs: GIT_TIMEOUT_MS,
+    timeoutMs: options.timeoutMs ?? GIT_TIMEOUT_MS,
     termination: options.managed.termination,
   });
   if (result.stdout.byteLength > MAX_GIT_OUTPUT_BYTES) {
@@ -1079,13 +1372,29 @@ export async function createCleanValidationCheckout(
   ]);
   const sourceInputRoot = resolve(options.sourceRoot);
   const sourceRoot = realpathSync.native(sourceInputRoot);
-  const additionalRefs = [...new Set(options.additionalRefs ?? [])].sort();
+  const additionalRefs = normalizeValidationAdditionalRefs(options.head, options.additionalRefs);
   if (additionalRefs.some((ref) => !isGitHead(ref))) {
     throw new CleanValidationCheckoutError(
       'invalid-source',
       '验证检出的附加 Git ref 必须是完整 commit id',
     );
   }
+  if (additionalRefs.length + 1 > MAX_GIT_HISTORY_REFS) {
+    throw new CleanValidationCheckoutError(
+      'invalid-source',
+      `验证检出的目标提交总数不能超过 ${MAX_GIT_HISTORY_REFS} 个`,
+    );
+  }
+  const maxHistoryObjects = restrictedHistoryLimit(
+    options.historyLimitsForTests?.maxObjects,
+    MAX_GIT_HISTORY_OBJECTS,
+    'Git 历史对象',
+  );
+  const maxHistoryBytes = restrictedHistoryLimit(
+    options.historyLimitsForTests?.maxBytes,
+    MAX_GIT_HISTORY_BYTES,
+    'Git 历史容量',
+  );
   const temporaryRoot = realpathSync.native(tmpdir());
   if (pathInside(sourceRoot, temporaryRoot)) {
     throw new CleanValidationCheckoutError(
@@ -1208,25 +1517,48 @@ export async function createCleanValidationCheckout(
     const processEnvironment = createValidationProcessEnvironment(sourceInputRoot, checkoutRoot);
     const environment = safeGitEnvironment(processEnvironment);
     const git = resolveValidationGitExecutable(sourceRoot, sourceRoot, environment);
-    const repositoryUrl = pathToFileURL(sourceRoot).href;
+    const repositoryUrl = options.repositoryUrlForTests ?? pathToFileURL(sourceRoot).href;
+    const gitEstablishmentDeadline = performance.now() + GIT_TIMEOUT_MS;
+    const history = await runGitHelper({
+      program: MANAGED_GIT_HISTORY_HELPER,
+      request: {
+        git,
+        root: checkoutRoot,
+        repositoryUrl,
+        sourceRoot,
+        refs: [options.head, ...additionalRefs],
+        maxHistoryObjects,
+        maxHistoryBytes,
+      },
+      cwd: checkoutRoot,
+      environment,
+      managed: options.managed,
+      timeoutMs: remainingGitEstablishmentTimeout(gitEstablishmentDeadline, performance.now()),
+    });
+    if (!history.ok || (history.objectFormat !== 'sha1' && history.objectFormat !== 'sha256')) {
+      throw new CleanValidationCheckoutError(
+        history.code ?? 'git-failed',
+        history.diagnostic ?? '无法建立受界的验证历史',
+      );
+    }
     const created = await runGitHelper({
       request: {
         mode: 'create',
         git,
         root: checkoutRoot,
-        repositoryUrl,
-        sourceRoot,
         head: options.head,
-        refs: [options.head, ...additionalRefs],
+        objectFormat: history.objectFormat,
       },
       cwd: checkoutRoot,
       environment,
       managed: options.managed,
+      timeoutMs: remainingGitEstablishmentTimeout(gitEstablishmentDeadline, performance.now()),
     });
     if (
       !created.ok ||
       typeof created.tree !== 'string' ||
       (created.objectFormat !== 'sha1' && created.objectFormat !== 'sha256') ||
+      created.objectFormat !== history.objectFormat ||
       typeof created.control?.tree !== 'string'
     ) {
       throw new CleanValidationCheckoutError(
@@ -1402,7 +1734,7 @@ export class CleanValidationCheckoutManager {
     additionalRefs: readonly string[] = [],
     additionalPolicy?: unknown,
   ): Promise<CleanValidationCheckout> {
-    const normalizedRefs = [...new Set(additionalRefs)].sort();
+    const normalizedRefs = normalizeValidationAdditionalRefs(head, additionalRefs);
     const policySnapshot =
       additionalPolicy === undefined ? undefined : structuredClone(additionalPolicy);
     const expectedDigest = validationEnvironmentDigest({
