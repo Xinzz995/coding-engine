@@ -133,6 +133,17 @@ describe('instruction assets workspace commit isolation contract', () => {
     ).contract.rules.map(({ path }) => path);
     expect(promptPaths.sort()).toEqual(contractPaths.sort());
   });
+
+  it('keeps progress history append-only while retaining reusable learning', () => {
+    const content = read('builder.md');
+    expect(content).toContain('只在 `progress.md` 文件末尾追加本轮进度');
+    expect(content).toContain('不得改写、移动、删除任何既有内容');
+    expect(content).toContain('只把它写入本轮新追加记录的');
+    expect(content).toContain('「未来迭代的学习」');
+    expect(content).toContain('`## Codebase Patterns`，只能读取，禁止修改');
+    expect(content).not.toContain('添加到 progress.md 顶部');
+    expect(content).not.toContain('如果不存在则创建');
+  });
 });
 
 describe('instruction assets Validator artifact isolation contract', () => {

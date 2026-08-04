@@ -15,11 +15,15 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
+import {
+  environmentEntries,
+  runManagedWorkspaceProcess,
+} from '../workspace-safety/coordinator.js';
 import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession, type WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
+import { observeManagedProcessSettlement } from '../workspace-safety/operation.js';
 import type { ReviewPackage } from './package.js';
 import {
   ReviewTemporaryDirectory,
@@ -59,6 +63,45 @@ afterEach(() => {
 });
 
 const fakeSession = {} as WorkspaceSession;
+
+async function confirmedWorkspaceRejection(
+  drainReason: 'natural' | 'timeout',
+): Promise<WorkspaceSafetyError> {
+  const workspace = mkdtempSync(join(tmpdir(), `review-settled-${drainReason}-`));
+  temporaryRoots.push(workspace);
+  await bootstrapWorkspace({ workspacePath: workspace });
+  const lease = await acquireWorkspaceLease({ workspacePath: workspace, command: 'run' });
+  const session = createWorkspaceSession(lease);
+  const target = join(workspace, 'rejected-change.txt');
+  const script =
+    `require('node:fs').writeFileSync(${JSON.stringify(target)}, 'changed');` +
+    (drainReason === 'timeout' ? 'setInterval(() => {}, 1000);' : '');
+  let failure: unknown;
+  try {
+    await runManagedWorkspaceProcess(session, {
+      kind: 'final-review',
+      delegation: 'read-only-v1',
+      executable: process.execPath,
+      args: ['-e', script],
+      cwd: workspace,
+      environment: environmentEntries(process.env),
+      timeoutMs: drainReason === 'timeout' ? 1_000 : 5_000,
+      supervisorTimeouts: {
+        naturalDrainMs: 25,
+        terminateDrainMs: 3_000,
+        pollMs: 10,
+      },
+    });
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(WorkspaceSafetyError);
+  expect(observeManagedProcessSettlement(failure)).toMatchObject({
+    status: 'confirmed',
+    drainReason,
+  });
+  return failure as WorkspaceSafetyError;
+}
 
 function injectNextExactSealFailure(): () => string {
   const createTemporary = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
@@ -662,6 +705,28 @@ describe('managed Final Review runner execution', () => {
     await outcome.toThrow(/process tree not empty.*Runner 版本临时域已保留/u);
     expect(retainedPath).not.toBe('');
     expect(() => realpathSync.native(retainedPath)).not.toThrow();
+  });
+
+  it('cleans the Runner version domain after a natural closeout whose workspace delta is rejected', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const workspaceFailure = await confirmedWorkspaceRejection('natural');
+    let temporaryPath = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      temporaryPath = options.cwd;
+      temporaryRoots.push(temporaryPath);
+      throw workspaceFailure;
+    };
+
+    await expect(
+      readRunnerVersion({
+        session: fakeSession,
+        runner: 'codex',
+        projectRoot: process.cwd(),
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/semantic delta was not accepted/u);
+    expect(temporaryPath).not.toBe('');
+    expect(existsSync(temporaryPath)).toBe(false);
   });
 
   it('retains the Runner version domain after a supervised timeout', async () => {
@@ -1557,6 +1622,62 @@ describe('managed Final Review runner execution', () => {
     expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
     expect(existsSync(reviewPackage.root)).toBe(true);
     expect(existsSync(invocationRoot)).toBe(true);
+  });
+
+  it('cleans both Review domains after a natural closeout whose workspace delta is rejected', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const workspaceFailure = await confirmedWorkspaceRejection('natural');
+    const reviewPackage = managedPackageFixture();
+    let invocationRoot = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      invocationRoot = dirname(options.args[1]);
+      temporaryRoots.push(invocationRoot);
+      throw workspaceFailure;
+    };
+
+    await expect(
+      runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/semantic delta was not accepted/u);
+    expect(existsSync(invocationRoot)).toBe(false);
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+    expect(existsSync(reviewPackage.root)).toBe(false);
+  });
+
+  it('retains both Review domains after a timed-out closeout whose workspace delta is rejected', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const workspaceFailure = await confirmedWorkspaceRejection('timeout');
+    const reviewPackage = managedPackageFixture();
+    let invocationRoot = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      invocationRoot = dirname(options.args[1]);
+      temporaryRoots.push(invocationRoot);
+      throw workspaceFailure;
+    };
+
+    await expect(
+      runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      }),
+    ).rejects.toThrow(/临时域已保留.*semantic delta was not accepted/u);
+    expect(existsSync(invocationRoot)).toBe(true);
+    expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+    expect(existsSync(reviewPackage.root)).toBe(true);
   });
 
   it('records two attempts when a retry ends in a temporary-domain policy failure', async () => {

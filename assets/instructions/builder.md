@@ -9,7 +9,8 @@
 ## 你的任务
 
 1. 读取 `prd.json` 中的需求与 `state.json` 中的执行状态（同一目录；state.json 或某个 story id 不存在时，视该 story 为未开始）
-2. 读取 `progress.md` 中的进度日志（首先检查 Codebase Patterns 部分）
+2. 读取 `progress.md` 中既有迭代的「未来迭代的学习」；历史文件若含 `## Codebase Patterns`，只读参考，
+   不得更新或创建该段
 3. 检查你是否在 PRD 中 `branchName` 指定的正确 branch 上。如果不是，checkout 或从 main 创建它。
 4. 选择满足以下所有条件的**最高 priority** 的 user story（passes/blocked 以 `state.json` 中该 story id 的记录为准；id 不存在视为未开始）：
    - `passes: false`
@@ -25,11 +26,12 @@
    - commit 前执行 `git diff --cached --name-only`，确认暂存区只含本 story 文件；若发现 workspace 或无关文件，不得把它们带入提交，也不要擅自重置用户已有暂存内容
    - 提交消息为：`feat: [Story ID] - [Story Title]`
 8. 提交成功后再更新 `state.json`，将已完成 story 对应 id 的 `passes` 设为 `true`（**不要修改 prd.json**——它是只读的需求文件）；`validated` 与 `escalated` 是引擎独占字段，必须原样保留——`passes=true` 只是待 Validator 复核的候选结果，引擎只会在 Validator 的结构化 passed claim 通过目标绑定与协议检查后签发 `validated=true`
-9. 每次完成运行后, 将你的进度追加到 `progress.md`
+9. 每次完成运行后，只在 `progress.md` 文件末尾追加本轮进度。不得改写、移动、删除任何既有内容，
+   也不得向文件顶部或中间插入内容
 
 ## 进度报告格式
 
-追加到 progress.md（永远不要替换，始终追加）：
+追加到 progress.md 文件末尾（永远不要替换，始终追加）：
 ```
 ## [日期-时间,格式yyyy-mm-dd HH:mm] - [Story ID]
 - 实现了什么
@@ -43,18 +45,11 @@
 
 学习部分至关重要 - 它帮助未来的迭代避免重复错误并更好地理解 codebase。
 
-## 整合 Patterns
+## 记录可复用 Patterns
 
-如果你发现未来迭代应该知道的**可重用 pattern**，将其添加到 progress.md 顶部的 `## Codebase Patterns` 部分（如果不存在则创建）。此部分应整合最重要的学习：
-
-```
-## Codebase Patterns
-- 示例：使用 `sql<number>` template 进行聚合
-- 示例：migrations 始终使用 `IF NOT EXISTS`
-- 示例：从 actions.ts 导出 types 供 UI components 使用
-```
-
-只添加**通用且可重用**的 patterns，不要添加 story 特定的细节。patterns 的升格与文档沉淀由收口命令统一处理，你不需要把它们写进项目 `docs/`。
+如果你发现对多个后续 story 都有用的**可重用 pattern**，只把它写入本轮新追加记录的
+「未来迭代的学习」。不要重复既有学习，也不要写只适用于当前 story 的细节。历史文件若含
+`## Codebase Patterns`，只能读取，禁止修改；patterns 的项目级沉淀由 `/compound-docs` 统一处理。
 
 ## 质量要求
 
@@ -96,7 +91,7 @@
 - 每次迭代只处理一个 story, 记住 只处理一个user story,处理完这个story,你的任务就结束了
 - 频繁提交
 - 保持 CI 绿色
-- 在开始之前阅读 progress.md 中的 Codebase Patterns 部分
+- 在开始之前阅读 progress.md 中既有迭代的「未来迭代的学习」；旧 `Codebase Patterns` 仅只读兼容
 
 ## 关于该项目的重要注意事项
 

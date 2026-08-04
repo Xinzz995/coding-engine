@@ -20,6 +20,7 @@ import { readTddConfig } from '../engine/tdd-gate.js';
 import { readQualityContract } from '../quality/contract.js';
 import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import { ACTIVE_LEASE_DIR, PROTOCOL_ROOT_DIR } from '../workspace-safety/types.js';
+import { observeManagedProcessSettlement } from '../workspace-safety/operation.js';
 import {
   evaluateReviewAuthoritySnapshot,
   parseReviewAuthoritySnapshotResult,
@@ -934,8 +935,9 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
       `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(rogue)}, 'rogue'); process.stdout.write('codex 1.2.3\\n');\n`,
     );
     try {
-      await expect(
-        verifyReviewAuthoritySnapshot({
+      let failure: unknown;
+      try {
+        await verifyReviewAuthoritySnapshot({
           session: fixture.managed.session,
           context: fixture.ctx,
           workspace: fixture.managed.workspacePath,
@@ -947,8 +949,19 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
           phase: 'workspace write checkpoint',
           managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
-        }),
-      ).rejects.toThrow(/workspace|越界|未完整结算|临时域/u);
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain('semantic delta was not accepted');
+      expect((failure as Error).message).not.toContain('临时域已保留');
+      expect(observeManagedProcessSettlement(failure)).toMatchObject({
+        status: 'confirmed',
+        drainReason: 'natural',
+      });
+      expect(authorityRoot).not.toBe('');
+      expect(existsSync(authorityRoot)).toBe(false);
     } finally {
       await fixture.managed.close().catch(() => undefined);
       if (authorityRoot !== '' && existsSync(authorityRoot)) {

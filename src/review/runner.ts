@@ -16,6 +16,7 @@ import {
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import type { ReviewPackage } from './package.js';
+import { confirmTemporaryUsesAfterSettledProcessFailure } from './managed-temporary-use.js';
 import { createRunnerInvocation } from './runner-invocation.js';
 import {
   describeReviewTemporaryRetention,
@@ -373,6 +374,7 @@ async function runProcess(options: {
     };
   } catch (error) {
     failure = error;
+    confirmTemporaryUsesAfterSettledProcessFailure(error, temporaryUses, ['natural']);
   }
   const cleanup = invocation.cleanup();
   if (cleanup.status !== 'removed') {
@@ -446,6 +448,7 @@ export async function readRunnerVersion(options: {
     value = output.split(/\r?\n/u)[0].trim();
   } catch (error) {
     failure = error;
+    confirmTemporaryUsesAfterSettledProcessFailure(error, [temporary], ['natural']);
   }
   const cleanup = temporary.cleanup();
   if (cleanup.status !== 'removed') {
