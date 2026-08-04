@@ -531,6 +531,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           status: 'ready' as const,
           digest: initialDigest,
           observationToken: observed.observationToken,
+          ...(observed.authorityInputDigest === undefined
+            ? {}
+            : { authorityInputDigest: observed.authorityInputDigest }),
         };
       };
       console.log('\n🔎 全部 story 已验证，开始针对当前 PR 最新提交执行本地最终 Review。');

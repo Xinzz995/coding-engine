@@ -62,7 +62,12 @@ export interface StoryValidationObservationReaders {
 }
 
 export type StoryValidationObservation =
-  | (ReadyStoryValidationCurrentness & { workspacePath: string; observationToken: string })
+  | (ReadyStoryValidationCurrentness & {
+      workspacePath: string;
+      observationToken: string;
+      /** Fixed raw authority identity used by the single-process Final Review snapshot helper. */
+      authorityInputDigest?: string;
+    })
   | (UnverifiableStoryValidationCurrentness & {
       workspacePath: string;
       observationToken: null;
@@ -108,9 +113,14 @@ export function readWorkingQualityContractAuthority(
 ): QualityContractReadResult {
   const path = join(projectRoot, QUALITY_CONTRACT_RELATIVE_PATH);
   const file = readStoryValidationAuthorityBytes(path);
-  if (file.status === 'missing') return { status: 'missing', path };
+  if (file.status === 'missing') return { status: 'missing', path, sourceFingerprint: 'missing' };
   if (file.status === 'invalid') {
-    return { status: 'io-error', path, error: file.diagnostic };
+    return {
+      status: 'io-error',
+      path,
+      error: file.diagnostic,
+      sourceFingerprint: file.fingerprint,
+    };
   }
 
   let value: unknown;
@@ -124,7 +134,7 @@ export function readWorkingQualityContractAuthority(
     };
   }
   const parsed = parseQualityContract(value);
-  return { ...parsed, path };
+  return { ...parsed, path, sourceFingerprint: file.fingerprint };
 }
 
 function readPrdFile(path: string): StoryValidationFileSnapshot<Prd> {
@@ -199,6 +209,23 @@ function snapshotIdentity(snapshot: ObservationSnapshot): Record<string, string 
     state: `${snapshot.state.status}:${snapshot.state.fingerprint}`,
     workingContract: contractFingerprint(snapshot.workingContract),
     trackedContract: contractFingerprint(snapshot.trackedContract),
+    tdd: tddFingerprint(snapshot.tddRead),
+  };
+}
+
+function authorityInputIdentity(
+  workspacePath: string,
+  snapshot: ObservationSnapshot,
+): Record<string, string | null> {
+  const sourceFingerprint = (result: QualityContractReadResult): string =>
+    result.sourceFingerprint ?? contractFingerprint(result);
+  return {
+    workspacePath,
+    head: snapshot.headSha,
+    prd: `${snapshot.prd.status}:${snapshot.prd.fingerprint}`,
+    state: `${snapshot.state.status}:${snapshot.state.fingerprint}`,
+    workingContract: sourceFingerprint(snapshot.workingContract),
+    trackedContract: sourceFingerprint(snapshot.trackedContract),
     tdd: tddFingerprint(snapshot.tddRead),
   };
 }
@@ -322,7 +349,8 @@ export async function observeStoryValidationCurrentnessControlled(
       storyValidationDigest: evaluated.storyValidationDigest,
     }),
   );
-  return { ...evaluated, workspacePath, observationToken };
+  const authorityInputDigest = sha256(JSON.stringify(authorityInputIdentity(workspacePath, after)));
+  return { ...evaluated, workspacePath, observationToken, authorityInputDigest };
 }
 
 export function observeStoryValidationCurrentness(

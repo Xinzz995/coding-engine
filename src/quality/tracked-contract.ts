@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import type { ManagedGateContext } from '../engine/gate.js';
 import { GIT_NULL_CONFIG_PATH } from '../engine/git-environment.js';
@@ -80,6 +81,7 @@ export async function readTrackedQualityContractAtHead(options: {
     };
   }
   let value: unknown;
+  const sourceFingerprint = `sha256:${createHash('sha256').update(result.stdout).digest('hex')}`;
   try {
     value = JSON.parse(result.stdout.toString('utf8'));
   } catch (error) {
@@ -90,5 +92,5 @@ export async function readTrackedQualityContractAtHead(options: {
     };
   }
   const parsed = parseQualityContract(value);
-  return { ...parsed, path: QUALITY_CONTRACT_RELATIVE_PATH };
+  return { ...parsed, path: QUALITY_CONTRACT_RELATIVE_PATH, sourceFingerprint };
 }

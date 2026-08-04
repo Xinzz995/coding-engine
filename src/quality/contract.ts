@@ -178,12 +178,16 @@ export type QualityContractParseResult =
   | { status: 'ready'; contract: QualityContract; digest: string }
   | { status: 'invalid'; errors: string[] };
 
-export type QualityContractReadResult =
+export type QualityContractReadResult = (
   | { status: 'missing'; path: string }
   | { status: 'io-error'; path: string; error: string }
   | { status: 'invalid-json'; path: string; error: string }
   | { status: 'invalid'; path: string; errors: string[] }
-  | { status: 'ready'; path: string; contract: QualityContract; digest: string };
+  | { status: 'ready'; path: string; contract: QualityContract; digest: string }
+) & {
+  /** Raw authority identity when the caller read a stable byte source. */
+  sourceFingerprint?: string;
+};
 
 export interface QualityRuntimeAssessment {
   mode: 'formal' | 'shadow' | 'version-mismatch';
