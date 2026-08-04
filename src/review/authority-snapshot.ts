@@ -91,9 +91,18 @@ interface HelperRequest {
 
 const AUTHORITY_SNAPSHOT_HELPER = String.raw`
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+
+const reportFatal = (error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  const bounded = message.length <= 1900 ? message : message.slice(0, 900) + '…' + message.slice(-900);
+  writeSync(2, bounded);
+  process.exit(1);
+};
+process.on('uncaughtException', reportFatal);
+process.on('unhandledRejection', reportFatal);
 
 const payload = process.argv[1];
 const request = JSON.parse(payload);
@@ -167,19 +176,27 @@ const stableFingerprint = (path, maximumBytes) => {
   return result.fingerprint;
 };
 let childProcessCount = 0;
-const run = (executable, args, cwd, maximumBytes, environment) => {
+const boundedDetail = (value) => {
+  const text = String(value);
+  return text.length <= 1500 ? text : text.slice(0, 700) + '…' + text.slice(-700);
+};
+const run = (step, executable, args, cwd, maximumBytes, environment) => {
   childProcessCount += 1;
   if (childProcessCount > ${AUTHORITY_CHILD_PROCESS_BUDGET}) throw new Error('authority child process budget exceeded');
   const result = spawnSync(executable, args, { cwd, env: environment, encoding: 'buffer', timeout: request.timeoutMs, killSignal: 'SIGKILL', maxBuffer: maximumBytes + 1, windowsHide: true, shell: false });
-  if (result.error) throw result.error;
-  if (result.signal) throw new Error(executable + ' terminated by ' + result.signal);
-  if (result.status !== 0) throw new Error(executable + ' exited ' + result.status + ': ' + Buffer.from(result.stderr ?? []).toString('utf8').slice(-2000));
+  if (result.error) throw new Error(step + ': ' + boundedDetail(result.error.message));
+  if (result.signal) throw new Error(step + ': terminated by ' + result.signal);
+  if (result.status !== 0) throw new Error(step + ': exited ' + result.status + ': ' + boundedDetail(Buffer.from(result.stderr ?? []).toString('utf8')));
   const stdout = Buffer.from(result.stdout ?? []);
-  if (stdout.length > maximumBytes) throw new Error(executable + ' output exceeded byte budget');
+  if (stdout.length > maximumBytes) throw new Error(step + ': output exceeded byte budget');
   return stdout;
 };
-const git = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}) => run(request.git, ['--no-replace-objects','-c','core.hooksPath=${GIT_NULL_CONFIG_PATH}','-c','core.fsmonitor=false', ...args], request.projectRoot, maximumBytes, gitEnvironment);
-const gh = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}, cwd = request.runnerDirectory) => run(request.gh, args, cwd, maximumBytes, githubEnvironment);
+const git = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}) => run('git-' + args[0], request.git, ['--no-replace-objects','-c','core.hooksPath=${GIT_NULL_CONFIG_PATH}','-c','core.fsmonitor=false', ...args], request.projectRoot, maximumBytes, gitEnvironment);
+const gh = (args, maximumBytes = ${CHILD_OUTPUT_MAX_BYTES}, cwd = request.runnerDirectory) => {
+  const target = args.at(-1);
+  const step = args[0] === 'repo' ? 'github-repository' : target.includes('/branches/') ? 'github-default-branch' : target.includes('/pulls/') ? 'github-pull-request' : 'github-api';
+  return run(step, request.gh, args, cwd, maximumBytes, githubEnvironment);
+};
 const tddFingerprint = (prdBytes) => {
   const prd = JSON.parse(prdBytes.toString('utf8'));
   if (!Object.prototype.hasOwnProperty.call(prd, 'tdd')) return sha256(JSON.stringify({ status: 'disabled' }));
@@ -213,7 +230,7 @@ const decisionDigest = () => {
 };
 const storyBeforeDigest = story();
 const branchBefore = git(['symbolic-ref','--quiet','--short','HEAD'], 4096).toString('utf8').trim();
-const runnerVersionOutput = run(request.runner, ['--version'], request.runnerDirectory, 4 * 1024 * 1024, runnerEnvironment).toString('utf8').trim();
+const runnerVersionOutput = run('runner-version', request.runner, ['--version'], request.runnerDirectory, 4 * 1024 * 1024, runnerEnvironment).toString('utf8').trim();
 if (!runnerVersionOutput) throw new Error('runner version is empty');
 const runnerVersion = runnerVersionOutput.split(/\r?\n/u)[0].trim();
 const repositoryJson = gh(['repo','view','--json','nameWithOwner,defaultBranchRef,isPrivate'], ${CHILD_OUTPUT_MAX_BYTES}, request.projectRoot).toString('utf8');
@@ -527,17 +544,19 @@ export async function verifyReviewAuthoritySnapshot(options: {
       observed.timedOut ||
       observed.processTreeNotEmpty ||
       observed.terminationReason !== null ||
-      observed.verdict !== 'completed'
+      (observed.verdict !== 'completed' && observed.verdict !== 'root-failed')
     ) {
       throw new WorkspaceSafetyError(
-        observed.processTreeNotEmpty ? 'isolated' : 'invalid',
-        observed.processTreeNotEmpty
+        observed.processTreeNotEmpty || observed.verdict === 'process-tree-not-empty'
+          ? 'isolated'
+          : 'invalid',
+        observed.processTreeNotEmpty || observed.verdict === 'process-tree-not-empty'
           ? 'authority snapshot 根进程结束后仍有后代进程'
           : 'authority snapshot 未完整结算',
       );
     }
     temporary.confirmManagedUseSettled();
-    if (observed.exitCode !== 0) {
+    if (observed.verdict === 'root-failed' || observed.exitCode !== 0) {
       throw new Error(
         `authority snapshot 失败（退出码 ${observed.exitCode ?? 'null'}）：${Buffer.concat([
           observed.stdout,
