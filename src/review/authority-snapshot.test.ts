@@ -1,0 +1,871 @@
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { TextEncoder } from 'node:util';
+import { afterEach, describe, expect, it } from 'vitest';
+import { createManagedProcessTestSession } from '../engine/managed-process-test-support.js';
+import { readQualityContract } from '../quality/contract.js';
+import { runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
+import { ACTIVE_LEASE_DIR, PROTOCOL_ROOT_DIR } from '../workspace-safety/types.js';
+import {
+  evaluateReviewAuthoritySnapshot,
+  parseReviewAuthoritySnapshotResult,
+  REVIEW_AUTHORITY_SNAPSHOT_MAX_OUTPUT_BYTES,
+  verifyReviewAuthoritySnapshot,
+  type ReviewAuthoritySnapshotResult,
+} from './authority-snapshot.js';
+import { runFinalReview } from './final-review.js';
+import type { ReviewPreflightContext } from './preflight.js';
+import { RUNNER_TOOL_POLICY_VERSION } from './runner.js';
+
+const REQUEST_DIGEST = `sha256:${'1'.repeat(64)}`;
+const STORY_DIGEST = `sha256:${'2'.repeat(64)}`;
+const DECISIONS_DIGEST = `sha256:${'3'.repeat(64)}`;
+const BASE_SHA = 'a'.repeat(40);
+const HEAD_SHA = 'b'.repeat(40);
+const roots: string[] = [];
+
+afterEach(() => {
+  while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
+});
+
+function contract() {
+  const read = readQualityContract(process.cwd());
+  if (read.status !== 'ready') throw new Error(`quality contract unavailable: ${read.status}`);
+  return structuredClone(read.contract);
+}
+
+function context(): ReviewPreflightContext {
+  const baseContract = contract();
+  return {
+    root: process.cwd(),
+    branch: 'feature/authority',
+    baseSha: BASE_SHA,
+    headSha: HEAD_SHA,
+    pullRequest: {
+      number: 151,
+      headSha: HEAD_SHA,
+      baseBranch: baseContract.repository.defaultBranch,
+      baseSha: BASE_SHA,
+      url: 'https://example.test/pull/151',
+      title: 'fix: batch authority snapshot',
+      body: 'review intent',
+      labels: ['policy-approved'],
+    },
+    baseContract,
+    baseContractDigest: 'sha256:base',
+    changedFiles: ['src/review/authority-snapshot.ts'],
+    files: [],
+    diff: '+snapshot',
+    specs: [],
+    engineeringStandards: [],
+    history: '',
+    prSections: {
+      本次目标: 'batch',
+      明确的非目标: 'cache',
+      'Spec 与验收标准来源': 'issue 151',
+      验证方式: 'tests',
+      风险说明: 'review authority',
+    },
+  };
+}
+
+function result(ctx = context()): ReviewAuthoritySnapshotResult {
+  return {
+    schemaVersion: 1,
+    requestDigest: REQUEST_DIGEST,
+    childProcessCount: 14,
+    storyBeforeDigest: STORY_DIGEST,
+    storyAfterDigest: STORY_DIGEST,
+    runnerVersion: 'codex 1.2.3',
+    branchBefore: ctx.branch,
+    branchAfter: ctx.branch,
+    headSha: ctx.headSha,
+    baseSha: ctx.baseSha,
+    repositoryJson: JSON.stringify({
+      nameWithOwner: ctx.baseContract.repository.fullName,
+      defaultBranchRef: { name: ctx.baseContract.repository.defaultBranch },
+      isPrivate: false,
+    }),
+    repositoryAfterJson: JSON.stringify({
+      nameWithOwner: ctx.baseContract.repository.fullName,
+      defaultBranchRef: { name: ctx.baseContract.repository.defaultBranch },
+      isPrivate: false,
+    }),
+    pullRequestJson: JSON.stringify({
+      number: ctx.pullRequest.number,
+      head: { sha: ctx.pullRequest.headSha },
+      base: { sha: ctx.pullRequest.baseSha, ref: ctx.pullRequest.baseBranch },
+      html_url: ctx.pullRequest.url,
+      title: ctx.pullRequest.title,
+      body: ctx.pullRequest.body,
+      labels: ctx.pullRequest.labels.map((name) => ({ name })),
+    }),
+    pullRequestState: 'open',
+    statusBeforeBase64: '',
+    statusBase64: '',
+    decisionsDigest: DECISIONS_DIGEST,
+  };
+}
+
+function evaluate(value: ReviewAuthoritySnapshotResult): string | null {
+  return evaluateReviewAuthoritySnapshot(value, {
+    context: context(),
+    workspace: `${process.cwd()}/.workspace`,
+    expectedRunnerVersion: 'codex 1.2.3',
+    expectedStoryAuthorityInputDigest: STORY_DIGEST,
+    expectedDecisionsDigest: DECISIONS_DIGEST,
+    includeDecisions: true,
+  });
+}
+
+describe('authority snapshot result protocol', () => {
+  it('accepts only a request-bound exact schema', () => {
+    const value = result();
+    expect(
+      parseReviewAuthoritySnapshotResult(
+        new TextEncoder().encode(JSON.stringify(value)),
+        REQUEST_DIGEST,
+      ),
+    ).toEqual(value);
+
+    expect(() =>
+      parseReviewAuthoritySnapshotResult(
+        new TextEncoder().encode(JSON.stringify({ ...value, extra: true })),
+        REQUEST_DIGEST,
+      ),
+    ).toThrow('schema 非法');
+    expect(() =>
+      parseReviewAuthoritySnapshotResult(
+        new TextEncoder().encode(JSON.stringify(value)),
+        `sha256:${'9'.repeat(64)}`,
+      ),
+    ).toThrow('未绑定当前请求');
+    expect(() =>
+      parseReviewAuthoritySnapshotResult(
+        new TextEncoder().encode(JSON.stringify({ ...value, childProcessCount: 15 })),
+        REQUEST_DIGEST,
+      ),
+    ).toThrow('子进程预算非法');
+  });
+
+  it('rejects malformed UTF-8 and output beyond the global budget', () => {
+    expect(() =>
+      parseReviewAuthoritySnapshotResult(Uint8Array.from([0xc3, 0x28]), REQUEST_DIGEST),
+    ).toThrow('严格 UTF-8 JSON');
+    expect(() =>
+      parseReviewAuthoritySnapshotResult(
+        new Uint8Array(REVIEW_AUTHORITY_SNAPSHOT_MAX_OUTPUT_BYTES + 1),
+        REQUEST_DIGEST,
+      ),
+    ).toThrow('超过');
+  });
+});
+
+describe('authority snapshot currentness verdict', () => {
+  it.each([
+    [
+      'Story double snapshot',
+      (value: ReviewAuthoritySnapshotResult) => ({
+        ...value,
+        storyAfterDigest: `sha256:${'9'.repeat(64)}`,
+      }),
+      'Story 验收权威输入发生变化',
+    ],
+    [
+      'Runner version',
+      (value: ReviewAuthoritySnapshotResult) => ({ ...value, runnerVersion: 'codex 9.9.9' }),
+      'Runner 版本发生变化',
+    ],
+    [
+      'branch',
+      (value: ReviewAuthoritySnapshotResult) => ({ ...value, branchAfter: 'main' }),
+      '本地功能分支身份发生变化',
+    ],
+    [
+      'head',
+      (value: ReviewAuthoritySnapshotResult) => ({ ...value, headSha: 'c'.repeat(40) }),
+      '本地 HEAD 发生变化',
+    ],
+    [
+      'base',
+      (value: ReviewAuthoritySnapshotResult) => ({ ...value, baseSha: 'c'.repeat(40) }),
+      'base SHA 发生变化',
+    ],
+    [
+      'PR state',
+      (value: ReviewAuthoritySnapshotResult) => ({ ...value, pullRequestState: 'closed' }),
+      '开放 PR 消失',
+    ],
+    [
+      'decisions',
+      (value: ReviewAuthoritySnapshotResult) => ({
+        ...value,
+        decisionsDigest: `sha256:${'8'.repeat(64)}`,
+      }),
+      '裁决记录发生变化',
+    ],
+  ])('fails closed when %s changes', (_name, mutate, message) => {
+    expect(evaluate(mutate(result()))).toContain(message);
+  });
+
+  it('rejects repository, PR intent, labels and dirty worktree drift independently', () => {
+    const repository = result();
+    repository.repositoryJson = JSON.stringify({
+      nameWithOwner: 'other/repository',
+      defaultBranchRef: { name: 'main' },
+      isPrivate: false,
+    });
+    expect(evaluate(repository)).toContain('GitHub 仓库或默认分支身份发生变化');
+
+    const intent = result();
+    intent.pullRequestJson = JSON.stringify({
+      ...JSON.parse(intent.pullRequestJson),
+      title: 'changed',
+    });
+    expect(evaluate(intent)).toContain('PR 标题或正文发生变化');
+
+    const changedLabels = result();
+    changedLabels.pullRequestJson = JSON.stringify({
+      ...JSON.parse(changedLabels.pullRequestJson),
+      labels: [{ name: 'changed' }],
+    });
+    expect(evaluate(changedLabels)).toContain('PR 标签发生变化');
+
+    const dirty = result();
+    dirty.statusBase64 = Buffer.from(' M src/index.ts\0').toString('base64');
+    expect(evaluate(dirty)).toContain('工作树产生未允许改动：src/index.ts');
+  });
+});
+
+function sha256(value: string | Uint8Array): string {
+  return `sha256:${createHash('sha256').update(value).digest('hex')}`;
+}
+
+function executable(path: string, body: string): string {
+  writeFileSync(path, `#!/usr/bin/env node\n${body}\n`);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+function managedFixtureContext(projectRoot: string, head: string): ReviewPreflightContext {
+  const value = context();
+  return {
+    ...value,
+    root: projectRoot,
+    branch: 'feature/authority',
+    baseSha: head,
+    headSha: head,
+    pullRequest: {
+      ...value.pullRequest,
+      headSha: head,
+      baseSha: head,
+      baseBranch: value.baseContract.repository.defaultBranch,
+    },
+  };
+}
+
+function inlinePayload(args: readonly string[]): {
+  payload: string;
+  request: Record<string, unknown>;
+} {
+  const sourceCount = Number(args[3]);
+  const payloadCount = Number(args[4]);
+  const payloadStart = 5 + sourceCount;
+  const encoded = args.slice(payloadStart, payloadStart + payloadCount).join('');
+  const payload = Buffer.from(encoded, 'base64url').toString('utf8');
+  return { payload, request: JSON.parse(payload) as Record<string, unknown> };
+}
+
+function fakeGh(path: string, ctx: ReviewPreflightContext): string {
+  const repository = JSON.stringify({
+    nameWithOwner: ctx.baseContract.repository.fullName,
+    defaultBranchRef: { name: ctx.baseContract.repository.defaultBranch },
+    isPrivate: false,
+  });
+  const branch = JSON.stringify({ commit: { sha: ctx.baseSha } });
+  const pullRequest = JSON.stringify({
+    state: 'open',
+    number: ctx.pullRequest.number,
+    head: { sha: ctx.pullRequest.headSha },
+    base: { sha: ctx.pullRequest.baseSha, ref: ctx.pullRequest.baseBranch },
+    html_url: ctx.pullRequest.url,
+    title: ctx.pullRequest.title,
+    body: ctx.pullRequest.body,
+    labels: ctx.pullRequest.labels.map((name) => ({ name })),
+  });
+  return executable(
+    path,
+    `const { execFileSync } = require('node:child_process');
+const args = process.argv.slice(2);
+if (args[0] === 'repo') {
+  const origin = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+  process.stdout.write(origin === ${JSON.stringify(`https://github.com/${ctx.baseContract.repository.fullName}.git`)} ? ${JSON.stringify(repository)} : JSON.stringify({ nameWithOwner: 'other/repository', defaultBranchRef: { name: 'main' }, isPrivate: false }));
+}
+else if (args.at(-1).includes('/branches/')) process.stdout.write(${JSON.stringify(branch)});
+else if (args.at(-1).includes('/pulls/')) process.stdout.write(${JSON.stringify(pullRequest)});
+else process.exit(9);`,
+  );
+}
+
+async function realManagedFixture(runnerBody: string) {
+  const projectRoot = mkdtempSync(join(tmpdir(), 'authority-snapshot-project-'));
+  const executableRoot = mkdtempSync(join(tmpdir(), 'authority-snapshot-bin-'));
+  roots.push(projectRoot, executableRoot);
+  const quality = JSON.stringify(contract());
+  mkdirSync(join(projectRoot, '.coding-x'), { recursive: true });
+  writeFileSync(join(projectRoot, '.coding-x', 'quality.json'), quality);
+  execFileSync('git', ['init', '-q', '-b', 'feature/authority'], { cwd: projectRoot });
+  execFileSync('git', ['config', 'user.name', 'authority test'], { cwd: projectRoot });
+  execFileSync('git', ['config', 'user.email', 'authority@example.invalid'], { cwd: projectRoot });
+  execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: projectRoot });
+  execFileSync('git', ['commit', '-q', '-m', 'fixture'], { cwd: projectRoot });
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: projectRoot,
+    encoding: 'utf8',
+  }).trim();
+  const ctx = managedFixtureContext(projectRoot, head);
+  execFileSync(
+    'git',
+    ['remote', 'add', 'origin', `https://github.com/${ctx.baseContract.repository.fullName}.git`],
+    { cwd: projectRoot },
+  );
+  const managed = await createManagedProcessTestSession();
+  writeFileSync(join(managed.workspacePath, 'prd.json'), '{"stories":[]}\n');
+  writeFileSync(join(managed.workspacePath, 'state.json'), '{}\n');
+  const identity = {
+    workspacePath: realpathSync.native(managed.workspacePath),
+    head,
+    prd: `ready:${sha256(readFileSync(join(managed.workspacePath, 'prd.json')))}`,
+    state: `ready:${sha256(readFileSync(join(managed.workspacePath, 'state.json')))}`,
+    workingContract: sha256(readFileSync(join(projectRoot, '.coding-x', 'quality.json'))),
+    trackedContract: sha256(readFileSync(join(projectRoot, '.coding-x', 'quality.json'))),
+    tdd: sha256(JSON.stringify({ status: 'disabled' })),
+  };
+  return {
+    managed,
+    projectRoot,
+    executableRoot,
+    ctx,
+    expectedStoryDigest: sha256(JSON.stringify(identity)),
+    git: execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(),
+    gh: fakeGh(join(executableRoot, 'fake-gh'), ctx),
+    runner: executable(join(executableRoot, 'fake-runner'), runnerBody),
+  };
+}
+
+describe.runIf(process.platform !== 'win32')('real managed authority snapshot', () => {
+  it('records exactly ten managed operations for a complete high-risk Final Review', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    try {
+      const settled = join(
+        fixture.managed.workspacePath,
+        PROTOCOL_ROOT_DIR,
+        ACTIVE_LEASE_DIR,
+        'settled-operations',
+      );
+      const storyValidationDigest = `sha256:${'4'.repeat(64)}`;
+      const outcome = await runFinalReview({
+        root: fixture.projectRoot,
+        workspace: fixture.managed.workspacePath,
+        session: fixture.managed.session,
+        currentContract: fixture.ctx.baseContract,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex 1.2.3',
+        storyValidationDigest,
+        observeStoryValidation: () => ({
+          status: 'ready' as const,
+          digest: storyValidationDigest,
+          observationToken: `sha256:${'5'.repeat(64)}`,
+          authorityInputDigest: fixture.expectedStoryDigest,
+        }),
+        preflight: () => ({ status: 'ready' as const, context: fixture.ctx }),
+        gate: async () => ({
+          ok: true,
+          failure: null,
+          total: 1,
+          ran: 1,
+          ms: 1,
+          skipped: [],
+        }),
+        probe: async () => ({
+          ok: true,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex 1.2.3',
+          policyVersion: RUNNER_TOOL_POLICY_VERSION,
+          durationMs: 1,
+          failures: [],
+        }),
+        axisRunner: async ({ axis }) => ({
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex 1.2.3',
+          durationMs: 1,
+          attempts: 1,
+          output: {
+            status: 'passed',
+            summary: `${axis} passed`,
+            requestDeepReview: false,
+            findings: [],
+          },
+        }),
+        remote: () => ({
+          status: 'ready',
+          checks: [],
+          rulesetErrors: [],
+          checkedAt: '2026-08-04T00:00:00.000Z',
+        }),
+        authoritySnapshotExecutablesForTests: {
+          git: fixture.git,
+          gh: fixture.gh,
+          runner: fixture.runner,
+        },
+      });
+
+      expect(outcome.exitCode).toBe(0);
+      expect(readdirSync(settled)).toHaveLength(10);
+    } finally {
+      await fixture.managed.close();
+    }
+  }, 30_000);
+
+  it('uses exactly one managed operation for all authority reads', async () => {
+    const fixture = await realManagedFixture(
+      `if (process.argv[2] !== '--version') process.exit(8); process.stdout.write('codex 1.2.3\\n');`,
+    );
+    try {
+      const requests: Array<{
+        payload: string;
+        request: Record<string, unknown>;
+        resultDigest: string;
+        childProcessCount: number | undefined;
+        operationTimeoutMs: number;
+      }> = [];
+      const managedProcess: typeof runManagedWorkspaceProcess = async (session, options) => {
+        const decoded = inlinePayload(options.args);
+        const outcome = await runManagedWorkspaceProcess(session, options);
+        const observed = JSON.parse(outcome.stdout.toString('utf8')) as {
+          requestDigest: string;
+          childProcessCount?: number;
+        };
+        requests.push({
+          ...decoded,
+          resultDigest: observed.requestDigest,
+          childProcessCount: observed.childProcessCount,
+          operationTimeoutMs: options.timeoutMs,
+        });
+        return outcome;
+      };
+      const settled = join(
+        fixture.managed.workspacePath,
+        PROTOCOL_ROOT_DIR,
+        ACTIVE_LEASE_DIR,
+        'settled-operations',
+      );
+      expect(existsSync(settled) ? readdirSync(settled) : []).toHaveLength(0);
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'first checkpoint',
+          managedProcess,
+          executablesForTests: {
+            git: fixture.git,
+            gh: fixture.gh,
+            runner: fixture.runner,
+          },
+        }),
+      ).resolves.toBeNull();
+      expect(readdirSync(settled)).toHaveLength(1);
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'second checkpoint',
+          managedProcess,
+          executablesForTests: {
+            git: fixture.git,
+            gh: fixture.gh,
+            runner: fixture.runner,
+          },
+        }),
+      ).resolves.toBeNull();
+      expect(readdirSync(settled)).toHaveLength(2);
+      expect(requests.map((entry) => entry.request.phase)).toEqual([
+        'first checkpoint',
+        'second checkpoint',
+      ]);
+      expect(requests[0].request.nonce).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(requests[1].request.nonce).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(requests[0].request.nonce).not.toBe(requests[1].request.nonce);
+      expect(requests[0].resultDigest).toBe(sha256(requests[0].payload));
+      expect(requests[1].resultDigest).toBe(sha256(requests[1].payload));
+      expect(requests[0].resultDigest).not.toBe(requests[1].resultDigest);
+      expect(requests[0].request.timeoutMs).toBe(30_000);
+      expect(requests[0].operationTimeoutMs).toBeGreaterThan(30_000);
+      expect(requests[1].operationTimeoutMs).toBe(requests[0].operationTimeoutMs);
+      expect(requests.map((entry) => entry.childProcessCount)).toEqual([14, 14]);
+    } finally {
+      await fixture.managed.close();
+    }
+  });
+
+  it('fails closed when the Runner version command writes into the project', async () => {
+    const fixture = await realManagedFixture(
+      `require('node:fs').writeFileSync(${JSON.stringify('/placeholder')}, 'pollution'); process.stdout.write('codex 1.2.3\\n');`,
+    );
+    const pollution = join(fixture.projectRoot, 'runner-pollution.txt');
+    writeFileSync(
+      fixture.runner,
+      `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(pollution)}, 'pollution'); process.stdout.write('codex 1.2.3\\n');\n`,
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'test checkpoint',
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).resolves.toContain('工作树产生未允许改动：runner-pollution.txt');
+    } finally {
+      await fixture.managed.close();
+    }
+  });
+
+  it('fails closed when a child survives the helper root process', async () => {
+    const fixture = await realManagedFixture(
+      `const { spawn } = require('node:child_process');
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: false, stdio: 'ignore' });
+child.unref(); process.stdout.write('codex 1.2.3\\n');`,
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'test checkpoint',
+          timeoutMs: 2_000,
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/后代进程|未完整结算/u);
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+    }
+  }, 15_000);
+
+  it('fails closed when the Runner writes into its sealed temporary domain', async () => {
+    const before = new Set(
+      readdirSync(tmpdir()).filter((name) => name.startsWith('coding-x-review-authority-')),
+    );
+    const fixture = await realManagedFixture(
+      `require('node:fs').writeFileSync(require('node:path').join(process.cwd(), 'pollution'), 'x'); process.stdout.write('codex 1.2.3\\n');`,
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'temporary write checkpoint',
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/临时域|目录树/u);
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+      for (const name of readdirSync(tmpdir())) {
+        if (!name.startsWith('coding-x-review-authority-') || before.has(name)) continue;
+        const path = join(tmpdir(), name);
+        chmodSync(path, 0o700);
+        roots.push(path);
+      }
+    }
+  });
+
+  it('fails closed when a descendant writes an undelegated workspace file', async () => {
+    const before = new Set(
+      readdirSync(tmpdir()).filter((name) => name.startsWith('coding-x-review-authority-')),
+    );
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const rogue = join(fixture.managed.workspacePath, 'rogue.txt');
+    writeFileSync(
+      fixture.runner,
+      `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(rogue)}, 'rogue'); process.stdout.write('codex 1.2.3\\n');\n`,
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'workspace write checkpoint',
+          executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).rejects.toThrow(/workspace|越界|未完整结算|临时域/u);
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+      for (const name of readdirSync(tmpdir())) {
+        if (!name.startsWith('coding-x-review-authority-') || before.has(name)) continue;
+        const path = join(tmpdir(), name);
+        chmodSync(path, 0o700);
+        roots.push(path);
+      }
+    }
+  });
+
+  it('binds the TDD authority and local origin repository at every snapshot', async () => {
+    const tddFixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    try {
+      writeFileSync(
+        join(tddFixture.managed.workspacePath, 'prd.json'),
+        JSON.stringify({
+          stories: [],
+          tdd: {
+            coverageCheck: 'go test ./...',
+            sourcePathspecs: ['src/**'],
+            policyFiles: [],
+            baselineRef: 'a'.repeat(40),
+            forbiddenAddedPatterns: ['skip'],
+          },
+        }),
+      );
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: tddFixture.managed.session,
+          context: tddFixture.ctx,
+          workspace: tddFixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: tddFixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'TDD checkpoint',
+          executablesForTests: {
+            git: tddFixture.git,
+            gh: tddFixture.gh,
+            runner: tddFixture.runner,
+          },
+        }),
+      ).resolves.toContain('Story 验收权威输入发生变化');
+    } finally {
+      await tddFixture.managed.close();
+    }
+
+    const originFixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    try {
+      execFileSync(
+        'git',
+        ['remote', 'set-url', 'origin', 'https://github.com/other/repository.git'],
+        {
+          cwd: originFixture.projectRoot,
+        },
+      );
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: originFixture.managed.session,
+          context: originFixture.ctx,
+          workspace: originFixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: originFixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'origin checkpoint',
+          executablesForTests: {
+            git: originFixture.git,
+            gh: originFixture.gh,
+            runner: originFixture.runner,
+          },
+        }),
+      ).resolves.toContain('GitHub 仓库或默认分支身份发生变化');
+    } finally {
+      await originFixture.managed.close();
+    }
+  });
+
+  it('fails closed when ordinary source changes after the first status sample', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const marker = join(fixture.executableRoot, 'status-seen');
+    const lateSource = join(fixture.projectRoot, 'late-source.ts');
+    const git = executable(
+      join(fixture.executableRoot, 'mutating-git'),
+      `const { spawnSync } = require('node:child_process');
+const { existsSync, writeFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('status')) writeFileSync(${JSON.stringify(marker)}, 'seen');
+else if (existsSync(${JSON.stringify(marker)}) && args.includes('cat-file') && !existsSync(${JSON.stringify(lateSource)})) writeFileSync(${JSON.stringify(lateSource)}, 'late mutation');
+const result = spawnSync(${JSON.stringify(fixture.git)}, args, { encoding: 'buffer' });
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);`,
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'late source checkpoint',
+          executablesForTests: { git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).resolves.toContain('工作树产生未允许改动：late-source.ts');
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+    }
+  });
+
+  it('fails closed when an allowed generated path changes between status samples', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const marker = join(fixture.executableRoot, 'generated-status-seen');
+    const generatedDirectory = join(fixture.projectRoot, 'dist');
+    const generatedFile = join(generatedDirectory, 'late-generated.txt');
+    mkdirSync(generatedDirectory);
+    const git = executable(
+      join(fixture.executableRoot, 'generated-mutating-git'),
+      `const { spawnSync } = require('node:child_process');
+const { existsSync, writeFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('status')) writeFileSync(${JSON.stringify(marker)}, 'seen');
+else if (existsSync(${JSON.stringify(marker)}) && args.includes('cat-file') && !existsSync(${JSON.stringify(generatedFile)})) writeFileSync(${JSON.stringify(generatedFile)}, 'late generated mutation');
+const result = spawnSync(${JSON.stringify(fixture.git)}, args, { encoding: 'buffer' });
+if (result.stdout) process.stdout.write(result.stdout);
+if (result.stderr) process.stderr.write(result.stderr);
+process.exit(result.status ?? 1);`,
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'allowed generated mutation checkpoint',
+          executablesForTests: { git, gh: fixture.gh, runner: fixture.runner },
+        }),
+      ).resolves.toContain('工作树状态发生变化');
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+    }
+  });
+
+  it('fails closed when local origin changes after initial repository discovery', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    const marker = join(fixture.executableRoot, 'origin-mutated');
+    const repository = JSON.stringify({
+      nameWithOwner: fixture.ctx.baseContract.repository.fullName,
+      defaultBranchRef: { name: fixture.ctx.baseContract.repository.defaultBranch },
+      isPrivate: false,
+    });
+    const otherRepository = JSON.stringify({
+      nameWithOwner: 'other/repository',
+      defaultBranchRef: { name: 'main' },
+      isPrivate: false,
+    });
+    const branch = JSON.stringify({ commit: { sha: fixture.ctx.baseSha } });
+    const pullRequest = JSON.stringify({
+      state: 'open',
+      number: fixture.ctx.pullRequest.number,
+      head: { sha: fixture.ctx.pullRequest.headSha },
+      base: {
+        sha: fixture.ctx.pullRequest.baseSha,
+        ref: fixture.ctx.pullRequest.baseBranch,
+      },
+      html_url: fixture.ctx.pullRequest.url,
+      title: fixture.ctx.pullRequest.title,
+      body: fixture.ctx.pullRequest.body,
+      labels: fixture.ctx.pullRequest.labels.map((name) => ({ name })),
+    });
+    const gh = executable(
+      join(fixture.executableRoot, 'mutating-gh'),
+      `const { execFileSync } = require('node:child_process');
+const { existsSync, writeFileSync } = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'repo') {
+  const origin = execFileSync(${JSON.stringify(fixture.git)}, ['remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim();
+  process.stdout.write(origin.includes('/other/repository') ? ${JSON.stringify(otherRepository)} : ${JSON.stringify(repository)});
+  if (!existsSync(${JSON.stringify(marker)})) {
+    execFileSync(${JSON.stringify(fixture.git)}, ['remote', 'set-url', 'origin', 'https://github.com/other/repository.git']);
+    writeFileSync(${JSON.stringify(marker)}, 'mutated');
+  }
+}
+else if (args.at(-1).includes('/branches/')) process.stdout.write(${JSON.stringify(branch)});
+else if (args.at(-1).includes('/pulls/')) process.stdout.write(${JSON.stringify(pullRequest)});
+else process.exit(9);`,
+    );
+    try {
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'origin mutation checkpoint',
+          executablesForTests: { git: fixture.git, gh, runner: fixture.runner },
+        }),
+      ).resolves.toContain('GitHub 仓库或默认分支身份发生变化');
+    } finally {
+      await fixture.managed.close().catch(() => undefined);
+    }
+  });
+});

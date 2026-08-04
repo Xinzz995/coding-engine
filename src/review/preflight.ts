@@ -213,10 +213,8 @@ async function managedExistsAt(
   return (await managedTryGit(observation, ['cat-file', '-e', `${ref}:${path}`])) !== null;
 }
 
-async function managedStatusPaths(observation: ManagedReviewObservation): Promise<string[]> {
-  const entries = (
-    await observation.git(['status', '--porcelain=v1', '-z', '--untracked-files=all'])
-  ).split('\0');
+export function parseManagedGitStatusPaths(output: string): string[] {
+  const entries = output.split('\0');
   const paths: string[] = [];
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index];
@@ -231,6 +229,12 @@ async function managedStatusPaths(observation: ManagedReviewObservation): Promis
     }
   }
   return [...new Set(paths)];
+}
+
+async function managedStatusPaths(observation: ManagedReviewObservation): Promise<string[]> {
+  return parseManagedGitStatusPaths(
+    await observation.git(['status', '--porcelain=v1', '-z', '--untracked-files=all']),
+  );
 }
 
 async function managedUnexpectedDirtyPaths(options: {

@@ -20,6 +20,10 @@ import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { workspacePathsReferToSameDirectory } from '../workspace-safety/filesystem.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { createReviewBinding, digestReviewBinding } from './binding.js';
+import {
+  verifyReviewAuthoritySnapshot,
+  type ReviewAuthoritySnapshotVerifier,
+} from './authority-snapshot.js';
 import { digest, normalizeText } from './common.js';
 import { unresolvedBlockingFindings } from './decisions.js';
 import { createReviewPackage } from './package.js';
@@ -80,7 +84,12 @@ type AxisRunner = (options: {
 }) => Promise<SafeRunnerInvocation>;
 
 export type StoryValidationBindingObservation =
-  | { status: 'ready'; digest: string; observationToken: string }
+  | {
+      status: 'ready';
+      digest: string;
+      observationToken: string;
+      authorityInputDigest?: string;
+    }
   | { status: 'unverifiable'; message: string };
 
 function findingId(axis: ReviewAxis, finding: ModelReviewOutput['findings'][number]): string {
@@ -187,6 +196,12 @@ export async function runFinalReview(options: {
     contract: QualityContract,
   ) => ReviewRemoteState | Promise<ReviewRemoteState>;
   revalidate?: () => ReviewContextRevalidation | Promise<ReviewContextRevalidation>;
+  /** @internal Whole-checkpoint test seam; production fixes the managed snapshot helper. */
+  authoritySnapshotVerifier?: ReviewAuthoritySnapshotVerifier;
+  /** @internal Trusted executable fixtures for the real managed snapshot integration test. */
+  authoritySnapshotExecutablesForTests?: { git: string; gh: string; runner: string };
+  /** @internal Explicit compatibility switch for legacy fine-grained unit fixtures only. */
+  legacyAuthorityVerificationForTests?: boolean;
   /** loop 在进入 Review 前冻结的精确 Story 凭证集合摘要。 */
   storyValidationDigest: string;
   /** 在同一 workspace session 中只读重算当前 PRD/state/HEAD 的凭证集合。 */
@@ -254,6 +269,7 @@ export async function runFinalReview(options: {
     };
   }
   let storyObservationToken: string | null = null;
+  let storyAuthorityInputDigest: string | null = null;
   const verifyStoryValidationBinding = async (
     phase: string,
     establish = false,
@@ -274,6 +290,11 @@ export async function runFinalReview(options: {
       }
       if (establish) {
         storyObservationToken = observed.observationToken;
+        storyAuthorityInputDigest =
+          observed.authorityInputDigest !== undefined &&
+          /^sha256:[a-f0-9]{64}$/u.test(observed.authorityInputDigest)
+            ? observed.authorityInputDigest
+            : null;
         return null;
       }
       return storyObservationToken === observed.observationToken
@@ -474,6 +495,40 @@ export async function runFinalReview(options: {
     phase: string,
     includeDecisions: boolean,
   ): Promise<string | null> => {
+    const productionSnapshot =
+      options.authoritySnapshotVerifier !== undefined ||
+      options.legacyAuthorityVerificationForTests !== true;
+    if (productionSnapshot) {
+      if (options.authoritySnapshotVerifier === undefined && storyAuthorityInputDigest === null) {
+        return `${phase}：Story 验收权威输入摘要缺失；本轮 Review 已作废`;
+      }
+      try {
+        const error = await (
+          options.authoritySnapshotVerifier ??
+          ((request) =>
+            verifyReviewAuthoritySnapshot({
+              session: options.session,
+              context,
+              workspace,
+              runner: options.runner,
+              expectedRunnerVersion: runnerVersion,
+              expectedStoryAuthorityInputDigest: storyAuthorityInputDigest!,
+              expectedDecisionsDigest: decisionsDigest,
+              includeDecisions: request.includeDecisions,
+              phase: request.phase,
+              termination: options.termination,
+              ...(options.authoritySnapshotExecutablesForTests
+                ? { executablesForTests: options.authoritySnapshotExecutablesForTests }
+                : {}),
+            }))
+        )({ phase, includeDecisions });
+        return error === null ? null : `${phase}：${error}`;
+      } catch (error) {
+        return `${phase}：无法核对 Review 权威快照：${
+          error instanceof Error ? error.message : String(error)
+        }；本轮 Review 已作废`;
+      }
+    }
     const storyError = await verifyStoryValidationBinding(`${phase}：`);
     if (storyError) return storyError;
     const runnerError = await verifyRunnerVersion(`${phase}：`);
