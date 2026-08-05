@@ -41,6 +41,7 @@ import {
 } from './runner.js';
 
 const temporaryRoots: string[] = [];
+const MANAGED_WORKSPACE_TEST_TIMEOUT_MS = 30_000;
 
 function removeFixtureRoot(path: string): void {
   if (!existsSync(path)) return;
@@ -393,7 +394,7 @@ describe('parseCodexReviewJsonl', () => {
         JSON.stringify({ type: 'item.started', item: { type } }),
         JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: '{}' } }),
       ].join('\n');
-      expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件');
+      expect(() => parseCodexReviewJsonl(stdout)).toThrow('已知禁用工具×1');
     },
   );
 
@@ -402,7 +403,7 @@ describe('parseCodexReviewJsonl', () => {
       type: 'item.started',
       item: { type: 'future_capability' },
     });
-    expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知非被动×1');
   });
 
   it('rejects an unrecognized top-level event even when a valid final answer follows', () => {
@@ -414,7 +415,7 @@ describe('parseCodexReviewJsonl', () => {
         item: { type: 'agent_message', text: JSON.stringify(answer) },
       }),
     ].join('\n');
-    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知顶层事件');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知非被动×1');
   });
 
   it('does not echo a model-controlled event type into diagnostics', () => {
@@ -426,13 +427,14 @@ describe('parseCodexReviewJsonl', () => {
       failure = error;
     }
     expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toContain('未知顶层事件');
+    expect((failure as Error).message).toContain('未知非被动×1');
     expect((failure as Error).message).not.toContain(secretType);
+    expect((failure as Error).message).toMatch(/stdout=\d+B\/sha256:[a-f0-9]{64}/u);
   });
 
   it('rejects an item event whose item payload is missing', () => {
     const stdout = JSON.stringify({ type: 'item.started' });
-    expect(() => parseCodexReviewJsonl(stdout)).toThrow('禁用工具事件');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('形状损坏×1');
   });
 
   it('rejects a passive top-level event that unexpectedly carries a tool item', () => {
@@ -440,7 +442,41 @@ describe('parseCodexReviewJsonl', () => {
       type: 'turn.completed',
       item: { type: 'command_execution', command: 'whoami' },
     });
-    expect(() => parseCodexReviewJsonl(stdout)).toThrow('turn.completed 含非预期 item');
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('形状损坏×1');
+  });
+
+  it('reports only fixed categories, counts, byte length, and a digest', () => {
+    const secrets = [
+      'MALICIOUS_EVENT_TYPE',
+      'MALICIOUS_COMMAND',
+      '/private/secret/path',
+      'MODEL_SECRET_TEXT',
+    ];
+    const stdout = [
+      JSON.stringify({ type: secrets[0], payload: secrets[3] }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: { type: 'command_execution', command: secrets[1], cwd: secrets[2] },
+      }),
+      JSON.stringify({ type: 'item.started', item: { type: 'web_search', query: secrets[3] } }),
+      JSON.stringify({ type: 'item.completed', item: secrets[3] }),
+    ].join('\n');
+
+    let failure: unknown;
+    try {
+      parseCodexReviewJsonl(stdout);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+    const message = (failure as Error).message;
+    expect(message).toContain('形状损坏×1');
+    expect(message).toContain('已知禁用工具×2');
+    expect(message).toContain('未知非被动×1');
+    expect(message).toContain(`stdout=${Buffer.byteLength(stdout)}B/sha256:`);
+    expect(message).toMatch(/sha256:[a-f0-9]{64}/u);
+    for (const secret of secrets) expect(message).not.toContain(secret);
   });
 });
 
@@ -451,9 +487,9 @@ describe('codexReviewPermissionOverrides', () => {
       '-c',
       'default_permissions="coding_x_review"',
       '-c',
-      `permissions.coding_x_review.filesystem={ ":minimal" = "read", ${JSON.stringify(resolve(cwd))} = "read" }`,
+      `permissions.coding_x_review.filesystem={ ":minimal" = "read", ":root" = "deny", ":tmpdir" = "deny", ":slash_tmp" = "deny", ${JSON.stringify(resolve(cwd))} = "read" }`,
       '-c',
-      'permissions.coding_x_review.network.enabled=true',
+      'permissions.coding_x_review.network.enabled=false',
     ]);
   });
 });
@@ -727,7 +763,7 @@ describe('managed Final Review runner execution', () => {
     ).rejects.toThrow(/semantic delta was not accepted/u);
     expect(temporaryPath).not.toBe('');
     expect(existsSync(temporaryPath)).toBe(false);
-  });
+  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
 
   it('retains the Runner version domain after a supervised timeout', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -821,7 +857,10 @@ describe('managed Final Review runner execution', () => {
         promptMode: string;
       };
       expect(config.promptMode).toBe('stdin');
-      expect(readFileSync(config.promptPath, 'utf8')).toContain('Runner 隔离反向测试');
+      const prompt = readFileSync(config.promptPath, 'utf8');
+      expect(prompt).toContain('Runner 隔离反向测试');
+      expect(prompt).toContain('调用成功且得到可用结果');
+      expect(prompt).toContain('被拒绝、不可用或报错都必须为 false');
       return managedResult(
         codexAnswer({
           outsideSecret: null,
@@ -842,7 +881,7 @@ describe('managed Final Review runner execution', () => {
       managedProcess: managed,
     });
     expect(result.ok, result.failures.join('；')).toBe(true);
-    expect(result.policyVersion).toBe('package-read-only-v6');
+    expect(result.policyVersion).toBe('package-read-only-v7');
     expect(calls).toBe(1);
   });
 
@@ -951,7 +990,7 @@ describe('managed Final Review runner execution', () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.failures.join('；')).toContain('非法');
+    expect(result.failures.join('；')).toContain('形状损坏×1');
     expect(calls).toBe(1);
   });
 
@@ -1024,7 +1063,203 @@ describe('managed Final Review runner execution', () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.failures.join('；')).toContain('禁用工具事件');
+    expect(result.failures.join('；')).toContain('已知禁用工具×1');
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    [
+      'direct result',
+      {
+        outsideSecret: null,
+        fileWriteSucceeded: false,
+        dangerousCommandSucceeded: false,
+        externalToolSucceeded: true,
+      },
+    ],
+    [
+      'nested result',
+      {
+        type: 'turn.failed',
+        terminal_reason: 'api_error',
+        structured_output: {
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: true,
+        },
+      },
+    ],
+    [
+      'string-wrapped result',
+      {
+        type: 'turn.failed',
+        terminal_reason: 'api_error',
+        result: JSON.stringify({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: true,
+        }),
+      },
+    ],
+  ])('blocks Codex external tool success in a %s', async (_name, value) => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult(
+        Object.hasOwn(value, 'type') ? JSON.stringify(value) : codexAnswer(value),
+        Object.hasOwn(value, 'type') ? { exitCode: 1 } : {},
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('Runner 声明成功调用了外部工具');
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    [
+      'error.structured_output',
+      {
+        type: 'turn.failed',
+        terminal_reason: 'api_error',
+        error: {
+          structured_output: {
+            layer1: {
+              layer2: {
+                outsideSecret: 'DEEP_OUTSIDE_SECRET',
+                fileWriteSucceeded: true,
+              },
+            },
+          },
+        },
+      },
+      ['Runner 声明能够读取审查包外文件', 'Runner 声明能够写文件'],
+    ],
+    [
+      'details.result',
+      {
+        type: 'turn.failed',
+        terminal_reason: 'api_error',
+        details: {
+          result: JSON.stringify({
+            layer1: {
+              layer2: {
+                dangerousCommandSucceeded: true,
+                externalToolSucceeded: true,
+              },
+            },
+          }),
+        },
+      },
+      ['Runner 声明能够执行危险命令', 'Runner 声明成功调用了外部工具'],
+    ],
+  ])('blocks deeply wrapped isolation claims in %s without retrying', async (_name, value, diagnostics) => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult(JSON.stringify(value), { exitCode: 1 });
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    for (const diagnostic of diagnostics) {
+      expect(result.failures.join('；')).toContain(diagnostic);
+    }
+    expect(result.failures.join('；')).not.toContain('DEEP_OUTSIDE_SECRET');
+    expect(calls).toBe(1);
+  });
+
+  it('does not parse claim-shaped text outside explicit result wrappers', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          JSON.stringify({
+            type: 'turn.failed',
+            terminal_reason: 'api_error',
+            details: '{"externalToolSucceeded":true,"outsideSecret":"TEXT_ONLY"}',
+          }),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok, result.failures.join('；')).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('fails closed when nested isolation data exceeds the bounded scan depth', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let nested: Record<string, unknown> = {};
+    for (let depth = 0; depth < 20; depth += 1) nested = { next: nested };
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      return managedResult(
+        JSON.stringify({
+          type: 'turn.failed',
+          terminal_reason: 'api_error',
+          error: { structured_output: nested },
+        }),
+        { exitCode: 1 },
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('Runner 隔离声明超出有界扫描范围');
     expect(calls).toBe(1);
   });
 
@@ -1432,14 +1667,14 @@ describe('managed Final Review runner execution', () => {
         type: 'item.completed',
         item: { type: 'command_execution', command: 'touch forbidden' },
       }),
-      '禁用工具事件',
+      '已知禁用工具×1',
     ],
     [
       'an invalid item envelope',
       JSON.stringify({ type: 'item.completed', item: '{"type":"command_execution"}' }),
-      '禁用工具事件',
+      '形状损坏×1',
     ],
-    ['a parseable non-object event', 'null', '未知顶层事件'],
+    ['a parseable non-object event', 'null', '形状损坏×1'],
   ])('does not retry an actual Review after %s', async (_name, firstOutput, diagnostic) => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     const reviewPackage = managedPackageFixture();
@@ -1650,7 +1885,7 @@ describe('managed Final Review runner execution', () => {
     expect(existsSync(invocationRoot)).toBe(false);
     expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
     expect(existsSync(reviewPackage.root)).toBe(false);
-  });
+  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
 
   it('retains both Review domains after a timed-out closeout whose workspace delta is rejected', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -1678,9 +1913,9 @@ describe('managed Final Review runner execution', () => {
     expect(existsSync(invocationRoot)).toBe(true);
     expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
     expect(existsSync(reviewPackage.root)).toBe(true);
-  });
+  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
 
-  it('records two attempts when a retry ends in a temporary-domain policy failure', async () => {
+  it('does not retry when the first Review event stream has a damaged shape', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     const reviewPackage = managedPackageFixture();
     let calls = 0;
@@ -1709,10 +1944,11 @@ describe('managed Final Review runner execution', () => {
     } catch (error) {
       failure = error;
     }
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
     expect(failure).toBeInstanceOf(RunnerPolicyViolation);
-    expect((failure as RunnerPolicyViolation).attempts).toBe(2);
-    expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+    expect((failure as RunnerPolicyViolation).attempts).toBe(1);
+    expect((failure as Error).message).toContain('形状损坏×1');
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
   });
 
   it('does not retry when the invocation directory is polluted during a managed call', async () => {
@@ -1787,9 +2023,9 @@ describe('managed Final Review runner execution', () => {
     } catch (error) {
       failure = error;
     }
-    expect(calls).toBe(2);
-    expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toContain('退出码 9');
+    expect(calls).toBe(1);
+    expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+    expect((failure as Error).message).toContain('形状损坏×1');
     expect((failure as Error).message).not.toContain(secret);
   });
 
