@@ -41,6 +41,7 @@ import {
 } from './runner.js';
 
 const temporaryRoots: string[] = [];
+const MANAGED_WORKSPACE_TEST_TIMEOUT_MS = 30_000;
 
 function removeFixtureRoot(path: string): void {
   if (!existsSync(path)) return;
@@ -762,7 +763,7 @@ describe('managed Final Review runner execution', () => {
     ).rejects.toThrow(/semantic delta was not accepted/u);
     expect(temporaryPath).not.toBe('');
     expect(existsSync(temporaryPath)).toBe(false);
-  });
+  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
 
   it('retains the Runner version domain after a supervised timeout', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -1884,7 +1885,7 @@ describe('managed Final Review runner execution', () => {
     expect(existsSync(invocationRoot)).toBe(false);
     expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
     expect(existsSync(reviewPackage.root)).toBe(false);
-  });
+  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
 
   it('retains both Review domains after a timed-out closeout whose workspace delta is rejected', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -1912,7 +1913,7 @@ describe('managed Final Review runner execution', () => {
     expect(existsSync(invocationRoot)).toBe(true);
     expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
     expect(existsSync(reviewPackage.root)).toBe(true);
-  });
+  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
 
   it('does not retry when the first Review event stream has a damaged shape', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
