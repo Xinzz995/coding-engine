@@ -8,8 +8,8 @@ describe('review rules', () => {
     expect(rules).toContain('改动应具备什么行为');
     expect(rules).toContain('全部 Review 轴完成状态');
     expect(rules).toContain('不得仅因这些后置状态');
-    expect(REVIEW_RULES.version).toBe('1.2.0');
-    expect(REVIEW_RULES_VERSION).toBe('1.2.0');
+    expect(REVIEW_RULES.version).toBe('1.3.0');
+    expect(REVIEW_RULES_VERSION).toBe('1.3.0');
     expect(REVIEW_RULES_DIGEST).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 });

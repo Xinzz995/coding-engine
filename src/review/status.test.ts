@@ -412,6 +412,32 @@ describe('collectCurrentReviewStatus currentness binding', () => {
     });
   });
 
+  it('invalidates a Review bound to rules version 1.2.0', () => {
+    const workspace = temporaryDirectory('review-status-old-rules-version-');
+    const context = reviewContext();
+    writeBoundReview(workspace, context);
+    const reviewPath = join(workspace, 'final-review.json');
+    const saved = JSON.parse(readFileSync(reviewPath, 'utf8')) as FinalReviewState;
+    saved.binding.reviewRulesVersion = '1.2.0';
+    writeFileSync(reviewPath, `${JSON.stringify(saved)}\n`);
+
+    const result = collectCurrentReviewStatus({
+      workspace,
+      projectRoot: '/project',
+      codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
+      runnerVersionObservation: {
+        status: 'ready',
+        runner: 'codex',
+        version: 'codex 1.2.3',
+      },
+      preflight: () => ({ status: 'ready', context }),
+    });
+
+    expect(result.current).toBe(false);
+    expect(result.staleReasons).toContain('Review 规则版本 已变化');
+  });
+
   it('fails closed without a project root or supervised Runner observation', () => {
     const workspace = temporaryDirectory('review-status-currentness-');
     const context = reviewContext();
