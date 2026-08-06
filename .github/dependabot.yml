@@ -13,10 +13,23 @@ updates:
         dependency-type: production
         patterns:
           - '*'
+        update-types:
+          - minor
+          - patch
       development-dependencies:
         dependency-type: development
         patterns:
           - '*'
+        update-types:
+          - minor
+          - patch
+    ignore:
+      - dependency-name: typescript
+        update-types:
+          - version-update:semver-major
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: chore
       include: scope
@@ -33,6 +46,9 @@ updates:
       actions:
         patterns:
           - '*'
+        update-types:
+          - minor
+          - patch
     commit-message:
       prefix: chore
       include: scope
