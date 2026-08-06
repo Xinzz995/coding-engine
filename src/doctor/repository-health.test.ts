@@ -105,4 +105,31 @@ describe('coding-engine repository mechanical health', () => {
     expect(ignoredMajorUpdates.get('typescript')).toEqual(['version-update:semver-major']);
     expect(ignoredMajorUpdates.get('@types/node')).toEqual(['version-update:semver-major']);
   });
+
+  it('keeps the esbuild security override, lockfile, and install permission aligned', () => {
+    const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as {
+      overrides?: { esbuild?: unknown; tsup?: { esbuild?: unknown } };
+      allowScripts?: Record<string, unknown>;
+    };
+    const override = manifest.overrides?.tsup?.esbuild;
+    expect(override).toBe('0.28.1');
+    expect(manifest.overrides?.esbuild).toBeUndefined();
+    if (override !== '0.28.1') return;
+
+    const lock = JSON.parse(readFileSync(join(ROOT, 'package-lock.json'), 'utf8')) as {
+      packages?: Record<string, { version?: string }>;
+    };
+    const lockedVersions = new Set(
+      Object.entries(lock.packages ?? {})
+        .filter(([path]) => path.endsWith('node_modules/esbuild'))
+        .map(([, entry]) => entry.version),
+    );
+    expect([...lockedVersions]).toEqual([override]);
+
+    const allowedEsbuildScripts = Object.keys(manifest.allowScripts ?? {}).filter((entry) =>
+      entry.startsWith('esbuild@'),
+    );
+    expect(allowedEsbuildScripts).toEqual([`esbuild@${override}`]);
+    expect(manifest.allowScripts?.[`esbuild@${override}`]).toBe(true);
+  });
 });
