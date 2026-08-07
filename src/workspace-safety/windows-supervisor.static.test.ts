@@ -209,6 +209,9 @@ describe('fixed Windows Job supervisor assets', () => {
       'standardOutput.EndOfFile && standardError.EndOfFile && outputCredit.Settled',
     );
     expect(processSource).toContain('Monitor.PulseAll(sync)');
+    expect(processSource).toMatch(
+      /internal void Terminate\(\)[\s\S]*?Native\.Close\(ref thread\);\s*Native\.Close\(ref process\);/u,
+    );
     expect(processSource).not.toMatch(
       /ProtocolWriter\.Send\(new Dictionary<string, object> \{[\s\S]{0,300}\{ "type", "OUTPUT" \}/u,
     );
@@ -230,6 +233,10 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(authority).toContain('"schemaVersion", "type", "operationId", "sequence", "bytes"');
     expect(authority).toContain('jobTarget.AcknowledgeOutput(operationId, sequence, bytes)');
     expect(authority).toContain('jobTarget.DiscardOutput()');
+    expect(authority).toMatch(
+      /if \(requestedTermination != null\)\s*\{\s*jobTarget\.Terminate\(\);\s*DrainAndSend\(requestedTermination,[\s\S]*?return;\s*\}\s*closeoutDeadline = StartPhaseDeadline/u,
+    );
+    expect(authority).not.toContain('WaitForRootResult');
     expect(authority).toContain('parent output acknowledgements did not settle');
     expect(authority).toContain('windows-job-zero-pipes-eof-output-settled-v2');
     expect(authority).not.toContain('windows-job-zero-and-pipes-eof-v1');

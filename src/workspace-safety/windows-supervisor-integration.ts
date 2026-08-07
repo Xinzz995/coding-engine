@@ -547,6 +547,9 @@ export async function runDarkWindowsSupervisedOperation(
           () => windowsDeadlineError('natural drain hook'),
         );
       } else {
+        if (!result && terminationSent === undefined) {
+          protocolInvalid('DRAINED without RESULT requires a bound external termination');
+        }
         drained = event;
       }
       if (!drained) {

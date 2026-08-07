@@ -310,7 +310,10 @@ export class WindowsSupervisorEventOrder {
     else if (event.type === 'ARMED' && this.#state === 'bound') this.#state = 'armed';
     else if (event.type === 'STARTED' && this.#state === 'armed') this.#state = 'started';
     else if (event.type === 'RESULT' && this.#state === 'started') this.#state = 'result';
-    else if (event.type === 'DRAINED' && (this.#state === 'armed' || this.#state === 'result')) {
+    else if (
+      event.type === 'DRAINED' &&
+      (this.#state === 'armed' || this.#state === 'started' || this.#state === 'result')
+    ) {
       this.#state = 'drained';
     } else if (
       event.type === 'PRESTART_DRAINED' &&

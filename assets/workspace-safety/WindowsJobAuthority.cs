@@ -633,13 +633,15 @@ namespace CodingX.WorkspaceSafety
                     }
                 }
             }
-            if (requestedTermination != null) jobTarget.Terminate();
-            if (!jobTarget.CaptureRootResult() && !jobTarget.WaitForEmptyAndEof(
-                closeoutDeadline, timeouts.PollMs))
-                throw new SafetyException("terminated root did not exit");
-            if (closeoutDeadline == null)
-                closeoutDeadline = StartPhaseDeadline(
-                    timeouts.NaturalDrainMs + timeouts.TerminateMs);
+            if (requestedTermination != null)
+            {
+                jobTarget.Terminate();
+                DrainAndSend(requestedTermination, parentConnected && ProtocolWriter.Connected,
+                    "windows-job-zero-pipes-eof-output-settled-v2", closeoutDeadline);
+                return;
+            }
+            closeoutDeadline = StartPhaseDeadline(
+                timeouts.NaturalDrainMs + timeouts.TerminateMs);
             ProtocolWriter.Send(new Dictionary<string, object> {
                 { "schemaVersion", 1 }, { "type", "RESULT" },
                 { "code", (long)jobTarget.RootExitCode }, { "signal", null }

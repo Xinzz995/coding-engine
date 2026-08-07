@@ -319,6 +319,18 @@ describe('Windows supervisor protocol parser', () => {
     expect(order.state).toBe('drained');
   });
 
+  it('accepts externally terminated STARTED to DRAINED without inventing a root result', () => {
+    const order = new WindowsSupervisorEventOrder();
+    order.accept(bound());
+    order.accept(armed());
+    order.accept(parseWindowsSupervisorEvent(event({ type: 'STARTED', targetPid: 510 })));
+    order.accept(drained());
+    expect(order.state).toBe('drained');
+    expect(() =>
+      order.accept(parseWindowsSupervisorEvent(event({ type: 'RESULT', code: 0, signal: null }))),
+    ).toThrow(/not allowed/i);
+  });
+
   it('accepts prepared-bound and armed prestart abort completion only as terminal paths', () => {
     for (const withContainment of [false, true]) {
       const order = new WindowsSupervisorEventOrder();

@@ -313,6 +313,37 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     await state.session.close();
   });
 
+  it('settles output failure without waiting for a root result when root exit races', async () => {
+    const state = await setup();
+    let callbackCalls = 0;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          "require('node:fs').writeSync(1,Buffer.alloc(32*1024,122));process.exit(0)",
+          state.workspace,
+        ),
+        timeouts: { naturalDrainMs: 10_000, terminateMs: 10_000, ackMs: 10_000, pollMs: 20 },
+        onOutput: () => {
+          callbackCalls += 1;
+          throw new Error('sink rejected while root was exiting');
+        },
+      }),
+    );
+
+    expect(callbackCalls).toBe(1);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      code: null,
+      terminationReason: 'output-failure',
+      receipt: {
+        proof: 'windows-job-zero-pipes-eof-output-settled-v2',
+        drainReason: 'output-failure',
+      },
+    });
+    await state.session.close();
+  });
+
   it('keeps a post-root cancellation authoritative while the last callback is blocked', async () => {
     const state = await setup();
     const controller = new AbortController();
@@ -362,6 +393,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     const state = await setup();
     let discardCalls = 0;
     let callbackCalls = 0;
+    let rootResultCalls = 0;
 
     const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
       runDarkWindowsSupervisedOperation(operation, {
@@ -376,11 +408,17 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
         onOutputDiscard: () => {
           discardCalls += 1;
         },
+        hooks: {
+          onRootResult: () => {
+            rootResultCalls += 1;
+          },
+        },
       }),
     );
 
     expect(callbackCalls).toBe(1);
     expect(discardCalls).toBe(1);
+    expect(rootResultCalls).toBe(0);
     expect(outcome).toMatchObject({
       verdict: 'terminated',
       code: null,

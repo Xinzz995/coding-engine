@@ -539,13 +539,13 @@ namespace CodingX.WorkspaceSafety
                 !Native.TerminateJobObject(job, Native.TERMINATION_EXIT_CODE))
                 throw Native.Failure("TerminateJobObject");
             Native.Close(ref thread);
+            Native.Close(ref process);
         }
 
         internal bool WaitForEmptyAndEof(MonotonicDeadline deadline, int pollMs)
         {
             while (!deadline.Expired)
             {
-                CaptureRootResult();
                 bool drained = ActiveProcesses(job) == 0 && OutputEnded;
                 if (deadline.Expired) return false;
                 if (drained) return true;
