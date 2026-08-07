@@ -1239,6 +1239,56 @@ describe('renderStatusReport', () => {
     }
   });
 
+  it('最近实际调用在文本与 JSON 单独展示输出通道终止原因', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(
+        join(ws, 'evidence.jsonl'),
+        JSON.stringify({
+          type: 'iteration',
+          source: 'engine',
+          at: '2026-07-22T10:40:23.145Z',
+          iteration: 1,
+          storyId: 'US-001',
+          builderRan: true,
+          builderModel: null,
+          validatorRan: false,
+          validatorModel: null,
+          skippedValidator: false,
+          agentBlocked: false,
+          builderRouteSource: 'runner-default',
+          builderOutcome: 'error',
+          builderInvocation: {
+            durationMs: 812,
+            exitCode: null,
+            terminationReason: 'output-failure',
+            diagnosticTail: 'builder output before sink failure',
+          },
+        }) + '\n',
+      );
+
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report).text;
+      expect(human).toContain(
+        'builder=默认 [runner-default]@第1轮 · error · 0.8s · exit=unavailable · reason=output-failure',
+      );
+      expect(human).toContain('builder 诊断：builder output before sink failure');
+      const json = JSON.parse(renderStatusJson(report).text);
+      expect(json.recentActual['US-001'].builder).toMatchObject({
+        outcome: 'error',
+        invocation: {
+          durationMs: 812,
+          exitCode: null,
+          terminationReason: 'output-failure',
+          diagnosticTail: 'builder output before sink failure',
+        },
+      });
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
   it('展示最近一次结构化验收绑定与 invalid 原因', () => {
     const ws = makeWorkspace();
     try {

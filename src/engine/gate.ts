@@ -608,6 +608,7 @@ export interface AbortInfo {
   side: 'builder' | 'validator';
   timedOut: boolean;
   exitCode: number | null;
+  terminationReason?: SupervisorTerminationReason | null;
 }
 
 /**

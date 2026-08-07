@@ -583,7 +583,8 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
               side.invocation?.exitCode !== undefined
                 ? ` · exit=${side.invocation.exitCode ?? 'unavailable'}`
                 : ''
-            }`
+            }` +
+            `${side.invocation?.terminationReason ? ` · reason=${side.invocation.terminationReason}` : ''}`
           : '无';
       lines.push(
         `      · 最近实际：builder=${route(actual.builder)} · validator=${route(actual.validator)}`,

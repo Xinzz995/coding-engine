@@ -929,7 +929,22 @@ describe('Agent 调用凭证', () => {
     expect(readEvidence(dir)).toEqual({ records: [iteration], skippedLines: 0 });
   });
 
-  it('拒绝负耗时、超限诊断、未运行侧凭证和成功结局诊断', () => {
+  it('保留输出通道失败的机械终止原因', () => {
+    const dir = ws();
+    const iteration: EvidenceRecord = {
+      ...base,
+      builderInvocation: {
+        durationMs: 812,
+        exitCode: null,
+        terminationReason: 'output-failure',
+        diagnosticTail: 'builder output before transport failure',
+      },
+    };
+    appendEvidence(dir, iteration);
+    expect(readEvidence(dir)).toEqual({ records: [iteration], skippedLines: 0 });
+  });
+
+  it('拒绝负耗时、超限诊断、错误终止原因、未运行侧凭证和成功结局诊断', () => {
     const dir = ws();
     writeFileSync(
       join(dir, EVIDENCE_FILE),
@@ -947,10 +962,24 @@ describe('Agent 调用凭证', () => {
         },
         { ...base, builderOutcome: 'completed', builderInvocation: { durationMs: 1, exitCode: 1 } },
         { ...base, builderOutcome: 'timeout', builderInvocation: { durationMs: 1, exitCode: 1 } },
+        {
+          ...base,
+          builderInvocation: { durationMs: 1, exitCode: null, terminationReason: 'unknown' },
+        },
+        {
+          ...base,
+          builderOutcome: 'completed',
+          builderInvocation: { durationMs: 1, exitCode: 0, terminationReason: 'output-failure' },
+        },
+        {
+          ...base,
+          builderOutcome: 'timeout',
+          builderInvocation: { durationMs: 1, exitCode: null, terminationReason: 'output-failure' },
+        },
       ]
         .map((value) => JSON.stringify(value))
         .join('\n') + '\n',
     );
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 6 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 9 });
   });
 });

@@ -162,6 +162,8 @@ export interface LoopConfig {
   afterValidatorUnverifiableStateWriteForTests?: () => void | Promise<void>;
   /** 只供 Validator 输出故障闭环测试；生产始终使用进程 stdout/stderr。 */
   validatorOutputForTests?: { readonly stdout: Writable; readonly stderr: Writable };
+  /** 只供 Builder 输出故障闭环测试；生产始终使用进程 stdout/stderr。 */
+  builderOutputForTests?: { readonly stdout: Writable; readonly stderr: Writable };
   /** 只供 session release 信号竞态测试；生产始终安装真实进程信号。 */
   commandSignalsForTests?: CommandSignalController;
   /** 只供 session release 信号竞态测试：close 已进入 closing、尚未 await 时执行。 */
@@ -359,6 +361,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       return {
         durationMs: result.durationMs,
         exitCode: result.exitCode,
+        ...(result.terminationReason ? { terminationReason: result.terminationReason } : {}),
         ...(diagnostic ? { diagnosticTail: diagnostic } : {}),
       };
     };
@@ -830,7 +833,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       // 不进入此处。state 读取失败（缺失/损坏）不回写不覆盖。
       const rollbackIfUnvalidatedPass = async (
         side: 'builder' | 'validator',
-        r: { timedOut: boolean; exitCode: number | null },
+        r: Pick<RunResult, 'timedOut' | 'exitCode' | 'terminationReason'>,
       ): Promise<boolean> => {
         if (!currentStory) return false;
         const passedBefore = beforeState?.[currentStory]?.passes ?? false;
@@ -840,7 +843,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const next = applyAbortRollback(
           st,
           currentStory,
-          { side, timedOut: r.timedOut, exitCode: r.exitCode },
+          {
+            side,
+            timedOut: r.timedOut,
+            exitCode: r.exitCode,
+            terminationReason: r.terminationReason,
+          },
           new Date(),
         );
         await session.writer.writeFile('state.json', JSON.stringify(next, null, 2));
@@ -1110,6 +1118,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           timeoutMs: cfg.devTimeoutMs,
           model: builderChoice!.model,
           env: agentEnv,
+          ...(cfg.builderOutputForTests ? { output: cfg.builderOutputForTests } : {}),
           managed: {
             session,
             termination: commandSignals.termination,

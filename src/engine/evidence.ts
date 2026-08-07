@@ -5,6 +5,7 @@ import type { StoryDifficulty } from './prd.js';
 import type { ValidationCheck, ValidationProtocolErrorCode } from './validation-protocol.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
 import { readStableFile } from '../workspace-safety/stable-file.js';
+import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
 
 export interface ValidationTargetEvidence {
   requestId: string;
@@ -17,6 +18,7 @@ export interface ValidationTargetEvidence {
 export interface AgentInvocationEvidence {
   durationMs: number;
   exitCode: number | null;
+  terminationReason?: SupervisorTerminationReason;
   diagnosticTail?: string;
 }
 
@@ -284,12 +286,22 @@ function isBoundedDiagnostic(v: unknown): v is string {
   return true;
 }
 
+function isSupervisorTerminationReason(value: unknown): value is SupervisorTerminationReason {
+  return (
+    value === 'timeout' ||
+    value === 'user-interrupt' ||
+    value === 'parent-shutdown' ||
+    value === 'output-failure'
+  );
+}
+
 function isInvocationEvidence(v: unknown): v is AgentInvocationEvidence {
   return (
     isRec(v) &&
     Number.isSafeInteger(v.durationMs) &&
     (v.durationMs as number) >= 0 &&
     (v.exitCode === null || Number.isInteger(v.exitCode)) &&
+    (v.terminationReason === undefined || isSupervisorTerminationReason(v.terminationReason)) &&
     (v.diagnosticTail === undefined ||
       (isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0))
   );
@@ -300,9 +312,19 @@ function isInvocationForOutcome(
   outcome: unknown,
 ): value is AgentInvocationEvidence {
   if (!isInvocationEvidence(value)) return false;
-  if (outcome === 'completed') return value.exitCode === 0 && value.diagnosticTail === undefined;
-  if (outcome === 'timeout') return value.exitCode === null;
-  if (outcome === 'error') return value.exitCode !== 0;
+  if (outcome === 'completed')
+    return (
+      value.exitCode === 0 &&
+      value.terminationReason === undefined &&
+      value.diagnosticTail === undefined
+    );
+  if (outcome === 'timeout')
+    return (
+      value.exitCode === null &&
+      (value.terminationReason === undefined || value.terminationReason === 'timeout')
+    );
+  if (outcome === 'error')
+    return value.exitCode !== 0 && value.terminationReason !== 'timeout';
   return false;
 }
 

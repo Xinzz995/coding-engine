@@ -5,7 +5,11 @@ import {
   VALIDATOR_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX,
 } from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
-import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
+import type {
+  AgentInvocationEvidence,
+  EvidenceRecord,
+  ScreenshotClaim,
+} from '../engine/evidence.js';
 import { readTddConfig } from '../engine/tdd-gate.js';
 import { acceptanceHash } from '../contracts/validation-contract.js';
 
@@ -351,10 +355,11 @@ function renderDiagnostic(label: string, value: string | undefined): string {
   return `<details class="evidence-diagnostic"><summary>${text(label)}</summary><pre>${text(value)}</pre></details>`;
 }
 
-function invocationMeta(value: { durationMs: number; exitCode: number | null } | undefined): string {
+function invocationMeta(value: AgentInvocationEvidence | undefined): string {
   if (!value) return '';
   const exit = value.exitCode === null ? 'exit unavailable' : `exit ${value.exitCode}`;
-  return ` · ${(value.durationMs / 1000).toFixed(1)}s · ${exit}`;
+  const termination = value.terminationReason ? ` · reason ${value.terminationReason}` : '';
+  return ` · ${(value.durationMs / 1000).toFixed(1)}s · ${exit}${termination}`;
 }
 
 type GateOrTddRun = Extract<EvidenceRecord, { type: 'gate-run' | 'tdd-gate' }>;

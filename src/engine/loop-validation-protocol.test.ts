@@ -468,6 +468,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
           },
           validatorInvocation: {
             exitCode: null,
+            terminationReason: 'output-failure',
             diagnosticTail: expect.any(String),
           },
         });
@@ -522,6 +523,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
           },
           validatorInvocation: {
             exitCode: null,
+            terminationReason: 'output-failure',
             diagnosticTail: 'validator output before sink failure',
           },
         });

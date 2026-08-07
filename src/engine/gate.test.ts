@@ -861,6 +861,29 @@ describe('applyAbortRollback', () => {
     expect(
       abortDesc({ timedOut: false, exitCode: null, terminationReason: 'output-failure' }),
     ).toBe('输出通道失败后被终止');
+
+    const next = applyAbortRollback(
+      {
+        'US-001': {
+          passes: true,
+          validated: false,
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+        },
+      },
+      'US-001',
+      {
+        side: 'builder',
+        timedOut: false,
+        exitCode: null,
+        terminationReason: 'output-failure',
+      },
+      at,
+    );
+    expect(next['US-001'].notes).toContain('输出通道失败后被终止');
+    expect(next['US-001'].notes).not.toContain('被信号终止');
   });
 
   it('回写 passes=false 并写入中断标记行；retryCount 与 blocked 不动', () => {

@@ -783,6 +783,21 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).not.toContain('<script>Account overdue</script>');
   });
 
+  it('Agent 调用凭证单独展示输出通道终止原因', () => {
+    const html = renderReportHtml(data(ev([{
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z',
+      iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      builderOutcome: 'error',
+      builderInvocation: {
+        durationMs: 812, exitCode: null, terminationReason: 'output-failure',
+        diagnosticTail: 'builder output before sink failure',
+      },
+    }])));
+    expect(html).toContain('0.8s · exit unavailable · reason output-failure');
+    expect(html).toContain('builder output before sink failure');
+  });
+
   it('validator 打回诊断进入时间线且按纯文本转义', () => {
     const html = renderReportHtml(data(ev([{
       type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z',
