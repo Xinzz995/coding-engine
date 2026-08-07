@@ -323,8 +323,10 @@ function isInvocationForOutcome(
       value.exitCode === null &&
       (value.terminationReason === undefined || value.terminationReason === 'timeout')
     );
-  if (outcome === 'error')
-    return value.exitCode !== 0 && value.terminationReason !== 'timeout';
+  if (outcome === 'error') {
+    if (value.terminationReason === undefined) return value.exitCode !== 0;
+    return value.exitCode === null && value.terminationReason !== 'timeout';
+  }
   return false;
 }
 

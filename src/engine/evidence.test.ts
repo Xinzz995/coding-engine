@@ -976,10 +976,18 @@ describe('Agent 调用凭证', () => {
           builderOutcome: 'timeout',
           builderInvocation: { durationMs: 1, exitCode: null, terminationReason: 'output-failure' },
         },
+        {
+          ...base,
+          builderInvocation: { durationMs: 1, exitCode: 137, terminationReason: 'output-failure' },
+        },
+        {
+          ...base,
+          builderInvocation: { durationMs: 1, exitCode: 1, terminationReason: 'user-interrupt' },
+        },
       ]
         .map((value) => JSON.stringify(value))
         .join('\n') + '\n',
     );
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 9 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 11 });
   });
 });
