@@ -207,17 +207,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
     const dashboardState = vi.spyOn(dashboard, 'setState');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
     try {
-      const code = await runLoop({
-        kind: 'claude',
-        maxIterations: 1,
-        devTimeoutMs: 5000,
-        valTimeoutMs: 5000,
-        workspace,
-        instructionsDir,
-        port: 0,
-        openBrowser: false,
-        stallLimit: 3,
-      });
+      const code = await runProductionLoop(strictConfig(workspace, instructionsDir));
       expect(code).toBe(5);
       expect(
         JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'],

@@ -107,6 +107,8 @@ export interface CleanValidationCheckoutOptions {
   };
   /** @internal 用不可读取的来源证明预算拒绝发生在 fetch 之前；生产不设置。 */
   readonly repositoryUrlForTests?: string;
+  /** @internal 在最终拓扑复核前制造确定性竞态；生产不设置。 */
+  readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
 }
 
 export interface CleanValidationCheckoutCleanup {
@@ -1087,6 +1089,7 @@ async function assertSafeArtifactTopology(
     readonly permittedExternalLinks: ReadonlyMap<string, ExternalFileLinkIdentity>;
     readonly signal?: AbortSignal;
     readonly managed: ManagedGateContext;
+    readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
   },
 ): Promise<Map<string, ExternalFileLinkIdentity>> {
   const assertNoMountPoints = (): CleanValidationBackingFileSystemProof => {
@@ -1214,7 +1217,11 @@ async function assertSafeArtifactTopology(
         `${context}${error.message}`,
       );
     }
-    throw error;
+    if (error instanceof CleanValidationCheckoutError) throw error;
+    throw new CleanValidationCheckoutError(
+      'topology-unverifiable',
+      `${context}无法完整核对验证检出拓扑：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   const afterInitialScanFileSystem = assertNoMountPoints();
   let initialHardLinkProof: ReturnType<typeof freezeCleanValidationHardLinks>;
@@ -1227,7 +1234,11 @@ async function assertSafeArtifactTopology(
         `${context}${error.message}`,
       );
     }
-    throw error;
+    if (error instanceof CleanValidationCheckoutError) throw error;
+    throw new CleanValidationCheckoutError(
+      'topology-unverifiable',
+      `${context}无法完成验证检出拓扑复核：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   if (
     initialHardLinkProof.groups > 0 &&
@@ -1306,6 +1317,7 @@ async function assertSafeArtifactTopology(
   try {
     externalLinkBudget?.assertDarwinMountTableCurrent();
     const finalBackingFileSystem = assertNoMountPoints();
+    options.beforeFinalTopologyScanForTests?.(root, context);
     const finalHardLinkProof = snapshotCleanValidationHardLinks({
       root,
       owningRoot: (path) => policy.owningRoot(path),
@@ -1339,7 +1351,11 @@ async function assertSafeArtifactTopology(
         `${context}${error.message}`,
       );
     }
-    throw error;
+    if (error instanceof CleanValidationCheckoutError) throw error;
+    throw new CleanValidationCheckoutError(
+      'topology-unverifiable',
+      `${context}无法完成验证检出拓扑复核：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   return capturedExternalLinks;
 }
@@ -1632,6 +1648,24 @@ export async function createCleanValidationCheckout(
           }`,
         );
       }
+      // 先证明整棵验证树的拓扑安全，再裁决普通未声明产物。否则一个位于未声明
+      // 目录中的回源链接会先被宽泛的 artifact-boundary 吞掉，错误地从需要隔离的
+      // 安全树异常降级为普通不可验证。普通额外文件仍会在下方按原规则拒绝。
+      const captured = await assertSafeArtifactTopology(
+        checkoutRoot,
+        sourceRoot,
+        artifactPolicy,
+        context,
+        {
+          capturePreparedExternalLinks,
+          permittedExternalLinks,
+          signal: options.managed.termination?.signal,
+          managed: options.managed,
+          ...(options.beforeFinalTopologyScanForTests === undefined
+            ? {}
+            : { beforeFinalTopologyScanForTests: options.beforeFinalTopologyScanForTests }),
+        },
+      );
       const unexpected = status
         .filter((entry) => entry.code === '??' || entry.code === '!!')
         .map((entry) => entry.path)
@@ -1645,18 +1679,6 @@ export async function createCleanValidationCheckout(
           `${context}验证检出产生未允许内容：${unexpected.slice(0, 20).join('、')}`,
         );
       }
-      const captured = await assertSafeArtifactTopology(
-        checkoutRoot,
-        sourceRoot,
-        artifactPolicy,
-        context,
-        {
-          capturePreparedExternalLinks,
-          permittedExternalLinks,
-          signal: options.managed.termination?.signal,
-          managed: options.managed,
-        },
-      );
       if (capturePreparedExternalLinks) permittedExternalLinks = captured;
     };
 

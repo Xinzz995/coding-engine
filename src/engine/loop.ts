@@ -477,6 +477,37 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     };
     let exitCode = 1;
     let reportCurrentReview: CurrentReviewStatus | undefined;
+    const reportOptionsFor = (
+      trustedPrd: Prd | null,
+      observation: StoryValidationObservation | null,
+      observationError?: string,
+    ): ReportOptions => ({
+      ...(trustedPrd === null ? {} : { trustedPrd }),
+      ...(reportCurrentReview === undefined ? {} : { currentReview: reportCurrentReview }),
+      currentGitHead: observation?.headSha ?? null,
+      storyValidationObservation: observation,
+      ...(observationError === undefined
+        ? {}
+        : { storyValidationObservationError: observationError }),
+    });
+    const pendingCloseoutMessage =
+      '本次运行尚未完成最终安全清理，不能把此报告视为最终结局';
+    let pendingCloseoutReportWritten = false;
+    const writePendingCloseoutReport = async (trustedPrd: Prd | null): Promise<void> => {
+      try {
+        const pending = await writeReportWithWriter(
+          session.writer,
+          new Date(),
+          reportOptionsFor(trustedPrd, null, pendingCloseoutMessage),
+        );
+        pendingCloseoutReportWritten ||= pending.status === 'written';
+      } catch (err) {
+        if (err instanceof WorkspaceSafetyError) throw err;
+        console.warn(
+          `⚠️  安全收口前的保守报告未能写入：${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
     const observeCurrentStoryValidation = () =>
       observeStoryValidationCurrentness({
         projectRoot,
@@ -1280,6 +1311,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           await tamperCheckBeforeExit(i);
           break;
         }
+        // 从这一刻起会建立临时验证目录；其准备、核对或清理一旦无法证明，workspace
+        // 将立即隔离且不能再写报告。先留下保守版本，但不要提前覆盖 Developer/PRD
+        // 越界路径“不得生成报告”的既有边界。
+        await writePendingCloseoutReport(gateRead.prd);
         try {
           const validationPolicy = candidateStoryValidationEnvironmentPolicy(tddConfig);
           validationCheckout = await cleanValidationManager.acquire(
@@ -2356,34 +2391,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       expected.status === 'ready' &&
       observed.status === 'ready' &&
       expected.observationToken === observed.observationToken;
-    const reportOptionsFor = (
-      observation: StoryValidationObservation | null,
-      observationError?: string,
-    ): ReportOptions => ({
-      ...(closeRead.prd === null ? {} : { trustedPrd: closeRead.prd }),
-      ...(reportCurrentReview === undefined ? {} : { currentReview: reportCurrentReview }),
-      currentGitHead: observation?.headSha ?? null,
-      storyValidationObservation: observation,
-      ...(observationError === undefined
-        ? {}
-        : { storyValidationObservationError: observationError }),
-    });
-
     // 最终清理失败会立刻把 session 隔离，之后不能再写报告。先原子写入一个明确的
     // “尚未完成安全收口”版本；只有临时检出实际清理成功后，才用当前观察覆盖成最终报告。
-    let pendingCloseoutReportWritten = false;
-    try {
-      const pending = await writeReportWithWriter(
-        session.writer,
-        new Date(),
-        reportOptionsFor(null, '本次运行尚未完成最终安全清理，不能把此报告视为最终结局'),
-      );
-      pendingCloseoutReportWritten = pending.status === 'written';
-    } catch (err) {
-      console.warn(
-        `⚠️  安全收口前的保守报告未能写入：${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    await writePendingCloseoutReport(closeRead.prd);
 
     const cleanValidationCleanup = cleanValidationManager?.dispose();
     const cleanValidationCleanupFailed =
@@ -2409,7 +2419,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       let report = await writeReportWithWriter(
         session.writer,
         new Date(),
-        reportOptionsFor(beforeWrite),
+        reportOptionsFor(closeRead.prd, beforeWrite),
       );
       if (report.status === 'written' && beforeWrite.status === 'ready') {
         const afterWrite = await observeCurrentStoryValidation();
@@ -2417,7 +2427,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           report = await writeReportWithWriter(
             session.writer,
             new Date(),
-            reportOptionsFor(afterWrite),
+            reportOptionsFor(closeRead.prd, afterWrite),
           );
           if (report.status === 'written' && afterWrite.status === 'ready') {
             const afterRewrite = await observeCurrentStoryValidation();
@@ -2425,7 +2435,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               report = await writeReportWithWriter(
                 session.writer,
                 new Date(),
-                reportOptionsFor(null, '报告持久化期间 Story 验收状态持续变化，已强制撤销全部绿灯'),
+                reportOptionsFor(
+                  closeRead.prd,
+                  null,
+                  '报告持久化期间 Story 验收状态持续变化，已强制撤销全部绿灯',
+                ),
               );
             }
           }

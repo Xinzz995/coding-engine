@@ -10,7 +10,6 @@ import {
   fakeCounting,
   FAKE_RUNNER_INPUT_SOURCE,
   readyQualityContract,
-  runLoop as runLegacyLoop,
   setup,
   story,
   strictConfig,
@@ -271,43 +270,59 @@ describe('runLoop Git HEAD validation chain', () => {
   );
 
   it(
-    'rolls back a new unvalidated candidate when a gate changes HEAD',
+    'preserves a new unvalidated candidate when a gate changes HEAD',
     async () => {
       const fixture = setup([story()]);
-      writeHeadAdvanceScript(
+      const gateScript = writeHeadAdvanceScript(
         fixture,
         'commit-during-builder-gate.mjs',
         'H2 after Builder\n',
         'test: Builder gate advanced HEAD',
       );
+      const contract = {
+        ...TEST_QUALITY_CONTRACT,
+        checks: {
+          ...TEST_QUALITY_CONTRACT.checks,
+          test: {
+            checks: [
+              {
+                id: 'advance-head-after-builder',
+                module: 'root',
+                command: {
+                  executable: process.execPath,
+                  args: [gateScript],
+                  cwd: '.',
+                  platforms: ['linux', 'macos', 'windows'],
+                  timeoutMs: 5000,
+                },
+              },
+            ],
+          },
+        },
+      } as QualityContract;
       const prdPath = join(fixture.workspace, 'prd.json');
       const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
-      prd.qualityChecks = ['node commit-during-builder-gate.mjs'];
+      prd.qualityChecks = contract.checks;
       writeFileSync(prdPath, JSON.stringify(prd));
       const { fake, calls } = fakeCounting(fixture.workspace);
       process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
 
       try {
         expect(
-          await runLegacyLoop({
-            kind: 'claude',
-            maxIterations: 1,
-            devTimeoutMs: 5000,
-            valTimeoutMs: 5000,
-            workspace: fixture.workspace,
-            instructionsDir: fixture.instructionsDir,
-            port: 0,
-            openBrowser: false,
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            qualityContractReader: () => readyQualityContract(contract),
           }),
-        ).toBe(1);
+        ).toBe(5);
         expect(readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(1);
         expect(
           JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
         ).toMatchObject({
-          passes: false,
+          passes: true,
           validated: false,
           validationReceipt: null,
           retryCount: 0,
+          validatorUnverifiable: { schemaVersion: 1, gitHead: fixture.head() },
         });
         const iteration = readEvidence(fixture.workspace).records.find(
           (record) => record.type === 'iteration',
@@ -316,10 +331,10 @@ describe('runLoop Git HEAD validation chain', () => {
           builderRan: true,
           validatorRan: false,
           validatorOutcome: 'skipped',
-          validationRollback: true,
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
         });
-        expect(iteration).not.toHaveProperty('validationProtocol');
-        expect(iteration).not.toHaveProperty('validationProtocolError');
+        expect(iteration).not.toHaveProperty('validationRollback');
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
       }

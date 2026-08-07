@@ -518,11 +518,11 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
           validationProtocol: 'invalid',
           validationProtocolError: {
             code: 'agent-aborted',
-            diagnostic: expect.stringContaining('输出通道失败'),
+            diagnostic: 'Validator 输出通道失败后被终止',
           },
           validatorInvocation: {
             exitCode: null,
-            diagnosticTail: expect.stringContaining('terminal-write-failed'),
+            diagnosticTail: 'validator output before sink failure',
           },
         });
       } finally {

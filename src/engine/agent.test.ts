@@ -35,6 +35,12 @@ import { observeManagedProcessSettlement } from '../workspace-safety/operation.j
 const here = dirname(fileURLToPath(import.meta.url));
 const fake = join(here, '__fixtures__', 'fake-agent.mjs');
 
+function acceptProcessWrite(...args: Parameters<typeof process.stdout.write>): boolean {
+  const callback = args.at(-1);
+  if (typeof callback === 'function') callback();
+  return true;
+}
+
 async function runManagedAgent(
   options: Omit<Parameters<typeof runAgent>[0], 'managed'>,
 ): ReturnType<typeof runAgent> {
@@ -712,8 +718,8 @@ describe('runAgent', () => {
 
   it('tees stdout/stderr while returning a bounded diagnostic tail', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} diagnostic`;
-    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(acceptProcessWrite);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(acceptProcessWrite);
     try {
       const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
       expect(r).toMatchObject({ timedOut: false, exitCode: 1 });
@@ -730,39 +736,89 @@ describe('runAgent', () => {
   });
 
   it('forwards the first output before the Runner exits', async () => {
+    const releaseRoot = mkdtempSync(join(tmpdir(), 'coding-x-agent-output-release-'));
+    const releasePath = join(releaseRoot, 'release');
+    const originalClaudeBin = process.env.CODING_X_CLAUDE_BIN;
+    const originalReleasePath = process.env.CODING_X_FAKE_RELEASE_PATH;
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} delayed-diagnostic`;
-    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    process.env.CODING_X_FAKE_RELEASE_PATH = releasePath;
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(acceptProcessWrite);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(acceptProcessWrite);
     let settled = false;
+    let outcome:
+      | Promise<
+          | { type: 'completed'; result: Awaited<ReturnType<typeof runManagedAgent>> }
+          | { type: 'rejected'; error: unknown }
+        >
+      | null = null;
     try {
-      const running = runManagedAgent({
+      const runningOutcome = runManagedAgent({
         kind: 'claude',
         prompt: '',
         cwd: here,
-        timeoutMs: 5000,
-      }).finally(() => {
-        settled = true;
+        timeoutMs: 10_000,
+      })
+        .then(
+          (result) => ({ type: 'completed' as const, result }),
+          (error: unknown) => ({ type: 'rejected' as const, error }),
+        )
+        .finally(() => {
+          settled = true;
+        });
+      outcome = runningOutcome;
+      const first = await new Promise<
+        | { type: 'forwarded' }
+        | { type: 'completed'; result: Awaited<ReturnType<typeof runManagedAgent>> }
+        | { type: 'rejected'; error: unknown }
+      >((resolve, reject) => {
+        let finished = false;
+        const finish = (callback: () => void): void => {
+          if (finished) return;
+          finished = true;
+          clearInterval(interval);
+          clearTimeout(timeout);
+          callback();
+        };
+        const checkOutput = (): void => {
+          if (!stdout.mock.calls.flat().join('').includes('EARLY-OUTPUT')) return;
+          finish(() => resolve({ type: 'forwarded' }));
+        };
+        const interval = setInterval(checkOutput, 20);
+        const timeout = setTimeout(() => {
+          finish(() => reject(new Error('Runner did not forward its first output within 8000ms')));
+        }, 8000);
+        void runningOutcome.then((result) => finish(() => resolve(result)));
+        checkOutput();
       });
-      await vi.waitFor(() => {
-        expect(stdout.mock.calls.flat().join('')).toContain('EARLY-OUTPUT');
-      });
+      if (first.type === 'rejected') throw first.error;
+      if (first.type === 'completed') {
+        throw new Error('Runner completed before forwarding its first output');
+      }
       expect(settled).toBe(false);
+      writeFileSync(releasePath, 'release\n');
 
-      const result = await running;
-      expect(result).toMatchObject({ timedOut: false, exitCode: 0 });
+      const completed = await runningOutcome;
+      if (completed.type === 'rejected') throw completed.error;
+      expect(completed.result).toMatchObject({ timedOut: false, exitCode: 0 });
       expect(stderr.mock.calls.flat().join('')).toContain('LATE-OUTPUT');
-      expect(result.outputTail).toContain('EARLY-OUTPUT');
-      expect(result.outputTail).toContain('LATE-OUTPUT');
+      expect(completed.result.outputTail).toContain('EARLY-OUTPUT');
+      expect(completed.result.outputTail).toContain('LATE-OUTPUT');
     } finally {
+      if (!existsSync(releasePath)) writeFileSync(releasePath, 'release after test failure\n');
+      await outcome;
       stdout.mockRestore();
       stderr.mockRestore();
-      delete process.env.CODING_X_CLAUDE_BIN;
+      if (originalClaudeBin === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+      else process.env.CODING_X_CLAUDE_BIN = originalClaudeBin;
+      if (originalReleasePath === undefined) delete process.env.CODING_X_FAKE_RELEASE_PATH;
+      else process.env.CODING_X_FAKE_RELEASE_PATH = originalReleasePath;
+      rmSync(releaseRoot, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it('keeps only the bounded tail of long runner output', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} long-diagnostic`;
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(acceptProcessWrite);
     try {
       const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 5000 });
       expect(r.exitCode).toBe(1);

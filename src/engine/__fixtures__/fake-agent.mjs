@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // Stub agent. Behavior controlled by argv:
@@ -41,11 +41,19 @@ if (mode === 'hang') {
   process.stderr.write('API Error: 402 Account overdue\n');
   process.exit(1);
 } else if (mode === 'delayed-diagnostic') {
+  const releasePath = process.env.CODING_X_FAKE_RELEASE_PATH;
+  if (!releasePath) throw new Error('CODING_X_FAKE_RELEASE_PATH is required');
   process.stdout.write('EARLY-OUTPUT\n');
-  setTimeout(() => {
-    process.stderr.write('LATE-OUTPUT\n');
-    process.exit(0);
-  }, 500);
+  const releaseDeadline = Date.now() + 9000;
+  while (!existsSync(releasePath) && Date.now() < releaseDeadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  if (!existsSync(releasePath)) {
+    process.stderr.write('release-marker-timeout\n');
+    process.exit(91);
+  }
+  process.stderr.write('LATE-OUTPUT\n');
+  process.exit(0);
 } else if (mode === 'long-diagnostic') {
   process.stderr.write(`${'x'.repeat(2500)}TAIL-END\n`);
   process.exit(1);

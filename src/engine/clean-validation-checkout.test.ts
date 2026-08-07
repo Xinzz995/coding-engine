@@ -147,6 +147,69 @@ describe.runIf(
     }
   }, 60_000);
 
+  it.runIf(process.platform !== 'win32')(
+    'treats an unreadable untracked directory as an unverifiable topology',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      const checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      const unreadable = join(checkout.root, 'unreadable-output');
+      mkdirSync(unreadable);
+      writeFileSync(join(unreadable, 'result.txt'), 'untrusted\n');
+      chmodSync(unreadable, 0o000);
+      try {
+        await expect(checkout.assertCurrent('不可读目录测试')).rejects.toMatchObject({
+          code: 'topology-unverifiable',
+          message: expect.stringContaining('无法完整核对验证检出拓扑'),
+        });
+      } finally {
+        chmodSync(unreadable, 0o700);
+        expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'treats a directory that becomes unreadable before the final scan as unverifiable',
+    async () => {
+      const source = repository({ 'source.txt': 'tracked\n' });
+      const managed = await createManagedProcessTestSession();
+      let finalScanCount = 0;
+      let unreadable = '';
+      const checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+        beforeFinalTopologyScanForTests: () => {
+          finalScanCount += 1;
+          if (finalScanCount === 3) chmodSync(unreadable, 0o000);
+        },
+      });
+      unreadable = join(checkout.root, 'late-unreadable-output');
+      mkdirSync(unreadable);
+      writeFileSync(join(unreadable, 'result.txt'), 'untrusted\n');
+      try {
+        await expect(checkout.assertCurrent('最终复核不可读目录测试')).rejects.toMatchObject({
+          code: 'topology-unverifiable',
+          message: expect.stringContaining('无法完成验证检出拓扑复核'),
+        });
+      } finally {
+        chmodSync(unreadable, 0o700);
+        expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
   it('preserves the source repository commit that last changed each tracked path', async () => {
     const source = repository({ 'stable.txt': 'first commit\n' });
     const stableCommit = source.head();
@@ -1763,8 +1826,8 @@ describe.runIf(
             },
           }),
         ).rejects.toMatchObject({
-          code: 'prepare-failed',
-          message: expect.stringContaining('实际位置无法确认'),
+          code: 'cleanup-unverifiable',
+          message: expect.stringMatching(/本地验证准备失败[\s\S]*实际位置无法确认/u),
         });
         expect(existsSync(join(container, 'checkout-escaped'))).toBe(true);
       } finally {

@@ -59,6 +59,10 @@ describe('runLoop clean validation checkout', () => {
         },
       },
     } as QualityContract;
+    const prdPath = join(fixture.workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8'));
+    prd.qualityChecks = contract.checks;
+    writeFileSync(prdPath, JSON.stringify(prd));
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
 
     try {
@@ -88,6 +92,35 @@ describe('runLoop clean validation checkout', () => {
       });
       expect(iteration).not.toHaveProperty('validationProtocol');
       expect(iteration).not.toHaveProperty('validationProtocolError');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  }, 60_000);
+
+  it('isolates before Validator when the conservative report target is not a regular file', async () => {
+    const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
+    const fake = fakeBoundValidator(fixture.workspace, 'passed');
+    const calls = join(fixture.projectRoot, 'bound-calls.txt');
+    mkdirSync(join(fixture.workspace, 'report.html'));
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(
+        await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+        }),
+      ).toBe(2);
+      expect(readFileSync(calls, 'utf8')).toBe('1');
+      expect(
+        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+      });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
