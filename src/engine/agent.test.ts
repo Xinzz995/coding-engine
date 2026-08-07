@@ -804,7 +804,7 @@ describe('runAgent', () => {
       expect(completed.result.outputTail).toContain('EARLY-OUTPUT');
       expect(completed.result.outputTail).toContain('LATE-OUTPUT');
     } finally {
-      if (!existsSync(releasePath)) writeFileSync(releasePath, 'release after test failure\n');
+      writeFileSync(releasePath, 'release after test failure\n', { flag: 'a' });
       await outcome;
       stdout.mockRestore();
       stderr.mockRestore();
