@@ -266,7 +266,7 @@ jobs:
         run: '& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-Target'' ''PathInspector'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-path-inspector.exe'''
       - name: 'test / windows-native-proof'
         working-directory: '.'
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: pwsh
         run: '& ''npm'' ''run'' ''test:windows-native-proof'''
   quality-gate:

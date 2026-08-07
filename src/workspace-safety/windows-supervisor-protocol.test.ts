@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { MonotonicDeadline } from './deadline.js';
 import { WindowsSupervisorProcess } from './windows-supervisor-protocol.js';
@@ -99,6 +99,50 @@ function deferred<T>(): {
   return { promise, resolve: resolvePromise };
 }
 
+function holdOutputAcknowledgementCallbacks(child: ChildProcessWithoutNullStreams): {
+  readonly release: (error?: Error) => void;
+  readonly restore: () => void;
+} {
+  const originalWrite = child.stdin.write.bind(child.stdin);
+  const completeHeldWrites: Array<(error?: Error) => void> = [];
+  let released = false;
+  let releaseError: Error | undefined;
+  child.stdin.write = ((...args: unknown[]) => {
+    const callback = args.at(-1);
+    const chunk = args[0];
+    let isOutputAcknowledgement = false;
+    if (Buffer.isBuffer(chunk) || typeof chunk === 'string') {
+      try {
+        isOutputAcknowledgement = JSON.parse(chunk.toString().trim()).type === 'OUTPUT_ACK';
+      } catch {
+        // Non-JSON control bytes are not output acknowledgements.
+      }
+    }
+    if (!released && isOutputAcknowledgement && typeof callback === 'function') {
+      args[args.length - 1] = (...callbackArgs: unknown[]) => {
+        const completeHeldWrite = (error?: Error): void =>
+          Reflect.apply(callback, undefined, error ? [error] : callbackArgs);
+        if (released) completeHeldWrite(releaseError);
+        else completeHeldWrites.push(completeHeldWrite);
+      };
+    }
+    return Reflect.apply(originalWrite, undefined, args) as boolean;
+  }) as typeof child.stdin.write;
+  return {
+    release: (error?: Error) => {
+      if (released) return;
+      released = true;
+      releaseError = error;
+      for (const completeHeldWrite of completeHeldWrites.splice(0)) {
+        completeHeldWrite(error);
+      }
+    },
+    restore: () => {
+      child.stdin.write = originalWrite;
+    },
+  };
+}
+
 function rejectable<T>(): {
   readonly promise: Promise<T>;
   readonly reject: (error: Error) => void;
@@ -147,6 +191,41 @@ function outputTransportSource(
   ].join('');
 }
 
+function creditReplacementTransportSource(): string {
+  const chunk = Buffer.alloc(16 * 1024, 120).toString('base64');
+  const drainedMessage = Buffer.from(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: 'DRAINED',
+      operationId: OPERATION_ID,
+      receiptDigest: DIGEST,
+      proof: 'windows-job-zero-pipes-eof-output-settled-v2',
+    }),
+    'utf8',
+  ).toString('base64');
+  return [
+    `const chunk=${JSON.stringify(chunk)};`,
+    'const send=(value)=>process.stdout.write(`${JSON.stringify(value)}\\n`);',
+    "const readline=require('node:readline');",
+    `const operationId=${JSON.stringify(OPERATION_ID)};`,
+    `const drainedMessage=${JSON.stringify(drainedMessage)};`,
+    "const frame=(sequence)=>({schemaVersion:1,type:'OUTPUT',operationId,sequence,bytes:16*1024,stream:'stdout',data:chunk});",
+    'const seen=new Set();',
+    "readline.createInterface({input:process.stdin}).on('line',(line)=>{",
+    'const value=JSON.parse(line);',
+    "if(value.schemaVersion!==1||value.type!=='OUTPUT_ACK'||value.operationId!==operationId||value.sequence<1||value.sequence>17||value.bytes!==16*1024||seen.has(value.sequence))process.exit(91);",
+    'seen.add(value.sequence);',
+    "if(value.sequence===1){send(frame(17));send({schemaVersion:1,type:'RESULT',code:0,signal:null});}",
+    "if(seen.size===17)send({schemaVersion:1,type:'DRAINED',messageBase64:drainedMessage});",
+    '});',
+    `send({schemaVersion:1,type:'BOUND',supervisorPid:410,supervisorIdentity:'133700000000000000',helperDigest:${JSON.stringify(DIGEST)}});`,
+    "send({schemaVersion:1,type:'ARMED',containment:{platform:'windows-job-v1',targetPid:510,targetIdentity:'133700000000000001'}});",
+    "send({schemaVersion:1,type:'STARTED',targetPid:510});",
+    'for(let sequence=1;sequence<=16;sequence+=1)send(frame(sequence));',
+    'process.stdin.resume();',
+  ].join('');
+}
+
 function terminationSettledTransportSource(): string {
   const drainedMessage = Buffer.from(
     JSON.stringify({
@@ -171,6 +250,41 @@ function terminationSettledTransportSource(): string {
     "send({schemaVersion:1,type:'ARMED',containment:{platform:'windows-job-v1',targetPid:510,targetIdentity:'133700000000000001'}});",
     "send({schemaVersion:1,type:'STARTED',targetPid:510});",
     `send(${JSON.stringify(output)});`,
+    "send({schemaVersion:1,type:'RESULT',code:0,signal:null});",
+    'process.stdin.resume();',
+  ].join('');
+}
+
+function captureQueuedTerminationTransportSource(): string {
+  const drainedMessage = Buffer.from(
+    JSON.stringify({
+      schemaVersion: 1,
+      type: 'DRAINED',
+      operationId: OPERATION_ID,
+      receiptDigest: DIGEST,
+      proof: 'windows-job-zero-pipes-eof-output-settled-v2',
+    }),
+    'utf8',
+  ).toString('base64');
+  const first = { schemaVersion: 1, ...outputEvent(1, 'stdout', Buffer.from('first')) };
+  const second = { schemaVersion: 1, ...outputEvent(2, 'stdout', Buffer.from('second')) };
+  return [
+    'const send=(value)=>process.stdout.write(`${JSON.stringify(value)}\\n`);',
+    "const readline=require('node:readline');",
+    'let terminated=false;let acknowledged=false;',
+    "readline.createInterface({input:process.stdin}).on('line',(line)=>{",
+    'const value=JSON.parse(line);',
+    "if(value.type==='OUTPUT_ACK'){if(terminated||acknowledged||value.sequence!==1)process.exit(91);acknowledged=true;return;}",
+    "if(value.type==='TERMINATE'){if(!acknowledged)process.exit(91);terminated=true;return;}",
+    "if(value.type==='CHECK'){if(!terminated)process.exit(91);send({schemaVersion:1,type:'DRAINED',messageBase64:drainedMessage});return;}",
+    'process.exit(91);',
+    '});',
+    `const drainedMessage=${JSON.stringify(drainedMessage)};`,
+    `send({schemaVersion:1,type:'BOUND',supervisorPid:410,supervisorIdentity:'133700000000000000',helperDigest:${JSON.stringify(DIGEST)}});`,
+    "send({schemaVersion:1,type:'ARMED',containment:{platform:'windows-job-v1',targetPid:510,targetIdentity:'133700000000000001'}});",
+    "send({schemaVersion:1,type:'STARTED',targetPid:510});",
+    `send(${JSON.stringify(first)});`,
+    `send(${JSON.stringify(second)});`,
     "send({schemaVersion:1,type:'RESULT',code:0,signal:null});",
     'process.stdin.resume();',
   ].join('');
@@ -324,6 +438,95 @@ describe('Windows supervisor protocol parser', () => {
         await expect(processHandle.next('ARMED')).resolves.toMatchObject({ type: 'ARMED' });
         await expect(processHandle.next('DRAINED')).rejects.toThrow(/credit window/i);
       } finally {
+        await processHandle.abort(MonotonicDeadline.after(5000));
+      }
+    },
+    30_000,
+  );
+
+  it.each(['stream', 'capture'] as const)(
+    'does not count submitted acknowledgements against the helper credit window in %s mode',
+    async (mode) => {
+      const child = spawn(process.execPath, ['-e', creditReplacementTransportSource()], {
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const heldWrite = holdOutputAcknowledgementCallbacks(child);
+      let outputBytes = 0;
+      const processHandle = new WindowsSupervisorProcess(
+        child,
+        15_000,
+        mode === 'stream'
+          ? {
+              onOutput: (_stream, chunk) => {
+                outputBytes += chunk.length;
+              },
+              onFailure: () => undefined,
+            }
+          : undefined,
+        OPERATION_ID,
+      );
+
+      try {
+        await processHandle.next('BOUND');
+        await processHandle.next('ARMED');
+        await processHandle.next('STARTED');
+        await processHandle.next('RESULT');
+        heldWrite.release();
+        await processHandle.next('DRAINED');
+        await processHandle.waitForOutputConsumption(MonotonicDeadline.after(5000));
+        expect(
+          mode === 'stream' ? outputBytes : Buffer.concat(processHandle.stdout).length,
+        ).toBe(17 * 16 * 1024);
+      } finally {
+        heldWrite.release();
+        heldWrite.restore();
+        processHandle.discardOutput();
+        await processHandle.abort(MonotonicDeadline.after(5000));
+      }
+    },
+    30_000,
+  );
+
+  it(
+    'rejects a delayed acknowledgement write failure even after DRAINED arrives',
+    async () => {
+      const child = spawn(
+        process.execPath,
+        [
+          '-e',
+          outputTransportSource([{ stream: 'stdout', data: Buffer.from('acknowledged') }]),
+        ],
+        {
+          shell: false,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+        },
+      );
+      const heldWrite = holdOutputAcknowledgementCallbacks(child);
+      const processHandle = new WindowsSupervisorProcess(
+        child,
+        15_000,
+        { onOutput: () => undefined, onFailure: () => undefined },
+        OPERATION_ID,
+      );
+
+      try {
+        await processHandle.next('BOUND');
+        await processHandle.next('ARMED');
+        await processHandle.next('STARTED');
+        await processHandle.next('RESULT');
+        await processHandle.next('DRAINED');
+        const consumption = processHandle.waitForOutputConsumption(
+          MonotonicDeadline.after(5000),
+        );
+        heldWrite.release(new Error('late ACK write failure'));
+        await expect(consumption).rejects.toThrow(/late ACK write failure/u);
+      } finally {
+        heldWrite.release();
+        heldWrite.restore();
+        processHandle.discardOutput();
         await processHandle.abort(MonotonicDeadline.after(5000));
       }
     },
@@ -570,6 +773,38 @@ describe('Windows supervisor protocol parser', () => {
       await expect(processHandle.next('DRAINED')).resolves.toMatchObject({ type: 'DRAINED' });
     } finally {
       sink.resolve();
+      await processHandle.abort(MonotonicDeadline.after(5000));
+    }
+  });
+
+  it('does not send a queued capture acknowledgement after output is discarded', async () => {
+    const child = spawn(process.execPath, ['-e', captureQueuedTerminationTransportSource()], {
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    const heldWrite = holdOutputAcknowledgementCallbacks(child);
+    const processHandle = new WindowsSupervisorProcess(child, 15_000, undefined, OPERATION_ID);
+
+    try {
+      await processHandle.next('BOUND');
+      await processHandle.next('ARMED');
+      await processHandle.next('STARTED');
+      await processHandle.next('RESULT');
+      processHandle.discardOutput();
+      await processHandle.send({
+        schemaVersion: 1,
+        type: 'TERMINATE',
+        operationId: OPERATION_ID,
+      });
+      heldWrite.release();
+      await new Promise((resolve) => setImmediate(resolve));
+      await processHandle.send({ schemaVersion: 1, type: 'CHECK' });
+      await expect(processHandle.next('DRAINED')).resolves.toMatchObject({ type: 'DRAINED' });
+    } finally {
+      heldWrite.release();
+      heldWrite.restore();
+      processHandle.discardOutput();
       await processHandle.abort(MonotonicDeadline.after(5000));
     }
   });

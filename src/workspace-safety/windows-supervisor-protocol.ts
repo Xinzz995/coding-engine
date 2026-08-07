@@ -435,7 +435,7 @@ export class WindowsSupervisorProcess {
     if (
       event.type === 'DRAINED' &&
       !this.#outputDiscarded &&
-      [...this.#pendingOutput.values()].some((frame) => frame.acknowledgement === undefined)
+      this.#pendingOutput.size > 0
     ) {
       protocolInvalid('DRAINED arrived before every OUTPUT was acknowledged');
     }
@@ -469,7 +469,12 @@ export class WindowsSupervisorProcess {
       const owned = Buffer.from(event.data);
       if (!this.output?.onOutput) {
         (event.stream === 'stdout' ? this.stdout : this.stderr).push(owned);
-        void this.#acknowledgeOutput(frame).catch(() => undefined);
+        const stream = event.stream;
+        this.#outputQueues[stream] = this.#outputQueues[stream]
+          .then(() => {
+            if (!this.#outputDiscarded) return this.#acknowledgeOutput(frame);
+          })
+          .catch((error: unknown) => this.#fail(error));
         return;
       }
       const stream = event.stream;
@@ -507,17 +512,19 @@ export class WindowsSupervisorProcess {
     acknowledgement: Promise<void> | undefined;
   }): Promise<void> {
     if (frame.acknowledgement) return frame.acknowledgement;
+    // The helper may consume a submitted ACK and refill its credit before Node invokes the
+    // corresponding write callback. Release the mirrored credit at submission, while the
+    // per-stream queue still requires the write callback to settle successfully.
+    if (!this.#pendingOutput.delete(frame.event.sequence)) {
+      protocolInvalid('OUTPUT acknowledgement state was already released');
+    }
+    this.#unacknowledgedOutputBytes -= frame.event.bytes;
     frame.acknowledgement = this.send({
       schemaVersion: 1,
       type: 'OUTPUT_ACK',
       operationId: frame.event.operationId,
       sequence: frame.event.sequence,
       bytes: frame.event.bytes,
-    }).then(() => {
-      if (!this.#pendingOutput.delete(frame.event.sequence)) {
-        protocolInvalid('OUTPUT acknowledgement state was already released');
-      }
-      this.#unacknowledgedOutputBytes -= frame.event.bytes;
     });
     frame.acknowledgement.catch((error: unknown) => this.#fail(error));
     return frame.acknowledgement;
@@ -545,16 +552,10 @@ export class WindowsSupervisorProcess {
       () => Promise.all([this.#outputQueues.stdout, this.#outputQueues.stderr]),
       () => protocolError('output consumption timed out'),
     );
-    const acknowledgements = [...this.#pendingOutput.values()].map((frame) => {
-      if (!frame.acknowledgement) {
-        return Promise.reject(protocolError('consumed output has no acknowledgement'));
-      }
-      return frame.acknowledgement;
-    });
-    await deadline.run(
-      () => Promise.all(acknowledgements),
-      () => protocolError('output acknowledgement timed out'),
-    );
+    if (this.#pendingOutput.size > 0) {
+      throw protocolError('consumed output has no acknowledgement');
+    }
+    if (this.#terminalError) throw this.#terminalError;
     if (this.#outputFailure) throw this.#outputFailure;
   }
 

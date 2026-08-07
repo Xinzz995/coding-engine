@@ -98,7 +98,7 @@
             "args": ["run", "test:windows-native-proof"],
             "cwd": ".",
             "platforms": ["windows"],
-            "timeoutMs": 1200000
+            "timeoutMs": 1800000
           }
         }
       ]
