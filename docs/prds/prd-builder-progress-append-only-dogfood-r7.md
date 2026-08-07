@@ -1,6 +1,6 @@
 ---
 title: "R7 Builder 进度只追加 Dogfood"
-status: active
+status: done
 updated: 2026-08-06
 scope: root
 ---
@@ -78,12 +78,12 @@ Developer、Validator 和本地 Review，并由发布维护者独立对账运行
 
 #### Acceptance Criteria
 
-- [ ] `docs/dogfood-regression.md` 表格末尾新增且只新增编号 31；编号 1 至 30、表头、frontmatter 和说明文字逐字不变。
-- [ ] 第 31 条断言明确包含：Builder 只在 `progress.md` 末尾追加；历史 `Codebase Patterns` 只读；可复用经验写入当轮“未来迭代的学习”；项目级沉淀由 `/compound-docs` 处理。
-- [ ] 第 31 条来源逐字为 `2026-08-05 Builder 追加指令冲突`。
-- [ ] 第 31 条验证点要求保存运行前 progress 前缀，运行后逐字确认此前字节不变且只新增本轮块，并确认没有新增或改写 `## Codebase Patterns`。
-- [ ] 相对 `main` 的受管改动只有本 PRD 与 `docs/dogfood-regression.md`，不修改代码、测试、工作流、质量契约、依赖、版本或发布文件。
-- [ ] Repository health check passes
+- [x] `docs/dogfood-regression.md` 表格末尾新增且只新增编号 31；编号 1 至 30、表头、frontmatter 和说明文字逐字不变。
+- [x] 第 31 条断言明确包含：Builder 只在 `progress.md` 末尾追加；历史 `Codebase Patterns` 只读；可复用经验写入当轮“未来迭代的学习”；项目级沉淀由 `/compound-docs` 处理。
+- [x] 第 31 条来源逐字为 `2026-08-05 Builder 追加指令冲突`。
+- [x] 第 31 条验证点要求保存运行前 progress 前缀，运行后逐字确认此前字节不变且只新增本轮块，并确认没有新增或改写 `## Codebase Patterns`。
+- [x] 相对 `main` 的受管改动只有本 PRD 与 `docs/dogfood-regression.md`，不修改代码、测试、工作流、质量契约、依赖、版本或发布文件。
+- [x] Repository health check passes
 
 ## Verification
 
@@ -120,6 +120,11 @@ Developer、Validator 和本地 Review，并由发布维护者独立对账运行
   GitHub Release 和 Release attestation 已核验为同一来源链，Policy PR #179 已更新固定裁判，
   功能分支已吸收最新 `main`。当前只允许公共 `coding-x@0.34.1`、全新 workspace 和重新派生的
   请求完成非 Shadow 正式闭环；候选入口及 Shadow 结果不得作为正式凭证。
+
+## Completion
+
+PR #172 已通过公共稳定版 0.34.1 的正式非 Shadow 流程和全部远端检查后合并；
+`docs/dogfood-regression.md` 第 31 条已进入主分支，以上验收项全部兑现。
 
 ## Rollback
 
