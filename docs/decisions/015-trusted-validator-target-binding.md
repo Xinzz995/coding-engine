@@ -1,7 +1,7 @@
 ---
 title: 015-trusted-validator-target-binding
 status: active
-updated: 2026-07-22
+updated: 2026-08-07
 scope: root
 ---
 
@@ -49,6 +49,6 @@ Validator 只能提交结构化 result：回显四项绑定字段，按 1..N 精
 - `evidence.jsonl` 增加 `validation-claim` 记录及 iteration 的 `validationProtocol`、`validationTarget`、`validationProtocolError`、`validatorStateMutation` 可选字段；旧记录继续可读。
 - status JSON 增加 `recentValidation`；静态报告增加结构化声明、协议错误和 state 改写红旗。
 - 合法 failed claim 才清除候选并消耗 Validator retry 预算，随后沿用既有升级与 blocked 规则；
-  未 blocked 时才重新进入 Builder。ADR-020 仅在凭证过期的 validation-only 中改变异常恢复：
-  超时、异常或协议不可验证只撤销验收结论、保留跨轮已有的实现候选；它们仍返回非绿结果，不能
-  进入 Final Review。普通 Builder 新候选继续遵循 ADR-009。
+  未 blocked 时才重新进入 Builder。ADR-020 先在凭证过期的 validation-only 中改变异常恢复；
+  ADR-023 再把它统一扩展到普通实现候选：超时、异常或协议不可验证只撤销验收结论、保留候选并
+  返回 5，不能进入 Final Review。Developer 自身异常仍遵循 ADR-009。

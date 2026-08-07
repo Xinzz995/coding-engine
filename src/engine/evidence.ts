@@ -25,7 +25,9 @@ export type LoopValidationProtocolErrorCode =
   | 'state-mutated'
   | 'candidate-not-passing'
   | 'result-cleanup-failed'
-  | 'agent-aborted';
+  | 'agent-aborted'
+  | 'environment-unverifiable'
+  | 'validator-unavailable';
 
 export type TddEvidenceFailureCode =
   | 'invalid-config'
@@ -209,7 +211,18 @@ export const EVIDENCE_DIAGNOSTIC_CHARS = 2000;
 
 /** 保留最接近失败点的尾部；门禁输出与 validator notes 共用同一边界。 */
 export function clipEvidenceDiagnostic(value: string): string {
-  return value.slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+  let start = value.length;
+  let remaining = EVIDENCE_DIAGNOSTIC_CHARS;
+  while (start > 0 && remaining > 0) {
+    start -= 1;
+    const codeUnit = value.charCodeAt(start);
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff && start > 0) {
+      const preceding = value.charCodeAt(start - 1);
+      if (preceding >= 0xd800 && preceding <= 0xdbff) start -= 1;
+    }
+    remaining -= 1;
+  }
+  return value.slice(start);
 }
 
 /**
@@ -262,7 +275,13 @@ function isRouteSource(v: unknown): v is ModelRouteSource {
 }
 
 function isBoundedDiagnostic(v: unknown): v is string {
-  return typeof v === 'string' && v.length <= EVIDENCE_DIAGNOSTIC_CHARS;
+  if (typeof v !== 'string') return false;
+  let count = 0;
+  for (const _character of v) {
+    count += 1;
+    if (count > EVIDENCE_DIAGNOSTIC_CHARS) return false;
+  }
+  return true;
 }
 
 function isInvocationEvidence(v: unknown): v is AgentInvocationEvidence {
@@ -337,7 +356,9 @@ function isValidationProtocolErrorCode(v: unknown): v is LoopValidationProtocolE
     v === 'state-mutated' ||
     v === 'candidate-not-passing' ||
     v === 'result-cleanup-failed' ||
-    v === 'agent-aborted'
+    v === 'agent-aborted' ||
+    v === 'environment-unverifiable' ||
+    v === 'validator-unavailable'
   );
 }
 

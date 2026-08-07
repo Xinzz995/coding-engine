@@ -1,7 +1,7 @@
 ---
 title: 017-tdd-workflow-and-verifiable-coverage
 status: active
-updated: 2026-07-23
+updated: 2026-08-07
 scope: root
 ---
 
@@ -47,8 +47,8 @@ fail closed；Builder 后发生的摘要变化、新增覆盖忽略标记、命�
 
 ADR-020 只对“凭证过期但实现候选已跨轮保留”的 validation-only 路径 supersede 上述恢复语义：
 确定的政策违规或正常结束的 coverage 非零仍打回；超时、无法启动、信号异常或政策环境无法可靠
-读取时保留旧候选、不增加 retry，并非绿结束。普通 Builder 新候选继续遵循本 ADR 的原规则；TDD
-`coverageCheck` 仍没有独立的平台跳过声明。
+读取时保留旧候选、不增加 retry，并非绿结束。ADR-023 只统一 Validator 不可验证结果，不改变本 ADR
+对普通 Builder 新候选的 TDD 门禁裁决；`coverageCheck` 仍没有独立的平台跳过声明。
 
 新项目默认要求行与分支覆盖率均不低于 90%；存量项目默认要求总体行/分支覆盖率不低于
 启用基线，且新增/改动可执行行覆盖率不低于 90%。不同政策、合法排除或政策变化必须在

@@ -204,6 +204,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
     const { workspace, instructionsDir } = setup([story()]);
     rmSync(join(instructionsDir, 'validator.md'));
     const fake = fakeCounting(workspace);
+    const dashboardState = vi.spyOn(dashboard, 'setState');
     process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
     try {
       const code = await runLoop({
@@ -217,18 +218,32 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
         openBrowser: false,
         stallLimit: 3,
       });
-      expect(code).toBe(1);
+      expect(code).toBe(5);
       expect(
         JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'))['US-001'],
-      ).toMatchObject({ passes: false, validated: false });
+      ).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        validatorUnverifiable: { schemaVersion: 1 },
+      });
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
       expect(iteration).toMatchObject({
         validatorRan: false,
         validatorOutcome: 'skipped',
-        validationRollback: true,
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'validator-unavailable' },
       });
+      expect(iteration).not.toHaveProperty('validationRollback');
       expect(iteration).not.toHaveProperty('validationReceipt');
+      expect(dashboardState).toHaveBeenLastCalledWith({
+        phase: 'blocked',
+        model: null,
+        routeSource: null,
+        storyDifficulty: null,
+      });
     } finally {
+      dashboardState.mockRestore();
       delete process.env.CODING_X_CLAUDE_BIN;
     }
   });

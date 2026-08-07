@@ -5,8 +5,11 @@ import { join } from 'node:path';
 import { validatePrdStorySet, type Prd, type Story } from './prd.js';
 import {
   parseRunStateBytes,
+  parseValidatorUnverifiableMarker,
   type RunState,
   type StoryState,
+  type ValidatorUnverifiableMarker,
+  VALIDATOR_UNVERIFIABLE_SCHEMA_VERSION,
 } from '../contracts/run-state-contract.js';
 import {
   acceptanceHash,
@@ -35,6 +38,7 @@ export const INITIAL_STORY_STATE: Readonly<StoryState> = Object.freeze({
   passes: false,
   validated: false,
   validationReceipt: null,
+  validatorUnverifiable: null,
   notes: '',
   retryCount: 0,
   blocked: false,
@@ -69,6 +73,7 @@ export function tryReadState(path: string): RunState | null {
 export interface EngineOwnedFields {
   validated: boolean | 'missing';
   validationReceipt: ValidationReceipt | null | 'missing';
+  validatorUnverifiable: ValidatorUnverifiableMarker | null | 'missing';
   escalated: boolean | 'missing';
 }
 
@@ -84,12 +89,19 @@ export function tryReadEngineOwnedFields(path: string, storyId: string): EngineO
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const raw = (parsed as Record<string, unknown>)[storyId];
     if (raw === undefined) {
-      return { validated: 'missing', validationReceipt: 'missing', escalated: 'missing' };
+      return {
+        validated: 'missing',
+        validationReceipt: 'missing',
+        validatorUnverifiable: 'missing',
+        escalated: 'missing',
+      };
     }
     if (!isRecord(raw)) return null;
     const story = raw;
     const validated = story.validated === undefined ? 'missing' : story.validated;
     const rawReceipt = story.validationReceipt === undefined ? 'missing' : story.validationReceipt;
+    const rawUnverifiable =
+      story.validatorUnverifiable === undefined ? 'missing' : story.validatorUnverifiable;
     const escalated = story.escalated === undefined ? 'missing' : story.escalated;
     if (
       (validated !== 'missing' && typeof validated !== 'boolean') ||
@@ -103,7 +115,14 @@ export function tryReadEngineOwnedFields(path: string, storyId: string): EngineO
       validationReceipt = parseValidationReceipt(rawReceipt);
       if (!validationReceipt) return null;
     }
-    return { validated, validationReceipt, escalated };
+    let validatorUnverifiable: ValidatorUnverifiableMarker | null | 'missing';
+    if (rawUnverifiable === 'missing' || rawUnverifiable === null) {
+      validatorUnverifiable = rawUnverifiable;
+    } else {
+      validatorUnverifiable = parseValidatorUnverifiableMarker(rawUnverifiable);
+      if (!validatorUnverifiable) return null;
+    }
+    return { validated, validationReceipt, validatorUnverifiable, escalated };
   } catch {
     return null;
   }
@@ -119,6 +138,7 @@ function legacyStateOf(story: Story): StoryState {
     // legacy 内嵌 passes 只能迁移为实现候选，不能补造结构化 Validator 凭证。
     validated: false,
     validationReceipt: null,
+    validatorUnverifiable: null,
     notes: s.notes ?? '',
     retryCount: s.retryCount ?? 0,
     blocked,
@@ -508,11 +528,13 @@ export interface ValidatedTamper {
 export interface ValidationOwnership {
   validated: boolean;
   validationReceipt: ValidationReceipt | null;
+  validatorUnverifiable: ValidatorUnverifiableMarker | null;
 }
 
 export interface ObservedValidationOwnership {
   validated: boolean | 'missing';
   validationReceipt: ValidationReceipt | null | 'missing';
+  validatorUnverifiable: ValidatorUnverifiableMarker | null | 'missing';
 }
 
 export interface ValidationOwnershipTamper {
@@ -536,10 +558,25 @@ function sameValidationReceipt(
   );
 }
 
+function sameValidatorUnverifiable(
+  left: ValidatorUnverifiableMarker | null | 'missing',
+  right: ValidatorUnverifiableMarker | null | 'missing',
+): boolean {
+  if (left === null || left === 'missing' || right === null || right === 'missing') {
+    return left === right;
+  }
+  return (
+    left.schemaVersion === right.schemaVersion &&
+    left.gitHead === right.gitHead &&
+    left.acceptanceHash === right.acceptanceHash
+  );
+}
+
 export function validationOwnershipOf(state: StoryState): ValidationOwnership {
   return {
     validated: state.validated,
     validationReceipt: state.validationReceipt ?? null,
+    validatorUnverifiable: state.validatorUnverifiable ?? null,
   };
 }
 
@@ -561,11 +598,16 @@ export function restoreValidationOwnership(
           ...fallback,
           validated: expected.validated,
           validationReceipt: expected.validationReceipt,
+          validatorUnverifiable: expected.validatorUnverifiable,
         },
       },
       tamper: {
         expected,
-        received: observed ?? { validated: 'missing', validationReceipt: 'missing' },
+        received: observed ?? {
+          validated: 'missing',
+          validationReceipt: 'missing',
+          validatorUnverifiable: 'missing',
+        },
       },
     };
   }
@@ -573,10 +615,16 @@ export function restoreValidationOwnership(
     validated: current.validated,
     validationReceipt:
       current.validationReceipt === undefined ? 'missing' : current.validationReceipt,
+    validatorUnverifiable:
+      current.validatorUnverifiable === undefined ? 'missing' : current.validatorUnverifiable,
   };
   if (
     received.validated === expected.validated &&
-    sameValidationReceipt(received.validationReceipt, expected.validationReceipt)
+    sameValidationReceipt(received.validationReceipt, expected.validationReceipt) &&
+    sameValidatorUnverifiable(
+      received.validatorUnverifiable,
+      expected.validatorUnverifiable,
+    )
   ) {
     return { state, tamper: null };
   }
@@ -587,6 +635,7 @@ export function restoreValidationOwnership(
         ...current,
         validated: expected.validated,
         validationReceipt: expected.validationReceipt,
+        validatorUnverifiable: expected.validatorUnverifiable,
       },
     },
     tamper: { expected, received },
@@ -712,13 +761,18 @@ export function issueValidationReceipt(
   return {
     state: {
       ...state,
-      [story.id]: { ...current, validated: true, validationReceipt: receipt },
+      [story.id]: {
+        ...current,
+        validated: true,
+        validationReceipt: receipt,
+        validatorUnverifiable: null,
+      },
     },
     changed: true,
   };
 }
 
-/** 未签发凭证的 passes 不能跨轮；保留 notes/retry/blocked/escalated。 */
+/** legacy 恢复入口：回滚未签发凭证的旧候选；正式 Validator 不可验证路径不再调用。 */
 export function rollbackUnvalidatedPass(
   state: RunState,
   storyId: string,
@@ -735,6 +789,39 @@ export function rollbackUnvalidatedPass(
         passes: false,
         validated: false,
         validationReceipt: null,
+        validatorUnverifiable: null,
+      },
+    },
+    changed: true,
+  };
+}
+
+/** 持久绑定最近一次仍适用于当前候选的 Validator 不可验证状态。 */
+export function markValidatorUnverifiable(
+  state: RunState,
+  story: Pick<Story, 'id' | 'acceptanceCriteria'>,
+  gitHead: string,
+): { state: RunState; changed: boolean } {
+  const current = state[story.id];
+  if (!current || !current.passes || current.blocked || !isGitHead(gitHead)) {
+    return { state, changed: false };
+  }
+  const marker: ValidatorUnverifiableMarker = {
+    schemaVersion: VALIDATOR_UNVERIFIABLE_SCHEMA_VERSION,
+    gitHead,
+    acceptanceHash: acceptanceHash(story.id, story.acceptanceCriteria),
+  };
+  if (sameValidatorUnverifiable(current.validatorUnverifiable ?? null, marker)) {
+    return { state, changed: false };
+  }
+  return {
+    state: {
+      ...state,
+      [story.id]: {
+        ...current,
+        validated: false,
+        validationReceipt: null,
+        validatorUnverifiable: marker,
       },
     },
     changed: true,

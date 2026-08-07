@@ -160,30 +160,24 @@ describe('delegated business semantics', () => {
       'binding-mismatch',
     ],
     ['wrong Git HEAD', validationResult({ gitHead: 'e'.repeat(40) }), 'binding-mismatch'],
-  ])('rejects a present-invalid Validator result: %s', (_label, contents, code) => {
+  ])('leaves a bounded present-invalid Validator result for the engine protocol: %s', (_label, contents) => {
     const root = workspace();
     writeValidState(root);
     const baseline = captureDelegatedBaseline(root, OWNER_ID, REQUEST_ID, validatorContract());
     writeFileSync(join(root, 'validation-result.json'), contents);
 
     const outcome = evaluateDelegatedDelta(root, baseline);
-    expect(outcome).toMatchObject({ accepted: false });
-    if (!outcome.accepted) {
-      expect(outcome.violations).toContain(`validation-result.json:${code}`);
-    }
+    expect(outcome).toEqual({ accepted: true, changes: ['validation-result.json'] });
   });
 
-  it('rejects an oversized Validator result using the engine contract limit', () => {
+  it('leaves a bounded result above the protocol limit for the engine to classify', () => {
     const root = workspace();
     writeValidState(root);
     const baseline = captureDelegatedBaseline(root, OWNER_ID, REQUEST_ID, validatorContract());
     writeFileSync(join(root, 'validation-result.json'), 'x'.repeat(64 * 1024 + 1));
 
     const outcome = evaluateDelegatedDelta(root, baseline);
-    expect(outcome).toMatchObject({ accepted: false });
-    if (!outcome.accepted) {
-      expect(outcome.violations).toContain('validation-result.json:result-too-large');
-    }
+    expect(outcome).toEqual({ accepted: true, changes: ['validation-result.json'] });
   });
 
   it('keeps malformed evidence and unclaimed screenshots non-blocking', () => {

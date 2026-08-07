@@ -568,11 +568,31 @@ namespace CodingX.WorkspaceSafety
             throw new SafetyException("ACK timed out");
         }
 
+        private bool HandleOutputAcknowledgement(ControlFrame frame)
+        {
+            if (frame.EndOfFile) return false;
+            Dictionary<string, object> envelope = StrictJson.ParseObject(frame.Line, "control envelope");
+            string type = StrictJson.String(envelope, "type", "control type", false);
+            if (type != "OUTPUT_ACK") return false;
+            StrictJson.ExactKeys(envelope, "OUTPUT_ACK",
+                "schemaVersion", "type", "operationId", "sequence", "bytes");
+            string operationId = StrictJson.String(
+                envelope, "operationId", "OUTPUT_ACK operationId", false);
+            long sequence = StrictJson.SafeInteger(envelope, "sequence", "OUTPUT_ACK sequence");
+            int bytes = StrictJson.Integer(envelope, "bytes", "OUTPUT_ACK bytes");
+            if (StrictJson.Integer(envelope, "schemaVersion", "OUTPUT_ACK schemaVersion") != 1 ||
+                operationId != target.OperationId || sequence < 1 || bytes < 1 || bytes > 16 * 1024)
+                throw new SafetyException("OUTPUT_ACK binding is invalid");
+            jobTarget.AcknowledgeOutput(operationId, sequence, bytes);
+            return true;
+        }
+
         private string HandleTermination(ControlFrame frame)
         {
             if (frame.EndOfFile)
             {
                 ProtocolWriter.Disconnect();
+                if (jobTarget != null) jobTarget.DiscardOutput();
                 if (terminationReason == null) terminationReason = "parent-shutdown";
                 return terminationReason;
             }
@@ -583,8 +603,10 @@ namespace CodingX.WorkspaceSafety
             if (StrictJson.Integer(message, "schemaVersion", "TERMINATE schemaVersion") != 1 ||
                 StrictJson.String(message, "type", "TERMINATE type", false) != "TERMINATE" ||
                 StrictJson.String(message, "operationId", "TERMINATE operationId", false) != target.OperationId ||
-                (reason != "timeout" && reason != "user-interrupt" && reason != "parent-shutdown"))
+                (reason != "timeout" && reason != "user-interrupt" &&
+                    reason != "parent-shutdown" && reason != "output-failure"))
                 throw new SafetyException("TERMINATE binding is invalid");
+            if (jobTarget != null) jobTarget.DiscardOutput();
             if (terminationReason == null) terminationReason = reason;
             return terminationReason;
         }
@@ -599,12 +621,15 @@ namespace CodingX.WorkspaceSafety
                 ControlFrame frame;
                 if (control.TryTake(timeouts.PollMs, out frame))
                 {
-                    requestedTermination = HandleTermination(frame);
-                    parentConnected = !frame.EndOfFile;
-                    if (requestedTermination != null)
+                    if (!HandleOutputAcknowledgement(frame))
                     {
-                        closeoutDeadline = StartPhaseDeadline(timeouts.TerminateMs);
-                        break;
+                        requestedTermination = HandleTermination(frame);
+                        parentConnected = !frame.EndOfFile;
+                        if (requestedTermination != null)
+                        {
+                            closeoutDeadline = StartPhaseDeadline(timeouts.TerminateMs);
+                            break;
+                        }
                     }
                 }
             }
@@ -630,10 +655,13 @@ namespace CodingX.WorkspaceSafety
                         closeoutDeadline.RemainingMilliseconds));
                 if (waitMs > 0 && control.TryTake(waitMs, out frame))
                 {
-                    requestedTermination = HandleTermination(frame);
-                    parentConnected = !frame.EndOfFile;
-                    if (requestedTermination != null)
-                        closeoutDeadline.TightenAfter(timeouts.TerminateMs);
+                    if (!HandleOutputAcknowledgement(frame))
+                    {
+                        requestedTermination = HandleTermination(frame);
+                        parentConnected = !frame.EndOfFile;
+                        if (requestedTermination != null)
+                            closeoutDeadline.TightenAfter(timeouts.TerminateMs);
+                    }
                 }
                 if (requestedTermination == null && !naturalDeadline.Expired &&
                     !closeoutDeadline.Expired)
@@ -642,6 +670,31 @@ namespace CodingX.WorkspaceSafety
                     if (!naturalDeadline.Expired && !closeoutDeadline.Expired)
                         naturallyDrained = observedDrained;
                 }
+            }
+            if (requestedTermination == null && !naturallyDrained &&
+                jobTarget.ActiveCount == 0 && jobTarget.OutputPipesEnded)
+            {
+                while (!naturallyDrained && requestedTermination == null &&
+                    !closeoutDeadline.Expired)
+                {
+                    ControlFrame frame;
+                    int waitMs = Math.Min(timeouts.PollMs,
+                        closeoutDeadline.RemainingMilliseconds);
+                    if (waitMs > 0 && control.TryTake(waitMs, out frame))
+                    {
+                        if (!HandleOutputAcknowledgement(frame))
+                        {
+                            requestedTermination = HandleTermination(frame);
+                            parentConnected = !frame.EndOfFile;
+                            if (requestedTermination != null)
+                                closeoutDeadline.TightenAfter(timeouts.TerminateMs);
+                        }
+                    }
+                    if (requestedTermination == null && !closeoutDeadline.Expired)
+                        naturallyDrained = jobTarget.Drained;
+                }
+                if (requestedTermination == null && !naturallyDrained)
+                    throw new SafetyException("parent output acknowledgements did not settle");
             }
             string drainReason;
             if (requestedTermination != null)
@@ -656,7 +709,7 @@ namespace CodingX.WorkspaceSafety
             }
             else drainReason = "natural";
             DrainAndSend(drainReason, parentConnected && ProtocolWriter.Connected,
-                "windows-job-zero-and-pipes-eof-v1", closeoutDeadline);
+                "windows-job-zero-pipes-eof-output-settled-v2", closeoutDeadline);
         }
 
         internal int Run()

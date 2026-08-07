@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 //   node fake-agent.mjs delayed-child  -> exits shortly after SIGTERM
 //   node fake-agent.mjs stubborn-child -> ignores SIGTERM until SIGKILL
 //   node fake-agent.mjs diagnostic     -> writes stdout/stderr then exits 1
+//   node fake-agent.mjs delayed-diagnostic -> writes once, waits, writes again, then exits
 //   node fake-agent.mjs long-diagnostic -> writes > evidence bound then exits 1
 //   node fake-agent.mjs prepend-progress -> violates the append-only workspace contract
 //   node fake-agent.mjs prepend-progress-with-descendant -> also leaves a live descendant
@@ -39,6 +40,12 @@ if (mode === 'hang') {
   process.stdout.write('runner started\n');
   process.stderr.write('API Error: 402 Account overdue\n');
   process.exit(1);
+} else if (mode === 'delayed-diagnostic') {
+  process.stdout.write('EARLY-OUTPUT\n');
+  setTimeout(() => {
+    process.stderr.write('LATE-OUTPUT\n');
+    process.exit(0);
+  }, 500);
 } else if (mode === 'long-diagnostic') {
   process.stderr.write(`${'x'.repeat(2500)}TAIL-END\n`);
   process.exit(1);

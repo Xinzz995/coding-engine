@@ -81,6 +81,41 @@ describe('neutral run state contract', () => {
       code: 'invalid-state-json',
     });
   });
+
+  it('accepts only an exact Validator-unverifiable marker on a pending candidate', () => {
+    const marker = {
+      schemaVersion: 1,
+      gitHead: GIT_HEAD,
+      acceptanceHash: ACCEPTANCE_HASH,
+    };
+    const parsed = parseRunStateBytes(
+      state({ passes: true, validatorUnverifiable: marker }),
+    );
+    expect(parsed).toMatchObject({
+      ok: true,
+      value: { [STORY_ID]: { validatorUnverifiable: marker } },
+    });
+
+    for (const invalid of [
+      { ...marker, schemaVersion: 2 },
+      { ...marker, gitHead: 'short' },
+      { ...marker, acceptanceHash: 'bad' },
+      { ...marker, extra: true },
+    ]) {
+      expect(parseRunStateBytes(state({ passes: true, validatorUnverifiable: invalid }))).toMatchObject({
+        ok: false,
+        code: 'invalid-state-schema',
+      });
+    }
+
+    const completed = parseRunStateBytes(
+      state({ passes: false, validatorUnverifiable: marker }),
+    );
+    expect(completed).toMatchObject({
+      ok: true,
+      value: { [STORY_ID]: { validatorUnverifiable: null } },
+    });
+  });
 });
 
 describe('neutral validation result contract', () => {
@@ -140,10 +175,7 @@ describe('delegated semantic contract', () => {
         phase: 'settlement',
         files: new Map([[VALIDATION_RESULT_PATH, Buffer.from('{broken')]]),
       }),
-    ).toEqual({
-      accepted: false,
-      violation: 'validation-result.json:invalid-json',
-    });
+    ).toEqual({ accepted: true });
   });
 
   it('requires a valid target story from the exact state bytes', () => {

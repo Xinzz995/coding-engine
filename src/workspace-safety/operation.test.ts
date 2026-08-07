@@ -492,21 +492,26 @@ describe('workspace operation protocol', () => {
     },
   );
 
-  it('keeps a present-invalid Validator result isolated instead of settling it', async () => {
+  it('settles a bounded present-invalid Validator result without adopting a candidate', async () => {
     const { workspace, session } = await setup();
 
-    await expect(
-      runWorkspaceOperation(session, validatorOptions(), async (operation) => {
+    const settled = await runWorkspaceOperation(
+      session,
+      validatorOptions(),
+      async (operation) => {
         const { machine, armed } = await driveToArmed(operation);
         machine.acceptStart(encodeSupervisorStart(OPERATION_ID, armed.activeChildDigest), armed);
         writeFileSync(join(workspace, 'validation-result.json'), '{broken');
         const drained = machine.drain('posix-group-empty-and-pipes-eof-v1');
         await operation.installDrainedReceiptControlled(drained.receiptBytes, drained.messageBytes);
         return operation.settleArmedControlled({ supervisor: 'dead', containment: 'empty' });
-      }),
-    ).rejects.toMatchObject({ code: 'isolated' });
+      },
+    );
 
-    expect(existsSync(operationPath(workspace))).toBe(true);
+    expect(settled).not.toHaveProperty('candidate');
+    expect(existsSync(settled.settledPath)).toBe(true);
+    expect(readFileSync(join(workspace, 'validation-result.json'), 'utf8')).toBe('{broken');
+    await session.close();
   });
 
   it('does not let Builder modify engine-owned fields of the current story', async () => {

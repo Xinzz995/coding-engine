@@ -11,7 +11,7 @@ import {
   evaluateStoryValidationDisplay,
   type StoryValidationDisplayCurrentness,
 } from '../engine/state.js';
-import { readGitHead } from '../engine/validation-protocol.js';
+import { acceptanceHash, readGitHead } from '../engine/validation-protocol.js';
 import { readProgress } from '../engine/progress.js';
 import { isArbitrationLine } from '../engine/gate.js';
 import {
@@ -47,6 +47,7 @@ import {
   readWorkingQualityContractAuthority,
   type StoryValidationObservation,
 } from '../review/story-validation-observation.js';
+import type { StoryValidationUnverifiableReason } from '../engine/story-validation-currentness.js';
 
 export interface RecentModelRoute {
   model: string | null;
@@ -94,6 +95,8 @@ export type StatusReport = (
       /** state.json 存在但解析失败/形状非法；缺失是正常回退，不算损坏 */
       stateCorrupted: boolean;
       storyValidation: StoryValidationCurrentness;
+      /** 仅记录受管 Story 观察器给出的结构化失败原因；缺失时不得从文案反推。 */
+      storyValidationFailureReason?: StoryValidationUnverifiableReason | null;
       finalReview: CurrentReviewStatus;
     }
 ) & {
@@ -179,8 +182,11 @@ function recentActualOf(records: EvidenceRecord[]): Record<string, StoryRecentAc
 function recentValidationOf(records: EvidenceRecord[]): Record<string, StoryRecentValidation> {
   const recent: Record<string, StoryRecentValidation> = {};
   for (const record of records) {
-    if (record.type !== 'iteration' || record.storyId === null || !record.validationProtocol)
+    if (record.type !== 'iteration' || record.storyId === null) continue;
+    if (!record.validationProtocol) {
+      delete recent[record.storyId];
       continue;
+    }
     recent[record.storyId] = {
       protocol: record.validationProtocol,
       iteration: record.iteration,
@@ -266,6 +272,7 @@ function collectStatusControlled(
     observationMatchesHead &&
     currentContract?.status === 'ready' &&
     observed.workingContractDigest === currentContract.digest;
+  let storyValidationFailureReason: StoryValidationUnverifiableReason | null = null;
   const failClosedDisplay = () => {
     const failed = evaluateStoryValidationDisplay(prd, state, currentGitHead, null);
     const observationMessage =
@@ -285,6 +292,15 @@ function collectStatusControlled(
                   : !observationMatchesContract
                     ? 'Story 当前性观察后工作树质量契约已变化或不可读取'
                     : 'Story 当前性观察无法绑定当前状态');
+    if (
+      options.storyValidationObservationError == null &&
+      observationMatchesPrd &&
+      observed?.status === 'unverifiable' &&
+      observed.headSha === currentGitHead &&
+      isDeepStrictEqual(observed.state, failed.state)
+    ) {
+      storyValidationFailureReason = observed.reason;
+    }
     return {
       ...failed,
       currentness: {
@@ -320,6 +336,7 @@ function collectStatusControlled(
     evidenceUnavailable,
     stateCorrupted,
     storyValidation: storyValidation.currentness,
+    storyValidationFailureReason,
     finalReview: options.finalReviewObservation
       ? bindObservedFinalReview(workspace, options.finalReviewObservation)
       : collectCurrentReviewStatus({
@@ -428,6 +445,32 @@ function summarize(stories: StoryView[]): { total: number; passed: number; block
     passed: stories.filter(isStoryPassed).length,
     blocked: stories.filter((s) => s.blocked).length,
   };
+}
+
+function isCurrentValidatorUnverifiableStory(
+  story: StoryView,
+  currentGitHead: string | null,
+): boolean {
+  const marker = story.validatorUnverifiable;
+  return !!(
+    !story.blocked &&
+    story.passes &&
+    !story.validated &&
+    marker &&
+    // HEAD 本身不可读也是 Validator 无法验证，而不是普通未完成。只在 HEAD 可读时
+    // 才能用精确提交淘汰旧标记；AC 绑定始终必须匹配。
+    (currentGitHead === null || marker.gitHead === currentGitHead) &&
+    marker.acceptanceHash === acceptanceHash(story.id, story.acceptanceCriteria)
+  );
+}
+
+function hasCurrentUnverifiableValidator(report: {
+  stories: StoryView[];
+  storyValidation: StoryValidationCurrentness;
+}): boolean {
+  return report.stories.some((story) =>
+    isCurrentValidatorUnverifiableStory(story, report.storyValidation.gitHead),
+  );
 }
 
 function markOf(s: StoryView): string {
@@ -600,7 +643,11 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   }
   if (report.evidenceUnavailable)
     lines.push('⚠️ evidence.jsonl 当前不可读，最近实际路由可能不完整');
-  if (report.storyValidation.configurationError !== null) {
+  const headIdentityUnverifiable =
+    report.storyValidationFailureReason === 'head-unreadable' &&
+    report.storyValidation.gitHead === null &&
+    hasCurrentUnverifiableValidator(report);
+  if (report.storyValidation.configurationError !== null && !headIdentityUnverifiable) {
     return { text: lines.join('\n'), exitCode: 2 };
   }
   // 空 story 列表不算全绿：status 的退出码用作 CI 门禁，对退化的 prd.json 必须保守
@@ -610,11 +657,19 @@ export function renderStatusReport(report: StatusReport): { text: string; exitCo
   }
   const allPassed = !report.stateCorrupted && passed === total;
   if (!allPassed) {
+    const validatorUnverifiable = hasCurrentUnverifiableValidator(report);
     lines.push(
       '',
-      blocked > 0 ? '⏸️ 存在 blocked story' : `⏳ 还有 ${total - passed} 个 story 未完成`,
+      blocked > 0
+        ? '⏸️ 存在 blocked story'
+        : validatorUnverifiable
+          ? '❌ 最近一次 Validator 无法可靠验证；实现候选仍保留，修复验证环境后重跑'
+          : `⏳ 还有 ${total - passed} 个 story 未完成`,
     );
-    return { text: lines.join('\n'), exitCode: blocked > 0 ? 3 : 1 };
+    return {
+      text: lines.join('\n'),
+      exitCode: blocked > 0 ? 3 : validatorUnverifiable ? 5 : 1,
+    };
   }
   const finalReview = report.finalReview;
   if (finalReview.read.status === 'invalid') {
@@ -691,6 +746,10 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
       retryCount: s.retryCount,
       blocked: s.blocked,
       escalated: s.escalated,
+      validatorUnverifiableCurrent: isCurrentValidatorUnverifiableStory(
+        s,
+        report.storyValidation.gitHead,
+      ),
       ...(s.difficulty ? { difficulty: s.difficulty, difficultyReason: s.difficultyReason } : {}),
     })),
     modelRouting: report.modelRouting,
@@ -709,13 +768,22 @@ export function renderStatusJson(report: StatusReport): { text: string; exitCode
   if (report.workspaceSafety !== undefined && report.workspaceSafety.status !== 'ready') {
     return { text: JSON.stringify(view, null, 2), exitCode: 2 };
   }
-  if (report.storyValidation.configurationError !== null) {
+  const headIdentityUnverifiable =
+    report.storyValidationFailureReason === 'head-unreadable' &&
+    report.storyValidation.gitHead === null &&
+    hasCurrentUnverifiableValidator(report);
+  if (report.storyValidation.configurationError !== null && !headIdentityUnverifiable) {
     return { text: JSON.stringify(view, null, 2), exitCode: 2 };
   }
   // 与人类可读模式同一保守语义：空 story 列表不算全绿
   const allPassed = !report.stateCorrupted && summary.total > 0 && summary.passed === summary.total;
-  if (!allPassed)
-    return { text: JSON.stringify(view, null, 2), exitCode: summary.blocked > 0 ? 3 : 1 };
+  if (!allPassed) {
+    const validatorUnverifiable = hasCurrentUnverifiableValidator(report);
+    return {
+      text: JSON.stringify(view, null, 2),
+      exitCode: summary.blocked > 0 ? 3 : validatorUnverifiable ? 5 : 1,
+    };
+  }
   const review = report.finalReview;
   if (review.read.status === 'invalid') return { text: JSON.stringify(view, null, 2), exitCode: 2 };
   if (review.read.status === 'missing' || !review.current)

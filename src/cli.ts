@@ -166,8 +166,18 @@ status 退出码:
   2                              workspace 安全状态未就绪/不可读，或最终 Review 状态损坏
   3                              存在 blocked Story
   4                              最终 Review 有待人工处理的 finding
-  5                              最终 Review 无法可靠验证
+  5                              Validator 或最终 Review 无法可靠验证
   6                              最终 Review 未完成或已失效，或 GitHub CI / Ruleset 未就绪
+  7                              Shadow 已完成，但不能表示可交付
+
+run 退出码:
+  0                              实现验证、本地 Review 与 GitHub 交付条件均已就绪
+  1                              机械检查、明确验收失败或执行未收敛
+  2                              配置、状态或 workspace 安全边界无效
+  3                              存在 blocked Story
+  4                              最终 Review 有待人工处理的 finding
+  5                              Validator 或最终 Review 无法可靠验证
+  6                              本地已完成，但 PR、CI 或 Ruleset 未就绪
   7                              Shadow 已完成，但不能表示可交付
 
 更多说明: https://github.com/Xinzz995/coding-engine#readme`;

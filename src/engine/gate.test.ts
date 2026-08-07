@@ -22,6 +22,7 @@ import {
   applyValidatorSuccess,
   classifyValidationOnlyGateFailure,
   runContractQualityChecks,
+  abortDesc,
 } from './gate.js';
 import type { GateFailure } from './gate.js';
 import type { RunState } from './state.js';
@@ -300,6 +301,7 @@ describe('engine-owned Validator verdict state', () => {
       passes: true,
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
       notes: '[需求冲突] 保留这条仲裁',
       retryCount: 0,
       blocked: false,
@@ -854,6 +856,12 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
 
 describe('applyAbortRollback', () => {
   const at = new Date('2026-07-17T10:00:00');
+
+  it('distinguishes an output channel failure from a generic signal exit', () => {
+    expect(
+      abortDesc({ timedOut: false, exitCode: null, terminationReason: 'output-failure' }),
+    ).toBe('输出通道失败后被终止');
+  });
 
   it('回写 passes=false 并写入中断标记行；retryCount 与 blocked 不动', () => {
     const state = {

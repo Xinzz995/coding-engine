@@ -42,6 +42,7 @@ const SUPERVISOR_HELPER_PATH = posixSupervisorHelperPath();
 const LAUNCHER_HELPER_PATH = posixLauncherHelperPath();
 const MAX_EVENT_STRING = 16_384;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+type PosixOutputStream = 'stdout' | 'stderr';
 
 export interface PosixSupervisorTimeouts {
   readonly handshakeMs?: number;
@@ -98,10 +99,19 @@ export interface RunDarkPosixSupervisedOperationOptions {
   readonly commandTimeoutMs?: number;
   readonly termination?: {
     readonly signal: AbortSignal;
-    readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+    readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
   };
   readonly timeouts?: PosixSupervisorTimeouts;
   readonly hooks?: PosixSupervisorHooks;
+  /**
+   * Opt-in streaming output. Each callback is acknowledged to the supervisor only after it
+   * resolves, so downstream backpressure propagates into the target process.
+   */
+  readonly onOutput?: (stream: PosixOutputStream, chunk: Buffer) => Promise<void>;
+  /** Release a streaming sink that is waiting for downstream drain before termination. */
+  readonly onOutputDiscard?: () => void;
+  /** Signals an asynchronous downstream sink failure between output callbacks. */
+  readonly outputFailureSignal?: AbortSignal;
 }
 
 export interface PosixInvocationOutcome {
@@ -282,7 +292,16 @@ function processIdentity(pid: number): string {
 
 function parseEvent(
   value: unknown,
-): ProtocolEvent | { type: 'OUTPUT'; stream: string; data: Buffer } {
+):
+  | ProtocolEvent
+  | {
+      type: 'OUTPUT';
+      operationId: string;
+      sequence: number;
+      bytes: number;
+      stream: PosixOutputStream;
+      data: Buffer;
+    } {
   const record = asRecord(value, 'supervisor event');
   if (record.schemaVersion !== 1 || typeof record.type !== 'string') {
     invalid('supervisor event version/type is invalid');
@@ -342,13 +361,21 @@ function parseEvent(
     return { type: 'PRESTART_DRAINED', messageBytes };
   }
   if (record.type === 'OUTPUT') {
-    exactKeys(record, ['schemaVersion', 'type', 'stream', 'data'], 'OUTPUT');
+    exactKeys(
+      record,
+      ['schemaVersion', 'type', 'operationId', 'sequence', 'bytes', 'stream', 'data'],
+      'OUTPUT',
+    );
+    const operationId = boundedString(record.operationId, 'OUTPUT.operationId');
+    const sequence = positiveInteger(record.sequence, 'OUTPUT.sequence');
+    const bytes = positiveInteger(record.bytes, 'OUTPUT.bytes');
     if (record.stream !== 'stdout' && record.stream !== 'stderr')
       invalid('OUTPUT stream is invalid');
     const encoded = boundedString(record.data, 'OUTPUT.data');
     const data = Buffer.from(encoded, 'base64');
     if (data.toString('base64') !== encoded) invalid('OUTPUT data is not canonical base64');
-    return { type: 'OUTPUT', stream: record.stream, data };
+    if (data.length !== bytes) invalid('OUTPUT bytes do not match decoded data');
+    return { type: 'OUTPUT', operationId, sequence, bytes, stream: record.stream, data };
   }
   if (record.type === 'FAILURE') {
     exactKeys(record, ['schemaVersion', 'type', 'message'], 'FAILURE');
@@ -373,15 +400,28 @@ class PosixSupervisorProcess {
     | undefined;
   #terminalError: Error | undefined;
   #outputBytes = 0;
+  #lastOutputSequence = 0;
+  #discardOutput = false;
+  #outputQueues: Record<PosixOutputStream, Promise<void>> = {
+    stdout: Promise.resolve(),
+    stderr: Promise.resolve(),
+  };
+  #resolveOutputFailure: (reason: SupervisorTerminationReason) => void = () => undefined;
+  readonly outputFailure: Promise<SupervisorTerminationReason>;
   #exitExpected = false;
   #exit: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 
   constructor(
     private readonly child: ChildProcess,
     private readonly timeouts: ResolvedTimeouts,
+    private readonly operationId: string,
+    private readonly onOutput: RunDarkPosixSupervisedOperationOptions['onOutput'],
   ) {
     if (child.pid === undefined) isolated('supervisor spawn did not return a pid');
     this.pid = child.pid;
+    this.outputFailure = new Promise((resolve) => {
+      this.#resolveOutputFailure = resolve;
+    });
     child.on('message', (message: unknown) => this.#push(message));
     child.once('error', (error) => this.#fail(error));
     this.#exit = new Promise((resolve) => {
@@ -408,12 +448,23 @@ class PosixSupervisorProcess {
       return;
     }
     if (event.type === 'OUTPUT') {
-      this.#outputBytes += event.data.length;
-      if (this.#outputBytes > MAX_OUTPUT_BYTES) {
-        this.#fail(new WorkspaceSafetyError('isolated', 'POSIX target output exceeded the bound'));
+      if (event.operationId !== this.operationId) {
+        this.#fail(new WorkspaceSafetyError('invalid', 'OUTPUT operation binding is invalid'));
         return;
       }
-      (event.stream === 'stdout' ? this.stdout : this.stderr).push(event.data);
+      if (event.sequence !== this.#lastOutputSequence + 1) {
+        this.#fail(
+          new WorkspaceSafetyError(
+            'invalid',
+            'OUTPUT sequence is duplicated, missing, or out of order',
+          ),
+        );
+        return;
+      }
+      this.#lastOutputSequence = event.sequence;
+      this.#outputQueues[event.stream] = this.#outputQueues[event.stream]
+        .then(() => this.#consumeOutput(event))
+        .catch((error: unknown) => this.#fail(error));
       return;
     }
     if (this.#waiter) {
@@ -433,6 +484,43 @@ class PosixSupervisorProcess {
       return;
     }
     this.#events.push(event);
+  }
+
+  async #consumeOutput(
+    event: Extract<ReturnType<typeof parseEvent>, { type: 'OUTPUT' }>,
+  ): Promise<void> {
+    if (!this.#discardOutput) {
+      this.#outputBytes += event.data.length;
+      if (this.#outputBytes > MAX_OUTPUT_BYTES) {
+        if (!this.onOutput) {
+          throw new WorkspaceSafetyError('isolated', 'POSIX target output exceeded the bound');
+        }
+        this.#discardOutput = true;
+        this.#resolveOutputFailure('output-failure');
+      }
+    }
+    if (!this.#discardOutput) {
+      if (!this.onOutput) {
+        (event.stream === 'stdout' ? this.stdout : this.stderr).push(event.data);
+      } else {
+        try {
+          await this.onOutput(event.stream, event.data);
+        } catch {
+          this.#discardOutput = true;
+          this.#resolveOutputFailure('output-failure');
+        }
+      }
+    }
+
+    if (!this.#discardOutput) {
+      await this.send({
+        schemaVersion: 1,
+        type: 'OUTPUT_ACK',
+        operationId: this.operationId,
+        sequence: event.sequence,
+        bytes: event.bytes,
+      });
+    }
   }
 
   #fail(error: unknown): void {
@@ -506,6 +594,10 @@ class PosixSupervisorProcess {
         else resolve();
       });
     });
+  }
+
+  discardOutput(): void {
+    this.#discardOutput = true;
   }
 
   nextBefore<T extends ProtocolEvent['type']>(
@@ -647,7 +739,11 @@ class PosixSupervisorProcess {
   }
 }
 
-function spawnSupervisor(timeouts: ResolvedTimeouts): PosixSupervisorProcess {
+function spawnSupervisor(
+  timeouts: ResolvedTimeouts,
+  operationId: string,
+  onOutput: RunDarkPosixSupervisedOperationOptions['onOutput'],
+): PosixSupervisorProcess {
   if (process.platform === 'win32') {
     throw new WorkspaceSafetyError('unsupported', 'POSIX supervisor is unavailable on Windows');
   }
@@ -661,7 +757,7 @@ function spawnSupervisor(timeouts: ResolvedTimeouts): PosixSupervisorProcess {
       windowsHide: true,
     },
   );
-  return new PosixSupervisorProcess(child, timeouts);
+  return new PosixSupervisorProcess(child, timeouts, operationId, onOutput);
 }
 
 function validateSupervisorBound(
@@ -730,6 +826,7 @@ interface TerminationTrigger {
 export function createTerminationTrigger(
   commandTimeoutMs: number | undefined,
   termination: RunDarkPosixSupervisedOperationOptions['termination'],
+  outputFailureSignal?: AbortSignal,
 ): TerminationTrigger {
   if (
     commandTimeoutMs !== undefined &&
@@ -754,9 +851,14 @@ export function createTerminationTrigger(
     resolveTrigger(reason);
   };
   const onAbort = (): void => freeze(termination!.reason);
+  const onOutputFailure = (): void => freeze('output-failure');
   if (termination) {
     termination.signal.addEventListener('abort', onAbort, { once: true });
     if (termination.signal.aborted) freeze(termination.reason);
+  }
+  if (outputFailureSignal) {
+    outputFailureSignal.addEventListener('abort', onOutputFailure, { once: true });
+    if (outputFailureSignal.aborted) freeze('output-failure');
   }
   return {
     promise,
@@ -786,6 +888,7 @@ export function createTerminationTrigger(
       if (timeout) clearTimeout(timeout);
       timeout = undefined;
       termination?.signal.removeEventListener('abort', onAbort);
+      outputFailureSignal?.removeEventListener('abort', onOutputFailure);
     },
   };
 }
@@ -914,9 +1017,24 @@ export async function runDarkPosixSupervisedOperation(
   let completed = false;
   let resolvedTimeouts: ResolvedTimeouts | undefined;
   let failureCloseoutDeadline: MonotonicDeadline | undefined;
+  let outputDiscarded = false;
   const operationDeadline: OperationDeadlineState = { timedOut: false };
+  const discardManagedOutput = (): void => {
+    if (outputDiscarded) return;
+    outputDiscarded = true;
+    try {
+      options.onOutputDiscard?.();
+    } catch {
+      // Cleanup must continue even if the optional downstream release hook is faulty.
+    }
+    processHandle?.discardOutput();
+  };
   try {
-    terminationTrigger = createTerminationTrigger(options.commandTimeoutMs, options.termination);
+    terminationTrigger = createTerminationTrigger(
+      options.commandTimeoutMs,
+      options.termination,
+      options.outputFailureSignal,
+    );
     throwIfPrestartInterrupted(terminationTrigger);
     const target = {
       ...options.target,
@@ -934,7 +1052,7 @@ export async function runDarkPosixSupervisedOperation(
     const prepareDeadline = MonotonicDeadline.after(timeouts.handshakeMs);
     const helperBytes = helperBundleBytes();
     const helperDigest = digestBytes(helperBytes);
-    processHandle = spawnSupervisor(timeouts);
+    processHandle = spawnSupervisor(timeouts, operation.operationId, options.onOutput);
     supervisorIdentity = processIdentity(processHandle.pid);
     throwIfPrestartInterrupted(terminationTrigger);
     const boundEvent = await processHandle.nextBefore(['BOUND'], prepareDeadline, 'prepare');
@@ -1006,6 +1124,7 @@ export async function runDarkPosixSupervisedOperation(
 
     const sendTermination = async (reason: SupervisorTerminationReason): Promise<void> => {
       if (terminationSent !== undefined) return;
+      discardManagedOutput();
       if (closeoutDeadline) closeoutDeadline.tightenAfter(timeouts.killMs);
       else closeoutDeadline = MonotonicDeadline.after(timeouts.killMs);
       failureCloseoutDeadline = closeoutDeadline;
@@ -1051,6 +1170,10 @@ export async function runDarkPosixSupervisedOperation(
       terminationTrigger.startCommandTimer();
     }
 
+    const anyTermination = Promise.race([
+      terminationTrigger.promise,
+      processHandle.outputFailure,
+    ]);
     let pendingEvent = processHandle.nextAny(['STARTED', 'RESULT', 'DRAINED'] as const, null);
     while (!drained) {
       if (terminationSent === undefined && terminationTrigger.reason !== undefined) {
@@ -1061,11 +1184,11 @@ export async function runDarkPosixSupervisedOperation(
             pendingEvent,
             closeoutDeadline,
             'termination and drain',
-            terminationSent === undefined ? terminationTrigger.promise : undefined,
+            terminationSent === undefined ? anyTermination : undefined,
           )
         : await Promise.race([
             pendingEvent.then((event) => ({ kind: 'event' as const, event })),
-            terminationTrigger.promise.then((reason) => ({
+            anyTermination.then((reason) => ({
               kind: 'termination' as const,
               reason,
             })),
@@ -1144,7 +1267,8 @@ export async function runDarkPosixSupervisedOperation(
     const externallyTerminated =
       receipt.drainReason === 'timeout' ||
       receipt.drainReason === 'user-interrupt' ||
-      receipt.drainReason === 'parent-shutdown';
+      receipt.drainReason === 'parent-shutdown' ||
+      receipt.drainReason === 'output-failure';
     if (
       ((receipt.drainReason === 'natural' || receipt.drainReason === 'process-tree-not-empty') &&
         (!startSent || !started || !result)) ||
@@ -1218,6 +1342,7 @@ export async function runDarkPosixSupervisedOperation(
       containment,
     };
   } catch (error) {
+    if (operation.activeState === 'armed') discardManagedOutput();
     let closeoutError: unknown;
     const failureTimeouts = resolvedTimeouts ?? resolveTimeouts(options.timeouts);
     failureCloseoutDeadline ??= MonotonicDeadline.after(

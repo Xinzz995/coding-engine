@@ -211,6 +211,7 @@ function defaultContainmentProbe(
   }
   if (process.platform !== 'win32') return 'unknown';
   return receipt.proof === 'windows-job-zero-and-pipes-eof-v1' ||
+    receipt.proof === 'windows-job-zero-pipes-eof-output-settled-v2' ||
     receipt.proof === 'never-started-containment-empty-v1'
     ? 'empty'
     : 'unknown';
@@ -249,7 +250,8 @@ function assertReceiptBinding(input: {
   }
   if (
     (active.platform === 'posix-process-group-v1' &&
-      receipt.proof === 'windows-job-zero-and-pipes-eof-v1') ||
+      (receipt.proof === 'windows-job-zero-and-pipes-eof-v1' ||
+        receipt.proof === 'windows-job-zero-pipes-eof-output-settled-v2')) ||
     (active.platform === 'windows-job-v1' && receipt.proof === 'posix-group-empty-and-pipes-eof-v1')
   ) {
     throw operationProofMissing();

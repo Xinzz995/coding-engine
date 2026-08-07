@@ -196,7 +196,10 @@ export function evaluateDelegatedSemantic(input: {
   if (!bytes) return { accepted: true };
   const parsed = parseValidationResultBytes(bytes, semantic);
   if (!parsed.ok) {
-    return { accepted: false, violation: `${VALIDATION_RESULT_PATH}:${parsed.code}` };
+    // workspace 安全层只裁决 Validator 是否把有界结果写在唯一允许路径；内容是否
+    // 构成有效 claim 由引擎协议层分类。把普通 JSON/绑定错误升级成 workspace 隔离
+    // 会混淆“无法验证”和“越权写入”，也会丢失可恢复的候选态。
+    return { accepted: true };
   }
   return {
     accepted: true,

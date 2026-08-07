@@ -145,7 +145,7 @@ describe('supervisor protocol', () => {
     expect(machine.state).toBe('acknowledged');
   });
 
-  it.each(['timeout', 'user-interrupt', 'parent-shutdown'] as const)(
+  it.each(['timeout', 'user-interrupt', 'parent-shutdown', 'output-failure'] as const)(
     'accepts one platform-neutral TERMINATE(%s) after START and still requires drain then ACK',
     (reason) => {
       const machine = protocol();
@@ -498,13 +498,18 @@ describe('supervisor protocol', () => {
   });
 
   it('only permits platform-matching drained proofs', () => {
-    const machine = protocol();
-    machine.acceptData(dataBytes(), preparedBoundBinding());
-    machine.containmentReady(containment);
-    const armed = armedBinding(machine);
-    machine.acceptStart(encodeSupervisorStart(OPERATION_ID, armed.activeChildDigest), armed);
+    for (const proof of [
+      'windows-job-zero-and-pipes-eof-v1',
+      'windows-job-zero-pipes-eof-output-settled-v2',
+    ] as const) {
+      const machine = protocol();
+      machine.acceptData(dataBytes(), preparedBoundBinding());
+      machine.containmentReady(containment);
+      const armed = armedBinding(machine);
+      machine.acceptStart(encodeSupervisorStart(OPERATION_ID, armed.activeChildDigest), armed);
 
-    expect(() => machine.drain('windows-job-zero-and-pipes-eof-v1')).toThrow(/platform/i);
-    expect(machine.state).toBe('failed');
+      expect(() => machine.drain(proof)).toThrow(/platform/i);
+      expect(machine.state).toBe('failed');
+    }
   });
 });

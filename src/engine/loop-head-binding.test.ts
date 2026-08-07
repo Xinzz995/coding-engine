@@ -231,7 +231,7 @@ describe('runLoop Git HEAD validation chain', () => {
             ...strictConfig(fixture.workspace, fixture.instructionsDir),
             qualityContractReader: () => readyQualityContract(contract, digest),
           }),
-        ).toBe(1);
+        ).toBe(5);
         expect(fixture.head()).not.toBe(initialHead);
         const state = JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'));
         expect(state['US-001']).toMatchObject({ ...candidate(), notes: 'candidate' });
@@ -259,8 +259,10 @@ describe('runLoop Git HEAD validation chain', () => {
             actualGitHead: fixture.head(),
           },
         });
-        expect(iteration).not.toHaveProperty('validationProtocol');
-        expect(iteration).not.toHaveProperty('validationProtocolError');
+        expect(iteration).toMatchObject({
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
+        });
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
@@ -357,7 +359,7 @@ describe('runLoop Git HEAD validation chain', () => {
               );
             },
           }),
-        ).toBe(1);
+        ).toBe(5);
         expect(existsSync(marker)).toBe(false);
         expect(
           JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
@@ -369,6 +371,8 @@ describe('runLoop Git HEAD validation chain', () => {
           builderRan: false,
           validatorRan: false,
           validatorOutcome: 'skipped',
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
           validationHeadAbort: {
             phase: 'validator-start',
             reason: 'head-changed',
@@ -376,8 +380,6 @@ describe('runLoop Git HEAD validation chain', () => {
             actualGitHead: fixture.head(),
           },
         });
-        expect(iteration).not.toHaveProperty('validationProtocol');
-        expect(iteration).not.toHaveProperty('validationProtocolError');
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
@@ -386,7 +388,7 @@ describe('runLoop Git HEAD validation chain', () => {
   );
 
   it(
-    'rolls back an ordinary Builder candidate at the exact Validator request boundary',
+    'preserves an ordinary Builder candidate at the exact Validator request boundary',
     async () => {
       const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
       const fake = fakeBoundValidator(fixture.workspace, 'passed');
@@ -404,12 +406,12 @@ describe('runLoop Git HEAD validation chain', () => {
               );
             },
           }),
-        ).toBe(1);
+        ).toBe(5);
         expect(readFileSync(calls, 'utf8')).toBe('1');
         expect(
           JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
         ).toMatchObject({
-          passes: false,
+          passes: true,
           validated: false,
           validationReceipt: null,
           retryCount: 0,
@@ -423,10 +425,10 @@ describe('runLoop Git HEAD validation chain', () => {
           builderRan: true,
           validatorRan: false,
           validatorOutcome: 'skipped',
-          validationRollback: true,
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
         });
-        expect(iteration).not.toHaveProperty('validationProtocol');
-        expect(iteration).not.toHaveProperty('validationProtocolError');
+        expect(iteration).not.toHaveProperty('validationRollback');
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
@@ -435,7 +437,7 @@ describe('runLoop Git HEAD validation chain', () => {
   );
 
   it(
-    'rolls back a Builder candidate when HEAD becomes unreadable after Developer returns',
+    'preserves a Builder candidate when HEAD becomes unreadable after Developer returns',
     async () => {
       const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
       const headPath = join(fixture.projectRoot, '.git', 'HEAD');
@@ -469,12 +471,13 @@ describe('runLoop Git HEAD validation chain', () => {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
 
-      expect(exitCode).toBe(2);
+      expect(exitCode).toBe(5);
       expect(readFileSync(calls, 'utf8')).toBe('builder\n');
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
       ).toMatchObject({
-        passes: false,
+        passes: true,
+        notes: 'candidate before HEAD failure',
         validated: false,
         validationReceipt: null,
         retryCount: 0,
@@ -487,7 +490,9 @@ describe('runLoop Git HEAD validation chain', () => {
         builderRan: true,
         validatorRan: false,
         builderOutcome: 'completed',
-        validationRollback: true,
+        validatorOutcome: 'skipped',
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'artifact-changed' },
         validationHeadAbort: {
           phase: 'quality-check-start',
           reason: 'head-unreadable',
@@ -533,7 +538,7 @@ describe('runLoop Git HEAD validation chain', () => {
         delete process.env.CODING_X_CLAUDE_BIN;
       }
 
-      expect(exitCode).toBe(1);
+      expect(exitCode).toBe(5);
       expect(existsSync(marker)).toBe(false);
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
@@ -545,6 +550,8 @@ describe('runLoop Git HEAD validation chain', () => {
         builderRan: false,
         validatorRan: false,
         validatorOutcome: 'skipped',
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'artifact-changed' },
         validationHeadAbort: {
           phase: 'validator-start',
           reason: 'head-unreadable',
@@ -552,15 +559,13 @@ describe('runLoop Git HEAD validation chain', () => {
           actualGitHead: null,
         },
       });
-      expect(iteration).not.toHaveProperty('validationProtocol');
-      expect(iteration).not.toHaveProperty('validationProtocolError');
     },
     HEAD_BINDING_TEST_TIMEOUT_MS,
   );
 
-  // 格式损坏与越权改 state 现在会在 delegated operation 层先被隔离；
-  // 此处只保留能正常完成 operation、因而确实到达 loop HEAD 优先级判断的两类结果。
-  it.each(['valid', 'missing'] as const)(
+  // 有界格式损坏由协议层裁决，仍能到达 HEAD 优先级判断；越权改 state 才由
+  // delegated operation 层隔离。
+  it.each(['valid', 'missing', 'invalid'] as const)(
     'prioritizes Validator-time HEAD drift over a %s result',
     async (mode) => {
       const first = story({ acceptanceCriteria: ['first'] });
@@ -595,7 +600,7 @@ describe('runLoop Git HEAD validation chain', () => {
               return { exitCode: 0, message: 'unexpected review' };
             },
           }),
-        ).toBe(1);
+        ).toBe(5);
         expect(readFileSync(marker, 'utf8')).toBe('called\n');
         expect(fixture.head()).not.toBe(initialHead);
         const state = JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'));
@@ -632,7 +637,7 @@ describe('runLoop Git HEAD validation chain', () => {
   );
 
   it(
-    'rolls back an ordinary Builder candidate when Validator changes HEAD',
+    'preserves an ordinary Builder candidate when Validator changes HEAD',
     async () => {
       const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
       const initialHead = fixture.head();
@@ -649,13 +654,14 @@ describe('runLoop Git HEAD validation chain', () => {
               return { exitCode: 0, message: 'unexpected review' };
             },
           }),
-        ).toBe(1);
+        ).toBe(5);
         expect(readFileSync(calls, 'utf8')).toBe('builder\nvalidator\n');
         expect(fixture.head()).not.toBe(initialHead);
         expect(
           JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
         ).toMatchObject({
-          passes: false,
+          passes: true,
+          notes: 'new candidate',
           validated: false,
           validationReceipt: null,
           retryCount: 0,
@@ -670,7 +676,6 @@ describe('runLoop Git HEAD validation chain', () => {
           builderRan: true,
           validatorRan: true,
           validatorOutcome: 'completed',
-          validationRollback: true,
           validationProtocol: 'invalid',
           validationProtocolError: { code: 'artifact-changed' },
           validationHeadAbort: {
@@ -679,6 +684,289 @@ describe('runLoop Git HEAD validation chain', () => {
             expectedGitHead: initialHead,
             actualGitHead: fixture.head(),
           },
+        });
+        expect(evidence.find((record) => record.type === 'iteration')).not.toHaveProperty(
+          'validationRollback',
+        );
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'rechecks the source HEAD immediately before issuing a Validator receipt',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const initialHead = fixture.head();
+      const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      let finalReviewCalls = 0;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            unsafeUseProjectRootForValidationTests: false,
+            unsafeAllowProjectScopedRunnerForValidationTests: true,
+            validationEnvironmentDigestForTests: undefined,
+            beforeValidationCheckoutCleanupForTests: () => {
+              fixture.commitFile(
+                'H2 immediately before receipt\n',
+                'test: advance immediately before receipt',
+              );
+            },
+            finalReviewRunner: async () => {
+              finalReviewCalls += 1;
+              return { exitCode: 0, message: 'unexpected review' };
+            },
+          }),
+        ).toBe(5);
+
+        const currentHead = fixture.head();
+        expect(currentHead).not.toBe(initialHead);
+        expect(finalReviewCalls).toBe(0);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+          validatorUnverifiable: { schemaVersion: 1, gitHead: currentHead },
+        });
+        const records = readEvidence(fixture.workspace).records;
+        expect(records.some((record) => record.type === 'validation-claim')).toBe(false);
+        expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+          validatorRan: true,
+          validatorOutcome: 'completed',
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
+          validationHeadAbort: {
+            phase: 'validator-finish',
+            reason: 'head-changed',
+            expectedGitHead: initialHead,
+            actualGitHead: currentHead,
+          },
+        });
+        expect(records.find((record) => record.type === 'iteration')).not.toHaveProperty(
+          'validationReceipt',
+        );
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'does not consume a failed claim when the source HEAD changes immediately before acceptance',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const initialHead = fixture.head();
+      const fake = fakeBoundValidator(fixture.workspace, 'failed');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            unsafeUseProjectRootForValidationTests: false,
+            unsafeAllowProjectScopedRunnerForValidationTests: true,
+            validationEnvironmentDigestForTests: undefined,
+            beforeValidationCheckoutCleanupForTests: () => {
+              fixture.commitFile(
+                'H2 immediately before failed claim\n',
+                'test: advance immediately before failed claim',
+              );
+            },
+          }),
+        ).toBe(5);
+
+        const currentHead = fixture.head();
+        expect(currentHead).not.toBe(initialHead);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+          blocked: false,
+          validatorUnverifiable: { schemaVersion: 1, gitHead: currentHead },
+        });
+        const records = readEvidence(fixture.workspace).records;
+        expect(records.some((record) => record.type === 'validation-claim')).toBe(false);
+        expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+          validatorOutcome: 'completed',
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
+          validationHeadAbort: {
+            phase: 'validator-finish',
+            expectedGitHead: initialHead,
+            actualGitHead: currentHead,
+          },
+        });
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it.each(['passed', 'failed'] as const)(
+    'rejects a %s claim when the source HEAD changes after checkout settlement',
+    async (verdict) => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const initialHead = fixture.head();
+      const fake = fakeBoundValidator(fixture.workspace, verdict);
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            unsafeUseProjectRootForValidationTests: false,
+            unsafeAllowProjectScopedRunnerForValidationTests: true,
+            validationEnvironmentDigestForTests: undefined,
+            afterValidationCheckoutSettlementForTests: () => {
+              fixture.commitFile(
+                `H2 after ${verdict} settlement\n`,
+                `test: advance after ${verdict} settlement`,
+              );
+            },
+          }),
+        ).toBe(5);
+
+        const currentHead = fixture.head();
+        expect(currentHead).not.toBe(initialHead);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+          blocked: false,
+          validatorUnverifiable: { schemaVersion: 1, gitHead: currentHead },
+        });
+        const records = readEvidence(fixture.workspace).records;
+        expect(records.some((record) => record.type === 'validation-claim')).toBe(false);
+        expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+          validatorOutcome: 'completed',
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
+          validationHeadAbort: {
+            phase: 'validator-finish',
+            expectedGitHead: initialHead,
+            actualGitHead: currentHead,
+          },
+        });
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it.each(['passed', 'failed'] as const)(
+    'restores the candidate when the source HEAD changes immediately after writing a %s claim',
+    async (verdict) => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const initialHead = fixture.head();
+      const fake = fakeBoundValidator(fixture.workspace, verdict);
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            unsafeUseProjectRootForValidationTests: false,
+            unsafeAllowProjectScopedRunnerForValidationTests: true,
+            validationEnvironmentDigestForTests: undefined,
+            afterValidatorClaimStateWriteForTests: () => {
+              fixture.commitFile(
+                `H2 after ${verdict} state write\n`,
+                `test: advance after ${verdict} state write`,
+              );
+            },
+          }),
+        ).toBe(5);
+
+        const currentHead = fixture.head();
+        expect(currentHead).not.toBe(initialHead);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+          blocked: false,
+          validatorUnverifiable: { schemaVersion: 1, gitHead: currentHead },
+        });
+        const records = readEvidence(fixture.workspace).records;
+        expect(records.find((record) => record.type === 'validation-claim')).toMatchObject({
+          storyId: 'US-001',
+          gitHead: initialHead,
+          verdict,
+        });
+        expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+          validatorOutcome: 'completed',
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
+          validationHeadAbort: {
+            phase: 'validator-finish',
+            expectedGitHead: initialHead,
+            actualGitHead: currentHead,
+          },
+        });
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    HEAD_BINDING_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'rebinds the durable unverifiable marker when HEAD changes during its first state write',
+    async () => {
+      const fixture = setup([story({ acceptanceCriteria: ['works'] })]);
+      const initialHead = fixture.head();
+      const fake = fakeBoundValidator(fixture.workspace, 'missing');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      let advanced = false;
+
+      try {
+        expect(
+          await runProductionLoop({
+            ...strictConfig(fixture.workspace, fixture.instructionsDir),
+            unsafeUseProjectRootForValidationTests: false,
+            unsafeAllowProjectScopedRunnerForValidationTests: true,
+            validationEnvironmentDigestForTests: undefined,
+            afterValidatorUnverifiableStateWriteForTests: () => {
+              if (advanced) return;
+              advanced = true;
+              fixture.commitFile(
+                'H2 while persisting unverifiable marker\n',
+                'test: advance during unverifiable marker write',
+              );
+            },
+          }),
+        ).toBe(5);
+
+        const currentHead = fixture.head();
+        expect(currentHead).not.toBe(initialHead);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+          retryCount: 0,
+          blocked: false,
+          validatorUnverifiable: { schemaVersion: 1, gitHead: currentHead },
         });
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
@@ -743,7 +1031,7 @@ describe('runLoop Git HEAD validation chain', () => {
             ...strictConfig(fixture.workspace, fixture.instructionsDir),
             qualityContractReader: () => readyQualityContract(changingContract, digest),
           }),
-        ).toBe(1);
+        ).toBe(5);
         expect(fixture.head()).not.toBe(initialHead);
         expect(existsSync(firstRunner.calls)).toBe(false);
 
@@ -850,7 +1138,7 @@ describe('runLoop Git HEAD validation chain', () => {
       process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
 
       try {
-        expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(1);
+        expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(5);
         expect(fixture.head()).not.toBe(initialHead);
         expect(
           JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'],
@@ -872,6 +1160,8 @@ describe('runLoop Git HEAD validation chain', () => {
           builderRan: false,
           validatorRan: false,
           validatorOutcome: 'skipped',
+          validationProtocol: 'invalid',
+          validationProtocolError: { code: 'artifact-changed' },
           validationHeadAbort: {
             phase: 'tdd-check-finish',
             reason: 'head-changed',
@@ -879,8 +1169,6 @@ describe('runLoop Git HEAD validation chain', () => {
             actualGitHead: fixture.head(),
           },
         });
-        expect(iteration).not.toHaveProperty('validationProtocol');
-        expect(iteration).not.toHaveProperty('validationProtocolError');
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
       }

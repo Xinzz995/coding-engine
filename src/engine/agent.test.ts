@@ -729,6 +729,37 @@ describe('runAgent', () => {
     }
   });
 
+  it('forwards the first output before the Runner exits', async () => {
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake} delayed-diagnostic`;
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let settled = false;
+    try {
+      const running = runManagedAgent({
+        kind: 'claude',
+        prompt: '',
+        cwd: here,
+        timeoutMs: 5000,
+      }).finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => {
+        expect(stdout.mock.calls.flat().join('')).toContain('EARLY-OUTPUT');
+      });
+      expect(settled).toBe(false);
+
+      const result = await running;
+      expect(result).toMatchObject({ timedOut: false, exitCode: 0 });
+      expect(stderr.mock.calls.flat().join('')).toContain('LATE-OUTPUT');
+      expect(result.outputTail).toContain('EARLY-OUTPUT');
+      expect(result.outputTail).toContain('LATE-OUTPUT');
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('keeps only the bounded tail of long runner output', async () => {
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} long-diagnostic`;
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

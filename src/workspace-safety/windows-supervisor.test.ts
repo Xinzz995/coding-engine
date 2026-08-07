@@ -1003,7 +1003,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
       'drained-receipt.json',
     );
     const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, unknown>;
-    expect(receipt.proof).toBe('windows-job-zero-and-pipes-eof-v1');
+    expect(receipt.proof).toBe('windows-job-zero-pipes-eof-output-settled-v2');
     expect(receipt.drainReason).toBe('parent-shutdown');
   });
 
@@ -1069,7 +1069,7 @@ windowsOnly('real Windows Job supervisor', { timeout: 90_000, concurrent: false 
     expect(result).toMatchObject({
       parentExitCode: 130,
       drainReason: 'user-interrupt',
-      proof: 'windows-job-zero-and-pipes-eof-v1',
+      proof: 'windows-job-zero-pipes-eof-output-settled-v2',
       targetSawCtrlC: false,
     });
   }, 90_000);

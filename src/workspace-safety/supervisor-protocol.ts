@@ -15,8 +15,17 @@ export type SignalIsolation =
 export type DrainedProof =
   | 'posix-group-empty-and-pipes-eof-v1'
   | 'windows-job-zero-and-pipes-eof-v1'
+  | 'windows-job-zero-pipes-eof-output-settled-v2'
   | 'never-started-containment-empty-v1';
-export type SupervisorTerminationReason = 'timeout' | 'user-interrupt' | 'parent-shutdown';
+export type SupervisorTerminationReason =
+  | 'timeout'
+  | 'user-interrupt'
+  | 'parent-shutdown'
+  | 'output-failure';
+export type ExternalSupervisorTerminationReason = Exclude<
+  SupervisorTerminationReason,
+  'timeout' | 'output-failure'
+>;
 export type DrainedReason = 'natural' | 'process-tree-not-empty' | SupervisorTerminationReason;
 
 export interface BoundSupervisorDescriptor {
@@ -247,6 +256,7 @@ function parseProof(value: unknown): DrainedProof {
   if (
     value === 'posix-group-empty-and-pipes-eof-v1' ||
     value === 'windows-job-zero-and-pipes-eof-v1' ||
+    value === 'windows-job-zero-pipes-eof-output-settled-v2' ||
     value === 'never-started-containment-empty-v1'
   ) {
     return value;
@@ -255,7 +265,12 @@ function parseProof(value: unknown): DrainedProof {
 }
 
 function parseTerminationReason(value: unknown): SupervisorTerminationReason {
-  if (value === 'timeout' || value === 'user-interrupt' || value === 'parent-shutdown') {
+  if (
+    value === 'timeout' ||
+    value === 'user-interrupt' ||
+    value === 'parent-shutdown' ||
+    value === 'output-failure'
+  ) {
     return value;
   }
   return invalid('TERMINATE.reason has an unsupported value');
@@ -508,7 +523,8 @@ export function parseDrainedReceipt(input: string | Buffer): DrainedReceipt {
         drainReason !== 'process-tree-not-empty' &&
         drainReason !== 'timeout' &&
         drainReason !== 'user-interrupt' &&
-        drainReason !== 'parent-shutdown')
+        drainReason !== 'parent-shutdown' &&
+        drainReason !== 'output-failure')
     ) {
       invalid('drained receipt proof and drainReason are inconsistent');
     }
@@ -820,7 +836,7 @@ export class SupervisorProtocol {
       (this.context.supervisor.platform === 'posix-process-group-v1' &&
         proof !== 'posix-group-empty-and-pipes-eof-v1') ||
       (this.context.supervisor.platform === 'windows-job-v1' &&
-        proof !== 'windows-job-zero-and-pipes-eof-v1')
+        proof !== 'windows-job-zero-pipes-eof-output-settled-v2')
     ) {
       this.#fail('drained proof does not match platform');
     }
@@ -861,7 +877,7 @@ export class SupervisorProtocol {
       ((this.context.supervisor.platform === 'posix-process-group-v1' &&
         proof !== 'posix-group-empty-and-pipes-eof-v1') ||
         (this.context.supervisor.platform === 'windows-job-v1' &&
-          proof !== 'windows-job-zero-and-pipes-eof-v1'))
+          proof !== 'windows-job-zero-pipes-eof-output-settled-v2'))
     ) {
       this.#fail('termination drain proof does not match platform');
     }

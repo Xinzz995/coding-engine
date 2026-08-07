@@ -6,6 +6,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { delimiter, join, relative } from 'node:path';
@@ -24,6 +25,74 @@ import {
 } from './loop-test-support.js';
 
 describe('runLoop clean validation checkout', () => {
+  it('does not report Validator unverifiable when no candidate exists yet', async () => {
+    const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
+    const fake = join(fixture.workspace, 'builder-without-candidate.mjs');
+    writeFileSync(
+      fake,
+      `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(
+        join(fixture.workspace, 'progress.md'),
+      )}, 'builder made progress without a candidate\\n');\n`,
+    );
+    const contract = {
+      ...TEST_QUALITY_CONTRACT,
+      checks: {
+        ...TEST_QUALITY_CONTRACT.checks,
+        test: {
+          checks: [
+            {
+              id: 'pollute-before-candidate',
+              module: 'root',
+              command: {
+                executable: process.execPath,
+                args: [
+                  '--input-type=module',
+                  '-e',
+                  "import { writeFileSync } from 'node:fs'; writeFileSync('unexpected-without-candidate.txt', 'x');",
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos', 'windows'],
+                timeoutMs: 5000,
+              },
+            },
+          ],
+        },
+      },
+    } as QualityContract;
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+
+    try {
+      expect(
+        await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+          qualityContractReader: () => readyQualityContract(contract),
+        }),
+      ).toBe(1);
+      expect(
+        JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+      ).toMatchObject({
+        passes: false,
+        validated: false,
+        validationReceipt: null,
+        validatorUnverifiable: null,
+      });
+      const iteration = readEvidence(fixture.workspace).records.find(
+        (record) => record.type === 'iteration',
+      );
+      expect(iteration).toMatchObject({
+        builderOutcome: 'completed',
+        validatorOutcome: 'skipped',
+      });
+      expect(iteration).not.toHaveProperty('validationProtocol');
+      expect(iteration).not.toHaveProperty('validationProtocolError');
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  }, 60_000);
+
   it('records completed gate facts before rejecting a polluted validation checkout', async () => {
     const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
     const contract = {
@@ -67,7 +136,7 @@ describe('runLoop clean validation checkout', () => {
           validationEnvironmentDigestForTests: undefined,
           qualityContractReader: () => readyQualityContract(contract),
         }),
-      ).toBe(1);
+      ).toBe(5);
       const evidence = readEvidence(fixture.workspace).records;
       const gateIndex = evidence.findIndex((record) => record.type === 'gate-run');
       const iterationIndex = evidence.findIndex((record) => record.type === 'iteration');
@@ -84,12 +153,18 @@ describe('runLoop clean validation checkout', () => {
         type: 'iteration',
         validatorRan: false,
         validatorOutcome: 'skipped',
-        validationRollback: true,
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'environment-unverifiable' },
         runId: (evidence[gateIndex] as { runId: string }).runId,
       });
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-      ).toMatchObject({ passes: false, validated: false, validationReceipt: null });
+      ).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        validatorUnverifiable: { schemaVersion: 1, gitHead: fixture.head() },
+      });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -115,7 +190,7 @@ describe('runLoop clean validation checkout', () => {
           unsafeAllowProjectScopedRunnerForValidationTests: true,
           validationEnvironmentDigestForTests: undefined,
         }),
-      ).toBe(1);
+      ).toBe(5);
       const evidence = readEvidence(fixture.workspace).records;
       const tddIndex = evidence.findIndex(
         (record) => record.type === 'tdd-gate' && record.phase === 'post-builder',
@@ -136,12 +211,18 @@ describe('runLoop clean validation checkout', () => {
         type: 'iteration',
         validatorRan: false,
         validatorOutcome: 'skipped',
-        validationRollback: true,
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'environment-unverifiable' },
         runId: (evidence[tddIndex] as { runId: string }).runId,
       });
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-      ).toMatchObject({ passes: false, validated: false, validationReceipt: null });
+      ).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        validatorUnverifiable: { schemaVersion: 1, gitHead: fixture.head() },
+      });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -334,13 +415,18 @@ describe('runLoop clean validation checkout', () => {
         unsafeAllowProjectScopedRunnerForValidationTests: true,
         validationEnvironmentDigestForTests: undefined,
       });
-      expect(code).toBe(1);
+      expect(code).toBe(5);
       const validatorRoot = readFileSync(validatorCwdMarker, 'utf8');
       expect(validatorRoot).toMatch(/coding-x-validation-[^/\\]+[/\\]checkout$/u);
       expect(existsSync(validatorRoot)).toBe(false);
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
-      ).toMatchObject({ passes: false, validated: false, validationReceipt: null });
+      ).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        validatorUnverifiable: { schemaVersion: 1, gitHead: fixture.head() },
+      });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -389,6 +475,52 @@ describe('runLoop clean validation checkout', () => {
     60_000,
   );
 
+  it.runIf(process.platform !== 'win32')(
+    'isolates a topology failure discovered immediately before the Validator request',
+    async () => {
+      const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
+      const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      const calls = join(fixture.projectRoot, 'bound-calls.txt');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      try {
+        const first = await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+          beforeValidatorRequestForTests: (root) => {
+            mkdirSync(join(root, 'node_modules'), { recursive: true });
+            symlinkSync(
+              join(fixture.projectRoot, 'source.txt'),
+              join(root, 'node_modules', 'developer-source.txt'),
+            );
+          },
+        });
+        expect(first).toBe(2);
+        expect(readFileSync(calls, 'utf8')).toBe('1');
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+        });
+
+        const second = await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+        });
+        expect(second).toBe(2);
+        expect(readFileSync(calls, 'utf8')).toBe('1');
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    90_000,
+  );
+
   it('isolates the workspace and refuses reuse when a validated checkout cannot be safely cleaned', async () => {
     const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
     const fake = fakeBoundValidator(fixture.workspace, 'passed');
@@ -413,6 +545,9 @@ describe('runLoop clean validation checkout', () => {
       expect(
         JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
       ).toMatchObject({ validated: false, validationReceipt: null });
+      expect(readFileSync(join(fixture.workspace, 'report.html'), 'utf8')).toContain(
+        '本次运行尚未完成最终安全清理',
+      );
 
       rmSync(escapedCheckout, { recursive: true, force: true });
       rmSync(originalContainer, { recursive: true, force: true });
@@ -434,4 +569,47 @@ describe('runLoop clean validation checkout', () => {
       if (originalContainer) rmSync(originalContainer, { recursive: true, force: true });
     }
   }, 90_000);
+
+  it.runIf(process.platform !== 'win32')(
+    'isolates the workspace when the clean checkout links back to the developer tree',
+    async () => {
+      const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
+      const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      try {
+        const first = await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+          beforeValidationCheckoutCleanupForTests: (root) => {
+            mkdirSync(join(root, 'node_modules'), { recursive: true });
+            symlinkSync(
+              join(fixture.projectRoot, 'source.txt'),
+              join(root, 'node_modules', 'developer-source.txt'),
+            );
+          },
+        });
+        expect(first).toBe(2);
+        expect(
+          JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8'))['US-001'],
+        ).toMatchObject({
+          passes: true,
+          validated: false,
+          validationReceipt: null,
+        });
+
+        const second = await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          unsafeUseProjectRootForValidationTests: false,
+          unsafeAllowProjectScopedRunnerForValidationTests: true,
+          validationEnvironmentDigestForTests: undefined,
+        });
+        expect(second).toBe(2);
+      } finally {
+        delete process.env.CODING_X_CLAUDE_BIN;
+      }
+    },
+    90_000,
+  );
 });

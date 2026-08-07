@@ -1,7 +1,7 @@
 ---
 title: 009-abort-round-semantics
 status: active
-updated: 2026-07-31
+updated: 2026-08-07
 scope: root
 ---
 
@@ -38,6 +38,10 @@ agent 结局机械三分（builder/validator 两侧同一判定，只看进程�
 2. **「每轮一条 iteration」不变式**：所有提前退出/continue 路径（builder 异常、no-op、门禁打回、agentBlocked 跳过、validator 异常）统一在跳出前写一条 evidence `iteration` 记录，新增字段全部可选（`builderOutcome`/`validatorOutcome`/`noop`/`gateRejected`/`abortRollback`，`src/engine/evidence.ts`）——时间线不再有空洞，发现 B 的还原方式改为「每轮一条记录可直读」，不再依赖「轮号跳跃对照门禁历史推断」。
 3. **no-op 双无变化判定**：builder `completed` 但轮首/轮后 `state.json` 与 `progress.md`（内容级字符串对比，不 parse）双无变化 → 判 no-op，跳过机械门禁与 validator，省一次强模型调用。
 4. **stall 熔断**：no-op、builder 异常、validator 异常三类累计计数，其余轮次（含门禁打回轮、agentBlocked 跳过轮——两者都有真实 state 写入即为有活动）一律清零；达到 `--stall-limit`（`src/cli.ts`，缺省 3，仅 `run` 命令下校验正整数字面量）即提前终止，退出码 1。
+
+以上 Validator 异常的回写与 stall 规则是本 ADR 发布时的行为。ADR-023 已对正式结构化 Validator
+取代该局部规则：不可验证时保留候选、不增加 retry，并立即返回 5；Developer 与 legacy 测试兼容路径
+仍沿用本 ADR。
 5. **blocked 收敛出口**：全部 story 收敛（`passes` 或 `blocked`）时，若存在 `blocked` story，输出文案分叉列出具体 story 号并以退出码 3 结束（而非旧版「全部 story 已通过」的假绿文案 + 退出码 0）；`convergedExit` 单一函数同时服务 no-op 快路径与轮末完成判定两个收敛出口，保证两处行为一致。
 
 四条对外可见退出码：`0`=全部通过 / `1`=跑满未收敛或 stall 熔断 / `2`=workspace 锁占用（ADR-008）/ `3`=收敛但有 blocked 待人工（README 同步）。

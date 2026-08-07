@@ -534,7 +534,7 @@ coding-x 的信息分三层保存：
 
 引擎每轮选择 `priority` 最高、尚未同时满足 `passes && validated` 且 `blocked: false` 的 story（状态读自 `state.json`）。
 
-> **0.25.0 验收凭证迁移：** 新状态用 `validated` 区分“builder 声称完成”和“引擎已观察 Validator 正常完成”。旧 state 缺少该字段时，读取阶段按历史 `passes` 值兼容，不会把既有已完成 workspace 全量重验；新一轮自然写回后会补齐字段。显式的 `passes=true, validated=false` 会被视为中断留下的待验收状态并回写待复核。
+> **验收凭证迁移：** 新状态用 `validated` 区分“builder 声称完成”和“引擎已观察 Validator 正常完成”。旧 state 缺少该字段时只保留实现候选，不再补造当前凭证。显式的 `passes=true, validated=false` 是稳定的待重验状态：它不会被算作通过；Validator 环境或结果不可验证时保留候选并返回 5，只有确定的机械失败或合法 `failed` claim 才清除候选。
 
 > **结构化验收协议：** 所有新 Validator 轮次都必须提交 `validation-result.json` v1；不再从 `progress.md` 猜 story，也不再直接改 `state.json`。引擎签发的 Validator receipt 使用 v2，除 request/story/AC/Git HEAD 外还绑定干净验证环境摘要；v1 receipt 继续可读，但一律按过期处理并重新验证。Git HEAD 或受支持的干净检出无法证明时，正式运行失败关闭，不会伪装成完整产物绑定。
 
@@ -740,7 +740,7 @@ GitHub 状态给出。
 | `2`    | workspace 安全状态未就绪/不可读，或最终 Review 状态损坏           |
 | `3`    | 存在 `blocked` Story                                              |
 | `4`    | 最终 Review 有待人工处理的 finding                                |
-| `5`    | 最终 Review 无法可靠验证                                          |
+| `5`    | Validator 或最终 Review 无法可靠验证                              |
 | `6`    | 最终 Review 未完成、已失效，或 GitHub CI / Ruleset 未就绪         |
 | `7`    | shadow 已完成，但不能表示可交付                                   |
 
@@ -757,11 +757,13 @@ GitHub 状态给出。
 | `2`    | 配置、质量契约、固定版本、状态或 workspace 锁无效                       |
 | `3`    | 存在 `blocked` Story，等待人工处理                                      |
 | `4`    | 最终 Review 存在待人工处理的 finding                                    |
-| `5`    | 最终 Review 无法可靠验证，例如缺 Spec、模型异常、隔离失败或上下文不完整 |
+| `5`    | Validator 或最终 Review 无法可靠验证，例如结果缺失、模型异常或上下文不完整 |
 | `6`    | 本地已完成，但 PR、GitHub CI 或 Ruleset 尚未就绪                        |
 | `7`    | shadow 运行完成；只表示候选验证跑完，永远不能表示可交付                 |
 
 `init`/`workspace`/`repair`/`doctor`/`status`/`report`/`models`/`config`/`hooks` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
+
+这里的“无法验证”表示代码结论不可信，但进程与临时目录已经安全收口。若连 workspace containment、临时检出拓扑或安全清理都无法证明，仍属于 workspace 安全故障并返回 `2`，不能降级成 `5`。
 
 ### 环境变量
 
@@ -816,7 +818,7 @@ GitHub 状态给出。
 - **引擎验收凭证 + 可信目标绑定**：`passes=true` 只是 builder 候选；引擎向 Validator 注入 request ID/story/AC hash/Git HEAD，严格消费逐 AC claim，确认 schema、绑定、产物和 state 不变式后才写 verdict 或签发 `validated=true`。凭证同时绑定机械验证环境、实际 coding-x 版本和 formal/shadow 模式，切换正式模式或候选版本会保留实现候选并强制重验（ADR-013、015、018）。
 - **Agent 调用凭证**：每次真实 Builder/Validator 子进程都记录 outcome、退出码与调用收口耗时；异常 stdout/stderr 尾部有界进入 evidence/status/report，成功 transcript 不落盘。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
-- **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；no-op、超时、异常退出累计达 `--stall-limit`（缺省 3）连续无进展轮即提前终止（退出码 1）——已全部完成的工作区不受影响，完成判定优先于熔断计数。
+- **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；Developer no-op、超时或异常退出累计达 `--stall-limit`（缺省 3）时提前终止（退出码 1）。结构化 Validator 异常不再空转重试，而是立即以不可验证退出码 5 停止并保留候选。
 - **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令和允许目录；引擎在精确 HEAD 的项目外检出中准备依赖并逐项执行，失败机械打回并跳过该轮验证。验证检出保留最多 16 个目标提交的完整可达历史，但不复制无关分支或标签；开发仓库为 shallow/partial、缺少对象、启用替换历史、可达对象超过 10 万个或保守容量估算超过 1 GiB 时会返回不可验证，检出后还会复核对象集合与实际文件大小。版本、摘要、快照、验证环境或运行中契约漂移都会停止，超时会等受管进程集合确认收口后才继续。主动脱离平台 containment 的恶意进程属于明确非目标，coding-x 不是操作系统沙箱。
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 安全写入与 Git 隔离检查**：builder 只 stage/commit story 文件并在受管范围内回写运行时状态；所有正式写入口共用 owner-bound 租约。`prd-to-json` 与 `/review-loop` 只准备临时请求，再由引擎写入；`doctor` 只读报告安全分类与 Git 隔离状态，不替用户删租约或改索引。
@@ -890,7 +892,8 @@ my-project/
 | 报“找不到 prd.json”                                        | 选定 workspace 的 `prd.json` 是否存在、`--workspace` 是否一致                             | 用 `prd-to-json` 从正式 PRD 生成临时候选并调用 apply；不要手工拼一个不完整 JSON                                                       |
 | 退出码 `2`，提示活动 lease 或恢复状态阻断                  | `doctor` / `status` 的安全分类、是否仍有 coding-x 或项目检查进程                          | 活跃运行就等待或正常停止；中断状态按提示运行 `workspace recover` 或 `workspace resume-mutation`，不要删除 `engine.lock/`              |
 | `state.json` 或 `prd.json` JSON 损坏                       | `status`/`report` 的保守警告                                                              | 运行 `npx coding-x repair`；它会自行获取短租约并按固定清单修复，不会替你解决业务失败                                                  |
-| 退出码 `1`：达到最大轮次或 stall 熔断                      | `npx coding-x status`、终端异常尾部、`report.html` 时间线                                 | 区分代码失败、runner 认证/网络、超时和空转；处理根因后重跑，已有有效状态会续跑                                                        |
+| 退出码 `1`：达到最大轮次或 stall 熔断                      | `npx coding-x status`、终端异常尾部、`report.html` 时间线                                 | 区分代码失败、Developer 的 runner 认证/网络、超时和空转；处理根因后重跑，已有有效状态会续跑                                           |
+| 退出码 `5`：Validator 无法可靠验证                         | `npx coding-x status`、最近一次 Validator 结局、协议错误和当前提交                        | 修复 runner、结果、提交漂移或运行环境后重跑；候选不会被当成失败清除，也不会获得验收凭证                                             |
 | 退出码 `3` 或 story `blocked`                              | `state.json` 对应 story 的 notes、报告红旗和仲裁标签                                      | 人决定改需求、修环境还是重试；需求/AC 有问题就改源 PRD、再运行 `prd-to-json`，然后重跑引擎                                            |
 | 运行中途需求改变                                           | 源 `docs/prds/prd-*.md`                                                                   | 先停止引擎；修改源 PRD 并重新转换。AC 变化的 story 会重验，旧证据会先归档                                                             |
 | UI story 没有浏览器证据                                    | PATH 中是否有 `agent-browser`、`.workspace/screenshots/`、报告截图对账                    | 安装/提供浏览器工具后真实操作；AC 要写明 URL、动作、期望结果，不能只写“页面正常”                                                      |

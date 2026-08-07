@@ -719,7 +719,7 @@ describe.runIf(
         join(checkout.root, 'node_modules', 'external-hard-link.txt'),
       );
       await expect(checkout.assertCurrent('hard link 产物测试')).rejects.toMatchObject({
-        code: 'artifact-boundary-violated',
+        code: 'topology-unverifiable',
         message: expect.stringContaining('hard link'),
       });
       expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
@@ -800,7 +800,7 @@ describe.runIf(
         linkSync(dependency, output);
 
         await expect(checkout.assertCurrent('跨产物根 hard link 测试')).rejects.toMatchObject({
-          code: 'artifact-boundary-violated',
+          code: 'topology-unverifiable',
           message: expect.stringContaining('跨越多个产物根'),
         });
       } finally {
@@ -829,7 +829,7 @@ describe.runIf(
         linkSync(join(checkout.root, 'source.txt'), alias);
 
         await expect(checkout.assertCurrent('源码 hard link 别名测试')).rejects.toMatchObject({
-          code: 'artifact-boundary-violated',
+          code: 'topology-unverifiable',
           message: expect.stringContaining('包含未声明为产物的路径'),
         });
       } finally {
@@ -855,7 +855,7 @@ describe.runIf(
         mkdirSync(join(checkout.root, 'node_modules'));
         execFileSync('mkfifo', [join(checkout.root, 'node_modules', 'special-pipe')]);
         await expect(checkout.assertCurrent('特殊产物测试')).rejects.toMatchObject({
-          code: 'artifact-boundary-violated',
+          code: 'topology-unverifiable',
           message: expect.stringContaining('特殊文件'),
         });
         expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
@@ -1266,7 +1266,7 @@ describe.runIf(
               checkout.cleanup();
             }
           })(),
-        ).rejects.toMatchObject({ code: 'artifact-boundary-violated' });
+        ).rejects.toMatchObject({ code: 'topology-unverifiable' });
         expect(existsSync(escaped)).toBe(false);
       } finally {
         await managed.close();
@@ -1302,7 +1302,7 @@ describe.runIf(
             managed: { session: managed.session, kind: 'quality-check' },
           }),
         ).rejects.toMatchObject({
-          code: 'artifact-boundary-violated',
+          code: 'topology-unverifiable',
           message: expect.stringMatching(/Git control directory|Git 控制/u),
         });
       } finally {
@@ -1379,7 +1379,7 @@ describe.runIf(
             managed: { session: managed.session, kind: 'quality-check' },
           }),
         ).rejects.toMatchObject({
-          code: 'artifact-boundary-violated',
+          code: 'topology-unverifiable',
           message: expect.stringContaining('需受管核对的普通文件链接超过 1024 条'),
         });
       } finally {
@@ -1442,7 +1442,7 @@ describe.runIf(
         rmSync(join(prepared.root, 'node_modules', 'system-node'));
         symlinkSync(process.execPath, join(prepared.root, 'node_modules', 'system-node'));
         await expect(prepared.assertCurrent('外部普通文件链接替换后')).rejects.toMatchObject({
-          code: 'artifact-boundary-violated',
+          code: 'topology-unverifiable',
         });
         expect(prepared.cleanup()).toMatchObject({ status: 'removed' });
       } finally {
@@ -1485,7 +1485,7 @@ describe.runIf(
           await checkout.assertCurrent('外部普通文件链接写入前');
           writeFileSync(join(checkout.root, 'node_modules', 'tool'), 'changed\n');
           await expect(checkout.assertCurrent('外部普通文件链接写入后')).rejects.toMatchObject({
-            code: 'artifact-boundary-violated',
+            code: 'topology-unverifiable',
           });
         } finally {
           expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
@@ -1523,7 +1523,7 @@ describe.runIf(
             }),
             managed: { session: managed.session, kind: 'quality-check' },
           }),
-        ).rejects.toMatchObject({ code: 'artifact-boundary-violated' });
+        ).rejects.toMatchObject({ code: 'topology-unverifiable' });
       } finally {
         await managed.close();
       }
@@ -1574,7 +1574,7 @@ describe.runIf(
             realpathSync(target),
           );
           await expect(checkout.assertCurrent('外部普通文件链接目标替换后')).rejects.toMatchObject({
-            code: 'artifact-boundary-violated',
+            code: 'topology-unverifiable',
           });
         } finally {
           expect(checkout.cleanup()).toMatchObject({ status: 'removed' });

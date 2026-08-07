@@ -60,4 +60,14 @@ describe.each(factories)('%s command deadline arbitration', (_platform, createTr
     expect(trigger.reason).toBe('user-interrupt');
     trigger.dispose();
   });
+
+  it('turns an asynchronous downstream sink failure into output-failure', async () => {
+    const outputFailure = new AbortController();
+    const trigger = createTrigger(undefined, undefined, outputFailure.signal);
+    outputFailure.abort();
+
+    await expect(trigger.promise).resolves.toBe('output-failure');
+    expect(trigger.reason).toBe('output-failure');
+    trigger.dispose();
+  });
 });

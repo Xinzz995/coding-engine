@@ -74,12 +74,45 @@ function observedStatusOptions(
   };
 }
 
+function unverifiableObservedStatusOptions(
+  workspace: string,
+  reason: Extract<StoryValidationObservation, { status: 'unverifiable' }>['reason'],
+): { currentGitHead: null; storyValidationObservation: StoryValidationObservation } {
+  const prd = tryReadPrd(join(workspace, 'prd.json'));
+  if (!prd || !Array.isArray(prd.userStories)) throw new Error('expected observable PRD fixture');
+  const state = readDisplayState(join(workspace, 'state.json'), prd).state;
+  const display = evaluateStoryValidationDisplay(prd, state, null, null);
+  return {
+    currentGitHead: null,
+    storyValidationObservation: {
+      status: 'unverifiable',
+      reason,
+      message:
+        reason === 'head-unreadable'
+          ? '当前 Git HEAD 不可读取或不是完整提交 ID'
+          : '受管 Story 当前性观察失败',
+      headSha: null,
+      prd,
+      state: display.state,
+      display,
+      storyValidationEnvironmentDigest: null,
+      storyValidationDigest: null,
+      workingContract: null,
+      trackedContract: null,
+      workingContractDigest: null,
+      trackedContractDigest: null,
+      workspacePath: workspace,
+      observationToken: null,
+    },
+  };
+}
+
 /** Existing behavioral tests explicitly provide a completed managed observation fixture. */
 function collectStatus(
   workspace: string,
   options: { currentGitHead?: string | null } = {},
 ): ReturnType<typeof collectStatusProduction> {
-  const head = options.currentGitHead ?? CURRENT_GIT_HEAD;
+  const head = options.currentGitHead === undefined ? CURRENT_GIT_HEAD : options.currentGitHead;
   if (head === null) return collectStatusProduction(workspace, { currentGitHead: null });
   return collectStatusProduction(workspace, {
     ...options,
@@ -610,6 +643,163 @@ describe('renderStatusReport', () => {
       const { text, exitCode } = renderStatusReport(collectStatus(ws));
       expect(text).toContain('0/3');
       expect(exitCode).toBe(1);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a current pending candidate at exit 5 without relying on evidence', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            validatorUnverifiable: {
+              schemaVersion: 1,
+              gitHead: CURRENT_GIT_HEAD,
+              acceptanceHash: acceptanceHash('US-001', PRD.userStories[0].acceptanceCriteria),
+            },
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
+      const report = collectStatus(ws);
+      const human = renderStatusReport(report);
+      const json = renderStatusJson(report);
+      expect(human.exitCode).toBe(5);
+      expect(human.text).toContain('Validator 无法可靠验证');
+      expect(json.exitCode).toBe(5);
+      const parsed = JSON.parse(json.text);
+      expect(parsed.recentValidation).toEqual({});
+      expect(parsed.stories[0].validatorUnverifiableCurrent).toBe(true);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps an unverifiable candidate at exit 5 while the current HEAD itself is unreadable', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            validatorUnverifiable: {
+              schemaVersion: 1,
+              gitHead: 'f'.repeat(40),
+              acceptanceHash: acceptanceHash('US-001', PRD.userStories[0].acceptanceCriteria),
+            },
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
+
+      const report = collectStatusProduction(
+        ws,
+        unverifiableObservedStatusOptions(ws, 'head-unreadable'),
+      );
+      expect(report.status === 'ok' && report.storyValidationFailureReason).toBe(
+        'head-unreadable',
+      );
+      expect(renderStatusReport(report).exitCode).toBe(5);
+      const json = renderStatusJson(report);
+      expect(json.exitCode).toBe(5);
+      expect(JSON.parse(json.text).stories[0].validatorUnverifiableCurrent).toBe(true);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let a Validator-unverifiable marker downgrade other observation failures', () => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            validatorUnverifiable: {
+              schemaVersion: 1,
+              gitHead: 'f'.repeat(40),
+              acceptanceHash: acceptanceHash('US-001', PRD.userStories[0].acceptanceCriteria),
+            },
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
+
+      const report = collectStatusProduction(
+        ws,
+        unverifiableObservedStatusOptions(ws, 'evaluation-error'),
+      );
+      expect(report.status === 'ok' && report.storyValidationFailureReason).toBe(
+        'evaluation-error',
+      );
+      expect(renderStatusReport(report).exitCode).toBe(2);
+      expect(renderStatusJson(report).exitCode).toBe(2);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: 'HEAD changes',
+      markerHead: 'f'.repeat(40),
+      acceptanceCriteria: PRD.userStories[0].acceptanceCriteria,
+    },
+    {
+      label: 'acceptance criteria change',
+      markerHead: CURRENT_GIT_HEAD,
+      acceptanceCriteria: ['stale acceptance criterion'],
+    },
+  ])('does not reuse a stale Validator-unverifiable marker when $label', ({ markerHead, acceptanceCriteria }) => {
+    const ws = makeWorkspace();
+    try {
+      writeFileSync(join(ws, 'prd.json'), JSON.stringify(PRD));
+      writeFileSync(
+        join(ws, 'state.json'),
+        JSON.stringify({
+          'US-001': {
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            validatorUnverifiable: {
+              schemaVersion: 1,
+              gitHead: markerHead,
+              acceptanceHash: acceptanceHash('US-001', acceptanceCriteria),
+            },
+            notes: '',
+            retryCount: 0,
+            blocked: false,
+            escalated: false,
+          },
+        }),
+      );
+      const report = collectStatus(ws, { currentGitHead: CURRENT_GIT_HEAD });
+      expect(renderStatusReport(report).exitCode).toBe(1);
+      expect(renderStatusJson(report).exitCode).toBe(1);
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
@@ -1257,6 +1447,7 @@ describe('renderStatusJson', () => {
         retryCount: 2,
         blocked: false,
         escalated: false,
+        validatorUnverifiableCurrent: false,
       });
       expect(obj.summary).toEqual({ total: 3, passed: 1, blocked: 1 });
       expect(exitCode).toBe(3);
@@ -1317,6 +1508,7 @@ describe('renderStatusJson', () => {
         retryCount: 2,
         blocked: false,
         escalated: false,
+        validatorUnverifiableCurrent: false,
       });
       expect(obj.stories[1].blocked).toBe(true);
       expect(obj.summary).toEqual({ total: 2, passed: 0, blocked: 1 });

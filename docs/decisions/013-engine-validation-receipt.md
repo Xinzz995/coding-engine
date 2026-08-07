@@ -1,7 +1,7 @@
 ---
 title: 013-engine-validation-receipt
 status: active
-updated: 2026-07-22
+updated: 2026-08-07
 scope: root
 ---
 
@@ -45,8 +45,8 @@ builder 与 validator 共享 `state.json`：builder 完成时先写 `passes=true
   只禁止缺少当前结构化凭证的候选被算作通过或进入最终 Review；`passes=true` 可以跨轮保留并进入
   validation-only。仅在这种“凭证过期但实现候选已存在”的纯重验中，机械检查/TDD 明确不通过、
   确定的 TDD 政策违规或合法 Validator failed 才清除候选并沿用既有 retry、升级与 blocked 规则；
-  不可验证只撤销验收、保留候选且不增加 retry。普通 Builder 新候选仍沿用 ADR-009、ADR-017 的
-  现有异常回写语义。
+  不可验证只撤销验收、保留候选且不增加 retry。ADR-023 已把同一不可验证语义扩展到普通 Builder
+  新候选；Developer 自身异常仍沿用 ADR-009 的回写语义。
 - 版本随新增公开状态字段与展示语义升到 0.25.0。
 
 ## 后续修订
@@ -55,3 +55,4 @@ ADR-015 supersede 了“只凭正常退出和 state 前后值签发、暂不引�
 新 Validator 轮次必须绑定引擎 request，并由引擎消费结构化 claim 后写 verdict 状态。ADR-020
 进一步 supersede 裸 `passes && validated` 与 legacy 自动置绿的最终语义：正式通过还必须持有与当前
 HEAD 和当前 Story `acceptanceHash` 一致的结构化持久凭证。
+ADR-023 又统一了 Validator 不可验证结果：无论候选来自本轮还是跨轮，均保留候选、拒绝凭证并返回 5。

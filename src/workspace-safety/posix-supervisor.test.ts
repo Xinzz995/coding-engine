@@ -298,6 +298,328 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 20_000);
 
+  it('streams multi-MiB stdout and stderr through a slow consumer without loss or duplication', async () => {
+    const setupState = await setup();
+    const stdoutBytes = 3 * 1024 * 1024 + 17;
+    const stderrBytes = 2 * 1024 * 1024 + 31;
+    const observed = { stdout: [] as Buffer[], stderr: [] as Buffer[] };
+    const expectedStdout = Buffer.concat([
+      ...Array.from({ length: 384 }, (_, index) => Buffer.alloc(8192, index % 251)),
+      Buffer.alloc(17, 384 % 251),
+    ]);
+    const expectedStderr = Buffer.concat([
+      ...Array.from({ length: 256 }, (_, index) => Buffer.alloc(8192, (index + 73) % 251)),
+      Buffer.alloc(31, (256 + 73) % 251),
+    ]);
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(
+            [
+              'for(let i=0;i<384;i+=1)process.stdout.write(Buffer.alloc(8192,i%251));',
+              'process.stdout.write(Buffer.alloc(17,384%251));',
+              'for(let i=0;i<256;i+=1)process.stderr.write(Buffer.alloc(8192,(i+73)%251));',
+              'process.stderr.write(Buffer.alloc(31,(256+73)%251));',
+            ].join(''),
+            setupState.workspace,
+          ),
+          onOutput: async (stream, chunk) => {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            observed[stream].push(Buffer.from(chunk));
+          },
+          timeouts: { naturalDrainMs: 5000, termMs: 100, killMs: 5000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      terminationReason: null,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    });
+    expect(expectedStdout).toHaveLength(stdoutBytes);
+    expect(expectedStderr).toHaveLength(stderrBytes);
+    expect(Buffer.concat(observed.stdout)).toEqual(expectedStdout);
+    expect(Buffer.concat(observed.stderr)).toEqual(expectedStderr);
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 30_000);
+
+  it('does not install DRAINED until the slow output consumer releases its ACK', async () => {
+    const setupState = await setup();
+    let releaseOutput = (): void => undefined;
+    const outputBlocked = new Promise<void>((resolve) => {
+      releaseOutput = resolve;
+    });
+    let callbackStarted = false;
+    let rootResultObserved = false;
+    let operationSettled = false;
+
+    const running = runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target("process.stdout.write('waiting-for-ack')", setupState.workspace),
+          onOutput: async () => {
+            callbackStarted = true;
+            await outputBlocked;
+          },
+          timeouts: { naturalDrainMs: 2000, termMs: 100, killMs: 5000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+            onRootResult: () => {
+              rootResultObserved = true;
+            },
+          },
+        }),
+    ).finally(() => {
+      operationSettled = true;
+    });
+
+    await waitUntil(() => callbackStarted && rootResultObserved);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(operationSettled).toBe(false);
+    expect(existsSync(join(operationPath(setupState.workspace), DRAINED_RECEIPT_FILE))).toBe(false);
+
+    releaseOutput();
+    const outcome = await running;
+    groups.delete(outcome.containment.pgid);
+    expect(outcome.verdict).toBe('completed');
+    expect(outcome.stdout).toEqual(Buffer.alloc(0));
+    await setupState.session.close();
+  }, 20_000);
+
+  it('applies the fixed output-credit window back to a target blocked on a large write', async () => {
+    const setupState = await setup();
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-output-credit-'));
+    roots.push(controlRoot);
+    const writeCompleted = join(controlRoot, 'write-completed');
+    let releaseOutput = (): void => undefined;
+    const outputBlocked = new Promise<void>((resolve) => {
+      releaseOutput = resolve;
+    });
+    let callbackStarted = false;
+
+    const running = runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(
+            [
+              "const fs=require('node:fs');",
+              `process.stdout.write(Buffer.alloc(4*1024*1024,97),()=>fs.writeFileSync(${JSON.stringify(writeCompleted)},'done'));`,
+            ].join(''),
+            setupState.workspace,
+          ),
+          onOutput: async () => {
+            callbackStarted = true;
+            await outputBlocked;
+          },
+          timeouts: { naturalDrainMs: 2000, termMs: 100, killMs: 5000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    await waitUntil(() => callbackStarted);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(existsSync(writeCompleted)).toBe(false);
+
+    releaseOutput();
+    const outcome = await running;
+    groups.delete(outcome.containment.pgid);
+    expect(outcome.verdict).toBe('completed');
+    expect(readFileSync(writeCompleted, 'utf8')).toBe('done');
+    await setupState.session.close();
+  }, 30_000);
+
+  it('terminates with output-failure and drains after a streaming callback rejects', async () => {
+    const setupState = await setup();
+    let discardCalls = 0;
+    let callbackCalls = 0;
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(
+            'const chunk=Buffer.alloc(64*1024,97);for(let i=0;i<128;i+=1){process.stdout.write(chunk);process.stderr.write(chunk)}',
+            setupState.workspace,
+          ),
+          onOutput: async () => {
+            callbackCalls += 1;
+            throw new Error('slow consumer failed');
+          },
+          onOutputDiscard: () => {
+            discardCalls += 1;
+          },
+          timeouts: { naturalDrainMs: 500, termMs: 100, killMs: 5000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(callbackCalls).toBeGreaterThan(0);
+    expect(discardCalls).toBe(1);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'output-failure',
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      leftover: false,
+      receipt: { drainReason: 'output-failure' },
+    });
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 30_000);
+
+  it('lets a delayed output-failure win after root exit instead of reporting a leaked tree', async () => {
+    const setupState = await setup();
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target("process.stdout.write('late-output-failure')", setupState.workspace),
+          onOutput: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            throw new Error('consumer failed after root exit');
+          },
+          timeouts: { naturalDrainMs: 50, termMs: 100, killMs: 5000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'output-failure',
+      leftover: false,
+      receipt: { drainReason: 'output-failure' },
+    });
+    await setupState.session.close();
+  }, 20_000);
+
+  it('sends no late OUTPUT_ACK when cancellation discards an in-flight callback after root exit', async () => {
+    const setupState = await setup();
+    const controller = new AbortController();
+    let releaseOutput = (): void => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseOutput = resolve;
+    });
+    let callbackStarted = false;
+    let discardCalls = 0;
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target("process.stdout.write('blocked-after-root-exit')", setupState.workspace),
+          termination: { signal: controller.signal, reason: 'user-interrupt' },
+          onOutput: async () => {
+            callbackStarted = true;
+            await blocked;
+          },
+          onOutputDiscard: () => {
+            discardCalls += 1;
+            releaseOutput();
+          },
+          timeouts: { naturalDrainMs: 50, termMs: 100, killMs: 5000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+            onRootResult: async () => {
+              await waitUntil(() => callbackStarted, 2000);
+              controller.abort();
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(callbackStarted).toBe(true);
+    expect(discardCalls).toBe(1);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'user-interrupt',
+      leftover: false,
+      receipt: { drainReason: 'user-interrupt' },
+    });
+    await setupState.session.close();
+  }, 20_000);
+
+  it('releases a permanently backpressured output callback before timeout termination', async () => {
+    const setupState = await setup();
+    let releaseOutput = (): void => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseOutput = resolve;
+    });
+    let discardCalls = 0;
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(
+            "process.stdout.write('blocked');setInterval(()=>{},1000)",
+            setupState.workspace,
+          ),
+          commandTimeoutMs: 200,
+          onOutput: async () => blocked,
+          onOutputDiscard: () => {
+            discardCalls += 1;
+            releaseOutput();
+          },
+          timeouts: { naturalDrainMs: 100, termMs: 100, killMs: 5000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(discardCalls).toBe(1);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'timeout',
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+    });
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 20_000);
+
   it('accepts a bounded DATA contract whose canonical base64 exceeds the generic event limit', async () => {
     const setupState = await setup();
     const environment = Array.from({ length: 48 }, (_, index) => ({
@@ -344,7 +666,7 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 15_000);
 
-  it('fails closed and drains containment when aggregate output exceeds 16 MiB', async () => {
+  it('fails closed and drains containment when aggregate capture output exceeds 16 MiB', async () => {
     const setupState = await setup();
     let containment: ContainmentDescriptor | undefined;
     const bytesOverBudget = 16 * 1024 * 1024 + 1;

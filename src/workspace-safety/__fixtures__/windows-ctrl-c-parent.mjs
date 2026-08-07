@@ -249,7 +249,7 @@ async function main() {
   const receipt = JSON.parse(receiptBytes.toString('utf8'));
   if (
     receipt.drainReason !== 'user-interrupt' ||
-    receipt.proof !== 'windows-job-zero-and-pipes-eof-v1' ||
+    receipt.proof !== 'windows-job-zero-pipes-eof-output-settled-v2' ||
     drainedMessage.receiptDigest !== digest(receiptBytes) ||
     existsSync(targetSawCtrl)
   ) {
