@@ -327,6 +327,8 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(outerJobDriverScript).toContain('Add-Type -Path $resolvedAssembly');
     expect(ctrlParent).toContain("process.on('SIGINT'");
     expect(ctrlParent).toContain("reason: 'user-interrupt'");
+    expect(ctrlParent).toContain("await events.next('DRAINED', ['RESULT'])");
+    expect(ctrlParent).not.toContain("await events.next('RESULT')");
     expect(ctrlParent).toContain("const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe'");
     expect(ctrlParent).toContain('detached: true');
     expect(ctrlParent).toContain("new URL('./windows-ctrl-c-target.mjs', import.meta.url)");
