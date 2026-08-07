@@ -224,8 +224,13 @@ const LEGACY_PRD = {
 
 describe('collectStatus', () => {
   it('reports missing when the workspace directory does not exist', () => {
-    const report = collectStatus(join(tmpdir(), 'status-no-such-dir-xyz'));
-    expect(report.status).toBe('missing');
+    const parent = makeWorkspace();
+    try {
+      const report = collectStatus(join(parent, 'missing-workspace'));
+      expect(report.status).toBe('missing');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 
   it('reports missing when prd.json is absent in an existing workspace', () => {
