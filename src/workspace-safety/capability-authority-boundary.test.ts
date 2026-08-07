@@ -10,6 +10,7 @@ const TEST_SEAMS = new Set([
   'workspace-safety/mutation-authority-test-seam.ts',
   'workspace-safety/operation-authority-test-seam.ts',
   'workspace-safety/recovery-authority-test-seam.ts',
+  'workspace-safety/windows-identity-transport-test-seam.ts',
   'workspace-safety/workspace-authority-test-seam.ts',
 ]);
 
@@ -56,6 +57,29 @@ describe('operation and mutation capability boundary', () => {
         readFileSync(path, 'utf8'),
       ),
     );
+    expect(offenders).toEqual([]);
+  });
+
+  it('forbids production code from importing the Windows identity transport test seam', () => {
+    const root = fileURLToPath(new URL('../', import.meta.url));
+    const offenders = productionFiles(root).filter((path) =>
+      /(?:from\s+|import\s*\(\s*)['"][^'"]*windows-identity-transport-test-seam(?:\.js)?['"]/u.test(
+        readFileSync(path, 'utf8'),
+      ),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it('keeps the injectable Windows identity transport core inside its owning module', () => {
+    const root = fileURLToPath(new URL('../', import.meta.url));
+    const offenders = productionFiles(root).filter((path) => {
+      if (sourcePath(root, path) === 'workspace-safety/windows-identity-transport.ts') {
+        return false;
+      }
+      return /\b(?:readWindowsIdentitySnapshotControlled|WindowsIdentityTransportRuntime)\b/u.test(
+        readFileSync(path, 'utf8'),
+      );
+    });
     expect(offenders).toEqual([]);
   });
 

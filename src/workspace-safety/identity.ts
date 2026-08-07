@@ -20,7 +20,9 @@ export {
   resolveWindowsIdentityPowerShellLaunch,
   resolveWindowsPowerShellPath,
   WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
+  WINDOWS_IDENTITY_MAX_ATTEMPTS,
   WINDOWS_IDENTITY_SNAPSHOT_SCRIPT,
+  WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS,
   type WindowsIdentityPowerShellLaunch,
 } from './windows-identity-protocol.js';
 

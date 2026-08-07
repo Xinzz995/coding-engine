@@ -18,7 +18,7 @@ import { OPERATION_ID, OWNER_ID, genericContract } from './__fixtures__/baseline
 import { bootstrapWorkspace } from './bootstrap.js';
 import { readStableBootstrapSource } from './bootstrap-recovery.js';
 import { evaluateWorkspaceSafetyDisk } from './disk-evaluator.js';
-import { createIdentityProbe } from './identity.js';
+import { createIdentityProbe, WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS } from './identity.js';
 import { readReadyWorkspaceRecords } from './lease.js';
 import { PROTOCOL_FILE, PROTOCOL_ROOT_DIR, WORKSPACE_MARKER_FILE } from './types.js';
 import { bootstrapWorkspaceWithAuthority } from './workspace-authority-test-seam.js';
@@ -30,7 +30,7 @@ import {
 } from './windows-path-attributes.js';
 
 const roots: string[] = [];
-const WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS = 60_000;
+const WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS = 2 * WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS + 60_000;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });

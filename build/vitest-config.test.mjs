@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import ordinaryVitestConfig, {
+  ordinaryWindowsExcludedSuitePaths,
+  ordinaryWindowsIdentityTransportTestPath,
   ordinaryWindowsPathAttributesTransportAlias,
   ordinaryWindowsTestSetupFiles,
   ordinaryWindowsTestSetupPath,
@@ -56,6 +58,24 @@ describe('Vitest process-suite scheduling', () => {
       ordinaryWindowsTestSetupFiles(process.platform),
     );
     expect(nativeWindowsVitestConfig.test?.setupFiles ?? []).not.toContain(expected);
+  });
+
+  it('keeps the production transport retry matrix away from the ordinary Windows alias', () => {
+    expect(ordinaryWindowsExcludedSuitePaths('win32')).toContain(
+      ordinaryWindowsIdentityTransportTestPath,
+    );
+    expect(ordinaryWindowsExcludedSuitePaths('win32')).toContain(
+      'src/workspace-safety/windows-identity-transport.windows.test.ts',
+    );
+    expect(ordinaryWindowsExcludedSuitePaths('linux')).not.toContain(
+      ordinaryWindowsIdentityTransportTestPath,
+    );
+    expect(ordinaryWindowsExcludedSuitePaths('linux')).not.toContain(
+      'src/workspace-safety/windows-identity-transport.windows.test.ts',
+    );
+    expect(ordinaryVitestConfig.test?.exclude).toEqual(
+      ordinaryWindowsExcludedSuitePaths(process.platform),
+    );
   });
 });
 

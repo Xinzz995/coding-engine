@@ -33,6 +33,7 @@ function report(overrides = {}) {
 describe('Windows native proof report', () => {
   it('locks the exact native suites required for release evidence', () => {
     expect(REQUIRED_WINDOWS_NATIVE_SUITES).toEqual([
+      'windows-identity-transport.windows.test.ts',
       'windows-supervisor.test.ts',
       'windows-supervisor.crash.test.ts',
       'windows-supervisor-integration.test.ts',
@@ -83,7 +84,7 @@ describe('Windows native proof report', () => {
     ).toThrow(/did not report success/u);
 
     expect(() => combineWindowsNativeVitestReports(separate.slice(1))).toThrow(
-      /expected 7 reports/u,
+      /expected 8 reports/u,
     );
   });
 
@@ -146,8 +147,12 @@ describe('Windows native proof report', () => {
 
   it('prints bounded failing test details when the hosted native proof fails', () => {
     const failed = report({ success: false, numFailedTestSuites: 1, numFailedTests: 1 });
-    failed.testResults[0] = {
-      ...failed.testResults[0],
+    const failedIndex = failed.testResults.findIndex((entry) =>
+      entry.name.endsWith('windows-reparse-point.windows.test.ts'),
+    );
+    if (failedIndex < 0) throw new Error('reparse native suite fixture is missing');
+    failed.testResults[failedIndex] = {
+      ...failed.testResults[failedIndex],
       status: 'failed',
       assertionResults: [
         {
@@ -160,7 +165,7 @@ describe('Windows native proof report', () => {
     };
 
     const summary = summarizeFailedWindowsNativeVitestReport(failed);
-    expect(summary).toContain('windows-supervisor.test.ts');
+    expect(summary).toContain('windows-reparse-point.windows.test.ts');
     expect(summary).toContain('rejects a native reparse point');
     expect(summary).toContain('expected native rejection but received success');
     expect(summary).not.toContain('windows-supervisor.crash.test.ts');
@@ -218,7 +223,8 @@ describe('Windows native proof report', () => {
     );
     expect(source).toContain("record.externalBacking.provider !== 'file'");
     expect(source).toContain("record.externalBacking.algorithm !== 'lzx'");
-    expect(source).toContain('const WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS = 60_000');
+    expect(source).toContain('const WINDOWS_NATIVE_BOOTSTRAP_TEST_TIMEOUT_MS =');
+    expect(source).toContain('2 * WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS + 60_000');
     expect(source).not.toContain('WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT');
   });
 
@@ -266,6 +272,30 @@ describe('Windows native proof report', () => {
     expect(testIdentityTransport).not.toMatch(
       /powershell\.exe|Get-CimInstance|WINDOWS_IDENTITY_SNAPSHOT_SCRIPT|spawnSync/u,
     );
+  });
+
+  it('forces a real PowerShell timeout tuple before accepting one fresh full snapshot', () => {
+    const source = readFileSync(
+      'src/workspace-safety/windows-identity-transport.windows.test.ts',
+      'utf8',
+    );
+    expect(source).toContain('const NATIVE_TIMEOUT_MS = 10_000');
+    expect(source).toContain('CXWI_STAGE_V1 stage=${TIMEOUT_STAGE}');
+    expect(source).toContain(
+      'Get-CimInstance -ClassName Win32_OperatingSystem -Property LastBootUpTime | Out-Null',
+    );
+    expect(source).toContain('const result = spawnSync(command, fixtureArgs, {');
+    expect(source).toContain('const result = spawnSync(command, args, options)');
+    expect(source).toContain("code: 'ETIMEDOUT'");
+    expect(source).toContain('status: null');
+    expect(source).toContain('decoySnapshotVisible: true');
+    expect(source).toContain('returnedOnlyFreshSnapshot');
+    expect(source).toContain('warningCount += 1');
+    expect(source).toContain('warningWasSafe &&= facts.safe');
+    expect(source).toContain('warningStageWasBootRead &&= facts.stageWasBootRead');
+    expect(source).toContain('warningStageWasBootRead: true');
+    expect(source).toContain('warningExcludedDecoy &&= !message.includes(TIMEOUT_DECOY_HOST)');
+    expect(source).not.toContain('const warnings: string[]');
   });
 
   it('keeps ordinary Windows parent and spawned-fixture identities on one deterministic seam', () => {

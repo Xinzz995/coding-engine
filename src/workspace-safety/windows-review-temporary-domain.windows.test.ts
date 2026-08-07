@@ -22,12 +22,14 @@ import { runSafeReviewAxis } from '../review/runner.js';
 import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
 import { bootstrapWorkspace } from './bootstrap.js';
 import { runManagedWorkspaceProcess } from './coordinator.js';
+import { WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS } from './identity.js';
 import { acquireWorkspaceLease } from './lease.js';
 import { createWorkspaceSession } from './session.js';
 import { inspectWindowsPathAttributes } from './windows-path-attributes.js';
 
 const roots: string[] = [];
-const WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS = 120_000;
+const WINDOWS_REVIEW_WOF_TEST_TIMEOUT_MS = 120_000;
+const WINDOWS_REVIEW_MANAGED_TEST_TIMEOUT_MS = 2 * WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS + 120_000;
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -130,7 +132,7 @@ function compactWithWof(path: string): void {
       encoding: 'utf8',
       windowsHide: true,
       shell: false,
-      timeout: WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
+      timeout: WINDOWS_REVIEW_WOF_TEST_TIMEOUT_MS,
     },
   );
   if (result.error) throw result.error;
@@ -268,7 +270,7 @@ describe.skipIf(process.platform !== 'win32')(
         }
         if (failure !== undefined) throw failure;
       },
-      WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
+      WINDOWS_REVIEW_MANAGED_TEST_TIMEOUT_MS,
     );
 
     it(
@@ -303,7 +305,7 @@ describe.skipIf(process.platform !== 'win32')(
           protection: { status: 'unverifiable', reason: 'platform-unsupported' },
         });
       },
-      WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
+      WINDOWS_REVIEW_WOF_TEST_TIMEOUT_MS,
     );
 
     it(
@@ -339,7 +341,7 @@ describe.skipIf(process.platform !== 'win32')(
           protection: { status: 'unverifiable', reason: 'platform-unsupported' },
         });
       },
-      WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
+      WINDOWS_REVIEW_WOF_TEST_TIMEOUT_MS,
     );
 
     it(
@@ -363,7 +365,7 @@ describe.skipIf(process.platform !== 'win32')(
           protection: { status: 'unverifiable', reason: 'platform-unsupported' },
         });
       },
-      WINDOWS_REVIEW_TEMPORARY_TEST_TIMEOUT_MS,
+      WINDOWS_REVIEW_WOF_TEST_TIMEOUT_MS,
     );
 
     it('rejects a junction ancestor without reading or deleting its outside target', () => {

@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createIdentityProbe } from './identity.js';
+import { createIdentityProbe, WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS } from './identity.js';
 import {
   DRAINED_RECEIPT_FILE,
   PRESTART_ABORT_FILE,
@@ -29,6 +29,7 @@ import {
 const OWNER_ID = '00000000-0000-4000-8000-000000000010';
 const OPERATION_ID = '00000000-0000-4000-8000-000000000020';
 const roots: string[] = [];
+const WINDOWS_TEST_TIMEOUT_MS = WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS + 90_000;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -105,7 +106,7 @@ function rejectable(): {
 
 const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
 
-windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => {
+windowsOnly('Windows production operation executor', { timeout: WINDOWS_TEST_TIMEOUT_MS }, () => {
   it.each([
     ['completed', 0],
     ['root-failed', 7],
