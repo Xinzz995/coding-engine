@@ -3,6 +3,22 @@ import { win32 } from 'node:path';
 import { WorkspaceSafetyError } from './types.js';
 
 export const WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS = 60_000;
+export const WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS = 120_000;
+export const WINDOWS_IDENTITY_MAX_ATTEMPTS = 2;
+export const WINDOWS_IDENTITY_MAX_CAPTURE_BYTES = 16 * 1024;
+
+export const WINDOWS_IDENTITY_FAILURE_STAGES = [
+  'powershell-startup',
+  'process-read',
+  'boot-read',
+  'host-read',
+  'response-write',
+  'response-decode',
+  'response-parse',
+  'boot-validation',
+] as const;
+
+export type WindowsIdentityFailureStage = (typeof WINDOWS_IDENTITY_FAILURE_STAGES)[number];
 
 export interface WindowsIdentityPowerShellLaunch {
   readonly command: string;
@@ -52,11 +68,19 @@ export function resolveWindowsPowerShellPath(environment: NodeJS.ProcessEnv = pr
 
 export const WINDOWS_IDENTITY_SNAPSHOT_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
+  'function Write-CodingXIdentityStage([string]$stage) {',
+  '  $bytes = [Text.Encoding]::UTF8.GetBytes("CXWI_STAGE_V1 stage=$stage`n")',
+  '  $stream = [Console]::OpenStandardError()',
+  '  $stream.Write($bytes, 0, $bytes.Length)',
+  '  $stream.Flush()',
+  '}',
+  'Write-CodingXIdentityStage "powershell-startup"',
   '$targetProcessId = 0',
   '$rawProcessId = [Environment]::GetEnvironmentVariable("CODING_X_WINDOWS_IDENTITY_PID", "Process")',
   'if (-not [int]::TryParse($rawProcessId, [ref]$targetProcessId) -or $targetProcessId -le 0) { exit 6 }',
   '$processStatus = "missing"',
   '$processValue = $null',
+  'Write-CodingXIdentityStage "process-read"',
   '$target = Get-Process -Id $targetProcessId -ErrorAction SilentlyContinue',
   'if ($null -ne $target) {',
   '  try {',
@@ -64,8 +88,11 @@ export const WINDOWS_IDENTITY_SNAPSHOT_SCRIPT = [
   '    $processStatus = "found"',
   '  } catch { $processStatus = "unknown" }',
   '}',
+  'Write-CodingXIdentityStage "boot-read"',
   '$bootIdentity = (Get-CimInstance -ClassName Win32_OperatingSystem -Property LastBootUpTime).LastBootUpTime.ToUniversalTime().ToString("O")',
+  'Write-CodingXIdentityStage "host-read"',
   '$hostIdentity = [string](Get-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Cryptography").MachineGuid',
+  'Write-CodingXIdentityStage "response-write"',
   '[Console]::Out.Write((@{ processStatus = $processStatus; processValue = $processValue; bootIdentity = $bootIdentity; hostIdentity = $hostIdentity } | ConvertTo-Json -Compress))',
 ].join('\n');
 

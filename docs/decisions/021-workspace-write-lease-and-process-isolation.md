@@ -1,7 +1,7 @@
 ---
 title: 021-workspace-write-lease-and-process-isolation
 status: active
-updated: 2026-08-01
+updated: 2026-08-08
 scope: root
 ---
 
@@ -435,6 +435,15 @@ bootstrap 协议根的目录、以及任何 0.33 runtime 文件，一律 legacy�
 - Windows：process-only 热路径由摘要固定的原生检查器使用 `OpenProcess + GetProcessTimes`
   读取 creation FILETIME，并在读取前后确认进程仍存活；host/boot/current owner 组合快照仍使用
   系统 PowerShell/CIM，同时结合 Job/target/supervisor 状态。每个正式入口先取得一份完整组合快照；
+  该固定只读命令只有在第一次同时满足 `error.code === 'ETIMEDOUT'` 与 `status === null` 时，才允许
+  立即重新执行一次完整脚本。两次尝试
+  共享进入本次读取时建立的 120 秒单调绝对预算，每次最多 60 秒，第二次只能消费剩余时间；任一成功
+  仍须重新完成严格 JSON、host/boot/process 与 boot source 交叉校验。非超时 spawn error、非零退出、
+  不伴随精确 `ETIMEDOUT + status null` tuple 的 signal、畸形结果、来源矛盾、unknown 或第二次失败都不重试；真实 timeout 可以同时带 `SIGTERM`；传输最多各捕获 16 KiB stdout/stderr，
+  失败诊断只允许从 stderr 中识别固定版本、固定枚举的阶段标记，不回显原始 stderr，也不得包含
+  stdout、原始 MachineGuid/boot/process identity、完整命令或环境。第一次的部分结果始终丢弃，
+  不得拼接或降级；错误对象不得附原始底层 Error 作为 cause，防止 Node 检查时展开脚本、参数或其他
+  未经过白名单的字段；
   非 reboot-proof 的同一 current-process authority 内，host/boot 是随当前进程存活的固定锚点，每个
   权限写入和最终 rename 前仍由原生检查器重新读取当前 PID、source owner 或 recovery attempt owner
   的 creation FILETIME。内存 authority 及其缓存不落盘、不跨进程复用；已哈希的 host/boot 身份仍按
@@ -473,7 +482,14 @@ WofIsExternalFile 证明 `provider=file`、`algorithm=lzx`；原始 reparse bit 
 但 `paths-v1`、`workspace-tree-v1`、`safety-tree-v1` 和对应高层读取均由生产系统检查拒绝。fixture
 创建、WOF 查询、provider/algorithm 断言、拒绝断言失败或测试被跳过都使 required job 失败。非
 Windows 只能验证检查器分发与摘要，不能宣称完成这项行为证明。
-普通 Windows 全量单测允许通过仅测试可见的模块解析替身避免重复启动原生检查器，但启动真实
+普通 Windows 全量单测允许通过仅测试可见的模块解析替身避免重复启动原生检查器，因此不能用该 job
+证明生产 PowerShell/CIM 的 timeout 与重试。两次 timeout、永久错误不重试、共享预算耗尽和诊断去敏
+先由非 Windows 确定性单测直接覆盖生产控制逻辑；required standard-user native runner 另以真实系统
+PowerShell 和局部 10 秒测试 timeout 确定性证明 `ETIMEDOUT + status null + 固定 stage`，再原样执行第二次
+production command/args/options 并只采用完整新快照。该场景只证明真实 timeout→成功分支，不把注入的
+失败矩阵包装成真机证据，也不修改 production 60/120 秒边界。会读取完整组合身份的 required native
+测试，其外层 timeout 必须按实际读取次数乘 120 秒总预算后再加原场景余量；不读取组合身份的 suite
+不得机械放宽。启动真实
 supervisor 的专用子进程和 required native runner 都不安装替身，直接调用摘要固定且可复现构建的
 C# EXE 与 Windows 原生进程/路径 API；生产入口没有 transport/probe 或环境旁路。原生 runner、
 独立配置、固定 suite、辅助资产、可复现构建、进程身份和属性规则都由旧 policy guard 识别，不能

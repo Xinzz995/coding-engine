@@ -9,7 +9,9 @@ import {
   resolveWindowsIdentityPowerShellLaunch,
   resolveWindowsPowerShellPath,
   WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS,
+  WINDOWS_IDENTITY_MAX_ATTEMPTS,
   WINDOWS_IDENTITY_SNAPSHOT_SCRIPT,
+  WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS,
   type IdentityProbeAdapter,
 } from './identity.js';
 import { captureExactCurrentIdentityAuthorityWithAdapter } from './identity-authority-test-seam.js';
@@ -63,9 +65,19 @@ describe('platform identity probe', () => {
   it('gives Windows cold-start probes a bounded CI budget without weakening POSIX bounds', () => {
     expect(POSIX_IDENTITY_COMMAND_TIMEOUT_MS).toBe(5_000);
     expect(WINDOWS_IDENTITY_COMMAND_TIMEOUT_MS).toBe(60_000);
+    expect(WINDOWS_IDENTITY_MAX_ATTEMPTS).toBe(2);
+    expect(WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS).toBe(120_000);
+    expect(WINDOWS_IDENTITY_SNAPSHOT_SCRIPT).toContain(
+      'Write-CodingXIdentityStage "powershell-startup"',
+    );
     expect(WINDOWS_IDENTITY_SNAPSHOT_SCRIPT).toContain(
       'Get-CimInstance -ClassName Win32_OperatingSystem -Property LastBootUpTime',
     );
+    expect(
+      [...WINDOWS_IDENTITY_SNAPSHOT_SCRIPT.matchAll(/Write-CodingXIdentityStage "([a-z-]+)"/gu)].map(
+        (match) => match[1],
+      ),
+    ).toEqual(['powershell-startup', 'process-read', 'boot-read', 'host-read', 'response-write']);
   });
 
   it('resolves Windows PowerShell from the system directory without consulting PATH or cwd', () => {

@@ -5,6 +5,7 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const REQUIRED_WINDOWS_NATIVE_SUITES = [
+  'windows-identity-transport.windows.test.ts',
   'windows-supervisor.test.ts',
   'windows-supervisor.crash.test.ts',
   'windows-supervisor-integration.test.ts',

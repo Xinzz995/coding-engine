@@ -31,6 +31,14 @@ export function ordinaryWindowsTestSetupFiles(platform: NodeJS.Platform): string
 const windowsNativeSuitePaths = REQUIRED_WINDOWS_NATIVE_SUITES.map(
   (name) => `src/workspace-safety/${name}`,
 );
+export const ordinaryWindowsIdentityTransportTestPath =
+  'src/workspace-safety/windows-identity-transport.test.ts';
+
+export function ordinaryWindowsExcludedSuitePaths(platform: NodeJS.Platform): string[] {
+  return platform === 'win32'
+    ? [...windowsNativeSuitePaths, ordinaryWindowsIdentityTransportTestPath]
+    : ['src/workspace-safety/windows-reparse-point.windows.test.ts'];
+}
 
 export default defineConfig({
   resolve: {
@@ -44,10 +52,7 @@ export default defineConfig({
     // These real process-tree suites run once in the stronger, serial standard-user proof.
     // Ordinary Windows matrix jobs still run every other test, but must not duplicate the same
     // native processes in parallel CI jobs. The reparse suite always needs the native config.
-    exclude:
-      process.platform === 'win32'
-        ? windowsNativeSuitePaths
-        : ['src/workspace-safety/windows-reparse-point.windows.test.ts'],
+    exclude: ordinaryWindowsExcludedSuitePaths(process.platform),
     environment: 'node',
     setupFiles: ordinaryWindowsTestSetupFiles(process.platform),
     // 安全回归会启动大量真实进程树、临时 Git 仓库和本机检查器；按文件并行会争抢

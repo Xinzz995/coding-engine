@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离设计
 status: active
-updated: 2026-08-01
+updated: 2026-08-08
 scope: root
 ---
 
@@ -857,6 +857,15 @@ parent IPC 后终止 Job、
 - Windows：process-only 热路径通过固定摘要的原生检查器读取 GetProcessTimes creation FILETIME，
   前后确认进程仍存活；host、boot 与当前 owner 的组合快照仍通过系统 PowerShell/CIM 获取，
   reboot proof 使用 `Win32_OperatingSystem.LastBootUpTime` 与 `GetTickCount64` 推导值交叉核对。
+  固定组合快照命令只有在第一次同时满足 `error.code === 'ETIMEDOUT'` 与 `status === null` 时才完整
+  重试一次；进入读取时创建一份 120 秒单调
+  绝对预算，每次最多 60 秒，第二次只消费剩余预算。第一次的 stdout 与中间状态全部丢弃，第二次仍须
+  重新通过完整 parse 与来源交叉核对；非超时 spawn error、非零退出、不伴随精确
+  `ETIMEDOUT + status null` tuple 的 signal、畸形/矛盾结果、unknown
+  和第二次失败都不重试。传输最多各捕获 16 KiB stdout/stderr；诊断只保留有界错误类别、次数、预算、
+  error code/status/signal，以及从 stderr 中识别出的固定版本、固定枚举阶段标记，不回显原始 stderr，
+  也不记录含原始身份的 stdout、完整命令或环境；真实 timeout 可以同时带 `SIGTERM`，只以精确 tuple
+  裁决；错误对象不得附原始底层 Error 作为 cause，防止检查时展开脚本、参数或其他非白名单字段；
   非 reboot-proof 的同一 Windows current-process authority 只读取一次组合快照，之后每个权限边界只
   复用该进程不可能跨重启继续存活的 host/boot 锚点，并用原生检查器重新读取 FILETIME；不得退回
   pid-only、PowerShell `Get-Process` 或失败后的降级路径。reboot-proof coordinator 仍按其独立合同
@@ -1074,48 +1083,50 @@ recovery 仍在。
 
 所有场景用 IPC/事件 barrier，不用固定 sleep 猜窗口。
 
-| 场景                                           |             Linux |             macOS |               Windows |
-| ---------------------------------------------- | ----------------: | ----------------: | --------------------: |
-| prepared/bound/DATA 各窗口 parent crash        |              真机 |              真机 |                  真机 |
-| prepared/bound setup 失败或首中断原子 abort    |    barrier + 真机 |    barrier + 真机 |        barrier + 真机 |
-| DATA 后、armed 前零 receipt 恢复               |              真机 |              真机 |              Job 真机 |
-| DATA 与 START 分离、重复/错 ID 拒绝            |       真机 + 单测 |       真机 + 单测 |           真机 + 单测 |
-| armed 后 START/TERMINATE 两种先后顺序          |       真机 + 单测 |       真机 + 单测 |           真机 + 单测 |
-| TERM-first 迟到 START、重复 TERM 首因冻结      |       真机 + 单测 |       真机 + 单测 |           真机 + 单测 |
-| 终止路径无 STARTED/RESULT 仍完成平台证明       |              真机 |              真机 |                  真机 |
-| STARTED/快速退出/receipt 任意交错              |      barrier 单测 |      barrier 单测 |      Job barrier 真机 |
-| child 越界后 parent hard kill 再恢复           |              真机 |              真机 |                  真机 |
-| 合法 delta 后 parent kill→recover ready        |              真机 |              真机 |                  真机 |
-| safety/owner 改写与 receipt 摘要冲突           |              真机 |              真机 |                  真机 |
-| root exit 0、grandchild 延迟写                 |              真机 |              真机 |              Job 真机 |
-| timeout 顽固 child/grandchild                  |              PGID |              PGID |                   Job |
-| parent SIGINT / terminal Ctrl+C                |          真机 130 |          真机 130 | CTRL_C_EVENT 真机 130 |
-| parent SIGTERM                                 |          真机 143 |          真机 143 |                不适用 |
-| Windows process.kill(SIGTERM)/TerminateProcess |            不适用 |            不适用 |       hard-crash 真机 |
-| 用户中断时 supervisor 存活至 receipt           |              真机 |              真机 |                  真机 |
-| parent hard kill                               |              真机 |              真机 |                  真机 |
-| supervisor hard kill、armed 无 receipt         | 终态/新 workspace | 终态/新 workspace |     终态/新 workspace |
-| termination adapter 失败                       |              注入 |              注入 |  Query/Terminate 注入 |
-| PID reuse/identity unknown                     |              注入 |      同秒 unknown |         FILETIME 注入 |
-| normal acquire vs recovery barrier             |            两进程 |            两进程 |                两进程 |
-| first workspace 双初始化                       |            两进程 |            两进程 |                两进程 |
-| bootstrap staging/root/marker/release crash    |    barrier 两进程 |    barrier 两进程 |        barrier 两进程 |
-| bootstrap owner dead、marker 缺失恢复          |            两进程 |            两进程 |                两进程 |
-| lease staging/install/handle-return crash      |    barrier 两进程 |    barrier 两进程 |        barrier 两进程 |
-| ready workspace 重复 init 零写                 |              真机 |              真机 |                  真机 |
-| 0.33.3 ready/active run 与无锁 report          |          冻结真包 |          冻结真包 |              冻结真包 |
-| 双 resume 与每 phase crash                     |            两进程 |            两进程 |                两进程 |
-| manifest 写后、finalizing 写前 crash           |    barrier 两进程 |    barrier 两进程 |        barrier 两进程 |
-| finalizing 后接管 lease 再 rename              |    barrier 两进程 |    barrier 两进程 |        barrier 两进程 |
-| committed 后直接移动完整 active lease          |     真文件 + 真机 |     真文件 + 真机 |         真文件 + 真机 |
-| in-flight writer vs close/release              |    barrier 两进程 |    barrier 两进程 |        barrier 两进程 |
-| release 后旧 callback 与新 owner               |    barrier 两进程 |    barrier 两进程 |        barrier 两进程 |
-| mutation 每 phase/mid-copy/二次 crash          |     真文件 + 真机 |     真文件 + 真机 |         真文件 + 真机 |
-| recovery committed/finalizing 各窗口中断       |    barrier + 真机 |    barrier + 真机 |        barrier + 真机 |
-| owner boot identity 同机重启恢复               |   adapter fixture |   adapter fixture |       adapter fixture |
-| reboot 仅解除合格 containment quarantine       |   adapter fixture |   adapter fixture |       adapter fixture |
-| reboot 不补 armed receipt/不越过 integrity     |   adapter fixture |   adapter fixture |       adapter fixture |
-| 未选择的普通 secret canary 不落安全元数据      |              真机 |              真机 |                  真机 |
+| 场景                                           |             Linux |             macOS |                Windows |
+| ---------------------------------------------- | ----------------: | ----------------: | ---------------------: |
+| prepared/bound/DATA 各窗口 parent crash        |              真机 |              真机 |                   真机 |
+| prepared/bound setup 失败或首中断原子 abort    |    barrier + 真机 |    barrier + 真机 |         barrier + 真机 |
+| DATA 后、armed 前零 receipt 恢复               |              真机 |              真机 |               Job 真机 |
+| DATA 与 START 分离、重复/错 ID 拒绝            |       真机 + 单测 |       真机 + 单测 |            真机 + 单测 |
+| armed 后 START/TERMINATE 两种先后顺序          |       真机 + 单测 |       真机 + 单测 |            真机 + 单测 |
+| TERM-first 迟到 START、重复 TERM 首因冻结      |       真机 + 单测 |       真机 + 单测 |            真机 + 单测 |
+| 终止路径无 STARTED/RESULT 仍完成平台证明       |              真机 |              真机 |                   真机 |
+| STARTED/快速退出/receipt 任意交错              |      barrier 单测 |      barrier 单测 |       Job barrier 真机 |
+| child 越界后 parent hard kill 再恢复           |              真机 |              真机 |                   真机 |
+| 合法 delta 后 parent kill→recover ready        |              真机 |              真机 |                   真机 |
+| safety/owner 改写与 receipt 摘要冲突           |              真机 |              真机 |                   真机 |
+| root exit 0、grandchild 延迟写                 |              真机 |              真机 |               Job 真机 |
+| timeout 顽固 child/grandchild                  |              PGID |              PGID |                    Job |
+| parent SIGINT / terminal Ctrl+C                |          真机 130 |          真机 130 |  CTRL_C_EVENT 真机 130 |
+| parent SIGTERM                                 |          真机 143 |          真机 143 |                 不适用 |
+| Windows process.kill(SIGTERM)/TerminateProcess |            不适用 |            不适用 |        hard-crash 真机 |
+| 用户中断时 supervisor 存活至 receipt           |              真机 |              真机 |                   真机 |
+| parent hard kill                               |              真机 |              真机 |                   真机 |
+| supervisor hard kill、armed 无 receipt         | 终态/新 workspace | 终态/新 workspace |      终态/新 workspace |
+| termination adapter 失败                       |              注入 |              注入 |   Query/Terminate 注入 |
+| PID reuse/identity unknown                     |              注入 |      同秒 unknown |          FILETIME 注入 |
+| Windows 组合身份真实 timeout→完整成功          |            不适用 |            不适用 | hosted PowerShell 真机 |
+| Windows 组合身份耗尽/永久错误/预算/去敏矩阵    |  生产控制逻辑注入 |  生产控制逻辑注入 |       生产控制逻辑注入 |
+| normal acquire vs recovery barrier             |            两进程 |            两进程 |                 两进程 |
+| first workspace 双初始化                       |            两进程 |            两进程 |                 两进程 |
+| bootstrap staging/root/marker/release crash    |    barrier 两进程 |    barrier 两进程 |         barrier 两进程 |
+| bootstrap owner dead、marker 缺失恢复          |            两进程 |            两进程 |                 两进程 |
+| lease staging/install/handle-return crash      |    barrier 两进程 |    barrier 两进程 |         barrier 两进程 |
+| ready workspace 重复 init 零写                 |              真机 |              真机 |                   真机 |
+| 0.33.3 ready/active run 与无锁 report          |          冻结真包 |          冻结真包 |               冻结真包 |
+| 双 resume 与每 phase crash                     |            两进程 |            两进程 |                 两进程 |
+| manifest 写后、finalizing 写前 crash           |    barrier 两进程 |    barrier 两进程 |         barrier 两进程 |
+| finalizing 后接管 lease 再 rename              |    barrier 两进程 |    barrier 两进程 |         barrier 两进程 |
+| committed 后直接移动完整 active lease          |     真文件 + 真机 |     真文件 + 真机 |          真文件 + 真机 |
+| in-flight writer vs close/release              |    barrier 两进程 |    barrier 两进程 |         barrier 两进程 |
+| release 后旧 callback 与新 owner               |    barrier 两进程 |    barrier 两进程 |         barrier 两进程 |
+| mutation 每 phase/mid-copy/二次 crash          |     真文件 + 真机 |     真文件 + 真机 |          真文件 + 真机 |
+| recovery committed/finalizing 各窗口中断       |    barrier + 真机 |    barrier + 真机 |         barrier + 真机 |
+| owner boot identity 同机重启恢复               |   adapter fixture |   adapter fixture |        adapter fixture |
+| reboot 仅解除合格 containment quarantine       |   adapter fixture |   adapter fixture |        adapter fixture |
+| reboot 不补 armed receipt/不越过 integrity     |   adapter fixture |   adapter fixture |        adapter fixture |
+| 未选择的普通 secret canary 不落安全元数据      |              真机 |              真机 |                   真机 |
 
 Windows 另测 Node 22 与当前 Node、普通用户、嵌套外层 Job、不兼容 Job、固定 EXE 缺失/损坏/摘要错误、
 确定性重建与逐字节比较、breakaway 尝试、普通项目命令的 `.cmd` shim、Unicode/空参数、
@@ -1153,6 +1164,19 @@ alias、setup 或环境旁路的固定配置，将 import 固定回生产 transp
 原生 API，并以 WOF 的 FILE/LZX 结果、junction、真实进程身份和普通用户断言证明没有走 test
 transport。production API 不接收 transport/probe，也不读取测试旁路环境变量；配置、runner、固定
 suite、辅助 EXE 的可复现构建、进程身份和属性规则都属于旧 policy 保护范围。
+
+生产组合快照的 retry/deadline 控制逻辑另由非 Windows 单测通过仅测试模块可导入的 controlled seam
+注入系统命令与单调时间，确定性覆盖第一次 timeout 后第二次完整成功、两次 timeout 耗尽、永久错误
+不重试、共享 120 秒预算、无效单调时钟、严格 UTF-8、16 KiB 捕获边界和诊断去敏；production 调用者
+不能导入该 seam，公开入口也不接收 runtime。该注入结果只证明控制逻辑。standard-user native job 的
+固定 `windows-identity-transport.windows.test.ts` 另以真实系统 PowerShell 产生 10 秒局部测试 timeout，
+验证 `ETIMEDOUT + status null + 固定 stage` 后第二次原样执行 production command/args/options，并只采用
+完整新快照；它证明真实 timeout→成功分支，但不把其余注入矩阵宣称为真机行为，也不改变 production
+60/120 秒边界或 25 分钟原生总预算。会读取完整组合身份的 required native 测试外层 timeout 按实际
+读取次数乘 120 秒总预算后再加原场景余量；不读取组合身份的 suite 不机械放宽。Windows Node 22
+在完整普通测试后单独执行且不加载 Vitest alias 的
+`test:legacy-compat`，再与该 required standard-user native job 共同证明真实 production transport。不得为制造
+单测绿色而给 production API 增加环境旁路、可注入 transport 或跨入口缓存。
 
 POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代码、launcher 提前退出、pgid
 仍有成员、group probe unknown 和 START 后 parent 立即 kill。真实测试只证明普通进程继承合同；
