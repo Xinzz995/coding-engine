@@ -136,6 +136,7 @@ export class EventReader {
   readonly outputBytes = { stdout: 0, stderr: 0 };
   readonly outputTail = { stdout: '', stderr: '' };
   #iterator: AsyncIterator<string>;
+  #nextOutputSequence = 1;
 
   constructor(
     readonly child: ChildProcessWithoutNullStreams,
@@ -176,9 +177,32 @@ export class EventReader {
       if (event.type === 'FAILURE') throw new Error(`supervisor failure: ${String(event.message)}`);
       if (event.type === 'OUTPUT' && (event.stream === 'stdout' || event.stream === 'stderr')) {
         const output = Buffer.from(String(event.data), 'base64');
+        if (
+          event.operationId !== OPERATION_ID ||
+          event.sequence !== this.#nextOutputSequence ||
+          event.bytes !== output.length
+        ) {
+          throw new Error('supervisor emitted an invalid OUTPUT binding');
+        }
+        this.#nextOutputSequence += 1;
         this.outputBytes[event.stream] += output.length;
         this.outputTail[event.stream] =
           `${this.outputTail[event.stream]}${output.toString('utf8')}`.slice(-8_192);
+        await new Promise<void>((resolve, reject) => {
+          this.child.stdin.write(
+            `${JSON.stringify({
+              schemaVersion: 1,
+              type: 'OUTPUT_ACK',
+              operationId: event.operationId,
+              sequence: event.sequence,
+              bytes: event.bytes,
+            })}\n`,
+            (error) => {
+              if (error) reject(error);
+              else resolve();
+            },
+          );
+        });
       }
       if (event.type === expected) return event;
     }
