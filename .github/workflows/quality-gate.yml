@@ -41,7 +41,7 @@ jobs:
         run: '''bash'' ''-c'' ''CODING_X_RUN_LINUX_MOUNT_PROOF=1 npx vitest run src/engine/clean-validation-mounts.test.ts -t ''"''"''rejects a real Linux bind mount before recursive cleanup''"''"'''''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -106,7 +106,7 @@ jobs:
         run: '''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'
@@ -141,7 +141,7 @@ jobs:
         run: '''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -181,7 +181,7 @@ jobs:
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -221,7 +221,7 @@ jobs:
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'

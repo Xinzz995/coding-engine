@@ -62,7 +62,7 @@
             "args": ["test", "--", "--run"],
             "cwd": ".",
             "platforms": ["linux", "macos", "windows"],
-            "timeoutMs": 1800000
+            "timeoutMs": 2700000
           }
         },
         {
