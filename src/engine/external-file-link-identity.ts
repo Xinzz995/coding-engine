@@ -286,7 +286,7 @@ export interface ManagedExternalFileLinkSnapshotOptions {
   readonly cwd: string;
   readonly termination?: {
     readonly signal: AbortSignal;
-    readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+    readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
   };
   /** @internal 仅用于证明阻塞 reader 受统一期限约束；生产调用不得提供。 */
   readonly readerProgramForTests?: string;

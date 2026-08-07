@@ -100,6 +100,26 @@ namespace CodingX.WorkspaceSafety
             if (request.Error != null) throw new SafetyException("protocol send failed");
         }
 
+        internal static bool SendOutput(Dictionary<string, object> message)
+        {
+            if (!connected) return false;
+            WriteRequest request = new WriteRequest { Line = StrictJson.Serialize(message) };
+            while (connected && !Requests.TryAdd(request, 25)) { }
+            if (!connected)
+            {
+                request.Cancelled = true;
+                return false;
+            }
+            while (connected && !request.Completed.Wait(25)) { }
+            if (!connected)
+            {
+                request.Cancelled = true;
+                return false;
+            }
+            if (request.Error != null) throw new SafetyException("protocol send failed");
+            return true;
+        }
+
         private static void WriteLoop()
         {
             foreach (WriteRequest request in Requests.GetConsumingEnumerable())

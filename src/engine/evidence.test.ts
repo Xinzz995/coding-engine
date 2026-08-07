@@ -2,7 +2,13 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { appendEvidence, readEvidence, EVIDENCE_FILE, type EvidenceRecord } from './evidence.js';
+import {
+  appendEvidence,
+  clipEvidenceDiagnostic,
+  readEvidence,
+  EVIDENCE_FILE,
+  type EvidenceRecord,
+} from './evidence.js';
 
 let cleanup: Array<() => void> = [];
 afterEach(() => {
@@ -306,6 +312,21 @@ describe('readEvidence 容错', () => {
     const result = readEvidence(dir);
     expect(result.skippedLines).toBe(4);
     expect(result.records).toHaveLength(2);
+  });
+
+  it('按 Unicode 字符而不是 UTF-16 单元截取诊断，不切断代理对', () => {
+    const clipped = clipEvidenceDiagnostic(`prefix-${'🙂'.repeat(2000)}终`);
+    expect(Array.from(clipped)).toHaveLength(2000);
+    expect(clipped).toBe(`${'🙂'.repeat(1999)}终`);
+    expect(clipped).not.toContain('�');
+
+    const dir = ws();
+    writeFileSync(
+      join(dir, EVIDENCE_FILE),
+      `${JSON.stringify({ ...gateRun, diagnosticTail: '🙂'.repeat(2000) })}\n` +
+        `${JSON.stringify({ ...gateRun, diagnosticTail: '🙂'.repeat(2001) })}\n`,
+    );
+    expect(readEvidence(dir)).toMatchObject({ skippedLines: 1, records: [{ type: 'gate-run' }] });
   });
 });
 
@@ -908,7 +929,22 @@ describe('Agent 调用凭证', () => {
     expect(readEvidence(dir)).toEqual({ records: [iteration], skippedLines: 0 });
   });
 
-  it('拒绝负耗时、超限诊断、未运行侧凭证和成功结局诊断', () => {
+  it('保留输出通道失败的机械终止原因', () => {
+    const dir = ws();
+    const iteration: EvidenceRecord = {
+      ...base,
+      builderInvocation: {
+        durationMs: 812,
+        exitCode: null,
+        terminationReason: 'output-failure',
+        diagnosticTail: 'builder output before transport failure',
+      },
+    };
+    appendEvidence(dir, iteration);
+    expect(readEvidence(dir)).toEqual({ records: [iteration], skippedLines: 0 });
+  });
+
+  it('拒绝负耗时、超限诊断、错误终止原因、未运行侧凭证和成功结局诊断', () => {
     const dir = ws();
     writeFileSync(
       join(dir, EVIDENCE_FILE),
@@ -926,10 +962,32 @@ describe('Agent 调用凭证', () => {
         },
         { ...base, builderOutcome: 'completed', builderInvocation: { durationMs: 1, exitCode: 1 } },
         { ...base, builderOutcome: 'timeout', builderInvocation: { durationMs: 1, exitCode: 1 } },
+        {
+          ...base,
+          builderInvocation: { durationMs: 1, exitCode: null, terminationReason: 'unknown' },
+        },
+        {
+          ...base,
+          builderOutcome: 'completed',
+          builderInvocation: { durationMs: 1, exitCode: 0, terminationReason: 'output-failure' },
+        },
+        {
+          ...base,
+          builderOutcome: 'timeout',
+          builderInvocation: { durationMs: 1, exitCode: null, terminationReason: 'output-failure' },
+        },
+        {
+          ...base,
+          builderInvocation: { durationMs: 1, exitCode: 137, terminationReason: 'output-failure' },
+        },
+        {
+          ...base,
+          builderInvocation: { durationMs: 1, exitCode: 1, terminationReason: 'user-interrupt' },
+        },
       ]
         .map((value) => JSON.stringify(value))
         .join('\n') + '\n',
     );
-    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 6 });
+    expect(readEvidence(dir)).toEqual({ records: [], skippedLines: 11 });
   });
 });

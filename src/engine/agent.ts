@@ -1,6 +1,7 @@
 import { accessSync, constants, realpathSync } from 'node:fs';
 import { delimiter, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { EVIDENCE_DIAGNOSTIC_CHARS } from './evidence.js';
+import type { Writable } from 'node:stream';
+import { clipEvidenceDiagnostic } from './evidence.js';
 import { createRunnerInvocation } from '../review/runner-invocation.js';
 import { confirmTemporaryUsesAfterSettledProcessFailure } from '../review/managed-temporary-use.js';
 import {
@@ -211,7 +212,7 @@ export interface RunResult {
   exitCode: number | null;
   /** 从 spawn 前到 runner stdio 关闭的墙钟耗时；超时路径含平台受管进程集合终止等待。 */
   durationMs: number;
-  /** 受控进程完成收口后转发 stdout/stderr，并保留有界合并尾部。 */
+  /** 运行期间实时转发 stdout/stderr；安全收口后只返回有界合并尾部，不再重放。 */
   outputTail: string;
   /** 根进程成功/失败后仍有后代；本轮结果必须丢弃。 */
   processTreeNotEmpty?: boolean;
@@ -262,13 +263,15 @@ export async function runAgent(opts: {
   inheritProcessEnvironment?: boolean;
   /** Validator clean checkout rejects a Runner executable resolved from the developer tree. */
   forbiddenExecutableRoot?: string;
+  /** @internal 流式输出目标；生产缺省使用当前进程 stdout/stderr。 */
+  output?: { readonly stdout: Writable; readonly stderr: Writable };
   /** 所有 agent/reviewer 子进程都必须绑定当前 workspace owner domain。 */
   managed: {
     readonly session: WorkspaceSession;
     readonly operation: OperationDelegationScope;
     readonly termination?: {
       readonly signal: AbortSignal;
-      readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+      readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
     };
   };
 }): Promise<RunResult> {
@@ -300,7 +303,7 @@ export async function runAgent(opts: {
       timedOut: false,
       exitCode: 1,
       durationMs: 0,
-      outputTail: message.slice(-EVIDENCE_DIAGNOSTIC_CHARS),
+      outputTail: clipEvidenceDiagnostic(message),
       processTreeNotEmpty: false,
       terminationReason: null,
     };
@@ -342,6 +345,11 @@ export async function runAgent(opts: {
       environment: environmentEntries(environment),
       timeoutMs: opts.timeoutMs,
       termination: opts.managed.termination,
+      output: {
+        mode: 'stream',
+        stdout: opts.output?.stdout ?? process.stdout,
+        stderr: opts.output?.stderr ?? process.stderr,
+      },
     });
     if (result.processTreeNotEmpty) {
       throw new WorkspaceSafetyError(
@@ -367,17 +375,12 @@ export async function runAgent(opts: {
   if (failure !== undefined) throw new Error('Agent Runner 返回了非 Error 失败');
   if (result === undefined) throw new Error('Agent Runner 未返回受管进程结果');
 
-  process.stdout.write(result.stdout);
-  process.stderr.write(result.stderr);
-  const outputTail = Buffer.concat([result.stdout, result.stderr])
-    .toString('utf8')
-    .slice(-EVIDENCE_DIAGNOSTIC_CHARS);
   return {
     timedOut: result.timedOut,
-    exitCode: result.processTreeNotEmpty ? 1 : result.exitCode,
+    exitCode: result.processTreeNotEmpty ? 1 : result.outputFailure ? null : result.exitCode,
     durationMs: result.durationMs,
-    outputTail,
+    outputTail: result.outputTail ?? '',
     processTreeNotEmpty: result.processTreeNotEmpty,
-    terminationReason: result.terminationReason,
+    terminationReason: result.outputFailure ? 'output-failure' : result.terminationReason,
   };
 }

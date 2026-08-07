@@ -3,6 +3,7 @@ import { renderReportHtml, escapeHtml, renderMarkdownLite } from './render.js';
 import type { ReportData } from './report.js';
 import type { EvidenceRecord } from '../engine/evidence.js';
 import type { ModelsConfig } from '../engine/prd.js';
+import { acceptanceHash } from '../contracts/validation-contract.js';
 
 function withModelsConfig(): ModelsConfig {
   return {
@@ -123,6 +124,7 @@ describe('renderReportHtml', () => {
     expect(html).toContain('proj · 验证报告');
     expect(html).toContain('2026-07-08 12:34');
     expect(html).toContain('.workspace');
+    expect(html).toContain('不自证写入后 workspace owner 已安全释放');
   });
 
   it('prd 缺 project/branchName 等必填字段时不抛，仍输出报告骨架（tryReadPrd 无逐字段守卫的脏数据防御）', () => {
@@ -781,6 +783,21 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).not.toContain('<script>Account overdue</script>');
   });
 
+  it('Agent 调用凭证单独展示输出通道终止原因', () => {
+    const html = renderReportHtml(data(ev([{
+      type: 'iteration', source: 'engine', at: '2026-07-22T10:40:23.145Z',
+      iteration: 1, storyId: 'US-001', builderRan: true, builderModel: null,
+      validatorRan: false, validatorModel: null, skippedValidator: false, agentBlocked: false,
+      builderOutcome: 'error',
+      builderInvocation: {
+        durationMs: 812, exitCode: null, terminationReason: 'output-failure',
+        diagnosticTail: 'builder output before sink failure',
+      },
+    }])));
+    expect(html).toContain('0.8s · exit unavailable · reason output-failure');
+    expect(html).toContain('builder output before sink failure');
+  });
+
   it('validator 打回诊断进入时间线且按纯文本转义', () => {
     const html = renderReportHtml(data(ev([{
       type: 'iteration', source: 'engine', at: '2026-07-08T06:00:00.000Z',
@@ -821,6 +838,8 @@ describe('renderReportHtml evidence 增强', () => {
 
     expect(html).toContain('Validator 结构化声明');
     expect(html).toContain('source=validator');
+    expect(html).toContain('是否最终采用');
+    expect(html).toContain('同轮时间线、当前提交与验收凭证');
     expect(html).toContain('不是安全签名或 CI 证明');
     expect(html).toContain('❌ AC 1');
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
@@ -841,6 +860,30 @@ describe('renderReportHtml evidence 增强', () => {
     expect(html).toContain('待引擎验收');
     expect(html).toContain('进行中：0/1 通过');
     expect(html).not.toContain('全部通过 1/1');
+  });
+
+  it('明确显示仍绑定当前提交的 Validator 不可验证状态', () => {
+    const base = data();
+    const currentHead = base.storyValidation.gitHead!;
+    const target = base.stories[0];
+    const html = renderReportHtml(
+      data({
+        stories: [
+          {
+            ...target,
+            validated: false,
+            validatorUnverifiable: {
+              schemaVersion: 1,
+              gitHead: currentHead,
+              acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
+            },
+          },
+        ],
+      }),
+    );
+    expect(html).toContain('Validator 无法可靠验证：US-001');
+    expect(html).toContain('Validator 无法验证');
+    expect(html).not.toContain('待引擎验收');
   });
 
   it('blocked 优先于矛盾的 passes 与 validated 组合', () => {

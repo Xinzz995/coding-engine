@@ -143,6 +143,7 @@ describe('parent WorkspaceWriter entrypoints', () => {
         passes: false,
         validated: false,
         validationReceipt: null,
+        validatorUnverifiable: null,
         notes: '',
         retryCount: 0,
         blocked: false,

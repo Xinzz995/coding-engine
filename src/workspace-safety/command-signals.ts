@@ -10,7 +10,7 @@ interface SignalSource {
 export interface CommandSignalController {
   readonly termination: {
     readonly signal: AbortSignal;
-    readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+    readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
   };
   readonly requestedSignal: SupportedCommandSignal | null;
   readonly exitCode: 130 | 143 | null;

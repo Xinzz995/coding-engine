@@ -1,14 +1,26 @@
 import {
+  isAcceptanceHash,
+  isGitHead,
   parseValidationReceipt,
   VALIDATION_RECEIPT_SCHEMA_VERSION,
   type ContractParseResult,
   type ValidationReceipt,
 } from './validation-contract.js';
 
+export const VALIDATOR_UNVERIFIABLE_SCHEMA_VERSION = 1 as const;
+
+export interface ValidatorUnverifiableMarker {
+  schemaVersion: typeof VALIDATOR_UNVERIFIABLE_SCHEMA_VERSION;
+  gitHead: string;
+  acceptanceHash: string;
+}
+
 export interface StoryState {
   passes: boolean;
   validated: boolean;
   validationReceipt?: ValidationReceipt | null;
+  /** 引擎持有、绑定当前候选的最近一次 Validator 不可验证状态。 */
+  validatorUnverifiable?: ValidatorUnverifiableMarker | null;
   notes: string;
   retryCount: number;
   blocked: boolean;
@@ -20,6 +32,29 @@ export type RunState = Record<string, StoryState>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function parseValidatorUnverifiableMarker(
+  value: unknown,
+): ValidatorUnverifiableMarker | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value).sort();
+  if (
+    keys.length !== 3 ||
+    keys[0] !== 'acceptanceHash' ||
+    keys[1] !== 'gitHead' ||
+    keys[2] !== 'schemaVersion' ||
+    value.schemaVersion !== VALIDATOR_UNVERIFIABLE_SCHEMA_VERSION ||
+    !isGitHead(value.gitHead) ||
+    !isAcceptanceHash(value.acceptanceHash)
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: VALIDATOR_UNVERIFIABLE_SCHEMA_VERSION,
+    gitHead: value.gitHead,
+    acceptanceHash: value.acceptanceHash,
+  };
 }
 
 /** 保持既有宽严：未知 story 字段、负数/小数 retryCount 仍沿用历史接受规则。 */
@@ -41,6 +76,11 @@ function normalizeStoryState(value: unknown): StoryState | null {
     validationReceipt = parseValidationReceipt(story.validationReceipt);
     if (!validationReceipt) return null;
   }
+  let validatorUnverifiable: ValidatorUnverifiableMarker | null = null;
+  if (story.validatorUnverifiable !== undefined && story.validatorUnverifiable !== null) {
+    validatorUnverifiable = parseValidatorUnverifiableMarker(story.validatorUnverifiable);
+    if (!validatorUnverifiable) return null;
+  }
   const hasCurrentReceipt =
     !story.blocked &&
     story.passes &&
@@ -50,6 +90,8 @@ function normalizeStoryState(value: unknown): StoryState | null {
     passes: story.passes,
     validated: hasCurrentReceipt,
     validationReceipt: hasCurrentReceipt ? validationReceipt : null,
+    validatorUnverifiable:
+      story.passes && !story.blocked && !hasCurrentReceipt ? validatorUnverifiable : null,
     notes: story.notes,
     retryCount: story.retryCount,
     blocked: story.blocked,

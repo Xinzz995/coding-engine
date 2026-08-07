@@ -1,10 +1,72 @@
 import { describe, it, expect } from 'vitest';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
 import { readEvidence } from './evidence.js';
 import { setup, story, runLoop } from './loop-test-support.js';
 
 describe('异常轮回写（builder 侧）', () => {
+  it('builder 输出写入失败后回写候选，并持久化准确的输出故障原因', async () => {
+    const { workspace, instructionsDir } = setup([story()]);
+    const fake = join(workspace, 'fake-output-failure.mjs');
+    writeFileSync(
+      fake,
+      String.raw`
+        import { readFileSync, writeFileSync } from 'node:fs';
+        const statePath = ${JSON.stringify(join(workspace, 'state.json'))};
+        const state = JSON.parse(readFileSync(statePath, 'utf8'));
+        state['US-001'].passes = true;
+        writeFileSync(statePath, JSON.stringify(state));
+        process.stdout.write('builder output before sink failure\n');
+      `,
+    );
+    const discard = (): Writable =>
+      new Writable({
+        write(_chunk, _encoding, callback): void {
+          callback();
+        },
+      });
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(
+        await runLoop({
+          kind: 'claude',
+          maxIterations: 1,
+          devTimeoutMs: 5000,
+          valTimeoutMs: 5000,
+          workspace,
+          instructionsDir,
+          port: 0,
+          openBrowser: false,
+          builderOutputForTests: {
+            stdout: new Writable({
+              write(_chunk, _encoding, callback): void {
+                setImmediate(() => callback(new Error('terminal-write-failed')));
+              },
+            }),
+            stderr: discard(),
+          },
+        }),
+      ).toBe(1);
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
+      expect(state).toMatchObject({ passes: false, validated: false, retryCount: 0 });
+      expect(state.notes).toContain('输出通道失败后被终止');
+      expect(state.notes).not.toContain('被信号终止');
+      expect(
+        readEvidence(workspace).records.find((record) => record.type === 'iteration'),
+      ).toMatchObject({
+        builderOutcome: 'error',
+        abortRollback: { storyId: 'US-001' },
+        builderInvocation: {
+          exitCode: null,
+          terminationReason: 'output-failure',
+        },
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  }, 60_000);
+
   it('builder provider 402：state 保持未通过，iteration 留退出码/耗时/诊断供报告恢复', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake-402.mjs');

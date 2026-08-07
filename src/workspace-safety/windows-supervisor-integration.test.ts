@@ -84,6 +84,25 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5000): Promise<vo
   }
 }
 
+function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
+  let resolvePromise = (): void => undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
+function rejectable(): {
+  readonly promise: Promise<void>;
+  readonly reject: (error: Error) => void;
+} {
+  let rejectPromise = (_error: Error): void => undefined;
+  const promise = new Promise<void>((_resolve, reject) => {
+    rejectPromise = reject;
+  });
+  return { promise, reject: rejectPromise };
+}
+
 const windowsOnly = process.platform === 'win32' ? describe : describe.skip;
 
 windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => {
@@ -119,7 +138,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       expect(outcome.stdout).toEqual(Buffer.alloc(stdoutBytes, 120));
       expect(outcome.stderr).toEqual(Buffer.alloc(stderrBytes, 121));
       expect(outcome.receipt).toMatchObject({
-        proof: 'windows-job-zero-and-pipes-eof-v1',
+        proof: 'windows-job-zero-pipes-eof-output-settled-v2',
         drainReason: 'natural',
       });
       expect(existsSync(outcome.settledPath)).toBe(true);
@@ -127,6 +146,289 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
       await state.session.close();
     },
   );
+
+  it('streams multi-megabyte stdout and stderr through a slow consumer without reordering', async () => {
+    const state = await setup();
+    const stdoutBytes = 3 * 1024 * 1024 + 29;
+    const stderrBytes = 2 * 1024 * 1024 + 47;
+    const expectedStdout = Buffer.allocUnsafe(stdoutBytes);
+    const expectedStderr = Buffer.allocUnsafe(stderrBytes);
+    for (let index = 0; index < expectedStdout.length; index += 1) {
+      expectedStdout[index] = Math.floor(index / (64 * 1024)) % 251;
+    }
+    for (let index = 0; index < expectedStderr.length; index += 1) {
+      expectedStderr[index] = 250 - (Math.floor(index / (64 * 1024)) % 251);
+    }
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let heldPastLegacyDeadline = false;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          [
+            `const stdout=Buffer.allocUnsafe(${stdoutBytes});`,
+            `const stderr=Buffer.allocUnsafe(${stderrBytes});`,
+            'for(let i=0;i<stdout.length;i++)stdout[i]=Math.floor(i/(64*1024))%251;',
+            'for(let i=0;i<stderr.length;i++)stderr[i]=250-(Math.floor(i/(64*1024))%251);',
+            'process.stdout.write(stdout);process.stderr.write(stderr);',
+          ].join(''),
+          state.workspace,
+        ),
+        onOutput: async (stream, chunk) => {
+          if (!heldPastLegacyDeadline) {
+            heldPastLegacyDeadline = true;
+            await new Promise((resolve) => setTimeout(resolve, 6500));
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 1));
+          }
+          (stream === 'stdout' ? stdout : stderr).push(Buffer.from(chunk));
+        },
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      verdict: 'completed',
+      code: 0,
+      terminationReason: null,
+    });
+    expect(outcome.stdout).toEqual(Buffer.alloc(0));
+    expect(outcome.stderr).toEqual(Buffer.alloc(0));
+    expect(Buffer.concat(stdout)).toEqual(expectedStdout);
+    expect(Buffer.concat(stderr)).toEqual(expectedStderr);
+    await state.session.close();
+  });
+
+  it('times out while output consumption is blocked, then discards and drains the Job', async () => {
+    const state = await setup();
+    const releaseOutput = deferred();
+    const outputEntered = deferred();
+    let discardCalls = 0;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          'process.stdout.write(Buffer.alloc(4*1024*1024,122));setInterval(()=>{},1000)',
+          state.workspace,
+        ),
+        commandTimeoutMs: 500,
+        timeouts: { terminateMs: 10_000, ackMs: 10_000, pollMs: 20 },
+        onOutput: async () => {
+          outputEntered.resolve();
+          await releaseOutput.promise;
+        },
+        onOutputDiscard: () => {
+          discardCalls += 1;
+          releaseOutput.resolve();
+        },
+      }),
+    );
+
+    await outputEntered.promise;
+    expect(discardCalls).toBe(1);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'timeout',
+      receipt: { drainReason: 'timeout' },
+    });
+    await state.session.close();
+  });
+
+  it('honors cancellation while output consumption is blocked without losing control traffic', async () => {
+    const state = await setup();
+    const controller = new AbortController();
+    const releaseOutput = deferred();
+    let discardCalls = 0;
+    let outputCalls = 0;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          'process.stdout.write(Buffer.alloc(4*1024*1024,121));setInterval(()=>{},1000)',
+          state.workspace,
+        ),
+        termination: { signal: controller.signal, reason: 'user-interrupt' },
+        timeouts: { terminateMs: 10_000, ackMs: 10_000, pollMs: 20 },
+        onOutput: async () => {
+          outputCalls += 1;
+          if (outputCalls === 1) controller.abort();
+          await releaseOutput.promise;
+        },
+        onOutputDiscard: () => {
+          discardCalls += 1;
+          releaseOutput.resolve();
+        },
+      }),
+    );
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(outputCalls).toBeGreaterThan(0);
+    expect(discardCalls).toBe(1);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      terminationReason: 'user-interrupt',
+      receipt: { drainReason: 'user-interrupt' },
+    });
+    await state.session.close();
+  });
+
+  it('keeps a post-root callback rejection authoritative over a natural drain', async () => {
+    const state = await setup();
+    const sink = rejectable();
+    let callbackStarted = false;
+    let rootResultSeen = false;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          "require('node:fs').writeSync(1,Buffer.alloc(32*1024,122));process.exit(0)",
+          state.workspace,
+        ),
+        timeouts: { naturalDrainMs: 10_000, terminateMs: 10_000, ackMs: 10_000, pollMs: 20 },
+        onOutput: () => {
+          callbackStarted = true;
+          return sink.promise;
+        },
+        hooks: {
+          onRootResult: async () => {
+            rootResultSeen = true;
+            await waitUntil(() => callbackStarted, 5000);
+            expect(callbackStarted).toBe(true);
+            sink.reject(new Error('sink rejected after root exit'));
+          },
+        },
+      }),
+    );
+
+    expect(rootResultSeen).toBe(true);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      code: null,
+      terminationReason: 'output-failure',
+      receipt: {
+        proof: 'windows-job-zero-pipes-eof-output-settled-v2',
+        drainReason: 'output-failure',
+      },
+    });
+    await state.session.close();
+  });
+
+  it('settles output failure without waiting for a root result when root exit races', async () => {
+    const state = await setup();
+    let callbackCalls = 0;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          "require('node:fs').writeSync(1,Buffer.alloc(32*1024,122));process.exit(0)",
+          state.workspace,
+        ),
+        timeouts: { naturalDrainMs: 10_000, terminateMs: 10_000, ackMs: 10_000, pollMs: 20 },
+        onOutput: () => {
+          callbackCalls += 1;
+          throw new Error('sink rejected while root was exiting');
+        },
+      }),
+    );
+
+    expect(callbackCalls).toBe(1);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      code: null,
+      terminationReason: 'output-failure',
+      receipt: {
+        proof: 'windows-job-zero-pipes-eof-output-settled-v2',
+        drainReason: 'output-failure',
+      },
+    });
+    await state.session.close();
+  });
+
+  it('keeps a post-root cancellation authoritative while the last callback is blocked', async () => {
+    const state = await setup();
+    const controller = new AbortController();
+    const sink = deferred();
+    let callbackStarted = false;
+    let rootResultSeen = false;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          "require('node:fs').writeSync(1,Buffer.alloc(32*1024,121));process.exit(0)",
+          state.workspace,
+        ),
+        termination: { signal: controller.signal, reason: 'user-interrupt' },
+        timeouts: { naturalDrainMs: 10_000, terminateMs: 10_000, ackMs: 10_000, pollMs: 20 },
+        onOutput: async () => {
+          callbackStarted = true;
+          await sink.promise;
+        },
+        onOutputDiscard: () => sink.resolve(),
+        hooks: {
+          onRootResult: async () => {
+            rootResultSeen = true;
+            await waitUntil(() => callbackStarted, 5000);
+            expect(callbackStarted).toBe(true);
+            controller.abort();
+          },
+        },
+      }),
+    );
+
+    expect(rootResultSeen).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      code: null,
+      terminationReason: 'user-interrupt',
+      receipt: {
+        proof: 'windows-job-zero-pipes-eof-output-settled-v2',
+        drainReason: 'user-interrupt',
+      },
+    });
+    await state.session.close();
+  });
+
+  it('terminates with output-failure and releases downstream backpressure when the callback fails', async () => {
+    const state = await setup();
+    let discardCalls = 0;
+    let callbackCalls = 0;
+    let rootResultCalls = 0;
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          'process.stdout.write(Buffer.alloc(4*1024*1024,122));setTimeout(()=>{},60_000)',
+          state.workspace,
+        ),
+        onOutput: () => {
+          callbackCalls += 1;
+          throw new Error('test sink failure');
+        },
+        onOutputDiscard: () => {
+          discardCalls += 1;
+        },
+        hooks: {
+          onRootResult: () => {
+            rootResultCalls += 1;
+          },
+        },
+      }),
+    );
+
+    expect(callbackCalls).toBe(1);
+    expect(discardCalls).toBe(1);
+    expect(rootResultCalls).toBe(0);
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      code: null,
+      terminationReason: 'output-failure',
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      receipt: { drainReason: 'output-failure' },
+    });
+    await state.session.close();
+  });
 
   it('lets termination win while the target is still suspended', async () => {
     const state = await setup();
@@ -253,9 +555,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(operationPath(state.workspace))).toBe(true);
     expect(
-      readdirSync(
-        join(state.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, 'settled-operations'),
-      ),
+      readdirSync(join(state.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, 'settled-operations')),
     ).toHaveLength(0);
     await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
@@ -286,7 +586,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     });
     expect(outcome.stdout.toString('utf8')).toContain('stubborn-started');
     expect(outcome.receipt).toMatchObject({
-      proof: 'windows-job-zero-and-pipes-eof-v1',
+      proof: 'windows-job-zero-pipes-eof-output-settled-v2',
       drainReason: 'timeout',
     });
     await state.session.close();
@@ -331,7 +631,7 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     });
     expect(controller.signal.aborted).toBe(true);
     expect(outcome.receipt).toMatchObject({
-      proof: 'windows-job-zero-and-pipes-eof-v1',
+      proof: 'windows-job-zero-pipes-eof-output-settled-v2',
       drainReason: 'user-interrupt',
     });
     expect(interruptedAt).toBeTypeOf('number');
@@ -469,23 +769,25 @@ windowsOnly('Windows production operation executor', { timeout: 90_000 }, () => 
     ).toBe('operation-proof-missing');
   });
 
-  it('fails closed when aggregate target output exceeds the total budget', async () => {
+  it('terminates as output-failure when aggregate target output exceeds the total budget', async () => {
     const state = await setup();
 
-    await expect(
-      runWorkspaceOperation(state.session, operationOptions(), (operation) =>
-        runDarkWindowsSupervisedOperation(operation, {
-          target: target(
-            `process.stdout.write(Buffer.alloc(${16 * 1024 * 1024 + 1},122));`,
-            state.workspace,
-          ),
-        }),
-      ),
-    ).rejects.toMatchObject({
-      code: 'isolated',
-      message: expect.stringMatching(/output exceeded the total bound/i),
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkWindowsSupervisedOperation(operation, {
+        target: target(
+          `process.stdout.write(Buffer.alloc(${16 * 1024 * 1024 + 1},122));`,
+          state.workspace,
+        ),
+      }),
+    );
+    expect(outcome).toMatchObject({
+      verdict: 'terminated',
+      code: null,
+      terminationReason: 'output-failure',
+      receipt: { drainReason: 'output-failure' },
     });
-    expect(existsSync(operationPath(state.workspace))).toBe(true);
+    expect(existsSync(operationPath(state.workspace))).toBe(false);
+    await state.session.close();
   });
 
   it('re-reads canonical armed authority before START and keeps the target at zero execution', async () => {

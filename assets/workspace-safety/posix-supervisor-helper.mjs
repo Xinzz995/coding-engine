@@ -35,6 +35,7 @@ const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 // 8 KiB expands to at most 10,924 base64 characters, safely below the
 // parent's fixed 16,384-character field limit without relaxing that limit.
 const OUTPUT_CHUNK_BYTES = 8 * 1024;
+const MAX_OUTSTANDING_OUTPUT_BYTES = 256 * 1024;
 
 let state = 'bound';
 let operationId;
@@ -57,6 +58,12 @@ let stageTimer;
 let prestartCleanupStarted = false;
 let closeoutDeadline;
 let pendingParentMessages = 0;
+let nextOutputSequence = 1;
+let outstandingOutputBytes = 0;
+const outstandingOutput = new Map();
+const pendingOutput = [];
+let outputDiscarded = false;
+let outputResumeScheduled = false;
 
 if (process.platform === 'win32' || !launcherPath || !isAbsolute(launcherPath) || !timeoutInput) {
   process.exit(2);
@@ -96,15 +103,106 @@ function send(message, deadline = deadlineAfter(5000)) {
   );
 }
 
-function sendOutput(stream, chunk) {
-  for (let offset = 0; offset < chunk.length; offset += OUTPUT_CHUNK_BYTES) {
+function outputPipes() {
+  return launcher ? [launcher.stdio[4], launcher.stdio[5]] : [];
+}
+
+function pauseOutputPipes() {
+  for (const pipe of outputPipes()) pipe.pause();
+}
+
+function scheduleOutputResume() {
+  if (outputResumeScheduled || outputDiscarded) return;
+  outputResumeScheduled = true;
+  queueMicrotask(() => {
+    outputResumeScheduled = false;
+    if (
+      !outputDiscarded &&
+      pendingOutput.length === 0 &&
+      outstandingOutputBytes < MAX_OUTSTANDING_OUTPUT_BYTES
+    ) {
+      for (const pipe of outputPipes()) pipe.resume();
+    }
+  });
+}
+
+function flushOutput() {
+  if (outputDiscarded) {
+    pendingOutput.length = 0;
+    return;
+  }
+  while (pendingOutput.length > 0) {
+    const next = pendingOutput[0];
+    if (outstandingOutputBytes + next.data.length > MAX_OUTSTANDING_OUTPUT_BYTES) break;
+    pendingOutput.shift();
+    const sequence = nextOutputSequence;
+    nextOutputSequence += 1;
+    outstandingOutput.set(sequence, next.data.length);
+    outstandingOutputBytes += next.data.length;
     send({
       schemaVersion: 1,
       type: 'OUTPUT',
-      stream,
-      data: chunk.subarray(offset, offset + OUTPUT_CHUNK_BYTES).toString('base64'),
+      operationId,
+      sequence,
+      bytes: next.data.length,
+      stream: next.stream,
+      data: next.data.toString('base64'),
     });
   }
+  if (pendingOutput.length > 0 || outstandingOutputBytes >= MAX_OUTSTANDING_OUTPUT_BYTES) {
+    pauseOutputPipes();
+  } else {
+    scheduleOutputResume();
+  }
+}
+
+function queueOutput(stream, chunk) {
+  if (outputDiscarded) return;
+  pauseOutputPipes();
+  for (let offset = 0; offset < chunk.length; offset += OUTPUT_CHUNK_BYTES) {
+    pendingOutput.push({
+      stream,
+      data: Buffer.from(chunk.subarray(offset, offset + OUTPUT_CHUNK_BYTES)),
+    });
+  }
+  flushOutput();
+}
+
+function acknowledgeOutput(envelope) {
+  if (
+    !exactKeys(envelope, ['schemaVersion', 'type', 'operationId', 'sequence', 'bytes']) ||
+    envelope.operationId !== operationId ||
+    !Number.isSafeInteger(envelope.sequence) ||
+    envelope.sequence < 1 ||
+    !Number.isSafeInteger(envelope.bytes) ||
+    envelope.bytes < 1
+  ) {
+    throw new Error('OUTPUT_ACK binding is invalid');
+  }
+  const expectedBytes = outstandingOutput.get(envelope.sequence);
+  if (expectedBytes === undefined || expectedBytes !== envelope.bytes) {
+    throw new Error('OUTPUT_ACK is unknown, duplicated, or has mismatched bytes');
+  }
+  outstandingOutput.delete(envelope.sequence);
+  outstandingOutputBytes -= expectedBytes;
+  flushOutput();
+}
+
+function discardOutput() {
+  outputDiscarded = true;
+  pendingOutput.length = 0;
+  outstandingOutput.clear();
+  outstandingOutputBytes = 0;
+  for (const pipe of outputPipes()) pipe.resume();
+}
+
+function outputSettled() {
+  return (
+    stdoutEof &&
+    stderrEof &&
+    outstandingOutputBytes === 0 &&
+    pendingOutput.length === 0
+  );
 }
 
 function armStageDeadline(label, deadline) {
@@ -226,7 +324,7 @@ function installReceipt(proof, drainReason) {
 }
 
 async function ensureOutputEof(deadline) {
-  return waitUntil(() => stdoutEof && stderrEof, deadline);
+  return waitUntil(outputSettled, deadline);
 }
 
 async function terminateContainment(deadline = beginCloseout()) {
@@ -263,7 +361,13 @@ async function finishWithReceipt(proof, drainReason) {
   if (receiptInstalled) return;
   receiptInstalled = true;
   clearTimeout(stageTimer);
-  if (probeGroup(launcherPgid) !== 'empty' || !stdoutEof || !stderrEof) {
+  if (
+    probeGroup(launcherPgid) !== 'empty' ||
+    !stdoutEof ||
+    !stderrEof ||
+    outstandingOutputBytes !== 0 ||
+    pendingOutput.length !== 0
+  ) {
     throw new Error('receipt attempted before POSIX containment and output were drained');
   }
   const messageBytes = installReceipt(proof, drainReason);
@@ -349,7 +453,7 @@ async function drainNormally() {
     deadlineAfter(timeouts.naturalDrainMs),
   );
   const containmentIsNaturallyDrained = () => {
-    if (stdoutEof && stderrEof) {
+    if (outputSettled()) {
       const members = groupMembers(launcherPgid);
       return members.length === 1 && members[0] === launcher.pid;
     }
@@ -374,6 +478,21 @@ async function drainNormally() {
     // the longer natural-drain deadline captured at entry.
     await terminateContainment(beginCloseout());
     return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
+  }
+  if (!naturallyDrained) {
+    const members = groupMembers(launcherPgid);
+    const containmentHasDrained = members.length === 1 && members[0] === launcher.pid;
+    // A slow parent ACK is output backpressure, not a leaked descendant. Keep the launcher-only
+    // containment intact so a later output-failure TERMINATE can win and still be proven clean.
+    if (containmentHasDrained && stdoutEof && stderrEof) {
+      await waitUntil(() => outputSettled() || terminalCause !== undefined, initialCloseoutDeadline);
+      naturallyDrained = containmentIsNaturallyDrained();
+      if (terminalCause) {
+        await terminateContainment(beginCloseout());
+        return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
+      }
+      if (!naturallyDrained) throw new Error('parent output acknowledgements did not settle');
+    }
   }
   if (!naturallyDrained) {
     terminalCause = 'process-tree-not-empty';
@@ -431,6 +550,7 @@ async function failClosed(message) {
 
 async function handleParentDisconnect() {
   parentConnected = false;
+  discardOutput();
   clearTimeout(stageTimer);
   if (state === 'drained') return process.exit(0);
   if (state === 'prestart-drained') return process.exit(0);
@@ -594,10 +714,10 @@ function handleParentMessage(envelope) {
         }
       });
       launcher.stdio[4].on('data', (chunk) => {
-        sendOutput('stdout', chunk);
+        queueOutput('stdout', chunk);
       });
       launcher.stdio[5].on('data', (chunk) => {
-        sendOutput('stderr', chunk);
+        queueOutput('stderr', chunk);
       });
       launcher.stdio[4].once('end', () => {
         stdoutEof = true;
@@ -655,6 +775,13 @@ function handleParentMessage(envelope) {
       process.disconnect?.();
       return;
     }
+    if (envelope.type === 'OUTPUT_ACK') {
+      if (!['start-accepted', 'running', 'root-exited'].includes(state)) {
+        throw new Error('OUTPUT_ACK is out of order');
+      }
+      acknowledgeOutput(envelope);
+      return;
+    }
     if (envelope.type === 'TERMINATE') {
       if (!exactKeys(envelope, ['schemaVersion', 'type', 'messageBase64'])) {
         throw new Error('TERMINATE is out of order');
@@ -663,7 +790,7 @@ function handleParentMessage(envelope) {
       if (
         !exactKeys(message, ['schemaVersion', 'type', 'operationId', 'reason']) ||
         message.operationId !== operationId ||
-        !['timeout', 'user-interrupt', 'parent-shutdown'].includes(message.reason)
+        !['timeout', 'user-interrupt', 'parent-shutdown', 'output-failure'].includes(message.reason)
       ) {
         throw new Error('TERMINATE binding is invalid');
       }
@@ -688,6 +815,7 @@ function handleParentMessage(envelope) {
       if (!['start-accepted', 'running', 'root-exited'].includes(state)) {
         throw new Error('TERMINATE is out of order');
       }
+      discardOutput();
       terminalCause = message.reason;
       clearTimeout(stageTimer);
       const deadline = beginCloseout();

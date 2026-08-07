@@ -1,7 +1,7 @@
 ---
 title: 约定与陷阱
 status: active
-updated: 2026-08-05
+updated: 2026-08-07
 scope: root
 ---
 
@@ -29,7 +29,7 @@ scope: root
 - 2026-07-22 可变状态里的瞬时失败详情必须在机械确认失败的同一时点快照进 append-only 证据，不能等收口时从最终 state/progress 反推——成功重试会清空 notes、覆盖现场。生产端只保留接近失败点的有界尾部，读取端对同名字段逐类型/长度守卫，报告端折叠并按纯文本转义；当前门禁 outputTail 与引擎接受的 Validator failed claim 共用 2000 字符单源边界（见 `clipEvidenceDiagnostic`、`diagnosticTail`、`validatorDiagnostic`）。
 - 2026-07-08 新增 workspace 运行产物时三处必须同步：`product-mutations` 固定动作里的归档白名单、失效清理白名单，以及报告等消费端的文件集合——调用方不得自行传入复制、删除或归档路径。任何一处缺席都是「归档回看断链」或「新轮红旗区被旧轮污染」（0.20.0 终审实证：tampered 存档曾三处全缺）。
 - 2026-07-16 workspace 中需要“旧版或新版、绝不半份”的父进程覆盖写一律走当前 session 的 `WorkspaceWriter`；涉及多文件归档、删除和安装则走固定 mutation，不能裸用 `writeFileSync` 或只靠单文件 tmp+rename。append-only 信道同样必须经 writer 追加，不能把旧 `fs-atomic` helper 当正式写入口（ADR-021）。
-- 2026-07-22 共享 state 里的 agent 声明与引擎事实必须分层：builder 只能写 `passes=true` 候选，Validator 只能写 `source=validator` 的结构化 claim，`validated`、凭证、retry/blocked/notes 与最终 verdict 全由引擎消费 claim 后写入。Story 完成不能再只看 `passes && validated`，必须用统一评估同时核对候选、完整凭证、当前 Git HEAD、Story ID 与有序 AC；非 blocked Story 的有序凭证集合摘要还要绑定 Final Review。凭证过期时保留实现候选并进入 validation-only；环境或协议不可验证时继续保留候选并失败关闭，只有明确验证失败才清除。status、report、dashboard 读取时只在内存撤销旧绿灯，正式循环才写回（ADR-013、015、020）。
+- 2026-07-22 共享 state 里的 agent 声明与引擎事实必须分层：builder 只能写 `passes=true` 候选，Validator 只能写 `source=validator` 的结构化 claim，`validated`、凭证、retry/blocked/notes 与最终 verdict 全由引擎消费 claim 后写入。Story 完成不能再只看 `passes && validated`，必须用统一评估同时核对候选、完整凭证、当前 Git HEAD、Story ID 与有序 AC；非 blocked Story 的有序凭证集合摘要还要绑定 Final Review。凭证过期时保留实现候选并进入 validation-only；环境或协议不可验证时继续保留候选并失败关闭，只有明确验证失败才清除。status、report、dashboard 读取时只在内存撤销旧绿灯，正式循环才写回（ADR-013、015、020、023）。
 - 2026-07-22 agent 结果协议不能把“文件存在/进程退出 0”当成功：request 必须带一次性 ID、精确 story、输入快照 hash 和可用的产物身份，result 要版本化、逐字段/大小守卫并回显绑定；每轮先清旧文件，缺失/畸形/错配/输入变化一律 fail closed。claim 与 engine protocol verdict 分 source 留痕，nonce/hash 只提供新鲜度和身份对账，不得文案升级成密码学防伪（见 `validation-protocol.ts`、ADR-015）。
 - 2026-07-22 workspace 是运行时边界，不是功能提交的一部分：`prd-to-json` 对用户给出的 workspace 参数只做只读 Git 隔离核对，并把同一个原始参数逐字传给 `workspace apply-prd`；skill 只在系统临时目录准备候选和请求，正式命令才在租约内写 workspace。builder 只显式 stage story 文件、检查暂存清单、提交成功后才回写 state/progress。自动化不得替用户修改 `.gitignore`、执行 `git rm --cached` 或重置既有暂存区。
 - 2026-07-22 收口副产物必须沿用主流程已经建立的信任来源：loop 自动报告只消费终轮 PRD guard 返回的冻结快照并显式标注来源，不能在裁决完成后重新读取 agent 可改写的磁盘 PRD；手动报告没有该信任来源，只能标成磁盘读取（ADR-014）。

@@ -27,8 +27,115 @@ namespace CodingX.WorkspaceSafety
         }
     }
 
+    internal sealed class OutputReservation
+    {
+        internal readonly long Sequence;
+        internal readonly int Bytes;
+
+        internal OutputReservation(long sequence, int bytes)
+        {
+            Sequence = sequence;
+            Bytes = bytes;
+        }
+    }
+
+    internal sealed class OutputCredit
+    {
+        private const int MaximumOutstandingBytes = 256 * 1024;
+        private const int MaximumOutstandingFrames = 1024;
+        private readonly object sendSync = new object();
+        private readonly object sync = new object();
+        private readonly string operationId;
+        private readonly Dictionary<long, int> outstanding = new Dictionary<long, int>();
+        private long nextSequence = 1;
+        private int outstandingBytes;
+        private bool discarded;
+
+        internal OutputCredit(string expectedOperationId)
+        {
+            operationId = expectedOperationId;
+        }
+
+        private OutputReservation Reserve(int bytes)
+        {
+            if (bytes < 1 || bytes > 16 * 1024)
+                throw new SafetyException("target output chunk is outside the fixed bound");
+            lock (sync)
+            {
+                while (!discarded && ProtocolWriter.Connected &&
+                    (outstandingBytes > MaximumOutstandingBytes - bytes ||
+                     outstanding.Count >= MaximumOutstandingFrames))
+                    Monitor.Wait(sync, 25);
+                if (discarded || !ProtocolWriter.Connected)
+                {
+                    DiscardLocked();
+                    return null;
+                }
+                if (nextSequence > 9007199254740991L)
+                    throw new SafetyException("target output sequence is exhausted");
+                OutputReservation reservation = new OutputReservation(nextSequence, bytes);
+                nextSequence += 1;
+                outstanding.Add(reservation.Sequence, bytes);
+                outstandingBytes += bytes;
+                return reservation;
+            }
+        }
+
+        internal void Send(string stream, byte[] chunk)
+        {
+            lock (sendSync)
+            {
+                OutputReservation reservation = Reserve(chunk.Length);
+                if (reservation == null) return;
+                if (!ProtocolWriter.SendOutput(new Dictionary<string, object> {
+                    { "schemaVersion", 1 }, { "type", "OUTPUT" },
+                    { "operationId", operationId }, { "sequence", reservation.Sequence },
+                    { "bytes", reservation.Bytes }, { "stream", stream },
+                    { "data", Convert.ToBase64String(chunk) }
+                })) Discard();
+            }
+        }
+
+        internal void Acknowledge(string acknowledgedOperationId, long sequence, int bytes)
+        {
+            lock (sync)
+            {
+                if (discarded) throw new SafetyException("OUTPUT_ACK is out of order");
+                int expectedBytes;
+                if (acknowledgedOperationId != operationId || sequence < 1 || bytes < 1 ||
+                    !outstanding.TryGetValue(sequence, out expectedBytes) || expectedBytes != bytes)
+                    throw new SafetyException("OUTPUT_ACK is unknown, duplicated, or has mismatched binding");
+                outstanding.Remove(sequence);
+                outstandingBytes -= expectedBytes;
+                Monitor.PulseAll(sync);
+            }
+        }
+
+        private void DiscardLocked()
+        {
+            discarded = true;
+            outstanding.Clear();
+            outstandingBytes = 0;
+            Monitor.PulseAll(sync);
+        }
+
+        internal void Discard()
+        {
+            lock (sync) { DiscardLocked(); }
+        }
+
+        internal bool Settled
+        {
+            get
+            {
+                lock (sync) { return discarded || outstandingBytes == 0; }
+            }
+        }
+    }
+
     internal sealed class OutputPipe : IDisposable
     {
+        private readonly OutputCredit credit;
         private readonly string stream;
         private readonly Thread thread;
         private IntPtr readHandle;
@@ -36,8 +143,9 @@ namespace CodingX.WorkspaceSafety
         internal volatile bool EndOfFile;
         internal volatile Exception Error;
 
-        internal OutputPipe(string name)
+        internal OutputPipe(string name, OutputCredit outputCredit)
         {
+            credit = outputCredit;
             stream = name;
             try
             {
@@ -81,13 +189,14 @@ namespace CodingX.WorkspaceSafety
                     if (read == 0) break;
                     byte[] chunk = new byte[read];
                     Buffer.BlockCopy(buffer, 0, chunk, 0, (int)read);
-                    ProtocolWriter.Send(new Dictionary<string, object> {
-                        { "schemaVersion", 1 }, { "type", "OUTPUT" },
-                        { "stream", stream }, { "data", Convert.ToBase64String(chunk) }
-                    });
+                    credit.Send(stream, chunk);
                 }
             }
-            catch (Exception error) { Error = error; }
+            catch (Exception error)
+            {
+                credit.Discard();
+                Error = error;
+            }
             finally
             {
                 Native.Close(ref readHandle);
@@ -107,6 +216,7 @@ namespace CodingX.WorkspaceSafety
         private IntPtr job;
         private IntPtr process;
         private IntPtr thread;
+        private OutputCredit outputCredit;
         private OutputPipe standardOutput;
         private OutputPipe standardError;
         private uint? exitCode;
@@ -121,9 +231,26 @@ namespace CodingX.WorkspaceSafety
             {
                 if (standardOutput.Error != null || standardError.Error != null)
                     throw new SafetyException("target output pipe could not be drained");
+                return standardOutput.EndOfFile && standardError.EndOfFile && outputCredit.Settled;
+            }
+        }
+
+        internal bool OutputPipesEnded
+        {
+            get
+            {
+                if (standardOutput.Error != null || standardError.Error != null)
+                    throw new SafetyException("target output pipe could not be drained");
                 return standardOutput.EndOfFile && standardError.EndOfFile;
             }
         }
+
+        internal void AcknowledgeOutput(string operationId, long sequence, int bytes)
+        {
+            outputCredit.Acknowledge(operationId, sequence, bytes);
+        }
+
+        internal void DiscardOutput() { outputCredit.Discard(); }
 
         internal JobTarget(TargetSpec target)
         {
@@ -131,8 +258,9 @@ namespace CodingX.WorkspaceSafety
             AssertOrdinaryPath(target.WorkingDirectory, true);
             try
             {
-                standardOutput = new OutputPipe("stdout");
-                standardError = new OutputPipe("stderr");
+                outputCredit = new OutputCredit(target.OperationId);
+                standardOutput = new OutputPipe("stdout", outputCredit);
+                standardError = new OutputPipe("stderr", outputCredit);
                 Create(target);
             }
             catch
@@ -411,13 +539,13 @@ namespace CodingX.WorkspaceSafety
                 !Native.TerminateJobObject(job, Native.TERMINATION_EXIT_CODE))
                 throw Native.Failure("TerminateJobObject");
             Native.Close(ref thread);
+            Native.Close(ref process);
         }
 
         internal bool WaitForEmptyAndEof(MonotonicDeadline deadline, int pollMs)
         {
             while (!deadline.Expired)
             {
-                CaptureRootResult();
                 bool drained = ActiveProcesses(job) == 0 && OutputEnded;
                 if (deadline.Expired) return false;
                 if (drained) return true;

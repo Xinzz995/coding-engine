@@ -49,7 +49,7 @@ class Events {
     );
   }
 
-  async next(expected) {
+  async next(expected, forbidden = []) {
     while (true) {
       const step = await Promise.race([
         this.iterator.next(),
@@ -60,6 +60,9 @@ class Events {
       if (step.done) throw new Error(`helper exited before ${expected}: ${this.stderr}`);
       const event = JSON.parse(step.value);
       if (event.type === 'FAILURE') throw new Error(`helper failure: ${event.message}`);
+      if (forbidden.includes(event.type)) {
+        throw new Error(`helper emitted forbidden ${event.type} while waiting for ${expected}`);
+      }
       if (event.type === expected) return event;
     }
   }
@@ -241,15 +244,14 @@ async function main() {
     operationId: OPERATION_ID,
     reason: 'user-interrupt',
   });
-  await events.next('RESULT');
-  const drained = await events.next('DRAINED');
+  const drained = await events.next('DRAINED', ['RESULT']);
   const drainedMessage = JSON.parse(Buffer.from(drained.messageBase64, 'base64').toString('utf8'));
   const receiptPath = join(authority.operationPath, 'drained-receipt.json');
   const receiptBytes = readFileSync(receiptPath);
   const receipt = JSON.parse(receiptBytes.toString('utf8'));
   if (
     receipt.drainReason !== 'user-interrupt' ||
-    receipt.proof !== 'windows-job-zero-and-pipes-eof-v1' ||
+    receipt.proof !== 'windows-job-zero-pipes-eof-output-settled-v2' ||
     drainedMessage.receiptDigest !== digest(receiptBytes) ||
     existsSync(targetSawCtrl)
   ) {

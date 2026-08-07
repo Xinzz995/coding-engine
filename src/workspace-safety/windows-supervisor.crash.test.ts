@@ -403,7 +403,7 @@ windowsOnly(
         const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<string, unknown>;
         expect(receipt).toMatchObject({
           drainReason: 'parent-shutdown',
-          proof: 'windows-job-zero-and-pipes-eof-v1',
+          proof: 'windows-job-zero-pipes-eof-output-settled-v2',
         });
         expect(existsSync(parentReadyPath)).toBe(true);
       } catch (error) {
@@ -445,7 +445,7 @@ windowsOnly(
         helperExitCode: 0,
         targetExecuted: true,
         receiptCreated: true,
-        proof: 'windows-job-zero-and-pipes-eof-v1',
+        proof: 'windows-job-zero-pipes-eof-output-settled-v2',
       });
     });
   },

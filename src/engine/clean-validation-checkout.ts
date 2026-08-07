@@ -72,6 +72,7 @@ export type CleanValidationCheckoutErrorCode =
   | 'identity-changed'
   | 'tracked-content-changed'
   | 'artifact-boundary-violated'
+  | 'topology-unverifiable'
   | 'cleanup-unverifiable';
 
 export class CleanValidationCheckoutError extends Error {
@@ -106,6 +107,8 @@ export interface CleanValidationCheckoutOptions {
   };
   /** @internal 用不可读取的来源证明预算拒绝发生在 fetch 之前；生产不设置。 */
   readonly repositoryUrlForTests?: string;
+  /** @internal 在最终拓扑复核前制造确定性竞态；生产不设置。 */
+  readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
 }
 
 export interface CleanValidationCheckoutCleanup {
@@ -196,12 +199,12 @@ async function observeManagedFileLinks(
   } catch (error) {
     if (error instanceof ExternalFileLinkSnapshotBudgetError) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}${error.message}`,
       );
     }
     throw new CleanValidationCheckoutError(
-      'artifact-boundary-violated',
+      'topology-unverifiable',
       `${context}无法冻结普通文件链接批次：${
         error instanceof Error ? error.message : String(error)
       }`,
@@ -1086,6 +1089,7 @@ async function assertSafeArtifactTopology(
     readonly permittedExternalLinks: ReadonlyMap<string, ExternalFileLinkIdentity>;
     readonly signal?: AbortSignal;
     readonly managed: ManagedGateContext;
+    readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
   },
 ): Promise<Map<string, ExternalFileLinkIdentity>> {
   const assertNoMountPoints = (): CleanValidationBackingFileSystemProof => {
@@ -1093,7 +1097,7 @@ async function assertSafeArtifactTopology(
       return assertCleanValidationTreeHasNoMountPoints(root);
     } catch (error) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -1106,7 +1110,7 @@ async function assertSafeArtifactTopology(
   const checkpoint = (): void => {
     if (options.signal?.aborted) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}验证检出产物边界核对被中断`,
       );
     }
@@ -1123,7 +1127,7 @@ async function assertSafeArtifactTopology(
         entries += 1;
         if (entries > MAX_VALIDATION_TREE_ENTRIES) {
           throw new CleanValidationCheckoutError(
-            'artifact-boundary-violated',
+            'topology-unverifiable',
             `${context}验证检出内容超过 ${MAX_VALIDATION_TREE_ENTRIES} 项，无法完整核对产物边界`,
           );
         }
@@ -1134,20 +1138,20 @@ async function assertSafeArtifactTopology(
           targetInfo = lstatSync(target, { bigint: true });
         } catch {
           throw new CleanValidationCheckoutError(
-            'artifact-boundary-violated',
+            'topology-unverifiable',
             `${context}验证检出条目在核对期间消失：${path}`,
           );
         }
         if (targetInfo.isSymbolicLink()) {
           if (targetInfo.nlink !== 1n) {
             throw new CleanValidationCheckoutError(
-              'artifact-boundary-violated',
+              'topology-unverifiable',
               `${context}验证检出含 hard-linked symbolic link：${path}`,
             );
           }
           if (policy.isRoot(path)) {
             throw new CleanValidationCheckoutError(
-              'artifact-boundary-violated',
+              'topology-unverifiable',
               `${context}允许的产物根不是普通目录：${path}`,
             );
           }
@@ -1156,7 +1160,7 @@ async function assertSafeArtifactTopology(
             linkTarget = readlinkSync(target, { encoding: 'buffer' });
           } catch {
             throw new CleanValidationCheckoutError(
-              'artifact-boundary-violated',
+              'topology-unverifiable',
               `${context}验证检出符号链接在核对期间无法读取：${path}`,
             );
           }
@@ -1171,7 +1175,7 @@ async function assertSafeArtifactTopology(
           managedLinks.push({ target, path });
           if (managedLinks.length > MAX_EXTERNAL_LINKS) {
             throw new CleanValidationCheckoutError(
-              'artifact-boundary-violated',
+              'topology-unverifiable',
               `${context}需受管核对的普通文件链接超过 ${MAX_EXTERNAL_LINKS} 条`,
             );
           }
@@ -1179,7 +1183,7 @@ async function assertSafeArtifactTopology(
         }
         if (policy.isRoot(path) && !targetInfo.isDirectory()) {
           throw new CleanValidationCheckoutError(
-            'artifact-boundary-violated',
+            'topology-unverifiable',
             `${context}允许的产物根不是普通目录：${path}`,
           );
         }
@@ -1192,7 +1196,7 @@ async function assertSafeArtifactTopology(
         }
         if (!targetInfo.isFile()) {
           throw new CleanValidationCheckoutError(
-            'artifact-boundary-violated',
+            'topology-unverifiable',
             `${context}验证检出含特殊文件：${path}`,
           );
         }
@@ -1209,11 +1213,15 @@ async function assertSafeArtifactTopology(
   } catch (error) {
     if (error instanceof CleanValidationHardLinkProofError) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}${error.message}`,
       );
     }
-    throw error;
+    if (error instanceof CleanValidationCheckoutError) throw error;
+    throw new CleanValidationCheckoutError(
+      'topology-unverifiable',
+      `${context}无法完整核对验证检出拓扑：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   const afterInitialScanFileSystem = assertNoMountPoints();
   let initialHardLinkProof: ReturnType<typeof freezeCleanValidationHardLinks>;
@@ -1222,11 +1230,15 @@ async function assertSafeArtifactTopology(
   } catch (error) {
     if (error instanceof CleanValidationHardLinkProofError) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}${error.message}`,
       );
     }
-    throw error;
+    if (error instanceof CleanValidationCheckoutError) throw error;
+    throw new CleanValidationCheckoutError(
+      'topology-unverifiable',
+      `${context}无法完成验证检出拓扑复核：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   if (
     initialHardLinkProof.groups > 0 &&
@@ -1234,7 +1246,7 @@ async function assertSafeArtifactTopology(
       initialBackingFileSystem.identity !== afterInitialScanFileSystem.identity)
   ) {
     throw new CleanValidationCheckoutError(
-      'artifact-boundary-violated',
+      'topology-unverifiable',
       `${context}无法在 ${initialBackingFileSystem.description} 上证明 hard link 组可信`,
     );
   }
@@ -1267,7 +1279,7 @@ async function assertSafeArtifactTopology(
     if (observation.scope === 'internal') continue;
     if (observation.scope === 'source') {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}验证检出链接回开发工作树：${path}`,
       );
     }
@@ -1278,13 +1290,13 @@ async function assertSafeArtifactTopology(
       const permitted = options.permittedExternalLinks.get(path);
       if (!permitted) {
         throw new CleanValidationCheckoutError(
-          'artifact-boundary-violated',
+          'topology-unverifiable',
           `${context}验证检出含未经准备阶段确认的外部链接：${path}`,
         );
       }
       if (!sameExternalFileLinkIdentity(permitted, observed)) {
         throw new CleanValidationCheckoutError(
-          'artifact-boundary-violated',
+          'topology-unverifiable',
           `${context}外部普通文件链接身份或内容发生变化：${path}`,
         );
       }
@@ -1297,7 +1309,7 @@ async function assertSafeArtifactTopology(
     );
     if (missing.length > 0) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}准备阶段确认的外部普通文件链接缺失或改变：${missing.slice(0, 20).join('、')}`,
       );
     }
@@ -1305,6 +1317,7 @@ async function assertSafeArtifactTopology(
   try {
     externalLinkBudget?.assertDarwinMountTableCurrent();
     const finalBackingFileSystem = assertNoMountPoints();
+    options.beforeFinalTopologyScanForTests?.(root, context);
     const finalHardLinkProof = snapshotCleanValidationHardLinks({
       root,
       owningRoot: (path) => policy.owningRoot(path),
@@ -1321,24 +1334,28 @@ async function assertSafeArtifactTopology(
           finalBackingFileSystem.identity !== initialBackingFileSystem.identity))
     ) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}验证检出整树拓扑、hard link 组或后备文件系统在核对期间发生变化`,
       );
     }
   } catch (error) {
     if (error instanceof ExternalFileLinkSnapshotBudgetError) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}${error.message}`,
       );
     }
     if (error instanceof CleanValidationHardLinkProofError) {
       throw new CleanValidationCheckoutError(
-        'artifact-boundary-violated',
+        'topology-unverifiable',
         `${context}${error.message}`,
       );
     }
-    throw error;
+    if (error instanceof CleanValidationCheckoutError) throw error;
+    throw new CleanValidationCheckoutError(
+      'topology-unverifiable',
+      `${context}无法完成验证检出拓扑复核：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   return capturedExternalLinks;
 }
@@ -1585,7 +1602,7 @@ export async function createCleanValidationCheckout(
         assertCleanValidationTreeHasNoMountPoints(checkoutRoot);
       } catch (error) {
         throw new CleanValidationCheckoutError(
-          'artifact-boundary-violated',
+          'topology-unverifiable',
           `${context}${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -1631,6 +1648,24 @@ export async function createCleanValidationCheckout(
           }`,
         );
       }
+      // 先证明整棵验证树的拓扑安全，再裁决普通未声明产物。否则一个位于未声明
+      // 目录中的回源链接会先被宽泛的 artifact-boundary 吞掉，错误地从需要隔离的
+      // 安全树异常降级为普通不可验证。普通额外文件仍会在下方按原规则拒绝。
+      const captured = await assertSafeArtifactTopology(
+        checkoutRoot,
+        sourceRoot,
+        artifactPolicy,
+        context,
+        {
+          capturePreparedExternalLinks,
+          permittedExternalLinks,
+          signal: options.managed.termination?.signal,
+          managed: options.managed,
+          ...(options.beforeFinalTopologyScanForTests === undefined
+            ? {}
+            : { beforeFinalTopologyScanForTests: options.beforeFinalTopologyScanForTests }),
+        },
+      );
       const unexpected = status
         .filter((entry) => entry.code === '??' || entry.code === '!!')
         .map((entry) => entry.path)
@@ -1644,18 +1679,6 @@ export async function createCleanValidationCheckout(
           `${context}验证检出产生未允许内容：${unexpected.slice(0, 20).join('、')}`,
         );
       }
-      const captured = await assertSafeArtifactTopology(
-        checkoutRoot,
-        sourceRoot,
-        artifactPolicy,
-        context,
-        {
-          capturePreparedExternalLinks,
-          permittedExternalLinks,
-          signal: options.managed.termination?.signal,
-          managed: options.managed,
-        },
-      );
       if (capturePreparedExternalLinks) permittedExternalLinks = captured;
     };
 
@@ -1703,7 +1726,7 @@ export async function createCleanValidationCheckout(
     const base = error instanceof Error ? error.message : String(error);
     if (cleaned.status !== 'removed') {
       throw new CleanValidationCheckoutError(
-        error instanceof CleanValidationCheckoutError ? error.code : 'cleanup-unverifiable',
+        'cleanup-unverifiable',
         `${base}；临时验证目录未能安全清理，${describeCleanValidationCheckoutCleanup(cleaned)}`,
       );
     }

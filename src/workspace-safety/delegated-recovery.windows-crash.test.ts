@@ -110,7 +110,7 @@ describe.runIf(process.platform === 'win32')(
           waitForProcessGone(Number(started.targetPid), 60_000),
         ]);
         expect(parseDrainedReceipt(readFileSync(receiptPath))).toMatchObject({
-          proof: 'windows-job-zero-and-pipes-eof-v1',
+          proof: 'windows-job-zero-pipes-eof-output-settled-v2',
           drainReason: 'parent-shutdown',
         });
         expect(parent.stderr()).toBe('');

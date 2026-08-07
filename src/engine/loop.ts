@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { Writable } from 'node:stream';
 import { join, basename } from 'node:path';
 import { runAgent, type AgentKind, type RunResult } from './agent.js';
 import { type Prd } from './prd.js';
@@ -13,6 +14,7 @@ import {
   restoreValidationOwnership,
   validationOwnershipOf,
   issueValidationReceipt,
+  markValidatorUnverifiable,
   reconcileValidationReceipts,
   rollbackUnvalidatedPass,
   tryReadEngineOwnedFields,
@@ -75,6 +77,7 @@ import {
 } from '../workspace-safety/command-signals.js';
 import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
 import {
+  CleanValidationCheckoutError,
   CleanValidationCheckoutManager,
   describeCleanValidationCheckoutCleanup,
   valueReferencesProjectPath,
@@ -89,6 +92,7 @@ import {
   observeStoryValidationCurrentness,
   type StoryValidationObservation,
 } from '../review/story-validation-observation.js';
+import { classifyValidatorAttempt } from './validator-outcome.js';
 
 export { renderInstruction } from './loop-instructions.js';
 
@@ -143,13 +147,23 @@ export interface LoopConfig {
       StoryValidationBindingObservation | Promise<StoryValidationBindingObservation>;
     termination?: {
       signal: AbortSignal;
-      reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+      reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
     };
   }) => Promise<FinalReviewOutcome>;
   /** 只供提交身份竞态测试：在 Validator request 读取 HEAD 的最后边界同步执行。 */
-  beforeValidatorRequestForTests?: () => void;
+  beforeValidatorRequestForTests?: (validationRoot: string) => void;
   /** 只供清理失败回归：在通过结果签发 receipt 前、验证检出清理前同步执行。 */
   beforeValidationCheckoutCleanupForTests?: (root: string) => void;
+  /** 只供提交身份竞态测试：验证检出已收口、Validator claim 尚未写入状态时执行。 */
+  afterValidationCheckoutSettlementForTests?: () => void | Promise<void>;
+  /** 只供提交身份竞态测试：Validator claim 已写状态、引擎尚未完成最终 HEAD 复核时执行。 */
+  afterValidatorClaimStateWriteForTests?: () => void | Promise<void>;
+  /** 只供提交身份竞态测试：不可验证标记首次写入、引擎尚未完成 HEAD 复核时执行。 */
+  afterValidatorUnverifiableStateWriteForTests?: () => void | Promise<void>;
+  /** 只供 Validator 输出故障闭环测试；生产始终使用进程 stdout/stderr。 */
+  validatorOutputForTests?: { readonly stdout: Writable; readonly stderr: Writable };
+  /** 只供 Builder 输出故障闭环测试；生产始终使用进程 stdout/stderr。 */
+  builderOutputForTests?: { readonly stdout: Writable; readonly stderr: Writable };
   /** 只供 session release 信号竞态测试；生产始终安装真实进程信号。 */
   commandSignalsForTests?: CommandSignalController;
   /** 只供 session release 信号竞态测试：close 已进入 closing、尚未 await 时执行。 */
@@ -347,6 +361,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       return {
         durationMs: result.durationMs,
         exitCode: result.exitCode,
+        ...(result.terminationReason ? { terminationReason: result.terminationReason } : {}),
         ...(diagnostic ? { diagnosticTail: diagnostic } : {}),
       };
     };
@@ -444,7 +459,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         });
       }
     };
-    // 四处提前退出（builder 异常轮熔断 / no-op 全部 resolved 快路径 / no-op 非 resolved 熔断 / validator 异常轮熔断）
+    // 提前退出（builder 异常轮熔断 / no-op 全部 resolved 快路径 / no-op 非 resolved 熔断）
     // break 前统一补一次 guard.read()+recordTamper()——它们都复用轮首快照提前结束本轮，
     // 若 builder 在本轮篡改了 prd.json，不补这一读就不会被检测/恢复/存档（与标准完成判定
     // 路径:344-345 的读点同形态）。guard.read() 幂等：磁盘未变时是真无操作。
@@ -465,6 +480,37 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     };
     let exitCode = 1;
     let reportCurrentReview: CurrentReviewStatus | undefined;
+    const reportOptionsFor = (
+      trustedPrd: Prd | null,
+      observation: StoryValidationObservation | null,
+      observationError?: string,
+    ): ReportOptions => ({
+      ...(trustedPrd === null ? {} : { trustedPrd }),
+      ...(reportCurrentReview === undefined ? {} : { currentReview: reportCurrentReview }),
+      currentGitHead: observation?.headSha ?? null,
+      storyValidationObservation: observation,
+      ...(observationError === undefined
+        ? {}
+        : { storyValidationObservationError: observationError }),
+    });
+    const pendingCloseoutMessage =
+      '本次运行尚未完成最终安全清理，不能把此报告视为最终结局';
+    let pendingCloseoutReportWritten = false;
+    const writePendingCloseoutReport = async (trustedPrd: Prd | null): Promise<void> => {
+      try {
+        const pending = await writeReportWithWriter(
+          session.writer,
+          new Date(),
+          reportOptionsFor(trustedPrd, null, pendingCloseoutMessage),
+        );
+        pendingCloseoutReportWritten ||= pending.status === 'written';
+      } catch (err) {
+        if (err instanceof WorkspaceSafetyError) throw err;
+        console.warn(
+          `⚠️  安全收口前的保守报告未能写入：${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
     const observeCurrentStoryValidation = () =>
       observeStoryValidationCurrentness({
         projectRoot,
@@ -682,7 +728,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             storyId,
             validationOwnershipOf(expected),
             expected,
-            { validated: owned.validated, validationReceipt: owned.validationReceipt },
+            {
+              validated: owned.validated,
+              validationReceipt: owned.validationReceipt,
+              validatorUnverifiable: owned.validatorUnverifiable,
+            },
           );
           materialized = validation.state;
           if (route.tamper || validation.tamper) materializedChanged = true;
@@ -734,6 +784,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               ? {
                   validated: observed.validated,
                   validationReceipt: observed.validationReceipt,
+                  validatorUnverifiable: observed.validatorUnverifiable,
                 }
               : undefined,
           );
@@ -757,7 +808,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               });
             }
             console.warn(
-              `⚠️  ${side} 修改了引擎独占的 ${storyId}.validated/validationReceipt，已整体恢复`,
+              `⚠️  ${side} 修改了引擎独占的 ${storyId} 验收状态，已整体恢复`,
             );
           }
         }
@@ -777,11 +828,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         console.log(`⬆️  ${currentStory} 首次有效失败（${reason}），下轮起使用 escalation 模型`);
         return true;
       };
-      // 异常轮回写：本轮把当前 story 的 passes 从 false 翻到 true 且未 blocked → 回写待复核。
-      // state 读取失败（缺失/损坏）不回写不覆盖（同门禁打回的保守语义）。返回是否发生回写。
+      // Developer 异常和 legacy Validator 测试兼容路径：本轮把当前 story 的 passes 从
+      // false 翻到 true 且未 blocked → 回写待复核。结构化 Validator 由 ADR-023 分类，
+      // 不进入此处。state 读取失败（缺失/损坏）不回写不覆盖。
       const rollbackIfUnvalidatedPass = async (
         side: 'builder' | 'validator',
-        r: { timedOut: boolean; exitCode: number | null },
+        r: Pick<RunResult, 'timedOut' | 'exitCode' | 'terminationReason'>,
       ): Promise<boolean> => {
         if (!currentStory) return false;
         const passedBefore = beforeState?.[currentStory]?.passes ?? false;
@@ -791,7 +843,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         const next = applyAbortRollback(
           st,
           currentStory,
-          { side, timedOut: r.timedOut, exitCode: r.exitCode },
+          {
+            side,
+            timedOut: r.timedOut,
+            exitCode: r.exitCode,
+            terminationReason: r.terminationReason,
+          },
           new Date(),
         );
         await session.writer.writeFile('state.json', JSON.stringify(next, null, 2));
@@ -800,6 +857,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         );
         return true;
       };
+      // 只供 legacy Validator 测试兼容路径；正式结构化协议不可验证时保留候选。
       const rollbackPendingValidation = async (reason: string): Promise<boolean> => {
         if (!currentStory) return false;
         const state = tryReadState(statePath);
@@ -850,6 +908,29 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ...(validatorInvocation ? { validatorInvocation } : {}),
           ...over,
         });
+      };
+      const persistCurrentValidatorUnverifiable = async (
+        fallbackGitHead: string | null,
+      ): Promise<void> => {
+        if (!currentStoryObj) return;
+        let bindingHead = readGitHead(agentCwd) ?? fallbackGitHead;
+        if (!bindingHead) return;
+
+        // Git HEAD 与 state.json 不是同一个原子事务。首次写入后立即复核；若提交在
+        // await 窗口中变化，再把标记绑定到新提交。这样 run=5 不会紧接着在 status
+        // 中无解释地退成 1。仍读不到 HEAD 时，status 会把它保守地继续显示为 5。
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const state = tryReadState(statePath);
+          if (!state) return;
+          const marked = markValidatorUnverifiable(state, currentStoryObj, bindingHead);
+          if (marked.changed) {
+            await session.writer.writeFile('state.json', JSON.stringify(marked.state, null, 2));
+          }
+          if (attempt === 0) await cfg.afterValidatorUnverifiableStateWriteForTests?.();
+          const observedHead = readGitHead(agentCwd);
+          if (observedHead === null || observedHead === bindingHead) return;
+          bindingHead = observedHead;
+        }
       };
       const observeValidationHead = async (
         expectedGitHead: string | null,
@@ -913,53 +994,88 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           observedGitHead,
           diagnostic,
         );
-        const validationRollback =
-          !validationOnly && (await rollbackPendingValidation('检查期间 Git HEAD 发生变化'));
-        const recovery = validationOnly
-          ? '保留已有实现候选且不增加重试'
-          : '撤销本轮尚未验收的候选且不增加重试';
+        const recovery = '保留当前实现状态且不增加重试';
         console.error(`\n⏸️  ${diagnostic}；${recovery}，本次运行停止且不启动 Validator`);
+        await persistCurrentValidatorUnverifiable(expectedGitHead);
         await recordIteration({
           ...(builderOutcome ? { builderOutcome } : {}),
           validatorOutcome: 'skipped',
-          ...(validationRollback ? { validationRollback: true as const } : {}),
+          validationProtocol: 'invalid',
+          validationProtocolError: {
+            code: 'artifact-changed',
+            diagnostic: clipEvidenceDiagnostic(diagnostic),
+          },
           validationHeadAbort,
         });
         dashboard.setState({
-          phase: 'idle',
+          phase: 'blocked',
           model: null,
           routeSource: null,
-          storyDifficulty: null,
+          storyDifficulty: currentStoryObj?.difficulty ?? null,
         });
-        exitCode = 1;
+        exitCode = 5;
         await tamperCheckBeforeExit(i);
         return true;
+      };
+      const throwIfValidationContainmentUnverifiable = (error: unknown): void => {
+        if (error instanceof WorkspaceSafetyError) throw error;
+        if (
+          error instanceof CleanValidationCheckoutError &&
+          (error.code === 'cleanup-unverifiable' || error.code === 'topology-unverifiable')
+        ) {
+          if (session.state === 'open') session.retainLeaseForIsolation();
+          throw new WorkspaceSafetyError('isolated', error.message);
+        }
       };
       const stopForValidationEnvironmentFailure = async (
         error: unknown,
         builderOutcome?: 'completed' | 'timeout' | 'error',
       ): Promise<true> => {
+        throwIfValidationContainmentUnverifiable(error);
         const detail = clipEvidenceDiagnostic(
           error instanceof Error ? error.message : String(error),
         ).trim();
-        const validationRollback =
-          !validationOnly && (await rollbackPendingValidation('本地验证环境无法可靠确认'));
-        const recovery = validationOnly
-          ? '保留已有实现候选且不增加重试'
-          : '撤销本轮尚未验收的候选且不增加重试';
+        const candidateState = currentStory ? tryReadState(statePath)?.[currentStory] : undefined;
+        const candidateReady =
+          cfg.legacyValidatorProtocolForTests ||
+          (!!currentStoryObj && !!candidateState?.passes && !candidateState.blocked);
+        if (!candidateReady) {
+          console.warn(
+            `⏭️  本地验证环境未能建立，但当前 Story 尚无可验收候选：${detail}；` +
+              '按普通未收敛结束，不把它误记为 Validator 无法验证',
+          );
+          await recordIteration({
+            ...(builderOutcome ? { builderOutcome } : {}),
+            validatorOutcome: 'skipped',
+          });
+          dashboard.setState({
+            phase: 'idle',
+            model: null,
+            routeSource: null,
+            storyDifficulty: null,
+          });
+          await tamperCheckBeforeExit(i);
+          return true;
+        }
+        const recovery = '保留当前实现状态且不增加重试';
         console.error(`\n⏸️  本地验证环境不可验证：${detail}；${recovery}，本次运行停止`);
+        await persistCurrentValidatorUnverifiable(currentGitHead);
         await recordIteration({
           ...(builderOutcome ? { builderOutcome } : {}),
           validatorOutcome: 'skipped',
-          ...(validationRollback ? { validationRollback: true as const } : {}),
+          validationProtocol: 'invalid',
+          validationProtocolError: {
+            code: 'environment-unverifiable',
+            diagnostic: detail,
+          },
         });
         dashboard.setState({
-          phase: 'idle',
+          phase: 'blocked',
           model: null,
           routeSource: null,
-          storyDifficulty: null,
+          storyDifficulty: currentStoryObj?.difficulty ?? null,
         });
-        exitCode = 1;
+        exitCode = 5;
         await tamperCheckBeforeExit(i);
         return true;
       };
@@ -1002,6 +1118,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           timeoutMs: cfg.devTimeoutMs,
           model: builderChoice!.model,
           env: agentEnv,
+          ...(cfg.builderOutputForTests ? { output: cfg.builderOutputForTests } : {}),
           managed: {
             session,
             termination: commandSignals.termination,
@@ -1091,13 +1208,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             'Developer 返回后',
           );
           if (!reconciled) {
-            const validationRollback = await rollbackPendingValidation(
-              'Developer 返回后无法读取 Git HEAD',
-            );
             const headDiagnostic = `Developer 返回后Git HEAD 与本轮检查目标不一致（期望 ${currentGitHead ?? 'unavailable'}，当前 unavailable）`;
+            await persistCurrentValidatorUnverifiable(currentGitHead);
             await recordIteration({
               builderOutcome: 'completed',
-              ...(validationRollback ? { validationRollback: true as const } : {}),
+              validatorOutcome: 'skipped',
+              validationProtocol: 'invalid',
+              validationProtocolError: {
+                code: 'artifact-changed',
+                diagnostic: clipEvidenceDiagnostic(headDiagnostic),
+              },
               validationHeadAbort: validationHeadAbortOf(
                 'quality-check-start',
                 currentGitHead,
@@ -1105,7 +1225,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 headDiagnostic,
               ),
             });
-            exitCode = 2;
+            exitCode = 5;
             await tamperCheckBeforeExit(i);
             break;
           }
@@ -1200,6 +1320,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           await tamperCheckBeforeExit(i);
           break;
         }
+        // 从这一刻起会建立临时验证目录；其准备、核对或清理一旦无法证明，workspace
+        // 将立即隔离且不能再写报告。先留下保守版本，但不要提前覆盖 Developer/PRD
+        // 越界路径“不得生成报告”的既有边界。
+        await writePendingCloseoutReport(gateRead.prd);
         try {
           const validationPolicy = candidateStoryValidationEnvironmentPolicy(tddConfig);
           validationCheckout = await cleanValidationManager.acquire(
@@ -1657,10 +1781,20 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       });
       const validatorModel = validatorChoice.model;
       const structuredValidation = !cfg.legacyValidatorProtocolForTests;
+      const validatorStateSnapshot = tryReadState(statePath);
+      const currentValidatorStateSnapshot = currentStory
+        ? validatorStateSnapshot?.[currentStory]
+        : undefined;
+      const structuredCandidateReady =
+        !structuredValidation ||
+        (!!currentStoryObj &&
+          !!currentValidatorStateSnapshot?.passes &&
+          !currentValidatorStateSnapshot.blocked);
       const validatorWillRun =
         !!validatorBase &&
         !skipValidator &&
         !agentBlocked &&
+        structuredCandidateReady &&
         (!structuredValidation || !!currentStoryObj);
       dashboard.setState({
         phase: 'validating',
@@ -1697,44 +1831,98 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           `⚠️  ${currentStory ?? '当前 story'} Validator 结构化结果无效（${code}）：${diagnostic}`,
         );
       };
-      const releaseValidationCheckoutBeforeReceipt = async (): Promise<boolean> => {
-        if (!validationCheckout || !cleanValidationManager) return true;
+      const settleValidationCheckoutBeforeClaim = async (): Promise<boolean> => {
         let checkoutStillCurrent = true;
-        try {
-          cfg.beforeValidationCheckoutCleanupForTests?.(validationCheckout.root);
-          await validationCheckout.assertCurrent('签发凭证清理前');
-        } catch (error) {
-          rejectProtocol(
-            'artifact-changed',
-            `验证检出在签发凭证清理前已变化：${error instanceof Error ? error.message : String(error)}`,
+        if (validationCheckout && cleanValidationManager) {
+          try {
+            cfg.beforeValidationCheckoutCleanupForTests?.(validationCheckout.root);
+            await validationCheckout.assertCurrent('签发凭证清理前');
+          } catch (error) {
+            throwIfValidationContainmentUnverifiable(error);
+            rejectProtocol(
+              'artifact-changed',
+              `验证检出在接受 Validator 结论前已变化：${error instanceof Error ? error.message : String(error)}`,
+            );
+            validationUnverifiable = true;
+            checkoutStillCurrent = false;
+          }
+          const cleanup = cleanValidationManager.dispose();
+          validationCheckout = null;
+          if (cleanup && cleanup.status !== 'removed') {
+            throw new WorkspaceSafetyError(
+              'isolated',
+              `验证检出未能在接受 Validator 结论前安全清理：${describeCleanValidationCheckoutCleanup(cleanup)}`,
+            );
+          }
+        }
+        const receiptHead = readGitHead(agentCwd);
+        if (receiptHead !== verificationHead) {
+          const diagnostic =
+            `接受 Validator 结论前项目 Git HEAD 与本轮检查目标不一致（期望 ${verificationHead ?? 'unavailable'}，` +
+            `当前 ${receiptHead ?? 'unavailable'}）`;
+          validationHeadAbort = validationHeadAbortOf(
+            'validator-finish',
+            verificationHead,
+            receiptHead,
+            diagnostic,
           );
+          rejectProtocol('artifact-changed', diagnostic);
           validationUnverifiable = true;
           checkoutStillCurrent = false;
         }
-        const cleanup = cleanValidationManager.dispose();
-        validationCheckout = null;
-        if (cleanup && cleanup.status !== 'removed') {
-          rejectProtocol(
-            'artifact-changed',
-            `验证检出未能在签发凭证前安全清理：${describeCleanValidationCheckoutCleanup(cleanup)}`,
-          );
-          validationUnverifiable = true;
-          return false;
-        }
         return checkoutStillCurrent;
       };
+      const rejectClaimForSourceHeadChange = (context: string, actualHead: string | null): false => {
+        const diagnostic =
+          `${context}项目 Git HEAD 与本轮检查目标不一致（期望 ${verificationHead ?? 'unavailable'}，` +
+          `当前 ${actualHead ?? 'unavailable'}）`;
+        validationHeadAbort = validationHeadAbortOf(
+          'validator-finish',
+          verificationHead,
+          actualHead,
+          diagnostic,
+        );
+        rejectProtocol('artifact-changed', diagnostic);
+        validationUnverifiable = true;
+        return false;
+      };
+      const sourceHeadStillCurrentForClaim = (context: string): boolean => {
+        const actualHead = readGitHead(agentCwd);
+        return actualHead === verificationHead
+          ? true
+          : rejectClaimForSourceHeadChange(context, actualHead);
+      };
+      const writeValidatorClaimState = async (
+        nextState: RunState,
+        previousState: RunState,
+      ): Promise<boolean> => {
+        if (!sourceHeadStillCurrentForClaim('写入 Validator 结论前')) return false;
+        await session.writer.writeFile('state.json', JSON.stringify(nextState, null, 2));
+        await cfg.afterValidatorClaimStateWriteForTests?.();
+        const actualHead = readGitHead(agentCwd);
+        if (actualHead === verificationHead) return true;
 
-      if (!validatorBase) {
+        // state.json 与 Git HEAD 不是同一个原子事务。写入后再复核；若提交已变化，先恢复
+        // 调用前候选，再把本轮 claim 判为不可验证，避免旧提交的 failed/passed 污染新提交。
+        await session.writer.writeFile('state.json', JSON.stringify(previousState, null, 2));
+        return rejectClaimForSourceHeadChange('写入 Validator 结论后', actualHead);
+      };
+
+      if (structuredValidation && !structuredCandidateReady) {
+        validatorOutcome = 'skipped';
+      } else if (!validatorBase) {
         console.error('❌ validator.md 不存在，本轮无法签发验收凭证');
         validatorOutcome = 'skipped';
+        rejectProtocol('validator-unavailable', 'validator.md 不存在，本轮无法启动 Validator');
       } else if (skipValidator) {
         console.warn('⚠️  prd.json 快照写回失败，跳过本轮 validator（磁盘验收标准不可信）');
         validatorOutcome = 'skipped';
+        rejectProtocol('environment-unverifiable', 'prd.json 快照不可信，不能启动 Validator');
       } else if (!agentBlocked && (!structuredValidation || currentStoryObj)) {
         console.log(
           `🧠 validator 实际模型: ${validatorModel ?? 'runner 默认'} [${validatorChoice.source}]`,
         );
-        const validatorStateBefore = tryReadState(statePath);
+        const validatorStateBefore = validatorStateSnapshot;
         const currentValidatorStateBefore = currentStory
           ? validatorStateBefore?.[currentStory]
           : undefined;
@@ -1745,7 +1933,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         let validatorHead: string | null = null;
 
         if (currentStoryObj) {
-          cfg.beforeValidatorRequestForTests?.();
+          cfg.beforeValidatorRequestForTests?.(validationRoot);
           const sourceHead = readGitHead(agentCwd);
           const headDiagnostic = await observeValidationHead(
             verificationHead,
@@ -1767,6 +1955,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             try {
               await validationCheckout?.assertCurrent('Validator 请求建立前');
             } catch (error) {
+              throwIfValidationContainmentUnverifiable(error);
               canStartValidator = false;
               validatorOutcome = 'skipped';
               validationHeadFailure = error instanceof Error ? error.message : String(error);
@@ -1792,6 +1981,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               try {
                 await clearValidationResultWithWriter(session.writer);
               } catch (err) {
+                if (err instanceof WorkspaceSafetyError) throw err;
                 canStartValidator = false;
                 validatorOutcome = 'skipped';
                 rejectProtocol(
@@ -1830,6 +2020,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               validationCheckout && !cfg.unsafeAllowProjectScopedRunnerForValidationTests
                 ? projectRoot
                 : undefined,
+            ...(cfg.validatorOutputForTests ? { output: cfg.validatorOutputForTests } : {}),
             managed: {
               session,
               termination: commandSignals.termination,
@@ -1862,14 +2053,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             );
           }
           const validatorHeadAfter = readGitHead(validationRoot);
+          const sourceHeadAfter = readGitHead(agentCwd);
           let validatorHeadDiagnostic = await observeValidationHead(
             verificationHead,
             'Validator 返回后',
-            readGitHead(agentCwd),
+            sourceHeadAfter,
           );
           try {
             await validationCheckout?.assertCurrent('Validator 返回后');
           } catch (error) {
+            throwIfValidationContainmentUnverifiable(error);
             validatorHeadDiagnostic = error instanceof Error ? error.message : String(error);
           }
           if (validatorHeadAfter !== verificationHead) {
@@ -1879,16 +2072,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           }
 
           if (validatorHeadDiagnostic) {
+            const observedHeadAfter =
+              sourceHeadAfter !== verificationHead ? sourceHeadAfter : validatorHeadAfter;
             validationHeadAbort = validationHeadAbortOf(
               'validator-finish',
               verificationHead,
-              validatorHeadAfter,
+              observedHeadAfter,
               validatorHeadDiagnostic,
             );
             if (structuredValidation && validationRequest) {
               try {
                 await clearValidationResultWithWriter(session.writer);
               } catch (err) {
+                if (err instanceof WorkspaceSafetyError) throw err;
                 console.warn(
                   `⚠️  validation result 清理失败，下轮会再次拒绝旧文件：${err instanceof Error ? err.message : String(err)}`,
                 );
@@ -1922,7 +2118,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 !currentValidatorStateBefore.blocked &&
                 validatorStateAfter?.passes &&
                 !validatorStateAfter.blocked &&
-                (await releaseValidationCheckoutBeforeReceipt())
+                (await settleValidationCheckoutBeforeClaim())
               ) {
                 stateAfter = tryReadState(statePath);
                 if (stateAfter) {
@@ -1955,6 +2151,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             try {
               await clearValidationResultWithWriter(session.writer);
             } catch (err) {
+              if (err instanceof WorkspaceSafetyError) throw err;
               // nonce 已阻止下轮复用；留存清理故障但不把已完成的当前绑定判成假失败。
               console.warn(
                 `⚠️  validation result 清理失败，下轮会再次拒绝旧文件：${err instanceof Error ? err.message : String(err)}`,
@@ -1963,12 +2160,17 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
 
             if (validatorOutcome !== 'completed') {
               rejectProtocol('agent-aborted', `Validator ${abortDesc(val)}`);
-              validatorRollback = await rollbackIfUnvalidatedPass('validator', val);
             } else if (validatorStateMutation) {
               rejectProtocol('state-mutated', 'Validator 修改了引擎独占的 state.json');
             } else if (!protocol.ok) {
               rejectProtocol(protocol.code, protocol.diagnostic);
-            } else if (currentStory && validatorStateBefore && currentValidatorStateBefore) {
+            } else if (!(await settleValidationCheckoutBeforeClaim())) {
+              // 结论返回后、引擎采用前的检出或 source HEAD 已变化；拒绝当前 claim。
+            } else {
+              await cfg.afterValidationCheckoutSettlementForTests?.();
+              if (!sourceHeadStillCurrentForClaim('记录 Validator 结论前')) {
+                // 检出已收口后 source HEAD 仍可能变化；拒绝旧提交 claim。
+              } else if (currentStory && validatorStateBefore && currentValidatorStateBefore) {
               await recordEvidence({
                 type: 'validation-claim',
                 source: 'validator',
@@ -1983,7 +2185,6 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 summary: protocol.result.summary,
               });
               if (protocol.result.verdict === 'failed') {
-                validationProtocol = 'failed';
                 const failed = applyValidatorFailure(
                   validatorStateBefore,
                   currentStory,
@@ -1991,20 +2192,19 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                   new Date(),
                 );
                 const enabled = enableEscalation(failed, currentStory, hasDedicatedEscalation);
-                await session.writer.writeFile(
-                  'state.json',
-                  JSON.stringify(enabled.state, null, 2),
-                );
-                validatorEscalationTriggered = enabled.changed;
-                if (enabled.changed) {
-                  console.log(
-                    `⬆️  ${currentStory} 首次有效失败（validator），下轮起使用 escalation 模型`,
-                  );
+                if (await writeValidatorClaimState(enabled.state, validatorStateBefore)) {
+                  validationProtocol = 'failed';
+                  validatorEscalationTriggered = enabled.changed;
+                  if (enabled.changed) {
+                    console.log(
+                      `⬆️  ${currentStory} 首次有效失败（validator），下轮起使用 escalation 模型`,
+                    );
+                  }
+                  const diagnostic = clipEvidenceDiagnostic(
+                    enabled.state[currentStory]?.notes ?? '',
+                  ).trim();
+                  if (diagnostic) validatorDiagnostic = diagnostic;
                 }
-                const diagnostic = clipEvidenceDiagnostic(
-                  enabled.state[currentStory]?.notes ?? '',
-                ).trim();
-                if (diagnostic) validatorDiagnostic = diagnostic;
               } else if (
                 !currentValidatorStateBefore.passes ||
                 currentValidatorStateBefore.blocked
@@ -2015,29 +2215,27 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 );
               } else {
                 const passed = applyValidatorSuccess(validatorStateBefore, currentStory);
-                const issued =
-                  currentStoryObj && (await releaseValidationCheckoutBeforeReceipt())
-                    ? issueValidationReceipt(
-                        passed,
-                        currentStoryObj,
-                        validationRequest,
-                        roundValidationEnvironmentDigest,
-                      )
-                    : { state: passed, changed: false };
+                const issued = currentStoryObj
+                  ? issueValidationReceipt(
+                      passed,
+                      currentStoryObj,
+                      validationRequest,
+                      roundValidationEnvironmentDigest,
+                    )
+                  : { state: passed, changed: false };
                 if (issued.changed) {
-                  await session.writer.writeFile(
-                    'state.json',
-                    JSON.stringify(issued.state, null, 2),
-                  );
-                  validationProtocol = 'passed';
-                  validationReceipt = true;
-                  console.log(`✅ ${currentStory} 结构化验收目标匹配，引擎验收凭证已签发`);
+                  if (await writeValidatorClaimState(issued.state, validatorStateBefore)) {
+                    validationProtocol = 'passed';
+                    validationReceipt = true;
+                    console.log(`✅ ${currentStory} 结构化验收目标匹配，引擎验收凭证已签发`);
+                  }
                 } else if (!validationProtocolError) {
                   rejectProtocol('candidate-not-passing', '引擎无法对当前候选态签发验收凭证');
                 }
               }
-            } else {
-              rejectProtocol('candidate-not-passing', '当前 story 或调用前状态缺失');
+              } else {
+                rejectProtocol('candidate-not-passing', '当前 story 或调用前状态缺失');
+              }
             }
           }
         }
@@ -2048,27 +2246,26 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         rejectProtocol('candidate-not-passing', '无法从可信 PRD 快照定位当前 story');
       }
 
-      // 普通实现轮仍沿用既有异常回写；validation-only 的旧候选只有明确失败才清除，
-      // Validator 运行或协议不可验证时保留候选、不增加 retry，并立即非绿结束。
-      if (!validationReceipt && !validatorRollback) {
-        const current = currentStory ? tryReadState(statePath)?.[currentStory] : undefined;
-        if (validationHeadFailure) {
-          if (!validationOnly) {
-            validationRollback = await rollbackPendingValidation('检查期间 Git HEAD 发生变化');
-          }
-          validationUnverifiable = true;
-        } else if (validationProtocolError?.code === 'artifact-changed') {
-          if (!validationOnly) {
-            validationRollback = await rollbackPendingValidation('检查期间 Git HEAD 发生变化');
-          }
-          validationUnverifiable = true;
-        } else if (validationOnly && !agentBlocked && current?.passes !== false) {
-          validationUnverifiable = true;
-        } else if (!validationOnly) {
-          validationRollback = await rollbackPendingValidation(
-            validatorOutcome === 'completed' ? 'validator 未确认候选通过' : 'validator 未完整执行',
-          );
+      // 结构化 Validator 的进程、协议与凭证由单一分类器裁决。无法验证时无论候选
+      // 是本轮新建还是跨轮保留，都不清 passes、不增加 retry，并立即以 exit 5 停止。
+      if (structuredValidation) {
+        if (validationHeadFailure && !validationProtocolError) {
+          rejectProtocol('artifact-changed', validationHeadFailure);
         }
+        validationUnverifiable =
+          classifyValidatorAttempt({
+            expected: !agentBlocked && currentStory !== null && structuredCandidateReady,
+            runnerOutcome: validatorOutcome,
+            protocol: validationProtocol,
+            receiptIssued: validationReceipt,
+          }) === 'unverifiable';
+        if (validationUnverifiable) {
+          await persistCurrentValidatorUnverifiable(verificationHead);
+        }
+      } else if (!validationReceipt && !validatorRollback && !validationOnly) {
+        validationRollback = await rollbackPendingValidation(
+          validatorOutcome === 'completed' ? 'validator 未确认候选通过' : 'validator 未完整执行',
+        );
       }
 
       // 每轮一条 iteration 不变式：continue 路径（builder 异常/no-op/门禁打回）各自留痕后跳出，
@@ -2110,7 +2307,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           ? '验收前无法确认当前提交身份'
           : 'Validator 结果无法可靠验证';
         console.error(`\n⏸️  ${currentStory} 的${reason}；保留实现候选且不增加重试，本次运行停止`);
-        exitCode = 1;
+        dashboard.setState({
+          phase: 'blocked',
+          model: null,
+          routeSource: null,
+          storyDifficulty: currentStoryObj?.difficulty ?? null,
+        });
+        exitCode = 5;
         await tamperCheckBeforeExit(i);
         break;
       }
@@ -2188,35 +2391,44 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             : '（文件删除类篡改无存档）'),
       );
     }
-    // 循环结束无条件生成静态验证报告（进行中态也诚实存档）；
-    // 报告是副产物：任何失败只 warn，绝不影响循环退出码。
-    try {
-      // closeRead 是最终一次 PRD guard 读：只要启动时建立过可信快照，即使磁盘恢复
-      // 失败也必须用快照出报告。guard 从未建立快照的异常输入才保留磁盘诊断回退。
-      const sameReadyObservation = (
-        expected: StoryValidationObservation,
-        observed: StoryValidationObservation,
-      ): boolean =>
-        expected.status === 'ready' &&
-        observed.status === 'ready' &&
-        expected.observationToken === observed.observationToken;
-      const reportOptionsFor = (
-        observation: StoryValidationObservation | null,
-        observationError?: string,
-      ): ReportOptions => ({
-        ...(closeRead.prd === null ? {} : { trustedPrd: closeRead.prd }),
-        ...(reportCurrentReview === undefined ? {} : { currentReview: reportCurrentReview }),
-        currentGitHead: observation?.headSha ?? null,
-        storyValidationObservation: observation,
-        ...(observationError === undefined
-          ? {}
-          : { storyValidationObservationError: observationError }),
-      });
+    // closeRead 是最终一次 PRD guard 读：只要启动时建立过可信快照，即使磁盘恢复
+    // 失败也必须用快照出报告。guard 从未建立快照的异常输入才保留磁盘诊断回退。
+    const sameReadyObservation = (
+      expected: StoryValidationObservation,
+      observed: StoryValidationObservation,
+    ): boolean =>
+      expected.status === 'ready' &&
+      observed.status === 'ready' &&
+      expected.observationToken === observed.observationToken;
+    // 最终清理失败会立刻把 session 隔离，之后不能再写报告。先原子写入一个明确的
+    // “尚未完成安全收口”版本；只有临时检出实际清理成功后，才用当前观察覆盖成最终报告。
+    await writePendingCloseoutReport(closeRead.prd);
+
+    const cleanValidationCleanup = cleanValidationManager?.dispose();
+    const cleanValidationCleanupFailed =
+      cleanValidationCleanup !== null &&
+      cleanValidationCleanup !== undefined &&
+      cleanValidationCleanup.status !== 'removed';
+    if (cleanValidationCleanupFailed) {
+      console.error(
+        `❌ 本地验证临时目录未能安全清理，` +
+          describeCleanValidationCheckoutCleanup(cleanValidationCleanup),
+      );
+      if (!pendingCloseoutReportWritten) {
+        console.warn('⚠️  现有 report.html 可能来自更早运行，不代表本次安全收口结果');
+      }
+      exitCode = 2;
+    }
+
+    // 循环结束生成静态验证报告（进行中态也诚实存档）。只有最终临时目录已经安全
+    // 收口时才写入可供阅读的当前观察；报告失败只 warn，不改写真实循环退出码。
+    if (!cleanValidationCleanupFailed) {
+      try {
       const beforeWrite = await observeCurrentStoryValidation();
       let report = await writeReportWithWriter(
         session.writer,
         new Date(),
-        reportOptionsFor(beforeWrite),
+        reportOptionsFor(closeRead.prd, beforeWrite),
       );
       if (report.status === 'written' && beforeWrite.status === 'ready') {
         const afterWrite = await observeCurrentStoryValidation();
@@ -2224,7 +2436,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           report = await writeReportWithWriter(
             session.writer,
             new Date(),
-            reportOptionsFor(afterWrite),
+            reportOptionsFor(closeRead.prd, afterWrite),
           );
           if (report.status === 'written' && afterWrite.status === 'ready') {
             const afterRewrite = await observeCurrentStoryValidation();
@@ -2232,7 +2444,11 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               report = await writeReportWithWriter(
                 session.writer,
                 new Date(),
-                reportOptionsFor(null, '报告持久化期间 Story 验收状态持续变化，已强制撤销全部绿灯'),
+                reportOptionsFor(
+                  closeRead.prd,
+                  null,
+                  '报告持久化期间 Story 验收状态持续变化，已强制撤销全部绿灯',
+                ),
               );
             }
           }
@@ -2245,21 +2461,14 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           `⚠️  验证报告未生成（prd.json ${report.status === 'missing' ? '缺失' : '不可解析'}）`,
         );
       }
-    } catch (err) {
-      console.warn(`⚠️  验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);
+      } catch (err) {
+        console.warn(`⚠️  验证报告生成失败：${err instanceof Error ? err.message : String(err)}`);
+      }
     }
     // keepOpen 等待阶段只读、无需持有 owner lease。
     // 等待期 Ctrl+C 完全走既有 waitForSigint 语义（真实退出码保留）
     if (commandSignals.exitCode !== null) exitCode = commandSignals.exitCode;
-    const cleanValidationCleanup = cleanValidationManager?.dispose();
-    if (cleanValidationCleanup && cleanValidationCleanup.status !== 'removed') {
-      console.error(
-        `❌ 本地验证临时目录未能安全清理，` +
-          describeCleanValidationCheckoutCleanup(cleanValidationCleanup),
-      );
-      exitCode = 2;
-    }
-    await closeSession();
+    if (session.state === 'open') await closeSession();
     if (commandSignals.exitCode !== null) exitCode = commandSignals.exitCode;
     commandSignals.dispose();
     if (cfg.keepOpen && commandSignals.exitCode === null) {

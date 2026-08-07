@@ -392,7 +392,17 @@ export function fakeCounting(workspace: string): { fake: string; calls: string }
 }
 
 export type BoundValidatorMode =
-  'passed' | 'failed' | 'missing' | 'wrong-story' | 'state-mutation' | 'aborted-after-result';
+  | 'passed'
+  | 'failed'
+  | 'missing'
+  | 'invalid-json'
+  | 'oversized'
+  | 'wrong-story'
+  | 'state-mutation'
+  | 'exit101-no-result'
+  | 'output-overflow'
+  | 'output-then-missing'
+  | 'aborted-after-result';
 
 export interface FakeBoundValidatorOptions {
   readonly builderCwdMarker?: string;
@@ -461,6 +471,32 @@ export function fakeBoundValidator(
     const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
     const mode = ${JSON.stringify(mode)};
     if (mode === 'missing') process.exit(0);
+    if (mode === 'exit101-no-result') process.exit(101);
+    if (mode === 'output-overflow') {
+      let remaining = 16 * 1024 * 1024 + 1;
+      const chunk = 'x'.repeat(64 * 1024);
+      while (remaining > 0) {
+        const bytes = chunk.slice(0, Math.min(chunk.length, remaining));
+        remaining -= bytes.length;
+        if (!process.stdout.write(bytes)) {
+          await new Promise((resolveDrain) => process.stdout.once('drain', resolveDrain));
+        }
+      }
+      await new Promise((resolveWrite) => process.stdout.write('', resolveWrite));
+      process.exit(0);
+    }
+    if (mode === 'output-then-missing') {
+      process.stdout.write('validator output before sink failure\n');
+      process.exit(0);
+    }
+    if (mode === 'invalid-json') {
+      writeFileSync(request.resultPath, '{broken');
+      process.exit(0);
+    }
+    if (mode === 'oversized') {
+      writeFileSync(request.resultPath, 'x'.repeat(64 * 1024 + 1));
+      process.exit(0);
+    }
     const checks = request.acceptanceCriteria.map((_, index) => ({
       acIndex: index + 1,
       passed: mode !== 'failed' || index !== 0,
@@ -482,7 +518,7 @@ export function fakeBoundValidator(
       writeFileSync(statePath, JSON.stringify(state));
     }
     writeFileSync(request.resultPath, JSON.stringify(result));
-    process.exit(mode === 'aborted-after-result' ? 1 : 0);
+    process.exit(mode === 'aborted-after-result' ? 101 : 0);
   `,
   );
   return fake;

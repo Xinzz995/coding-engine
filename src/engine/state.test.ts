@@ -28,6 +28,7 @@ import {
   validationOwnershipOf,
   selectNextStory,
   allStoriesResolvedAt,
+  markValidatorUnverifiable,
   type ValidationReceipt,
 } from './state.js';
 import type { Prd } from './prd.js';
@@ -222,6 +223,7 @@ describe('tryReadState', () => {
     expect(tryReadEngineOwnedFields(file, 'US-001')).toEqual({
       validated: 'missing',
       validationReceipt: 'missing',
+      validatorUnverifiable: 'missing',
       escalated: 'missing',
     });
     writeFileSync(
@@ -240,11 +242,13 @@ describe('tryReadState', () => {
     expect(tryReadEngineOwnedFields(file, 'US-001')).toEqual({
       validated: false,
       validationReceipt: 'missing',
+      validatorUnverifiable: 'missing',
       escalated: true,
     });
     expect(tryReadEngineOwnedFields(file, 'US-404')).toEqual({
       validated: 'missing',
       validationReceipt: 'missing',
+      validatorUnverifiable: 'missing',
       escalated: 'missing',
     });
     rmSync(dir, { recursive: true, force: true });
@@ -309,6 +313,7 @@ describe('initialStateFor', () => {
       passes: true,
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
       notes: 'x',
       retryCount: 3,
       blocked: true,
@@ -937,6 +942,7 @@ describe('validated engine ownership', () => {
       passes: true,
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
       notes: '',
       retryCount: 1,
       blocked: false,
@@ -968,7 +974,11 @@ describe('validated engine ownership', () => {
 
   it('restores validated and validationReceipt as one engine-owned value', () => {
     const expectedReceipt = receiptFor('US-001');
-    const expected = { validated: true, validationReceipt: expectedReceipt };
+    const expected = {
+      validated: true,
+      validationReceipt: expectedReceipt,
+      validatorUnverifiable: null,
+    };
     const tampered = base();
     tampered['US-001'] = {
       ...tampered['US-001'],
@@ -982,6 +992,7 @@ describe('validated engine ownership', () => {
       received: {
         validated: true,
         validationReceipt: { ...expectedReceipt, requestId: 'forged-request' },
+        validatorUnverifiable: null,
       },
     });
 
@@ -991,10 +1002,12 @@ describe('validated engine ownership', () => {
       ...fallback,
       validated: true,
       validationReceipt: expectedReceipt,
+      validatorUnverifiable: null,
     });
     expect(deleted.tamper?.received).toEqual({
       validated: 'missing',
       validationReceipt: 'missing',
+      validatorUnverifiable: 'missing',
     });
   });
 
@@ -1002,11 +1015,13 @@ describe('validated engine ownership', () => {
     const expected = {
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
     };
     const state = base();
     const unchanged = restoreValidationOwnership(state, 'US-001', expected, undefined, {
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
     });
     expect(unchanged.state).toBe(state);
     expect(unchanged.tamper).toBeNull();
@@ -1014,6 +1029,7 @@ describe('validated engine ownership', () => {
     const missingReceipt = restoreValidationOwnership(state, 'US-001', expected, undefined, {
       validated: false,
       validationReceipt: 'missing',
+      validatorUnverifiable: null,
     });
     expect(missingReceipt.state['US-001'].validationReceipt).toBeNull();
     expect(missingReceipt.tamper?.received.validationReceipt).toBe('missing');
@@ -1027,6 +1043,7 @@ describe('validated engine ownership', () => {
     expect(validationOwnershipOf(issued.state['US-001'])).toEqual({
       validated: true,
       validationReceipt: receiptFor('US-001', ['first', 'second']),
+      validatorUnverifiable: null,
     });
     expect(isStoryPassedAt(story, issued.state['US-001'], HEAD_A, ENVIRONMENT)).toBe(true);
     expect(issueValidationReceipt(issued.state, story, request, ENVIRONMENT).changed).toBe(false);
@@ -1053,6 +1070,48 @@ describe('validated engine ownership', () => {
         ENVIRONMENT,
       ).changed,
     ).toBe(false);
+  });
+
+  it('binds a Validator-unverifiable marker to the exact candidate and clears it on receipt', () => {
+    const story = storyIdentity('US-001', ['first', 'second']);
+    const request = createValidationRequest(story, '/tmp/workspace', HEAD_A, 'request-1');
+    const marked = markValidatorUnverifiable(base(), story, HEAD_A);
+    expect(marked.changed).toBe(true);
+    expect(marked.state['US-001']).toMatchObject({
+      passes: true,
+      validated: false,
+      validationReceipt: null,
+      validatorUnverifiable: {
+        schemaVersion: 1,
+        gitHead: HEAD_A,
+        acceptanceHash: acceptanceHash('US-001', ['first', 'second']),
+      },
+    });
+    expect(markValidatorUnverifiable(marked.state, story, HEAD_A).changed).toBe(false);
+
+    const issued = issueValidationReceipt(marked.state, story, request, ENVIRONMENT);
+    expect(issued.changed).toBe(true);
+    expect(issued.state['US-001'].validatorUnverifiable).toBeNull();
+  });
+
+  it('does not mark a missing, failed, blocked, or invalid-head candidate unverifiable', () => {
+    const story = storyIdentity('US-001');
+    expect(markValidatorUnverifiable({}, story, HEAD_A).changed).toBe(false);
+    expect(
+      markValidatorUnverifiable(
+        { 'US-001': { ...base()['US-001'], passes: false } },
+        story,
+        HEAD_A,
+      ).changed,
+    ).toBe(false);
+    expect(
+      markValidatorUnverifiable(
+        { 'US-001': { ...base()['US-001'], blocked: true } },
+        story,
+        HEAD_A,
+      ).changed,
+    ).toBe(false);
+    expect(markValidatorUnverifiable(base(), story, 'not-a-head').changed).toBe(false);
   });
 
   it('refuses empty/non-Git/wrong Story/wrong hash/wrong ordered criteria requests', () => {

@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
+import type { Writable } from 'node:stream';
 import type { DelegatedSemanticCandidate } from '../contracts/delegated-operation-contract.js';
 import { runWorkspaceOperationControlled, type OperationDelegationScope } from './operation.js';
 import { readDarkPosixHelperBundle, runDarkPosixSupervisedOperation } from './posix-supervisor.js';
@@ -12,13 +13,18 @@ import {
 } from './supervisor-timeouts.js';
 import { WorkspaceSafetyError } from './types.js';
 import {
+  ManagedOutputController,
+  type ManagedOutputFailure,
+  type ManagedOutputSnapshot,
+} from './managed-output.js';
+import {
   readDarkWindowsHelperBundle,
   runDarkWindowsSupervisedOperation,
 } from './windows-supervisor.js';
 
 export type { ManagedSupervisorTimeouts } from './supervisor-timeouts.js';
 
-export type ManagedWorkspaceProcessOptions = OperationDelegationScope & {
+type ManagedWorkspaceProcessBaseOptions = OperationDelegationScope & {
   readonly executable: string;
   /**
    * POSIX 目标进程看到的绝对 argv[0]。真实执行文件仍由 executable 的 canonical path 固定；
@@ -31,22 +37,37 @@ export type ManagedWorkspaceProcessOptions = OperationDelegationScope & {
   readonly timeoutMs: number;
   readonly termination?: {
     readonly signal: AbortSignal;
-    readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+    readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
   };
   readonly supervisorTimeouts?: ManagedSupervisorTimeouts;
 };
 
-export interface ManagedWorkspaceProcessResult {
+export type ManagedWorkspaceProcessOptions = ManagedWorkspaceProcessBaseOptions & {
+  readonly output?: {
+    readonly mode: 'stream';
+    readonly stdout: Writable;
+    readonly stderr: Writable;
+  };
+};
+
+interface ManagedWorkspaceProcessBaseResult {
   readonly verdict: 'completed' | 'root-failed' | 'process-tree-not-empty' | 'terminated';
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
-  readonly stdout: Buffer;
-  readonly stderr: Buffer;
   readonly timedOut: boolean;
   readonly processTreeNotEmpty: boolean;
   readonly terminationReason: SupervisorTerminationReason | null;
   readonly durationMs: number;
   readonly candidate?: DelegatedSemanticCandidate;
+}
+
+export interface ManagedWorkspaceProcessResult extends ManagedWorkspaceProcessBaseResult {
+  readonly stdout: Buffer;
+  readonly stderr: Buffer;
+  /** Present only when options.output.mode is stream; stdout/stderr are then empty compatibility buffers. */
+  readonly outputBytes?: number;
+  readonly outputTail?: string;
+  readonly outputFailure?: ManagedOutputFailure | null;
 }
 
 /** 固定 supervisor 只接收操作系统解析后的真实目标，拒绝短路径和符号链接别名漂移。 */
@@ -120,42 +141,103 @@ export async function runManagedWorkspaceProcess(
   };
   const helperBytes =
     platform === 'windows-job-v1' ? readDarkWindowsHelperBundle() : readDarkPosixHelperBundle();
+  const outputFailureController = options.output?.mode === 'stream' ? new AbortController() : null;
+  const outputController =
+    options.output?.mode === 'stream'
+      ? new ManagedOutputController({
+          stdout: options.output.stdout,
+          stderr: options.output.stderr,
+          onFailure: () => outputFailureController!.abort(),
+        })
+      : null;
   const startedAt = Date.now();
-  const outcome = await runWorkspaceOperationControlled(
-    session,
-    {
-      ...options,
-      platform,
-      helperBytes,
-    },
-    async (operation) => {
-      if (platform === 'windows-job-v1') {
-        return await runDarkWindowsSupervisedOperation(operation, {
-          target,
-          commandTimeoutMs: options.timeoutMs,
-          termination: options.termination,
-          timeouts: mapManagedTimeoutsToWindows(options.supervisorTimeouts),
-        });
+  const outcome = await (async () => {
+    let operationCompleted = false;
+    try {
+      const result = await runWorkspaceOperationControlled(
+        session,
+        {
+          ...options,
+          platform,
+          helperBytes,
+        },
+        async (operation) => {
+          if (platform === 'windows-job-v1') {
+            return await runDarkWindowsSupervisedOperation(operation, {
+              target,
+              commandTimeoutMs: options.timeoutMs,
+              termination: options.termination,
+              timeouts: mapManagedTimeoutsToWindows(options.supervisorTimeouts),
+              ...(outputController
+                ? {
+                    onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) =>
+                      outputController.write(stream, chunk),
+                    onOutputDiscard: () => outputController.discard(),
+                    outputFailureSignal: outputFailureController!.signal,
+                  }
+                : {}),
+            });
+          }
+          return await runDarkPosixSupervisedOperation(operation, {
+            target: { ...target, executableArgv0: executableArgv0 ?? executable },
+            commandTimeoutMs: options.timeoutMs,
+            termination: options.termination,
+            timeouts: mapManagedTimeoutsToPosix(options.supervisorTimeouts),
+            ...(outputController
+              ? {
+                  onOutput: (stream: 'stdout' | 'stderr', chunk: Buffer) =>
+                    outputController.write(stream, chunk),
+                  onOutputDiscard: () => outputController.discard(),
+                  outputFailureSignal: outputFailureController!.signal,
+                }
+              : {}),
+          });
+        },
+      );
+      operationCompleted = true;
+      return result;
+    } finally {
+      if (!operationCompleted && outputController) {
+        outputController.discard();
+        await outputController.finish().catch(() => undefined);
       }
-      return await runDarkPosixSupervisedOperation(operation, {
-        target: { ...target, executableArgv0: executableArgv0 ?? executable },
-        commandTimeoutMs: options.timeoutMs,
-        termination: options.termination,
-        timeouts: mapManagedTimeoutsToPosix(options.supervisorTimeouts),
-      });
-    },
-  );
+    }
+  })();
 
-  return {
+  const baseResult: ManagedWorkspaceProcessBaseResult = {
     verdict: outcome.verdict,
     exitCode: outcome.code,
     signal: outcome.signal,
-    stdout: outcome.stdout,
-    stderr: outcome.stderr,
     timedOut: outcome.terminationReason === 'timeout',
     processTreeNotEmpty: outcome.leftover,
     terminationReason: outcome.terminationReason,
     durationMs: Math.max(0, Date.now() - startedAt),
     ...(outcome.candidate ? { candidate: outcome.candidate } : {}),
+  };
+  if (!outputController) {
+    return { ...baseResult, stdout: outcome.stdout, stderr: outcome.stderr };
+  }
+
+  let outputSnapshot: ManagedOutputSnapshot;
+  try {
+    outputSnapshot = await outputController.finish();
+  } catch {
+    outputSnapshot = outputController.snapshot;
+  }
+  const outputFailure =
+    outputSnapshot.failure ??
+    (outcome.terminationReason === 'output-failure'
+      ? ({
+          code: 'supervisor-output-failure',
+          diagnostic: '受管输出超过固定上限或平台输出通道失败',
+        } as const)
+      : null);
+  return {
+    ...baseResult,
+    stdout: Buffer.alloc(0),
+    stderr: Buffer.alloc(0),
+    outputBytes: outputSnapshot.totalBytes,
+    outputTail: outputSnapshot.diagnosticTail,
+    outputFailure,
   };
 }

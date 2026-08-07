@@ -413,7 +413,7 @@ v1 evaluator 进一步冻结以下机械边界，避免正常路径与恢复路�
   "containmentDigest": "sha256:...",
   "helperDigest": "sha256:...",
   "supervisorIdentity": "bounded-platform-value",
-  "proof": "windows-job-zero-and-pipes-eof-v1",
+  "proof": "windows-job-zero-pipes-eof-output-settled-v2",
   "drainReason": "natural",
   "drainedAt": "2026-07-30T00:00:03.000Z"
 }
@@ -427,19 +427,22 @@ receipt；同时缓存 owner.json 与 protocol.json 精确摘要，绝不在 chi
 目标 pgid 精确为空时写 `posix-group-empty-and-pipes-eof-v1`；Windows 自然结束路径必须已缓存根
 结果，随后关闭 thread/process handle；外部终止路径允许没有 STARTED/RESULT，但同样必须关闭目标
 handle，并在仍持有 Job handle 时确认 `ActiveProcesses == 0` 与 pipes EOF，才写
-`windows-job-zero-and-pipes-eof-v1`。若 supervisor 从未接受 START，项目代码机械上未运行；canonical
+新 Windows helper 在接受 START 后签发 `windows-job-zero-pipes-eof-output-settled-v2`：自然完成要求
+全部输出已消费并确认；终止完成要求剩余窗口已经由绑定终止请求明确丢弃。旧
+`windows-job-zero-and-pipes-eof-v1` 仅用于读取历史恢复记录。若 supervisor 从未接受 START，项目代码机械上未运行；canonical
 active-child 已是严格 armed 时，它可以安全重读摘要、清空 barrier/suspended containment，并写
-`never-started-containment-empty-v1`；磁盘仍是 prepared-bound 时不写 receipt。`proof` 只允许这三个
-枚举。receipt 用不替换既有文件的原子安装；预先存在、错 issuer 或摘要冲突都失败关闭。正常路径由
-parent 回读绑定后 ACK；supervisor 随后退出，parent 确认其死亡、delta accepted 后才整体 settle
-operation，不逐项清 active 与 receipt。
+`never-started-containment-empty-v1`；磁盘仍是 prepared-bound 时不写 receipt。读取层只接受 POSIX、
+历史 Windows v1、当前 Windows v2 与 never-started 四个固定 `proof`；当前 live 路径按实际平台只签
+POSIX、Windows v2 或 never-started，旧 Windows v1 只供恢复历史记录。receipt 用不替换既有文件的
+原子安装；预先存在、错 issuer 或摘要冲突都失败关闭。正常路径由 parent 回读绑定后 ACK；supervisor
+随后退出，parent 确认其死亡、delta accepted 后才整体 settle operation，不逐项清 active 与 receipt。
 父进程崩溃路径由 supervisor 完成同一写入后退出，留给 recovery 使用。
 
 `drainReason` 固定为
-`natural | process-tree-not-empty | timeout | user-interrupt | parent-shutdown`，是 receipt 精确字节及
-摘要的一部分。`process-tree-not-empty` 只能由 supervisor 在自然收口窗口结束后根据平台集合测量得出；
-parent 不能通过 TERMINATE 自报。IPC 的 DRAINED 只携带 `operationId + receiptDigest + proof`，不复制
-reason 或 `leftover`，避免出现两个可分叉的裁决来源。
+`natural | process-tree-not-empty | timeout | user-interrupt | parent-shutdown | output-failure`，是
+receipt 精确字节及摘要的一部分。`process-tree-not-empty` 只能由 supervisor 在自然收口窗口结束后根据
+平台集合测量得出；parent 不能通过 TERMINATE 自报。IPC 的 DRAINED 只携带
+`operationId + receiptDigest + proof`，不复制 reason 或 `leftover`，避免出现两个可分叉的裁决来源。
 
 receipt 必须和当前 owner record、protocol、operation、active-child、delegated baseline 的精确字节
 摘要、固定 helper 及 supervisor identity 完全匹配。缺失、部分写入、旧 operation、helper 不匹配、当前 safety bytes 与

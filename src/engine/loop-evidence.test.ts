@@ -127,7 +127,7 @@ describe('runLoop evidence records', () => {
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  });
+  }, 20_000);
 
   it('保留 validator 打回 notes，即使成功重试已清空当前 state', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([

@@ -5,6 +5,7 @@ import type { StoryDifficulty } from './prd.js';
 import type { ValidationCheck, ValidationProtocolErrorCode } from './validation-protocol.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
 import { readStableFile } from '../workspace-safety/stable-file.js';
+import type { SupervisorTerminationReason } from '../workspace-safety/supervisor-protocol.js';
 
 export interface ValidationTargetEvidence {
   requestId: string;
@@ -17,6 +18,7 @@ export interface ValidationTargetEvidence {
 export interface AgentInvocationEvidence {
   durationMs: number;
   exitCode: number | null;
+  terminationReason?: SupervisorTerminationReason;
   diagnosticTail?: string;
 }
 
@@ -25,7 +27,9 @@ export type LoopValidationProtocolErrorCode =
   | 'state-mutated'
   | 'candidate-not-passing'
   | 'result-cleanup-failed'
-  | 'agent-aborted';
+  | 'agent-aborted'
+  | 'environment-unverifiable'
+  | 'validator-unavailable';
 
 export type TddEvidenceFailureCode =
   | 'invalid-config'
@@ -209,7 +213,18 @@ export const EVIDENCE_DIAGNOSTIC_CHARS = 2000;
 
 /** 保留最接近失败点的尾部；门禁输出与 validator notes 共用同一边界。 */
 export function clipEvidenceDiagnostic(value: string): string {
-  return value.slice(-EVIDENCE_DIAGNOSTIC_CHARS);
+  let start = value.length;
+  let remaining = EVIDENCE_DIAGNOSTIC_CHARS;
+  while (start > 0 && remaining > 0) {
+    start -= 1;
+    const codeUnit = value.charCodeAt(start);
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff && start > 0) {
+      const preceding = value.charCodeAt(start - 1);
+      if (preceding >= 0xd800 && preceding <= 0xdbff) start -= 1;
+    }
+    remaining -= 1;
+  }
+  return value.slice(start);
 }
 
 /**
@@ -262,7 +277,22 @@ function isRouteSource(v: unknown): v is ModelRouteSource {
 }
 
 function isBoundedDiagnostic(v: unknown): v is string {
-  return typeof v === 'string' && v.length <= EVIDENCE_DIAGNOSTIC_CHARS;
+  if (typeof v !== 'string') return false;
+  let count = 0;
+  for (const _character of v) {
+    count += 1;
+    if (count > EVIDENCE_DIAGNOSTIC_CHARS) return false;
+  }
+  return true;
+}
+
+function isSupervisorTerminationReason(value: unknown): value is SupervisorTerminationReason {
+  return (
+    value === 'timeout' ||
+    value === 'user-interrupt' ||
+    value === 'parent-shutdown' ||
+    value === 'output-failure'
+  );
 }
 
 function isInvocationEvidence(v: unknown): v is AgentInvocationEvidence {
@@ -271,6 +301,7 @@ function isInvocationEvidence(v: unknown): v is AgentInvocationEvidence {
     Number.isSafeInteger(v.durationMs) &&
     (v.durationMs as number) >= 0 &&
     (v.exitCode === null || Number.isInteger(v.exitCode)) &&
+    (v.terminationReason === undefined || isSupervisorTerminationReason(v.terminationReason)) &&
     (v.diagnosticTail === undefined ||
       (isBoundedDiagnostic(v.diagnosticTail) && v.diagnosticTail.length > 0))
   );
@@ -281,9 +312,21 @@ function isInvocationForOutcome(
   outcome: unknown,
 ): value is AgentInvocationEvidence {
   if (!isInvocationEvidence(value)) return false;
-  if (outcome === 'completed') return value.exitCode === 0 && value.diagnosticTail === undefined;
-  if (outcome === 'timeout') return value.exitCode === null;
-  if (outcome === 'error') return value.exitCode !== 0;
+  if (outcome === 'completed')
+    return (
+      value.exitCode === 0 &&
+      value.terminationReason === undefined &&
+      value.diagnosticTail === undefined
+    );
+  if (outcome === 'timeout')
+    return (
+      value.exitCode === null &&
+      (value.terminationReason === undefined || value.terminationReason === 'timeout')
+    );
+  if (outcome === 'error') {
+    if (value.terminationReason === undefined) return value.exitCode !== 0;
+    return value.exitCode === null && value.terminationReason !== 'timeout';
+  }
   return false;
 }
 
@@ -337,7 +380,9 @@ function isValidationProtocolErrorCode(v: unknown): v is LoopValidationProtocolE
     v === 'state-mutated' ||
     v === 'candidate-not-passing' ||
     v === 'result-cleanup-failed' ||
-    v === 'agent-aborted'
+    v === 'agent-aborted' ||
+    v === 'environment-unverifiable' ||
+    v === 'validator-unavailable'
   );
 }
 

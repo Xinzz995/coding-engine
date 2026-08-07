@@ -147,6 +147,17 @@ describe('instruction assets workspace commit isolation contract', () => {
 });
 
 describe('instruction assets Validator artifact isolation contract', () => {
+  it('forbids unbounded dependency scans and requires every running handle to settle', () => {
+    const content = read('validator.md');
+    expect(content).toContain('禁止递归枚举、读取、哈希或逐文件输出');
+    expect(content).toContain('依赖目录、虚拟环境、缓存目录、构建输出');
+    expect(content).toContain('只检查少量与当前 AC 明确相关的命名文件');
+    expect(content).toContain('session、cell、run ID');
+    expect(content).toContain('轮询到终态');
+    expect(content).toContain('显式终止并确认已经结束');
+    expect(content).toContain('不得写 validation result');
+  });
+
   it('requires cache-free validation and a clean checkout before a passed claim', () => {
     const content = read('validator.md');
     expect(content).toContain('不是通用临时目录');
@@ -154,7 +165,8 @@ describe('instruction assets Validator artifact isolation contract', () => {
     expect(content).toContain('测试缓存、语言运行时字节码、覆盖率数据、静态检查缓存');
     expect(content).toContain('系统临时目录或质量契约已声明的生成产物目录');
     expect(content).toContain('被 Git 忽略也不构成保留理由');
-    expect(content).toContain('`git status --short --untracked-files=all --ignored=matching`');
+    expect(content).toContain('`git status --short --untracked-files=normal --ignored=matching`');
+    expect(content).toContain('不得切换到逐文件的 `--untracked-files=all`');
     expect(content).toContain('不得写入 `verdict="passed"`');
     expect(content).toContain('不得为获得干净状态而删除或还原项目原有的跟踪文件');
   });
@@ -178,7 +190,7 @@ describe('instruction assets Validator artifact isolation contract', () => {
 
       const complete = execFileSync(
         'git',
-        ['status', '--short', '--untracked-files=all', '--ignored=matching'],
+        ['status', '--short', '--untracked-files=normal', '--ignored=matching'],
         { cwd: root, encoding: 'utf8' },
       );
       expect(complete).toContain('!! __pycache__/');

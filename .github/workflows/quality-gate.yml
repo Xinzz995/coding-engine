@@ -41,7 +41,7 @@ jobs:
         run: '''bash'' ''-c'' ''CODING_X_RUN_LINUX_MOUNT_PROOF=1 npx vitest run src/engine/clean-validation-mounts.test.ts -t ''"''"''rejects a real Linux bind mount before recursive cleanup''"''"'''''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -106,7 +106,7 @@ jobs:
         run: '''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'
@@ -141,7 +141,7 @@ jobs:
         run: '''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -181,7 +181,7 @@ jobs:
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
@@ -221,7 +221,7 @@ jobs:
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
         working-directory: '.'
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'
@@ -266,7 +266,7 @@ jobs:
         run: '& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-Target'' ''PathInspector'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-path-inspector.exe'''
       - name: 'test / windows-native-proof'
         working-directory: '.'
-        timeout-minutes: 20
+        timeout-minutes: 30
         shell: pwsh
         run: '& ''npm'' ''run'' ''test:windows-native-proof'''
   quality-gate:

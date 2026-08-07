@@ -18,8 +18,11 @@ const MAX_EVENT_LINE_BYTES = 64 * 1024;
 const MAX_EVENT_STRING = 16_384;
 const MAX_OUTPUT_CHUNK_BYTES = 16 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+const MAX_PENDING_OUTPUT_FRAMES = 1024;
 const MAX_HELPER_STDERR_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/u;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 export type WindowsContainment = Extract<ContainmentDescriptor, { platform: 'windows-job-v1' }>;
 type WindowsSupervisorTarget = Omit<SupervisorTarget, 'executableArgv0'> & {
@@ -64,10 +67,14 @@ export interface RunDarkWindowsSupervisedOperationOptions {
   readonly commandTimeoutMs?: number;
   readonly termination?: {
     readonly signal: AbortSignal;
-    readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+    readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
   };
   readonly timeouts?: Partial<WindowsSupervisorTimeouts>;
   readonly hooks?: WindowsSupervisorHooks;
+  readonly onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void | Promise<void>;
+  readonly onOutputDiscard?: () => void;
+  /** Signals an asynchronous downstream sink failure between output callbacks. */
+  readonly outputFailureSignal?: AbortSignal;
 }
 
 export interface WindowsInvocationOutcome {
@@ -120,6 +127,9 @@ export interface WindowsPrestartDrainedEvent {
 
 export interface WindowsOutputEvent {
   readonly type: 'OUTPUT';
+  readonly operationId: string;
+  readonly sequence: number;
+  readonly bytes: number;
   readonly stream: 'stdout' | 'stderr';
   readonly data: Buffer;
 }
@@ -177,6 +187,13 @@ function eventString(value: unknown, field: string, maximum = MAX_EVENT_STRING):
 function eventPid(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 0xffff_ffff) {
     return protocolInvalid(`${field} must be an unsigned 32-bit process id`);
+  }
+  return value as number;
+}
+
+function eventPositiveSafeInteger(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    return protocolInvalid(`${field} must be a positive safe integer`);
   }
   return value as number;
 }
@@ -241,7 +258,15 @@ export function parseWindowsSupervisorEvent(input: string | Buffer): WindowsPars
     return { type: 'PRESTART_DRAINED', messageBytes };
   }
   if (record.type === 'OUTPUT') {
-    exactEventKeys(record, ['schemaVersion', 'type', 'stream', 'data'], 'OUTPUT');
+    exactEventKeys(
+      record,
+      ['schemaVersion', 'type', 'operationId', 'sequence', 'bytes', 'stream', 'data'],
+      'OUTPUT',
+    );
+    const operationId = eventString(record.operationId, 'OUTPUT.operationId');
+    if (!UUID_PATTERN.test(operationId)) protocolInvalid('OUTPUT.operationId is invalid');
+    const sequence = eventPositiveSafeInteger(record.sequence, 'OUTPUT.sequence');
+    const bytes = eventPositiveSafeInteger(record.bytes, 'OUTPUT.bytes');
     if (record.stream !== 'stdout' && record.stream !== 'stderr') {
       protocolInvalid('OUTPUT.stream is invalid');
     }
@@ -249,7 +274,8 @@ export function parseWindowsSupervisorEvent(input: string | Buffer): WindowsPars
     if (data.length === 0 || data.length > MAX_OUTPUT_CHUNK_BYTES) {
       protocolInvalid('OUTPUT chunk is outside the fixed bound');
     }
-    return { type: 'OUTPUT', stream: record.stream, data };
+    if (bytes !== data.length) protocolInvalid('OUTPUT.bytes does not match decoded data');
+    return { type: 'OUTPUT', operationId, sequence, bytes, stream: record.stream, data };
   }
   if (record.type === 'FAILURE') {
     exactEventKeys(record, ['schemaVersion', 'type', 'message'], 'FAILURE');
@@ -284,7 +310,10 @@ export class WindowsSupervisorEventOrder {
     else if (event.type === 'ARMED' && this.#state === 'bound') this.#state = 'armed';
     else if (event.type === 'STARTED' && this.#state === 'armed') this.#state = 'started';
     else if (event.type === 'RESULT' && this.#state === 'started') this.#state = 'result';
-    else if (event.type === 'DRAINED' && (this.#state === 'armed' || this.#state === 'result')) {
+    else if (
+      event.type === 'DRAINED' &&
+      (this.#state === 'armed' || this.#state === 'started' || this.#state === 'result')
+    ) {
       this.#state = 'drained';
     } else if (
       event.type === 'PRESTART_DRAINED' &&
@@ -304,6 +333,22 @@ export class WindowsSupervisorProcess {
 
   #line = Buffer.alloc(0);
   #outputBytes = 0;
+  #unacknowledgedOutputBytes = 0;
+  #nextOutputSequence = 1;
+  #boundOutputOperationId: string | undefined;
+  readonly #pendingOutput = new Map<
+    number,
+    {
+      readonly event: WindowsOutputEvent;
+      acknowledgement: Promise<void> | undefined;
+    }
+  >();
+  #outputDiscarded = false;
+  #outputFailure: Error | undefined;
+  readonly #outputQueues: Record<'stdout' | 'stderr', Promise<void>> = {
+    stdout: Promise.resolve(),
+    stderr: Promise.resolve(),
+  };
   #helperStderrBytes = 0;
   #events: WindowsProtocolEvent[] = [];
   #waiter:
@@ -323,8 +368,17 @@ export class WindowsSupervisorProcess {
   constructor(
     private readonly child: ChildProcessWithoutNullStreams,
     private readonly handshakeMs: number,
+    private readonly output?: {
+      readonly onOutput?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void | Promise<void>;
+      readonly onFailure: (error: Error) => void;
+    },
+    expectedOperationId?: string,
   ) {
     if (child.pid === undefined) protocolIsolated('supervisor spawn did not return a pid');
+    if (expectedOperationId !== undefined && !UUID_PATTERN.test(expectedOperationId)) {
+      protocolInvalid('expected output operation id is invalid');
+    }
+    this.#boundOutputOperationId = expectedOperationId;
     this.pid = child.pid;
     child.stdout.on('data', (chunk: Buffer) => this.#consume(chunk));
     this.#stdoutEnd = new Promise((resolve) => {
@@ -353,9 +407,14 @@ export class WindowsSupervisorProcess {
   #consume(chunk: Buffer): void {
     try {
       this.#line = Buffer.concat([this.#line, chunk]);
-      if (this.#line.length > MAX_EVENT_LINE_BYTES && !this.#line.includes(0x0a)) {
-        protocolInvalid('protocol frame exceeds the line bound');
-      }
+      this.#drainProtocolFrames();
+    } catch (error) {
+      this.#fail(error);
+    }
+  }
+
+  #drainProtocolFrames(): void {
+    try {
       let newline = this.#line.indexOf(0x0a);
       while (newline !== -1) {
         let line = this.#line.subarray(0, newline);
@@ -376,13 +435,66 @@ export class WindowsSupervisorProcess {
   }
 
   #push(event: WindowsParsedEvent): void {
+    if (
+      event.type === 'DRAINED' &&
+      !this.#outputDiscarded &&
+      this.#pendingOutput.size > 0
+    ) {
+      protocolInvalid('DRAINED arrived before every OUTPUT was acknowledged');
+    }
     this.#order.accept(event);
     if (event.type === 'OUTPUT') {
-      this.#outputBytes += event.data.length;
-      if (this.#outputBytes > MAX_OUTPUT_BYTES) {
-        protocolIsolated('target output exceeded the total bound');
+      const expectedOperationId = this.#boundOutputOperationId ?? event.operationId;
+      this.#boundOutputOperationId = expectedOperationId;
+      if (event.operationId !== expectedOperationId) {
+        protocolInvalid('OUTPUT is bound to a different operation');
       }
-      (event.stream === 'stdout' ? this.stdout : this.stderr).push(event.data);
+      if (event.sequence !== this.#nextOutputSequence) {
+        protocolInvalid('OUTPUT sequence is not globally consecutive');
+      }
+      this.#nextOutputSequence += 1;
+      if (this.#outputDiscarded) return;
+      this.#outputBytes += event.bytes;
+      const frame = { event, acknowledgement: undefined as Promise<void> | undefined };
+      this.#pendingOutput.set(event.sequence, frame);
+      this.#unacknowledgedOutputBytes += event.bytes;
+      if (
+        this.#unacknowledgedOutputBytes > MAX_PENDING_OUTPUT_BYTES ||
+        this.#pendingOutput.size > MAX_PENDING_OUTPUT_FRAMES
+      ) {
+        protocolInvalid('OUTPUT exceeded the fixed unacknowledged credit window');
+      }
+      if (this.#outputBytes > MAX_OUTPUT_BYTES) {
+        if (!this.output) protocolIsolated('target output exceeded the total bound');
+        this.#beginOutputFailure(protocolError('target output exceeded the total bound'));
+        return;
+      }
+      const owned = Buffer.from(event.data);
+      if (!this.output?.onOutput) {
+        (event.stream === 'stdout' ? this.stdout : this.stderr).push(owned);
+        const stream = event.stream;
+        this.#outputQueues[stream] = this.#outputQueues[stream]
+          .then(() => {
+            if (!this.#outputDiscarded) return this.#acknowledgeOutput(frame);
+          })
+          .catch((error: unknown) => this.#fail(error));
+        return;
+      }
+      const stream = event.stream;
+      this.#outputQueues[stream] = this.#outputQueues[stream]
+        .then(async () => {
+          if (this.#outputDiscarded) return;
+          try {
+            await this.output!.onOutput!(stream, owned);
+          } catch (error) {
+            this.#beginOutputFailure(
+              error instanceof Error ? error : new Error('unknown Windows output callback failure'),
+            );
+            return;
+          }
+          if (!this.#outputDiscarded) await this.#acknowledgeOutput(frame);
+        })
+        .catch((error: unknown) => this.#fail(error));
       return;
     }
     if (this.#waiter) {
@@ -396,6 +508,58 @@ export class WindowsSupervisorProcess {
       return;
     }
     this.#events.push(event);
+  }
+
+  #acknowledgeOutput(frame: {
+    readonly event: WindowsOutputEvent;
+    acknowledgement: Promise<void> | undefined;
+  }): Promise<void> {
+    if (frame.acknowledgement) return frame.acknowledgement;
+    // The helper may consume a submitted ACK and refill its credit before Node invokes the
+    // corresponding write callback. Release the mirrored credit at submission, while the
+    // per-stream queue still requires the write callback to settle successfully.
+    if (!this.#pendingOutput.delete(frame.event.sequence)) {
+      protocolInvalid('OUTPUT acknowledgement state was already released');
+    }
+    this.#unacknowledgedOutputBytes -= frame.event.bytes;
+    frame.acknowledgement = this.send({
+      schemaVersion: 1,
+      type: 'OUTPUT_ACK',
+      operationId: frame.event.operationId,
+      sequence: frame.event.sequence,
+      bytes: frame.event.bytes,
+    });
+    frame.acknowledgement.catch((error: unknown) => this.#fail(error));
+    return frame.acknowledgement;
+  }
+
+  #beginOutputFailure(error: Error): void {
+    if (this.#outputFailure !== undefined) return;
+    this.#outputFailure = error;
+    this.discardOutput();
+    try {
+      this.output?.onFailure(error);
+    } catch {
+      // Output failure notification cannot replace the mechanical failure.
+    }
+  }
+
+  discardOutput(): void {
+    if (this.#outputDiscarded) return;
+    this.#outputDiscarded = true;
+  }
+
+  async waitForOutputConsumption(deadline: MonotonicDeadline): Promise<void> {
+    if (this.#outputDiscarded) return;
+    await deadline.run(
+      () => Promise.all([this.#outputQueues.stdout, this.#outputQueues.stderr]),
+      () => protocolError('output consumption timed out'),
+    );
+    if (this.#pendingOutput.size > 0) {
+      throw protocolError('consumed output has no acknowledgement');
+    }
+    if (this.#terminalError) throw this.#terminalError;
+    if (this.#outputFailure) throw this.#outputFailure;
   }
 
   #fail(error: unknown): void {
@@ -552,12 +716,11 @@ export class WindowsSupervisorProcess {
     });
   }
 
-  sendBefore(
-    envelope: StrictRecord,
-    deadline: MonotonicDeadline,
-    label: string,
-  ): Promise<void> {
-    return deadline.run(() => this.send(envelope), () => protocolError(`${label} timed out`));
+  sendBefore(envelope: StrictRecord, deadline: MonotonicDeadline, label: string): Promise<void> {
+    return deadline.run(
+      () => this.send(envelope),
+      () => protocolError(`${label} timed out`),
+    );
   }
 
   expectCleanExit(): void {

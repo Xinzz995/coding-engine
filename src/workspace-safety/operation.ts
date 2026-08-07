@@ -533,9 +533,11 @@ export class WorkspaceOperationHandleControlled {
     }
     if (
       (binding.supervisor.platform === 'posix-process-group-v1' &&
-        receipt.proof === 'windows-job-zero-and-pipes-eof-v1') ||
+        (receipt.proof === 'windows-job-zero-and-pipes-eof-v1' ||
+          receipt.proof === 'windows-job-zero-pipes-eof-output-settled-v2')) ||
       (binding.supervisor.platform === 'windows-job-v1' &&
-        receipt.proof === 'posix-group-empty-and-pipes-eof-v1')
+        receipt.proof !== 'windows-job-zero-pipes-eof-output-settled-v2' &&
+        receipt.proof !== 'never-started-containment-empty-v1')
     ) {
       invalid('drained receipt proof does not match platform');
     }

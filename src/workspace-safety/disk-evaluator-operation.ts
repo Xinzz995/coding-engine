@@ -177,7 +177,8 @@ function parseAndBindReceipt(input: {
       receipt.helperDigest !== input.active.helperDigest ||
       receipt.supervisorIdentity !== input.active.supervisorIdentity ||
       (input.active.platform === 'posix-process-group-v1' &&
-        receipt.proof === 'windows-job-zero-and-pipes-eof-v1') ||
+        (receipt.proof === 'windows-job-zero-and-pipes-eof-v1' ||
+          receipt.proof === 'windows-job-zero-pipes-eof-output-settled-v2')) ||
       (input.active.platform === 'windows-job-v1' &&
         receipt.proof === 'posix-group-empty-and-pipes-eof-v1')
     ) {

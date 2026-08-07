@@ -6,6 +6,7 @@ import {
   summarizeFailedWindowsNativeVitestReport,
   verifyWindowsNativeSuiteReport,
   verifyWindowsNativeVitestReport,
+  WINDOWS_NATIVE_SUITE_TIMEOUT_MS,
   WINDOWS_NATIVE_TOTAL_TIMEOUT_MS,
 } from './windows-native-proof.mjs';
 
@@ -197,8 +198,11 @@ describe('Windows native proof report', () => {
     expect(nativeJob.indexOf('windows-supervisor-reproducibility')).toBeLessThan(
       nativeJob.indexOf('windows-native-proof'),
     );
-    expect(nativeJob).toContain('timeout-minutes: 20');
-    expect(WINDOWS_NATIVE_TOTAL_TIMEOUT_MS).toBeLessThan(20 * 60_000);
+    expect(nativeJob).toContain('timeout-minutes: 30');
+    expect(WINDOWS_NATIVE_SUITE_TIMEOUT_MS).toBe(15 * 60_000);
+    expect(WINDOWS_NATIVE_SUITE_TIMEOUT_MS).toBeLessThan(WINDOWS_NATIVE_TOTAL_TIMEOUT_MS);
+    expect(WINDOWS_NATIVE_TOTAL_TIMEOUT_MS).toBe(25 * 60_000);
+    expect(WINDOWS_NATIVE_TOTAL_TIMEOUT_MS).toBeLessThan(30 * 60_000);
   });
 
   it('runs compact from the WOF target directory and verifies dedicated WOF facts', () => {

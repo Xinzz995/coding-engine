@@ -5,8 +5,13 @@ import {
   VALIDATOR_FAIL_LINE_PREFIX, BLOCKED_LINE_PREFIX, ABORT_LINE_PREFIX,
 } from '../engine/gate.js';
 import { readModelRouting } from '../engine/models.js';
-import type { EvidenceRecord, ScreenshotClaim } from '../engine/evidence.js';
+import type {
+  AgentInvocationEvidence,
+  EvidenceRecord,
+  ScreenshotClaim,
+} from '../engine/evidence.js';
 import { readTddConfig } from '../engine/tdd-gate.js';
+import { acceptanceHash } from '../contracts/validation-contract.js';
 
 export function escapeHtml(s: string): string {
   return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
@@ -126,14 +131,35 @@ function renderGallery(shots: ScreenshotEntry[], claimedFiles: ReadonlySet<strin
   return parts.join('');
 }
 
-function storyBadge(s: StoryView): string {
+function isCurrentValidatorUnverifiableStory(s: StoryView, currentGitHead: string | null): boolean {
+  const marker = s.validatorUnverifiable;
+  return !!(
+    s.passes &&
+    !s.validated &&
+    !s.blocked &&
+    marker &&
+    marker.gitHead === currentGitHead &&
+    marker.acceptanceHash === acceptanceHash(s.id, s.acceptanceCriteria)
+  );
+}
+
+function storyBadge(s: StoryView, currentGitHead: string | null): string {
   if (isStoryPassed(s)) return '<span class="badge ok">✅ 通过</span>';
   if (s.blocked) return '<span class="badge blocked">⛔ blocked</span>';
+  if (isCurrentValidatorUnverifiableStory(s, currentGitHead)) {
+    return '<span class="badge blocked">⏸️ Validator 无法验证</span>';
+  }
   if (s.passes) return '<span class="badge pending">🟨 待引擎验收</span>';
   return '<span class="badge pending">⬜ 未完成</span>';
 }
 
-function renderStoryCard(s: StoryView, shots: ScreenshotEntry[], claims: ScreenshotClaim[], anyClaims: boolean): string {
+function renderStoryCard(
+  s: StoryView,
+  shots: ScreenshotEntry[],
+  claims: ScreenshotClaim[],
+  anyClaims: boolean,
+  currentGitHead: string | null,
+): string {
   const retry = s.retryCount > 0 ? ` <span class="retry">重试 ${s.retryCount} 次</span>` : '';
   const routeMeta = s.difficulty
     ? `<div class="meta-line">难度：<code>${text(s.difficulty)}</code>${s.escalated ? ' · ⬆️ 已升级' : ''}` +
@@ -154,7 +180,7 @@ function renderStoryCard(s: StoryView, shots: ScreenshotEntry[], claims: Screens
     ? `<div class="meta-line">story 级登记：${storyClaims.map((c) => `${claimLink(c)}${c.note ? `（${text(c.note)}）` : ''}`).join(' · ')}</div>`
     : '';
   return `<section class="card story">
-<h3>${text(s.id)} ${text(s.title)} ${storyBadge(s)}${retry}</h3>
+<h3>${text(s.id)} ${text(s.title)} ${storyBadge(s, currentGitHead)}${retry}</h3>
 ${routeMeta}
 <ul class="acs">${acs}</ul>
 ${storyClaimsHtml}
@@ -174,6 +200,12 @@ function renderImplementationBanner(
   }
   if (storyValidation.gitHead === null) {
     return '<div class="banner blocked">❌ 当前 Git HEAD 不可读取，Story 验收结果均需重验</div>';
+  }
+  const unverifiable = stories.filter((story) =>
+    isCurrentValidatorUnverifiableStory(story, storyValidation.gitHead),
+  );
+  if (unverifiable.length > 0) {
+    return `<div class="banner blocked">⏸️ Validator 无法可靠验证：${text(unverifiable.map((story) => story.id).join('、'))}</div>`;
   }
   if (!storyValidation.current) {
     return `<div class="banner blocked">❌ Story 验收凭证已过期：${text(storyValidation.invalidStoryIds.join('、'))}</div>`;
@@ -323,10 +355,11 @@ function renderDiagnostic(label: string, value: string | undefined): string {
   return `<details class="evidence-diagnostic"><summary>${text(label)}</summary><pre>${text(value)}</pre></details>`;
 }
 
-function invocationMeta(value: { durationMs: number; exitCode: number | null } | undefined): string {
+function invocationMeta(value: AgentInvocationEvidence | undefined): string {
   if (!value) return '';
   const exit = value.exitCode === null ? 'exit unavailable' : `exit ${value.exitCode}`;
-  return ` · ${(value.durationMs / 1000).toFixed(1)}s · ${exit}`;
+  const termination = value.terminationReason ? ` · reason ${value.terminationReason}` : '';
+  return ` · ${(value.durationMs / 1000).toFixed(1)}s · ${exit}${termination}`;
 }
 
 type GateOrTddRun = Extract<EvidenceRecord, { type: 'gate-run' | 'tdd-gate' }>;
@@ -495,7 +528,7 @@ function renderValidationClaims(records: EvidenceRecord[]): string {
   }).join('');
   return `<section class="card"><details><summary><h2>Validator 结构化声明</h2></summary>` +
     `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>claim</th><th>AC hash</th><th>Git HEAD</th><th>逐项证据</th></tr></thead><tbody>${rows}</tbody></table>` +
-    `<p class="placeholder">这些记录的 source=validator，是经引擎做新鲜度与目标绑定校验后的 agent claim；它们不是安全签名或 CI 证明。</p>` +
+    `<p class="placeholder">source=validator 只表示 Validator 曾返回形状与目标字段可解析的 agent claim；是否最终采用，必须同时核对同轮时间线、当前提交与验收凭证。它们不是安全签名或 CI 证明。</p>` +
     `</details></section>`;
 }
 
@@ -700,7 +733,17 @@ export function renderReportHtml(data: ReportData): string {
     list.push(c);
     claimsByStory.set(realId, list);
   }
-  const cards = stories.map((s) => renderStoryCard(s, byStory.get(s.id) ?? [], claimsByStory.get(s.id) ?? [], allClaims.length > 0)).join('\n');
+  const cards = stories
+    .map((s) =>
+      renderStoryCard(
+        s,
+        byStory.get(s.id) ?? [],
+        claimsByStory.get(s.id) ?? [],
+        allClaims.length > 0,
+        data.storyValidation.gitHead,
+      ),
+    )
+    .join('\n');
   const claimDisclaimer = allClaims.length > 0
     ? '<p class="placeholder">「agent 声明」类证据由 builder/validator 自行登记，真实性以截图内容与 git 历史为准。</p>'
     : '';
@@ -729,6 +772,7 @@ export function renderReportHtml(data: ReportData): string {
 ${renderImplementationBanner(stories, data.stateCorrupted, data.storyValidation)}
 <div class="meta-line">分支：<code>${text(prd.branchName)}</code>${prd.sourcePrd ? ` · 源 PRD：<code>${text(prd.sourcePrd)}</code>` : ''}</div>
 <div class="meta-line">生成时间：${formatStamp(data.generatedAt)} · workspace：<code>${text(data.workspace)}</code></div>
+<div class="meta-line">边界：本报告记录生成前已完成的检查；不自证写入后 workspace owner 已安全释放，最终以本次命令退出码和后续 doctor/status 为准。</div>
 ${prdSource}
 ${stateWarn}
 ${evidenceWarn}

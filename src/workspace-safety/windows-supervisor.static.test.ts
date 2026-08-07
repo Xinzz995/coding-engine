@@ -166,9 +166,7 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(program).toContain('arguments.Length != 4');
     expect(program).toContain('Assembly.Location');
     expect(core).toContain('private const int MaximumDecodedObjectBytes = 64 * 1024');
-    expect(core).toContain(
-      '4 * ((MaximumDecodedObjectBytes + 2) / 3)',
-    );
+    expect(core).toContain('4 * ((MaximumDecodedObjectBytes + 2) / 3)');
     expect(core).toContain(
       'StrictJson.Base64ObjectString(envelope, "messageBase64", "DATA messageBase64")',
     );
@@ -187,6 +185,10 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(deadlines).toContain('RemainingMilliseconds');
     expect(deadlines).toContain('TightenAfter');
     expect(deadlines).toContain('protocol send timed out');
+    expect(deadlines).toContain('internal static bool SendOutput');
+    expect(deadlines).toMatch(
+      /while \(connected && !Requests\.TryAdd\(request, 25\)\)[\s\S]*?while \(connected && !request\.Completed\.Wait\(25\)\)/u,
+    );
     expect(deadlines).toContain('TryFailure(string message, MonotonicDeadline deadline)');
     expect(deadlines).toContain(
       'Requests.TryAdd(new WriteRequest { Line = StrictJson.Serialize(failure) }, 0)',
@@ -196,6 +198,23 @@ describe('fixed Windows Job supervisor assets', () => {
     );
     expect(deadlines).not.toContain('DateTime.UtcNow');
     expect(processSource).toContain('WaitForEmptyAndEof(MonotonicDeadline deadline');
+    expect(processSource).toContain('private const int MaximumOutstandingBytes = 256 * 1024');
+    expect(processSource).toContain('private const int MaximumOutstandingFrames = 1024');
+    expect(processSource).toContain('outstanding.Count >= MaximumOutstandingFrames');
+    expect(processSource).toContain('ProtocolWriter.SendOutput(');
+    expect(processSource).toContain('{ "operationId", operationId }');
+    expect(processSource).toContain('{ "sequence", reservation.Sequence }');
+    expect(processSource).toContain('{ "bytes", reservation.Bytes }');
+    expect(processSource).toContain(
+      'standardOutput.EndOfFile && standardError.EndOfFile && outputCredit.Settled',
+    );
+    expect(processSource).toContain('Monitor.PulseAll(sync)');
+    expect(processSource).toMatch(
+      /internal void Terminate\(\)[\s\S]*?Native\.Close\(ref thread\);\s*Native\.Close\(ref process\);/u,
+    );
+    expect(processSource).not.toMatch(
+      /ProtocolWriter\.Send\(new Dictionary<string, object> \{[\s\S]{0,300}\{ "type", "OUTPUT" \}/u,
+    );
     expect(processSource).toMatch(
       /bool drained = ActiveProcesses\(job\) == 0 && OutputEnded;\s*if \(deadline\.Expired\) return false;\s*if \(drained\) return true;/u,
     );
@@ -210,6 +229,17 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(authority).toContain('control.Take(prepareDeadline, "DATA handshake")');
     expect(authority).toContain('control.Take(prepareDeadline, "START handshake")');
     expect(authority).toContain('control.Take(deadline, "ACK")');
+    expect(authority).toContain('HandleOutputAcknowledgement(ControlFrame frame)');
+    expect(authority).toContain('"schemaVersion", "type", "operationId", "sequence", "bytes"');
+    expect(authority).toContain('jobTarget.AcknowledgeOutput(operationId, sequence, bytes)');
+    expect(authority).toContain('jobTarget.DiscardOutput()');
+    expect(authority).toMatch(
+      /if \(requestedTermination != null\)\s*\{\s*jobTarget\.Terminate\(\);\s*DrainAndSend\(requestedTermination,[\s\S]*?return;\s*\}\s*closeoutDeadline = StartPhaseDeadline/u,
+    );
+    expect(authority).not.toContain('WaitForRootResult');
+    expect(authority).toContain('parent output acknowledgements did not settle');
+    expect(authority).toContain('windows-job-zero-pipes-eof-output-settled-v2');
+    expect(authority).not.toContain('windows-job-zero-and-pipes-eof-v1');
     expect(authority).toContain('closeoutDeadline.TightenAfter(timeouts.TerminateMs)');
     expect(authority).toContain('StartPhaseDeadline(timeouts.AckMs)');
     expect(authority).toContain('internal MonotonicDeadline FailureDeadline()');
@@ -240,9 +270,7 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(processSource).toContain('CREATE_UNICODE_ENVIRONMENT');
     expect(processSource).toContain('CREATE_SUSPENDED');
     expect(processSource).toContain('CREATE_NO_WINDOW');
-    expect(processSource).toContain(
-      'cmd.exe target must use the fixed /d /s /c shape',
-    );
+    expect(processSource).toContain('cmd.exe target must use the fixed /d /s /c shape');
     expect(processSource).toContain('only the fixed system cmd.exe target is supported');
     expect(processSource).toContain('Path.Combine(windows, "System32", "cmd.exe")');
     expect(processSource).not.toContain('Environment.GetEnvironmentVariable("ComSpec")');
@@ -299,6 +327,8 @@ describe('fixed Windows Job supervisor assets', () => {
     expect(outerJobDriverScript).toContain('Add-Type -Path $resolvedAssembly');
     expect(ctrlParent).toContain("process.on('SIGINT'");
     expect(ctrlParent).toContain("reason: 'user-interrupt'");
+    expect(ctrlParent).toContain("await events.next('DRAINED', ['RESULT'])");
+    expect(ctrlParent).not.toContain("await events.next('RESULT')");
     expect(ctrlParent).toContain("const SUPERVISOR_EXECUTABLE = 'coding-x-windows-supervisor.exe'");
     expect(ctrlParent).toContain('detached: true');
     expect(ctrlParent).toContain("new URL('./windows-ctrl-c-target.mjs', import.meta.url)");

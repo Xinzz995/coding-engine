@@ -21,7 +21,7 @@ function protocolPrefix(): string {
       type: 'DRAINED',
       operationId: OPERATION_ID,
       receiptDigest: DIGEST,
-      proof: 'windows-job-zero-and-pipes-eof-v1',
+      proof: 'windows-job-zero-pipes-eof-output-settled-v2',
     }),
     'utf8',
   ).toString('base64');

@@ -34,7 +34,7 @@ const MAX_OBSERVATION_BYTES = 16 * 1024 * 1024;
 
 export interface ManagedReviewTermination {
   readonly signal: AbortSignal;
-  readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+  readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
 }
 
 export interface ManagedReviewObservation {

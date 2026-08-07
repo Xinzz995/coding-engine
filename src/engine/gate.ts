@@ -129,7 +129,7 @@ export interface ManagedGateContext {
   readonly gitExecutable?: string;
   readonly termination?: {
     readonly signal: AbortSignal;
-    readonly reason: Exclude<SupervisorTerminationReason, 'timeout'>;
+    readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
   };
 }
 
@@ -532,6 +532,7 @@ export function applyGateFailure(
       passes: false,
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
       notes: lines.join('\n'),
       retryCount,
       blocked,
@@ -552,6 +553,7 @@ export function applyValidatorSuccess(state: RunState, storyId: string): RunStat
       ...prev,
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
       notes: arbitrationLines.join('\n'),
       retryCount: 0,
     },
@@ -594,6 +596,7 @@ export function applyValidatorFailure(
       passes: false,
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
       notes: lines.join('\n'),
       retryCount,
       blocked,
@@ -605,15 +608,21 @@ export interface AbortInfo {
   side: 'builder' | 'validator';
   timedOut: boolean;
   exitCode: number | null;
+  terminationReason?: SupervisorTerminationReason | null;
 }
 
 /**
  * agent 异常结局的人读描述单源（notes 标记行与引擎回写警告共用）。
- * 非超时且 exitCode 为 null 只有一种来源：进程被外部信号终止（runAgent 的
- * exit 事件 code=null）——渲染「被信号终止」而非字面「退出码 null」。
+ * 非超时且 exitCode 为 null 可能来自外部信号，也可能来自已机械收口的输出通道失败；
+ * 后者由 terminationReason 精确区分，不能都渲染成字面「退出码 null」。
  */
-export function abortDesc(abort: Pick<AbortInfo, 'timedOut' | 'exitCode'>): string {
+export function abortDesc(
+  abort: Pick<AbortInfo, 'timedOut' | 'exitCode'> & {
+    readonly terminationReason?: SupervisorTerminationReason | null;
+  },
+): string {
   if (abort.timedOut) return '执行超时被终止';
+  if (abort.terminationReason === 'output-failure') return '输出通道失败后被终止';
   return abort.exitCode === null ? '被信号终止' : `退出码 ${abort.exitCode}`;
 }
 
@@ -643,6 +652,7 @@ export function applyAbortRollback(
       passes: false,
       validated: false,
       validationReceipt: null,
+      validatorUnverifiable: null,
       notes: lines.join('\n'),
       retryCount: prev.retryCount,
       blocked: prev.blocked,
