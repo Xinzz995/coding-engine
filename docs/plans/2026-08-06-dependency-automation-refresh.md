@@ -1,6 +1,6 @@
 ---
 title: 依赖自动化分组与受保护工具刷新
-status: active
+status: done
 updated: 2026-08-06
 scope: root
 ---
@@ -59,6 +59,11 @@ scope: root
 3. 收紧 Dependabot 分组并忽略两个已知不支持的 major 更新。
 4. 增加仓库健康断言，防止分组重新吞入 major 或 CodeQL 两处版本漂移。
 5. 通过本地检查后创建受保护 PR；远端全部通过后合并并关闭 Issue #180。
+
+## Completion
+
+PR #181 已合并，全部远端检查通过；四个失效的旧依赖 PR 已关闭，Issue #180 已按完成关闭。
+主分支继续使用拆分后的依赖分组与固定版本的 CodeQL Action。
 
 ## Rollback
 

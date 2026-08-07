@@ -1,7 +1,7 @@
 ---
 title: esbuild Windows 开发服务器安全修复
-status: active
-updated: 2026-08-06
+status: done
+updated: 2026-08-07
 scope: root
 ---
 
@@ -58,6 +58,11 @@ scope: root
 让上游依赖范围重新成为唯一版本来源。该 PR 必须同步删除或改写临时版本 guard，并证明实际锁定
 的所有 esbuild 版本都不在漏洞范围、`npm audit` 仍为零，以及其余格式、类型、测试、构建和
 跨平台门禁全部通过；不再要求满足“override 必须存在”或“只能是 0.28.1”这两项临时条件。
+
+## Completion
+
+PR #183 已合并，全部远端检查通过；主分支依赖树只保留 esbuild 0.28.1，`npm audit` 为零，
+Issue #182 已按完成关闭。上面的移除条件继续有效，不把临时 override 误写成永久设计。
 
 ## Rollback
 
