@@ -8,8 +8,10 @@ scope: root
 # Agent 调用凭证实施计划
 
 > 当前边界：ADR-021 与 `2026-08-09-posix-opaque-runner-termination-proof.md` 已取代本计划对 Agent
-> timeout 的旧进程树假设。下面的调用凭证合同只适用于已经权威结算的 invocation；POSIX 不透明
-> Runner 已启动后被外部终止时永久隔离 workspace，不签发这种完成凭证，也不进入下一轮。
+> timeout 的旧进程树假设。调用凭证只在普通 iteration 写入时成批持久化，不是逐调用
+> 日志。若 Builder 已权威结算、随后 Validator 发生 proof-missing，整轮不写普通 iteration，
+> Builder 凭证也不单独落盘；只保留安全协议与永久隔离事实，且不进入下一轮。下文主体保留
+> 本计划实施时的历史目标，现行行为以 ADR-016、021 和上述 POSIX 计划为准。
 
 **Goal:** 让每次已经权威结算的真实 Builder/Validator 进程调用都留下可恢复诊断的机械凭证：实际结局、退出码、耗时和有界输出尾部；终端仍实时显示原生 runner 输出。proof-missing 只保留安全协议、隔离状态和受保护现场，不伪造普通调用凭证。
 

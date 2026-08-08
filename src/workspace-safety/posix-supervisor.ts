@@ -71,6 +71,10 @@ export interface PosixSupervisorHooks {
     readonly supervisorPid: number;
     readonly containment: ContainmentDescriptor;
   }) => void | Promise<void>;
+  /** Fault-injection seam after START is dispatched but before its acknowledgement is trusted. */
+  readonly onStartDeliveryAttempted?: (facts: {
+    readonly startWasMarked: boolean;
+  }) => Error | undefined;
   readonly onStarted?: (facts: {
     readonly supervisorPid: number;
     readonly containment: ContainmentDescriptor;
@@ -693,10 +697,23 @@ class PosixSupervisorProcess {
     deadline: MonotonicDeadline,
     label: string,
     beforeSend?: () => void,
+    afterSendAttempt?: () => Error | undefined,
   ): Promise<void> {
-    return deadline.run(() => {
+    return deadline.run(async () => {
       beforeSend?.();
-      return this.send(envelope);
+      const delivery = this.send(envelope);
+      let injectedFailure: Error | undefined;
+      try {
+        injectedFailure = afterSendAttempt?.();
+      } catch (error) {
+        void delivery.catch(() => undefined);
+        throw error;
+      }
+      if (injectedFailure) {
+        void delivery.catch(() => undefined);
+        throw injectedFailure;
+      }
+      await delivery;
     }, () => posixDeadlineError(label));
   }
 
@@ -1180,6 +1197,7 @@ export async function runDarkPosixSupervisedOperation(
           // later fails. Treat that window conservatively as a started opaque runner domain.
           startSent = true;
         },
+        () => options.hooks?.onStartDeliveryAttempted?.({ startWasMarked: startSent }),
       );
       terminationTrigger.startCommandTimer();
     }

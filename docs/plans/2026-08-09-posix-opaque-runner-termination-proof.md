@@ -23,6 +23,11 @@ RC2 因此永久作废，不得进入 staging。
 隔离；普通项目质量命令继续使用现有进程组合同，Windows Job Object 合同不变。恢复自动清理与重试
 需要未来取得能封闭 fork/setsid/reparent 竞态的强证明，不在本轮用 PID、PGID 或轮询近似替代。
 
+当前 Agent 调用凭证按普通 iteration 一次性持久化，不是逐调用日志。若 Builder 已权威结算、
+随后 Validator 进入 `operation-proof-missing`，本轮会在 iteration 写入前永久隔离；此前
+Builder 的调用凭证也不单独进入 evidence/status/report。本修复保留这一轮级边界，不在
+永久隔离后追加部分普通轮次。
+
 ## 完成合同
 
 | 验收标准                                                                                                             | 失败时观察                                    | 验证证据                                                                       |

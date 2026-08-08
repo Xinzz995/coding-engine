@@ -34,16 +34,18 @@ agent 结局机械三分（builder/validator 两侧同一判定，只看进程�
 | `timeout`   | 引擎侧 dev/val 超时触发（SIGTERM→SIGKILL） |
 | `error`     | `exitCode !== 0`（含 spawn 失败）          |
 
-异常结局（`timeout ∨ error`）触发以下机制：
+只有在取得与调用类型相符的权威收口证明后，异常结局（`timeout ∨ error`）才触发以下普通轮次机制。POSIX 不透明 Runner 发生 `operation-proof-missing` 时没有形成可结算的普通轮次：只保留安全协议和永久隔离事实，不写普通 `iteration`、不计入 stall，也不进入下一轮。
 
 1. **回写待复核**（`applyAbortRollback`，`src/engine/gate.ts`）：若本轮把当前 story 的 `passes` 从 `false` 翻到 `true` 且未 `blocked`，回写 `passes: false` 并在 notes 追加机械标记行（`ABORT_LINE_PREFIX = '[中断轮待复核]'`），文本自带下轮指令（确认实现后重新走完门禁与验收）；**不涨 `retryCount`**（中断不是能力不足，不该消耗打回预算或触发 escalation）；仲裁标签行（`ARBITRATION_PREFIXES`）保全、`prev.blocked` 原样返回——与 `applyGateFailure` 共享同一套 notes 保全逻辑，不另写一套。state 读取失败（缺失/损坏）时不回写不覆盖，只警告。
-2. **「每轮一条 iteration」不变式**：所有提前退出/continue 路径（builder 异常、no-op、门禁打回、agentBlocked 跳过、validator 异常）统一在跳出前写一条 evidence `iteration` 记录，新增字段全部可选（`builderOutcome`/`validatorOutcome`/`noop`/`gateRejected`/`abortRollback`，`src/engine/evidence.ts`）——时间线不再有空洞，发现 B 的还原方式改为「每轮一条记录可直读」，不再依赖「轮号跳跃对照门禁历史推断」。
+2. **「每个已权威结算轮次一条 iteration」不变式**：已取得权威收口证明的提前退出/continue 路径（builder 异常、no-op、门禁打回、agentBlocked 跳过、validator 异常）统一在跳出前写一条 evidence `iteration` 记录，新增字段全部可选（`builderOutcome`/`validatorOutcome`/`noop`/`gateRejected`/`abortRollback`，`src/engine/evidence.ts`）——可结算时间线不再有空洞，发现 B 的还原方式改为「每个已结算轮次一条记录可直读」，不再依赖「轮号跳跃对照门禁历史推断」。`operation-proof-missing` 不在此集合中。
 3. **no-op 双无变化判定**：builder `completed` 但轮首/轮后 `state.json` 与 `progress.md`（内容级字符串对比，不 parse）双无变化 → 判 no-op，跳过机械门禁与 validator，省一次强模型调用。
-4. **stall 熔断**：no-op、builder 异常、validator 异常三类累计计数，其余轮次（含门禁打回轮、agentBlocked 跳过轮——两者都有真实 state 写入即为有活动）一律清零；达到 `--stall-limit`（`src/cli.ts`，缺省 3，仅 `run` 命令下校验正整数字面量）即提前终止，退出码 1。
+4. **stall 熔断（本 ADR 发布时行为）**：no-op、已权威结算的 builder 异常、已权威结算的 validator 异常三类累计计数，其余轮次（含门禁打回轮、agentBlocked 跳过轮——两者都有真实 state 写入即为有活动）一律清零；达到 `--stall-limit`（`src/cli.ts`，缺省 3，仅 `run` 命令下校验正整数字面量）即提前终止，退出码 1。`operation-proof-missing` 永远不计入 stall。
 
 以上 Validator 异常的回写与 stall 规则是本 ADR 发布时的行为。ADR-023 已对正式结构化 Validator
 取代该局部规则：不可验证时保留候选、不增加 retry，并立即返回 5；Developer 与 legacy 测试兼容路径
-仍沿用本 ADR。5. **blocked 收敛出口**：全部 story 收敛（`passes` 或 `blocked`）时，若存在 `blocked` story，输出文案分叉列出具体 story 号并以退出码 3 结束（而非旧版「全部 story 已通过」的假绿文案 + 退出码 0）；`convergedExit` 单一函数同时服务 no-op 快路径与轮末完成判定两个收敛出口，保证两处行为一致。
+仍沿用本 ADR。
+
+5. **blocked 收敛出口**：全部 story 收敛（`passes` 或 `blocked`）时，若存在 `blocked` story，输出文案分叉列出具体 story 号并以退出码 3 结束（而非旧版「全部 story 已通过」的假绿文案 + 退出码 0）；`convergedExit` 单一函数同时服务 no-op 快路径与轮末完成判定两个收敛出口，保证两处行为一致。
 
 四条对外可见退出码：`0`=全部通过 / `1`=跑满未收敛或 stall 熔断 / `2`=workspace 锁占用（ADR-008）/ `3`=收敛但有 blocked 待人工（README 同步）。
 

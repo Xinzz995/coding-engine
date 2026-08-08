@@ -921,6 +921,45 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 15_000);
 
+  it('keeps an opaque runner proof-missing when START delivery acknowledgement is lost', async () => {
+    const setupState = await setup();
+    let pgid: number | undefined;
+    let startDeliveryAttempted = false;
+
+    await expect(
+      runWorkspaceOperation(setupState.session, operationOptions(), (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target('setInterval(() => {}, 1000)', setupState.workspace),
+          posixProcessDomain: 'opaque-runner',
+          timeouts: { termMs: 100, killMs: 3000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+              if (containment.platform === 'posix-process-group-v1') pgid = containment.pgid;
+            },
+            onStartDeliveryAttempted: ({ startWasMarked }) => {
+              startDeliveryAttempted = true;
+              expect(startWasMarked).toBe(true);
+              return new Error('START delivery acknowledgement lost');
+            },
+          },
+        }),
+      ),
+    ).rejects.toThrow(/START delivery acknowledgement lost/u);
+
+    expect(startDeliveryAttempted).toBe(true);
+    expect(existsSync(join(operationPath(setupState.workspace), DRAINED_RECEIPT_FILE))).toBe(false);
+    expect(
+      parseQuarantineRecord(
+        readFileSync(join(operationPath(setupState.workspace), QUARANTINE_FILE)),
+      ).reason,
+    ).toBe('operation-proof-missing');
+    if (pgid !== undefined) {
+      expect(await waitForPosixProcessGroupEmpty(pgid, 5000, 20)).toBe(true);
+      groups.delete(pgid);
+    }
+  }, 15_000);
+
   it('honors a user interrupt that arrives while a completed root is naturally draining', async () => {
     const setupState = await setup();
     const controller = new AbortController();
