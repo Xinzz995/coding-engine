@@ -557,9 +557,18 @@ describe('runAgent', () => {
 
       expect(observed).toBeInstanceOf(WorkspaceSafetyError);
       expect(observeManagedProcessSettlement(observed)).toEqual({ status: 'unknown' });
-      expect(
-        observeManagedProcessSettlement((observed as Error & { cause?: unknown }).cause),
-      ).toEqual({ status: 'unknown' });
+      const causeSettlement = observeManagedProcessSettlement(
+        (observed as Error & { cause?: unknown }).cause,
+      );
+      if (process.platform === 'win32') {
+        expect(causeSettlement).toMatchObject({
+          status: 'confirmed',
+          drainReason: 'process-tree-not-empty',
+        });
+        expect((observed as Error).message).toContain('semantic delta was not accepted');
+      } else {
+        expect(causeSettlement).toEqual({ status: 'unknown' });
+      }
       expect((observed as Error).message).toContain('Agent Runner 临时域已保留');
       expect(invocationRoot).toBeDefined();
       expect(existsSync(invocationRoot!)).toBe(true);
