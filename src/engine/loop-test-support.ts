@@ -58,7 +58,21 @@ export const TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST = bindStoryValidationRunt
 export const TEST_QUALITY_CONTRACT = {
   codingXVersion: CODING_X_VERSION,
   checks: {
-    test: { notApplicable: 'fixture' },
+    test: {
+      checks: [
+        {
+          id: 'fixture-pass',
+          module: 'root',
+          command: {
+            executable: process.execPath,
+            args: ['--input-type=module', '-e', 'process.exit(0)'],
+            cwd: '.',
+            platforms: ['linux', 'macos', 'windows'],
+            timeoutMs: 5_000,
+          },
+        },
+      ],
+    },
     build: { notApplicable: 'fixture' },
     static: { notApplicable: 'fixture' },
     security: { notApplicable: 'fixture' },

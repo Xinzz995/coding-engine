@@ -554,21 +554,23 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
       try {
         const result = await runContractQualityChecks(
           contractWith({
-            checks: [{
-              id: 'source-alias',
-              module: 'root',
-              command: {
-                executable: process.execPath,
-                args: [
-                  '-e',
-                  `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.argv[1])`,
-                  join(sourceAlias, 'secret.txt'),
-                ],
-                cwd: '.',
-                platforms: ['linux', 'macos', 'windows'],
-                timeoutMs: 5_000,
+            checks: [
+              {
+                id: 'source-alias',
+                module: 'root',
+                command: {
+                  executable: process.execPath,
+                  args: [
+                    '-e',
+                    `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.argv[1])`,
+                    join(sourceAlias, 'secret.txt'),
+                  ],
+                  cwd: '.',
+                  platforms: ['linux', 'macos', 'windows'],
+                  timeoutMs: 5_000,
+                },
               },
-            }],
+            ],
           }),
           validationRoot,
           null,
@@ -746,7 +748,7 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
     },
   );
 
-  it('skips checks that do not apply to the current platform and records their ids', async () => {
+  it('fails unverifiably when no declared check applies to the current platform', async () => {
     const result = await runManagedContractQualityChecks(
       contractWith({
         checks: [
@@ -766,7 +768,18 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
       process.cwd(),
       'linux',
     );
-    expect(result).toMatchObject({ ok: true, total: 0, ran: 0, skipped: ['windows-only'] });
+    expect(result).toMatchObject({
+      ok: false,
+      total: 0,
+      ran: 0,
+      skipped: ['windows-only'],
+      failure: {
+        command: '[quality-checks:platform]',
+        exitCode: null,
+        timedOut: false,
+      },
+    });
+    expect(result.failure?.outputTail).toContain('linux 没有适用的质量检查');
   });
 
   it('fails fast and names the check without exposing a shell-expanded command', async () => {

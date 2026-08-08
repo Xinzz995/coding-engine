@@ -472,6 +472,25 @@ describe('main — help', () => {
   });
 });
 
+describe('main — unattended init', () => {
+  it('requires an explicit contract when --yes disables interaction', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(await main(['init', '--yes', '--json'])).toBe(2);
+      expect(errorSpy).not.toHaveBeenCalled();
+      expect(JSON.parse(String(logSpy.mock.calls[0][0]))).toMatchObject({
+        status: 'error',
+        exitCode: 2,
+        message: expect.stringContaining('--contract'),
+      });
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+});
+
 describe('main — invalid --port', () => {
   it.each([
     { label: 'empty', args: ['dashboard', '--port', ''], raw: '' },

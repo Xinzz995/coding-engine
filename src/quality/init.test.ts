@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,6 +26,7 @@ import { QUALITY_WORKFLOW_PATH } from './github-workflows.js';
 import { runQualityInit } from './init.js';
 import { codeScanningToolsFromRuleset, requiredChecksFromRuleset } from './ruleset.js';
 import { findManagedReleaseRuleset, validateManagedReleaseRuleset } from './release-ruleset.js';
+import { CODING_X_VERSION } from '../version.js';
 
 const roots: string[] = [];
 
@@ -57,6 +59,34 @@ function repositoryFixture(contract = codingEngineContract()): string {
   return root;
 }
 
+function discoveryFixture(): string {
+  const root = repositoryFixture();
+  rmSync(join(root, '.coding-x/quality.json'));
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({
+      engines: { node: '>=22' },
+      scripts: {
+        test: 'node --test',
+        build: 'node build.mjs',
+        lint: 'eslint .',
+      },
+    }),
+  );
+  writeFileSync(
+    join(root, 'package-lock.json'),
+    JSON.stringify({ name: 'fixture', lockfileVersion: 3, packages: {} }),
+  );
+  mkdirSync(join(root, '.github/workflows'), { recursive: true });
+  writeFileSync(
+    join(root, '.github/workflows/existing.yml'),
+    'jobs:\n  desktop:\n    runs-on: macos-26\n  dynamic:\n    runs-on: ${{ matrix.runner }}\n',
+  );
+  git(root, 'add', '-A');
+  git(root, 'commit', '-m', '准备自动发现');
+  return root;
+}
+
 function contractVersion(root: string): string {
   const result = readQualityContract(root);
   if (result.status !== 'ready') throw new Error(`fixture contract unavailable: ${result.status}`);
@@ -76,7 +106,9 @@ function check(name: string, sha: string, over: Partial<GitHubCheckRun> = {}): G
 
 class FakeGitHubClient implements GitHubQualityClient {
   repository: GitHubRepositoryInfo = {
-    fullName: 'example/project', defaultBranch: 'main', isPrivate: true,
+    fullName: 'example/project',
+    defaultBranch: 'main',
+    isPrivate: true,
   };
   rulesets: GitHubRuleset[] = [];
   pullRequest: GitHubPullRequestInfo | null = null;
@@ -86,9 +118,11 @@ class FakeGitHubClient implements GitHubQualityClient {
   corruptReadback = false;
   immutableReleases = false;
   nextRulesetId = 101;
+  onDiscoverRepository?: () => void;
 
   discoverRepository(): GitHubRepositoryInfo {
     this.events.push('discover');
+    this.onDiscoverRepository?.();
     return structuredClone(this.repository);
   }
 
@@ -170,6 +204,194 @@ afterEach(() => {
 });
 
 describe('runQualityInit', () => {
+  it('always reads the supplied contract and permits only that exact untracked candidate', async () => {
+    const root = discoveryFixture();
+    const contract = structuredClone(codingEngineContract());
+    contract.codingXVersion = CODING_X_VERSION;
+    const candidatePath = 'confirmed-quality.json';
+    writeFileSync(join(root, candidatePath), `${JSON.stringify(contract, null, 2)}\n`);
+
+    const result = await runQualityInit({
+      root,
+      actualVersion: CODING_X_VERSION,
+      client: new FakeGitHubClient(),
+      confirm: async () => true,
+      ask: async () => '经仓库所有者确认不适用。',
+      contractFile: candidatePath,
+    });
+    expect(result).toMatchObject({ status: 'files-created', exitCode: 6 });
+    expect(readQualityContract(root)).toMatchObject({
+      status: 'ready',
+      contract: { codingXVersion: CODING_X_VERSION },
+    });
+  });
+
+  it('rejects a missing or inconsistent supplied contract even when an existing contract is ready', async () => {
+    const root = repositoryFixture();
+    const client = new FakeGitHubClient();
+    await expect(
+      runQualityInit({
+        ...options(root, client),
+        contractFile: 'missing-quality.json',
+      }),
+    ).rejects.toThrow('无法读取契约输入');
+
+    const changed = structuredClone(codingEngineContract());
+    changed.github.requiredPlatforms = ['linux'];
+    writeFileSync(join(root, 'changed-quality.json'), `${JSON.stringify(changed, null, 2)}\n`);
+    await expect(
+      runQualityInit({
+        ...options(root, client),
+        contractFile: 'changed-quality.json',
+      }),
+    ).rejects.toThrow('与现有 .coding-x/quality.json 不一致');
+    expect(client.rulesets).toEqual([]);
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a contract candidate whose symlink points outside the repository',
+    async () => {
+      const root = discoveryFixture();
+      const outside = mkdtempSync(join(tmpdir(), 'coding-x-contract-outside-'));
+      roots.push(outside);
+      writeFileSync(join(outside, 'quality.json'), `${JSON.stringify(codingEngineContract())}\n`);
+      symlinkSync(join(outside, 'quality.json'), join(root, 'linked-quality.json'));
+
+      await expect(
+        runQualityInit({
+          root,
+          actualVersion: CODING_X_VERSION,
+          client: new FakeGitHubClient(),
+          confirm: async () => true,
+          ask: async () => '经仓库所有者确认不适用。',
+          contractFile: 'linked-quality.json',
+        }),
+      ).rejects.toThrow('真实位置位于项目根之外');
+    },
+  );
+
+  it('rejects a contract candidate replaced by a different regular file during repository discovery', async () => {
+    const root = discoveryFixture();
+    const candidatePath = 'confirmed-quality.json';
+    const contract = structuredClone(codingEngineContract());
+    contract.codingXVersion = CODING_X_VERSION;
+    writeFileSync(join(root, candidatePath), `${JSON.stringify(contract, null, 2)}\n`);
+    const client = new FakeGitHubClient();
+    client.onDiscoverRepository = () => {
+      const replacement = structuredClone(contract);
+      replacement.repository.fullName = 'outside/project';
+      writeFileSync(join(root, candidatePath), `${JSON.stringify(replacement, null, 2)}\n`);
+    };
+
+    await expect(
+      runQualityInit({
+        root,
+        actualVersion: CODING_X_VERSION,
+        client,
+        confirm: async () => true,
+        ask: async () => '经仓库所有者确认不适用。',
+        contractFile: candidatePath,
+      }),
+    ).rejects.toThrow('契约输入在仓库探测期间发生变化');
+    expect(client.events).not.toEqual(
+      expect.arrayContaining(['create-ruleset', 'update-ruleset', 'enable-immutable-releases']),
+    );
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a contract candidate redirected outside during repository discovery',
+    async () => {
+      const root = discoveryFixture();
+      const candidatePath = 'confirmed-quality.json';
+      const contract = structuredClone(codingEngineContract());
+      contract.codingXVersion = CODING_X_VERSION;
+      writeFileSync(join(root, candidatePath), `${JSON.stringify(contract, null, 2)}\n`);
+      const outside = mkdtempSync(join(tmpdir(), 'coding-x-contract-outside-'));
+      roots.push(outside);
+      const replacement = structuredClone(contract);
+      replacement.repository.fullName = 'outside/project';
+      writeFileSync(join(outside, 'quality.json'), `${JSON.stringify(replacement, null, 2)}\n`);
+      const client = new FakeGitHubClient();
+      client.onDiscoverRepository = () => {
+        rmSync(join(root, candidatePath));
+        symlinkSync(join(outside, 'quality.json'), join(root, candidatePath));
+      };
+
+      await expect(
+        runQualityInit({
+          root,
+          actualVersion: CODING_X_VERSION,
+          client,
+          confirm: async () => true,
+          ask: async () => '经仓库所有者确认不适用。',
+          contractFile: candidatePath,
+        }),
+      ).rejects.toThrow('真实位置位于项目根之外');
+      expect(client.events).not.toEqual(
+        expect.arrayContaining(['create-ruleset', 'update-ruleset', 'enable-immutable-releases']),
+      );
+    },
+  );
+
+  it('asks for required platforms before any local or remote write and generates only that selection', async () => {
+    const root = discoveryFixture();
+    const client = new FakeGitHubClient();
+    const emitted: string[] = [];
+    const questions: string[] = [];
+    let workspacePrepared = false;
+    const result = await runQualityInit({
+      root,
+      actualVersion: CODING_X_VERSION,
+      client,
+      emit: (message) => emitted.push(message),
+      confirm: async () => true,
+      ask: async (question) => {
+        questions.push(question);
+        expect(question).toContain('linux、macos、windows');
+        expect(existsSync(join(root, '.coding-x/quality.json'))).toBe(false);
+        expect(workspacePrepared).toBe(false);
+        expect(client.events).not.toEqual(
+          expect.arrayContaining(['create-ruleset', 'update-ruleset', 'enable-immutable-releases']),
+        );
+        return 'macos, windows';
+      },
+      prepareWorkspace: () => {
+        workspacePrepared = true;
+      },
+    });
+
+    expect(result).toMatchObject({ status: 'files-created', exitCode: 6 });
+    expect(workspacePrepared).toBe(true);
+    expect(emitted.join('\n')).toContain('macos');
+    expect(questions.join('\n')).toContain('动态或 self-hosted');
+    const contract = readQualityContract(root);
+    expect(contract.status).toBe('ready');
+    if (contract.status !== 'ready') return;
+    expect(contract.contract.github.requiredPlatforms).toEqual(['macos', 'windows']);
+    expect(contract.contract.github.jobs.map((job) => job.platform)).toEqual(['macos', 'windows']);
+  });
+
+  it('stops on an empty platform answer before workspace, GitHub, or repository writes', async () => {
+    const root = discoveryFixture();
+    const client = new FakeGitHubClient();
+    let workspacePrepared = false;
+    await expect(
+      runQualityInit({
+        root,
+        actualVersion: CODING_X_VERSION,
+        client,
+        confirm: async () => true,
+        ask: async () => '   ',
+        prepareWorkspace: () => {
+          workspacePrepared = true;
+        },
+      }),
+    ).rejects.toThrow('至少选择一个平台');
+    expect(workspacePrepared).toBe(false);
+    expect(existsSync(join(root, '.coding-x/quality.json'))).toBe(false);
+    expect(client.rulesets).toEqual([]);
+  });
+
   it('completes minimum lock, managed files, quality gate activation, then policy activation', async () => {
     const root = repositoryFixture();
     const client = new FakeGitHubClient();
@@ -177,8 +399,11 @@ describe('runQualityInit', () => {
 
     const generated = await runQualityInit(options(root, client, [], summaries));
     expect(generated).toMatchObject({
-      status: 'files-created', exitCode: 6, rulesetId: 101,
-      activeRequiredChecks: [], pendingRequiredChecks: ['quality-gate', 'policy-guard-source'],
+      status: 'files-created',
+      exitCode: 6,
+      rulesetId: 101,
+      activeRequiredChecks: [],
+      pendingRequiredChecks: ['quality-gate', 'policy-guard-source'],
     });
     expect(client.rulesets[0].name).toBe(MANAGED_RULESET_NAME);
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([]);
@@ -194,22 +419,28 @@ describe('runQualityInit', () => {
     expect(summaries[1]).toContain('即将保护 GitHub 发布标签：v*');
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(true);
     expect(readFileSync(join(root, QUALITY_WORKFLOW_PATH), 'utf8')).toContain('name: quality-gate');
-    expect(client.labels).toEqual(new Set([
-      'quality-policy-approved', 'quality-policy-exception', 'quality-p1-deferral',
-    ]));
+    expect(client.labels).toEqual(
+      new Set(['quality-policy-approved', 'quality-policy-exception', 'quality-p1-deferral']),
+    );
 
     git(root, 'add', '.');
     git(root, 'commit', '-m', '加入质量门禁');
     const head = git(root, 'rev-parse', 'HEAD');
     client.pullRequest = {
-      number: 7, headSha: head, baseBranch: 'main', url: 'https://example.test/pr/7',
+      number: 7,
+      headSha: head,
+      baseBranch: 'main',
+      url: 'https://example.test/pr/7',
     };
     client.runs = [check('quality-gate', head)];
 
     const qualityActive = await runQualityInit(options(root, client));
     expect(qualityActive).toMatchObject({
-      status: 'checks-activated', exitCode: 6, pullRequest: 7,
-      activeRequiredChecks: ['quality-gate'], pendingRequiredChecks: ['policy-guard-source'],
+      status: 'checks-activated',
+      exitCode: 6,
+      pullRequest: 7,
+      activeRequiredChecks: ['quality-gate'],
+      pendingRequiredChecks: ['policy-guard-source'],
     });
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([
       { context: 'quality-gate', integration_id: 15368 },
@@ -249,7 +480,9 @@ describe('runQualityInit', () => {
     const client = new FakeGitHubClient();
     const result = await runQualityInit(options(root, client));
     expect(result).toMatchObject({
-      status: 'files-created', releaseRulesetId: null, immutableReleases: true,
+      status: 'files-created',
+      releaseRulesetId: null,
+      immutableReleases: true,
     });
     expect(client.rulesets.map((ruleset) => ruleset.name)).toEqual([MANAGED_RULESET_NAME]);
     expect(client.events).toContain('enable-immutable-releases');
@@ -263,12 +496,19 @@ describe('runQualityInit', () => {
     git(root, 'commit', '-m', '加入质量门禁');
     const head = git(root, 'rev-parse', 'HEAD');
     client.pullRequest = {
-      number: 8, headSha: head, baseBranch: 'main', url: 'https://example.test/pr/8',
+      number: 8,
+      headSha: head,
+      baseBranch: 'main',
+      url: 'https://example.test/pr/8',
     };
-    client.runs = [check('quality-gate', head, {
-      app: { id: 999, slug: 'external-ci', name: 'External CI' },
-    })];
-    await expect(runQualityInit(options(root, client))).rejects.toThrow('不是唯一的 GitHub Actions 来源');
+    client.runs = [
+      check('quality-gate', head, {
+        app: { id: 999, slug: 'external-ci', name: 'External CI' },
+      }),
+    ];
+    await expect(runQualityInit(options(root, client))).rejects.toThrow(
+      '不是唯一的 GitHub Actions 来源',
+    );
     expect(requiredChecksFromRuleset(client.rulesets[0])).toEqual([]);
   });
 
@@ -283,21 +523,28 @@ describe('runQualityInit', () => {
   it('refuses unrelated dirty files', async () => {
     const dirtyRoot = repositoryFixture();
     writeFileSync(join(dirtyRoot, 'unrelated.txt'), 'do not mix\n');
-    await expect(runQualityInit(options(dirtyRoot, new FakeGitHubClient()))).rejects.toThrow('无关的改动');
+    await expect(runQualityInit(options(dirtyRoot, new FakeGitHubClient()))).rejects.toThrow(
+      '无关的改动',
+    );
   }, 15_000);
 
   it('refuses initialization on the default branch', async () => {
     const mainRoot = repositoryFixture();
     git(mainRoot, 'checkout', 'main');
-    await expect(runQualityInit(options(mainRoot, new FakeGitHubClient()))).rejects.toThrow('默认分支');
+    await expect(runQualityInit(options(mainRoot, new FakeGitHubClient()))).rejects.toThrow(
+      '默认分支',
+    );
   }, 15_000);
 
   it('refuses a coding-x version that differs from the quality contract', async () => {
     const versionRoot = repositoryFixture();
     const expectedVersion = contractVersion(versionRoot);
     const mismatchedVersion = expectedVersion === '0.0.0' ? '0.0.1' : '0.0.0';
-    await expect(runQualityInit({
-      ...options(versionRoot, new FakeGitHubClient()), actualVersion: mismatchedVersion,
-    })).rejects.toThrow(`质量契约固定 ${expectedVersion}`);
+    await expect(
+      runQualityInit({
+        ...options(versionRoot, new FakeGitHubClient()),
+        actualVersion: mismatchedVersion,
+      }),
+    ).rejects.toThrow(`质量契约固定 ${expectedVersion}`);
   }, 15_000);
 });

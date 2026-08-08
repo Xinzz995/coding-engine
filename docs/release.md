@@ -1,7 +1,7 @@
 ---
 title: coding-x 候选发布与恢复手册
 status: active
-updated: 2026-08-05
+updated: 2026-08-08
 scope: root
 ---
 
@@ -62,14 +62,18 @@ PR 合并到 `main` 后再完成 npm 配置，因为 npm 只接受已经存在�
 ### 2. 构建固定候选
 
 从 GitHub Actions 手动运行 `Build release candidate`，分支必须选 `main`，输入精确稳定版本，
-例如 `0.34.0`。该工作流在没有 npm 身份的环境中执行完整检查、构建并保存候选包。
+例如 `0.35.0`。该工作流在没有 npm 身份的环境中执行完整检查，只在 Ubuntu 24.04 构建一次并保存
+候选包。随后 Ubuntu 24.04、macOS 26、Windows Server 2022 使用 Node 22 下载同一 artifact，重新核对
+版本、提交、运行编号、文件大小与 SHA-256，在仓库外全新目录通过 npm 安装，并从 npm 创建的真实命令
+入口依次运行 help、workspace 初始化和 shadow doctor。三个系统与构建任务全部成功，候选总闸才成功。
 
 下载该次运行的制品：
 
 - `npm-candidate-X.Y.Z`：压缩包、打包结果和 schema v2 候选证据；证据记录 commit、candidate
   run ID、文件大小、SHA-1、SHA-256 和 SHA-512 integrity。
 
-构建或检查失败时 npm 尚未收到任何内容。通过受保护 PR 修复后，从新的 main 重新构建候选。
+构建、摘要、任一系统安装或候选总闸失败时 npm 尚未收到任何内容。取消、超时或跳过也视为失败。
+通过受保护 PR 修复后，从新的 main 重新构建候选。
 不要重跑旧候选并把它解释成包含后续修复。
 
 ### 3. 批准前 Dogfood
@@ -114,7 +118,8 @@ coding-engine、Go 多模块合成试点和 Python Monorepo 合成试点都安�
 
 不需要手工复制文件摘要。工作流自动回读候选运行，要求它来自
 `.github/workflows/build-candidate.yml`、已成功结束、对应提交仍是当前远端 main，并重新核对
-tarball 摘要。任一条件不满足都会在联系 npm 前停止；此时应从新 main 重新构建并重跑三仓
+tarball 摘要。该运行只有在三系统安装总闸成功后才能得到成功结论，因此不另接受人工“已检查”输入。
+任一条件不满足都会在联系 npm 前停止；此时应从新 main 重新构建并重跑三仓
 Dogfood。
 
 成功后下载该次 staging 运行的 `npm-stage-X.Y.Z`。它记录 candidate run、stage run、npm
@@ -179,17 +184,17 @@ git push origin vX.Y.Z
 
 ## 失败恢复
 
-| 失败点 | 处理方式 |
-|---|---|
-| 候选构建或 Dogfood 失败 | npm 尚未收到候选。通过新 PR 修复，从新 main 构建新候选并重跑 Dogfood。 |
-| 选择的候选运行非法、失败或已落后 main | 没有 stage；不要猜测后续改动是否影响发布物，构建并验证新候选。 |
-| 暂存任务在 npm 调用前失败 | 没有 stage；查明候选身份、OIDC、environment 或工作流配置后重跑。 |
-| npm 已返回 stage，但摘要核验或证据上传失败 | 不批准。用 `npm stage reject <stage-id>` 和 2FA 拒绝；查明原因后重跑。 |
-| 批准到 `next` 后，公开冒烟失败 | 不移动 `latest`，不创建标签；保留版本并发布新的补丁版本。 |
-| 已移动 `latest`，标签创建前发现问题 | 立即把 `latest` 移回前一个稳定版本，再发布补丁；不删除已发布版本。 |
-| 标签工作流因临时错误失败 | 直接重跑原工作流。标签不得移动或删除。 |
-| 标签工作流本身有缺陷 | 通过受保护 Policy PR 修复；随后从当前 `main` 手动运行 `Verify stable npm release`，输入原标签恢复或复核。 |
-| GitHub Release 已发布 | Release、资产和标签不可改写；任何修复使用新补丁版本。 |
+| 失败点                                     | 处理方式                                                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| 候选构建或 Dogfood 失败                    | npm 尚未收到候选。通过新 PR 修复，从新 main 构建新候选并重跑 Dogfood。                                    |
+| 选择的候选运行非法、失败或已落后 main      | 没有 stage；不要猜测后续改动是否影响发布物，构建并验证新候选。                                            |
+| 暂存任务在 npm 调用前失败                  | 没有 stage；查明候选身份、OIDC、environment 或工作流配置后重跑。                                          |
+| npm 已返回 stage，但摘要核验或证据上传失败 | 不批准。用 `npm stage reject <stage-id>` 和 2FA 拒绝；查明原因后重跑。                                    |
+| 批准到 `next` 后，公开冒烟失败             | 不移动 `latest`，不创建标签；保留版本并发布新的补丁版本。                                                 |
+| 已移动 `latest`，标签创建前发现问题        | 立即把 `latest` 移回前一个稳定版本，再发布补丁；不删除已发布版本。                                        |
+| 标签工作流因临时错误失败                   | 直接重跑原工作流。标签不得移动或删除。                                                                    |
+| 标签工作流本身有缺陷                       | 通过受保护 Policy PR 修复；随后从当前 `main` 手动运行 `Verify stable npm release`，输入原标签恢复或复核。 |
+| GitHub Release 已发布                      | Release、资产和标签不可改写；任何修复使用新补丁版本。                                                     |
 
 npm staged publishing 不可用时不自动降级。只有用户明确批准新的限时政策例外后，才能临时
 开放 OIDC 直接发布到 `next`；验证结束后必须恢复 stage-only，并重新运行 doctor。

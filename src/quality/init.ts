@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeFileAtomicSync } from '../engine/fs-atomic.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 import {
   POLICY_GUARD_REQUIRED_CHECK,
   QUALITY_CONTRACT_RELATIVE_PATH,
+  digestQualityContract,
   parseQualityContract,
   readQualityContract,
   type QualityCheckCategory,
@@ -21,6 +23,8 @@ import {
 import { GhGitHubQualityClient } from './github-unmanaged.js';
 import {
   discoverQualityContract,
+  discoverTrackedWorkflowPlatforms,
+  parseRequiredPlatformsInput,
   resolveNotApplicableReasons,
 } from './init-discovery.js';
 import { renderManagedGitHubFiles } from './github-workflows.js';
@@ -68,7 +72,7 @@ export interface QualityInitOptions {
   client?: GitHubQualityClient;
   /** 用户确认；CLI 交互或显式 --yes 均实现此接口。 */
   confirm: (summary: string) => boolean | Promise<boolean>;
-  /** 自动发现缺少某类检查时，必须取得具体不适用理由。 */
+  /** 自动发现时取得明确平台选择，以及缺少某类检查时的具体不适用理由。 */
   ask: (question: string) => string | Promise<string>;
   emit?: (message: string) => void;
   /**
@@ -80,7 +84,10 @@ export interface QualityInitOptions {
 
 const MANAGED_MARKER = 'Generated from';
 const CATEGORY_LABEL: Record<QualityCheckCategory, string> = {
-  test: '测试', build: '构建', static: '静态检查', security: '安全检查',
+  test: '测试',
+  build: '构建',
+  static: '静态检查',
+  security: '安全检查',
 };
 
 function git(root: string, args: string[]): string {
@@ -91,7 +98,9 @@ function git(root: string, args: string[]): string {
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
   } catch (error) {
-    throw new Error(`Git 检查失败（git ${args.join(' ')}）：${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `Git 检查失败（git ${args.join(' ')}）：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -109,11 +118,22 @@ function currentBranch(root: string): string {
   return branch;
 }
 
-function assertSafeWorktree(root: string): void {
+interface ContractSource {
+  path: string;
+  relativePath: string;
+  bytes: Buffer;
+  fingerprint: string;
+  realRoot: string;
+  realPath: string;
+}
+
+function assertSafeWorktree(root: string, contractSource: ContractSource | undefined): void {
   const lines = git(root, ['status', '--porcelain=v1', '--untracked-files=all'])
-    .split('\n').filter(Boolean);
+    .split('\n')
+    .filter(Boolean);
   const allowed = new Set([
     QUALITY_CONTRACT_RELATIVE_PATH,
+    ...(contractSource ? [contractSource.relativePath] : []),
     ...Object.keys(renderManagedGitHubFilesPlaceholder()),
   ]);
   const unrelated = lines.filter((line) => {
@@ -145,10 +165,81 @@ function pathInsideRoot(root: string, value: string): string {
   return path;
 }
 
-function readContractFile(path: string): QualityContract {
+interface ContractBoundary {
+  realRoot: string;
+  realPath: string;
+}
+
+function resolveContractBoundary(root: string, path: string, value: string): ContractBoundary {
+  let realRoot: string;
+  let realPath: string;
+  try {
+    realRoot = realpathSync(root);
+    realPath = realpathSync(path);
+  } catch (error) {
+    throw new Error(
+      `无法读取契约输入 ${value}：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const realRelative = relative(realRoot, realPath);
+  if (realRelative === '..' || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative)) {
+    throw new Error(`契约输入的真实位置位于项目根之外：${value}`);
+  }
+  return { realRoot, realPath };
+}
+
+function readFrozenContractSource(root: string, value: string): ContractSource {
+  const lexicalPath = pathInsideRoot(root, value);
+  const before = resolveContractBoundary(root, lexicalPath, value);
+  const observed = readStableFile(lexicalPath, { label: `契约输入 ${value}` });
+  if (observed.status !== 'ready') {
+    const detail = observed.status === 'missing' ? '文件不存在' : observed.diagnostic;
+    throw new Error(`无法读取契约输入 ${value}：${detail}`);
+  }
+  const after = resolveContractBoundary(root, lexicalPath, value);
+  if (before.realRoot !== after.realRoot || before.realPath !== after.realPath) {
+    throw new Error(`契约输入的真实位置在读取期间发生变化：${value}`);
+  }
+  return {
+    path: lexicalPath,
+    relativePath: relative(resolve(root), lexicalPath).split(sep).join('/'),
+    bytes: observed.bytes,
+    fingerprint: observed.fingerprint,
+    realRoot: after.realRoot,
+    realPath: after.realPath,
+  };
+}
+
+function revalidateContractSource(root: string, source: ContractSource): void {
+  const before = resolveContractBoundary(root, source.path, source.relativePath);
+  if (before.realRoot !== source.realRoot || before.realPath !== source.realPath) {
+    throw new Error(`契约输入的真实位置在仓库探测期间发生变化：${source.relativePath}`);
+  }
+  const observed = readStableFile(source.path, { label: `契约输入 ${source.relativePath}` });
+  if (observed.status !== 'ready') {
+    const detail = observed.status === 'missing' ? '文件不存在' : observed.diagnostic;
+    throw new Error(`契约输入在仓库探测期间不可稳定读取：${detail}`);
+  }
+  const after = resolveContractBoundary(root, source.path, source.relativePath);
+  if (
+    before.realRoot !== after.realRoot ||
+    before.realPath !== after.realPath ||
+    after.realRoot !== source.realRoot ||
+    after.realPath !== source.realPath ||
+    observed.fingerprint !== source.fingerprint
+  ) {
+    throw new Error(`契约输入在仓库探测期间发生变化：${source.relativePath}`);
+  }
+}
+
+function parseContractFile(bytes: Buffer, path: string): QualityContract {
   let parsed: unknown;
-  try { parsed = JSON.parse(readFileSync(path, 'utf8')); } catch (error) {
-    throw new Error(`无法读取契约输入 ${path}：${error instanceof Error ? error.message : String(error)}`);
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch (error) {
+    throw new Error(
+      `无法读取契约输入 ${path}：${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   const result = parseQualityContract(parsed);
   if (result.status === 'invalid') throw new Error(`契约输入非法：${result.errors.join('；')}`);
@@ -160,11 +251,13 @@ function validateContractIdentity(
   repository: GitHubRepositoryInfo,
   actualVersion: string,
 ): void {
-  if (contract.repository.fullName !== repository.fullName
-      || contract.repository.defaultBranch !== repository.defaultBranch) {
+  if (
+    contract.repository.fullName !== repository.fullName ||
+    contract.repository.defaultBranch !== repository.defaultBranch
+  ) {
     throw new Error(
       `质量契约绑定 ${contract.repository.fullName}/${contract.repository.defaultBranch}，` +
-      `实际远端为 ${repository.fullName}/${repository.defaultBranch}`,
+        `实际远端为 ${repository.fullName}/${repository.defaultBranch}`,
     );
   }
   if (contract.codingXVersion !== actualVersion) {
@@ -175,8 +268,25 @@ function validateContractIdentity(
 async function resolveContract(
   options: QualityInitOptions,
   repository: GitHubRepositoryInfo,
+  contractSource: ContractSource | undefined,
 ): Promise<{ contract: QualityContract; needsWrite: boolean }> {
   const existing = readQualityContract(options.root);
+  if (contractSource) {
+    revalidateContractSource(options.root, contractSource);
+    const contract = parseContractFile(contractSource.bytes, contractSource.relativePath);
+    validateContractIdentity(contract, repository, options.actualVersion);
+    if (existing.status === 'ready') {
+      if (existing.digest !== digestQualityContract(contract)) {
+        throw new Error('契约候选与现有 .coding-x/quality.json 不一致；请先人工完成一致性裁决');
+      }
+      return { contract, needsWrite: false };
+    }
+    if (existing.status !== 'missing') {
+      const detail = existing.status === 'invalid' ? existing.errors.join('；') : existing.error;
+      throw new Error(`现有质量契约不可用：${detail}`);
+    }
+    return { contract, needsWrite: true };
+  }
   if (existing.status === 'ready') {
     validateContractIdentity(existing.contract, repository, options.actualVersion);
     return { contract: existing.contract, needsWrite: false };
@@ -185,13 +295,26 @@ async function resolveContract(
     const detail = existing.status === 'invalid' ? existing.errors.join('；') : existing.error;
     throw new Error(`现有质量契约不可用：${detail}`);
   }
-  if (options.contractFile) {
-    const source = pathInsideRoot(options.root, options.contractFile);
-    const contract = readContractFile(source);
-    validateContractIdentity(contract, repository, options.actualVersion);
-    return { contract, needsWrite: true };
-  }
-  const draft = discoverQualityContract(options.root, repository, options.actualVersion);
+  const workflowHints = discoverTrackedWorkflowPlatforms(options.root);
+  const hintSummary =
+    workflowHints.platforms.length > 0
+      ? `已跟踪 workflow 中写死的 runner 提示：${workflowHints.platforms.join('、')}。`
+      : '已跟踪 workflow 没有可直接识别的固定 runner 提示。';
+  const uncertaintySummary = workflowHints.hasUncertainRunners
+    ? '另有动态或 self-hosted runner，coding-x 不会猜测其平台。'
+    : '没有发现动态或 self-hosted runner。';
+  const requiredPlatforms = parseRequiredPlatformsInput(
+    await options.ask(
+      `${hintSummary}\n${uncertaintySummary}\n` +
+        '请输入目标项目交付前必须验证的平台，使用逗号分隔，只允许 linux、macos、windows；空值会停止初始化：',
+    ),
+  );
+  const draft = discoverQualityContract(
+    options.root,
+    repository,
+    options.actualVersion,
+    requiredPlatforms,
+  );
   const reasons: Partial<Record<QualityCheckCategory, string>> = {};
   for (const category of draft.unresolvedCategories) {
     reasons[category] = await options.ask(
@@ -200,10 +323,11 @@ async function resolveContract(
   }
   const contract = resolveNotApplicableReasons(draft, reasons);
   const parsed = parseQualityContract(contract);
-  if (parsed.status === 'invalid') throw new Error(`自动发现的契约未通过校验：${parsed.errors.join('；')}`);
+  if (parsed.status === 'invalid')
+    throw new Error(`自动发现的契约未通过校验：${parsed.errors.join('；')}`);
   options.emit?.(
     `发现生态：${draft.detectedEcosystems.join('、')}\n` +
-    `候选质量契约：\n${JSON.stringify(contract, null, 2)}`,
+      `候选质量契约：\n${JSON.stringify(contract, null, 2)}`,
   );
   return { contract, needsWrite: true };
 }
@@ -219,18 +343,23 @@ async function ensureMinimumRules(
     ? validateManagedRuleset(existing, currentChecks, requiredCodeScanning)
     : ['Ruleset 不存在'];
   if (currentErrors.length === 0) return existing;
-  const confirmed = await options.confirm([
-    '即将配置 GitHub 默认分支规则：所有改动必须经过 PR、解决所有对话、禁止强推和删除、无日常绕过者。',
-    currentChecks.length > 0
-      ? `保留已启用检查：${currentChecks.map((check) => check.context).join('、')}`
-      : '当前仍处于 Bootstrap 最小阶段，不提前要求尚未出现的检查。',
-    requiredCodeScanning && requiredCodeScanning.length > 0
-      ? `强制代码扫描：${requiredCodeScanning.map((entry) => (
-          `${entry.tool}（安全 ${entry.securityAlertsThreshold}；普通 ${entry.alertsThreshold}）`
-        )).join('、')}`
-      : '质量契约未要求 coding-x 接管代码扫描规则。',
-    `远端当前差异：${currentErrors.join('；')}`,
-  ].join('\n'));
+  const confirmed = await options.confirm(
+    [
+      '即将配置 GitHub 默认分支规则：所有改动必须经过 PR、解决所有对话、禁止强推和删除、无日常绕过者。',
+      currentChecks.length > 0
+        ? `保留已启用检查：${currentChecks.map((check) => check.context).join('、')}`
+        : '当前仍处于 Bootstrap 最小阶段，不提前要求尚未出现的检查。',
+      requiredCodeScanning && requiredCodeScanning.length > 0
+        ? `强制代码扫描：${requiredCodeScanning
+            .map(
+              (entry) =>
+                `${entry.tool}（安全 ${entry.securityAlertsThreshold}；普通 ${entry.alertsThreshold}）`,
+            )
+            .join('、')}`
+        : '质量契约未要求 coding-x 接管代码扫描规则。',
+      `远端当前差异：${currentErrors.join('；')}`,
+    ].join('\n'),
+  );
   if (!confirmed) return null;
   const payload = buildManagedRulesetPayload(existing, currentChecks, requiredCodeScanning);
   const changed = existing
@@ -270,16 +399,20 @@ async function ensureReleaseProtection(
     return { ruleset: manageRefs ? existing : null, immutableReleases };
   }
 
-  const confirmed = await options.confirm([
-    ...(manageRefs ? [
-      `即将保护 GitHub 发布标签：${protectedRefs.join('、')}。`,
-      '有仓库写权限的人可以首次创建标签；创建后禁止更新和删除，且不配置日常绕过者。',
-    ] : []),
-    requireImmutableReleases
-      ? '发布后 GitHub Release、关联标签和资产不可修改。'
-      : '质量契约未要求 coding-x 管理 GitHub Release 不可变设置。',
-    `远端当前差异：${errors.join('；')}`,
-  ].join('\n'));
+  const confirmed = await options.confirm(
+    [
+      ...(manageRefs
+        ? [
+            `即将保护 GitHub 发布标签：${protectedRefs.join('、')}。`,
+            '有仓库写权限的人可以首次创建标签；创建后禁止更新和删除，且不配置日常绕过者。',
+          ]
+        : []),
+      requireImmutableReleases
+        ? '发布后 GitHub Release、关联标签和资产不可修改。'
+        : '质量契约未要求 coding-x 管理 GitHub Release 不可变设置。',
+      `远端当前差异：${errors.join('；')}`,
+    ].join('\n'),
+  );
   if (!confirmed) return null;
 
   let readback: GitHubRuleset | null = null;
@@ -330,10 +463,7 @@ function planManagedFiles(
   return { files, create, update };
 }
 
-function writeManagedFiles(
-  root: string,
-  plan: ReturnType<typeof planManagedFiles>,
-): void {
+function writeManagedFiles(root: string, plan: ReturnType<typeof planManagedFiles>): void {
   for (const relativePath of [...plan.create, ...plan.update]) {
     const path = pathInsideRoot(root, relativePath);
     mkdirSync(dirname(path), { recursive: true });
@@ -343,17 +473,18 @@ function writeManagedFiles(
 
 function ensureManagedLabels(client: GitHubQualityClient, repository: string): void {
   client.ensureLabel(
-    repository, 'quality-policy-approved', 'B60205',
+    repository,
+    'quality-policy-approved',
+    'B60205',
     'Owner approved one protected policy exception.',
   );
   client.ensureLabel(
-    repository, 'quality-policy-exception', 'D93F0B',
+    repository,
+    'quality-policy-exception',
+    'D93F0B',
     'Time-bounded quality policy exception.',
   );
-  client.ensureLabel(
-    repository, 'quality-p1-deferral', 'FBCA04',
-    'Time-bounded P1 deferral.',
-  );
+  client.ensureLabel(repository, 'quality-p1-deferral', 'FBCA04', 'Time-bounded P1 deferral.');
 }
 
 function result(
@@ -388,14 +519,17 @@ function result(
 export async function runQualityInit(options: QualityInitOptions): Promise<QualityInitResult> {
   options.client ??= new GhGitHubQualityClient();
   validateGitRoot(options.root);
-  assertSafeWorktree(options.root);
+  const contractSource = options.contractFile
+    ? readFrozenContractSource(options.root, options.contractFile)
+    : undefined;
+  assertSafeWorktree(options.root, contractSource);
   const branch = currentBranch(options.root);
   const repository = options.client.discoverRepository(options.root);
   options.client.verifyDefaultBranch(repository);
   if (branch === repository.defaultBranch) {
     throw new Error(`当前位于默认分支 ${branch}；请先创建 Bootstrap 或 Policy 功能分支`);
   }
-  const { contract, needsWrite } = await resolveContract(options, repository);
+  const { contract, needsWrite } = await resolveContract(options, repository, contractSource);
   await options.prepareWorkspace?.();
   const initialRulesets = options.client.listRulesets(repository.fullName);
   const initialRuleset = findManagedRuleset(initialRulesets);
@@ -404,7 +538,9 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
   const contractCheckNames = new Set(contract.github.requiredChecks);
   const unexpected = currentChecks.filter((check) => !contractCheckNames.has(check.context));
   if (unexpected.length > 0) {
-    throw new Error(`托管 Ruleset 含契约外检查：${unexpected.map((check) => check.context).join('、')}`);
+    throw new Error(
+      `托管 Ruleset 含契约外检查：${unexpected.map((check) => check.context).join('、')}`,
+    );
   }
   const requiredCodeScanning = contract.github.requiredCodeScanning;
   const ruleset = await ensureMinimumRules(
@@ -441,13 +577,15 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
 
   const filePlan = planManagedFiles(options.root, contract, needsWrite);
   if (filePlan.create.length > 0 || filePlan.update.length > 0) {
-    const confirmed = await options.confirm([
-      'GitHub 最小规则已回读确认。即将生成受 Git 管理的质量文件：',
-      ...filePlan.create.map((path) => `新增 ${path}`),
-      ...filePlan.update.map((path) => `更新 ${path}`),
-      '请确认候选命令、工作目录、运行系统、超时、规范来源和不适用理由均正确。',
-      '尤其确认 localValidation.prepare 会在项目外的干净检出运行，allowedPaths 只列出确实需要的本地依赖目录。',
-    ].join('\n'));
+    const confirmed = await options.confirm(
+      [
+        'GitHub 最小规则已回读确认。即将生成受 Git 管理的质量文件：',
+        ...filePlan.create.map((path) => `新增 ${path}`),
+        ...filePlan.update.map((path) => `更新 ${path}`),
+        '请确认候选命令、工作目录、运行系统、超时、规范来源和不适用理由均正确。',
+        '尤其确认 localValidation.prepare 会在项目外的干净检出运行，allowedPaths 只列出确实需要的本地依赖目录。',
+      ].join('\n'),
+    );
     if (!confirmed) {
       return result('cancelled', 6, repository, branch, ruleset, contract, {
         ...releaseState,
@@ -460,7 +598,8 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
       ...releaseState,
       createdFiles: filePlan.create,
       updatedFiles: filePlan.update,
-      message: '本地初始化文件已生成。请提交、推送并打开 Bootstrap PR，然后重新运行 coding-x init。',
+      message:
+        '本地初始化文件已生成。请提交、推送并打开 Bootstrap PR，然后重新运行 coding-x init。',
     });
   }
 
@@ -502,8 +641,8 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
     const merged = [...activeChecks, ...newlyObserved];
     const confirmed = await options.confirm(
       `PR #${pullRequest.number} 已出现 GitHub Actions 检查：` +
-      `${newlyObserved.map((check) => check.context).join('、')}。` +
-      '是否将它们绑定到默认分支 Ruleset 并立即回读核验？',
+        `${newlyObserved.map((check) => check.context).join('、')}。` +
+        '是否将它们绑定到默认分支 Ruleset 并立即回读核验？',
     );
     if (!confirmed) {
       return result('cancelled', 6, repository, branch, ruleset, contract, {
@@ -520,9 +659,9 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
   }
 
   const finalChecks = requiredChecksFromRuleset(finalRuleset);
-  const pending = contract.github.requiredChecks.filter((name) => (
-    !finalChecks.some((check) => check.context === name)
-  ));
+  const pending = contract.github.requiredChecks.filter(
+    (name) => !finalChecks.some((check) => check.context === name),
+  );
   if (pending.length > 0) {
     return result(
       newlyObserved.length > 0 ? 'checks-activated' : 'waiting-for-checks',
@@ -534,7 +673,8 @@ export async function runQualityInit(options: QualityInitOptions): Promise<Quali
       {
         ...releaseState,
         pullRequest: pullRequest.number,
-        message: `仍等待默认分支可信工作流产生检查：${pending.join('、')}。` +
+        message:
+          `仍等待默认分支可信工作流产生检查：${pending.join('、')}。` +
           `Bootstrap PR 可先启用 quality-gate；${POLICY_GUARD_REQUIRED_CHECK} ` +
           '必须在工作流进入默认分支后的 Activation PR 中启用。',
       },

@@ -22,14 +22,39 @@ export const SETUP_PYTHON_ACTION_SHA = '5fda3b95a4ea91299a34e894583c3862153e4b97
 export const SETUP_GO_ACTION_SHA = 'b7ad1dad31e06c5925ef5d2fc7ad053ef454303e';
 
 const CATEGORIES: QualityCheckCategory[] = ['test', 'build', 'static', 'security'];
-const RUNNER: Record<QualityPlatform, string> = {
-  linux: 'ubuntu-latest',
+const PINNED_RUNNER_VERSION = [0, 35, 0] as const;
+const LEGACY_CONTROL_RUNNER = 'ubuntu-latest';
+const LEGACY_RUNNER: Record<QualityPlatform, string> = {
+  linux: LEGACY_CONTROL_RUNNER,
   macos: 'macos-latest',
+  windows: 'windows-2022',
+};
+const PINNED_CONTROL_RUNNER = 'ubuntu-24.04';
+const PINNED_RUNNER: Record<QualityPlatform, string> = {
+  linux: PINNED_CONTROL_RUNNER,
+  macos: 'macos-26',
   // Windows Server 2022 is the oldest hosted image in the v1 support contract.
   // Keep this mapping internal: adding a runner label to schema v1 would make
   // the already-published strict 0.33.3 parser reject the repository contract.
   windows: 'windows-2022',
 };
+
+function usesPinnedRunnerLabels(contract: QualityContract): boolean {
+  const actual = contract.codingXVersion.split('.').map(Number);
+  for (const [index, expected] of PINNED_RUNNER_VERSION.entries()) {
+    if (actual[index] === expected) continue;
+    return actual[index] > expected;
+  }
+  return true;
+}
+
+function runnerFor(contract: QualityContract, platform: QualityPlatform): string {
+  return (usesPinnedRunnerLabels(contract) ? PINNED_RUNNER : LEGACY_RUNNER)[platform];
+}
+
+function controlRunnerFor(contract: QualityContract): string {
+  return usesPinnedRunnerLabels(contract) ? PINNED_CONTROL_RUNNER : LEGACY_CONTROL_RUNNER;
+}
 
 function yamlString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
@@ -150,7 +175,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     lines.push(
       `  ${jobKey}:`,
       `    name: checks / ${job.id}`,
-      `    runs-on: ${RUNNER[job.platform]}`,
+      `    runs-on: ${runnerFor(contract, job.platform)}`,
       '    timeout-minutes: 60',
       '    steps:',
       `      - uses: actions/checkout@${CHECKOUT_ACTION_SHA}`,
@@ -175,7 +200,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     '    name: quality-gate',
     '    if: ${{ always() }}',
     `    needs: [${needs.join(', ')}]`,
-    '    runs-on: ubuntu-latest',
+    `    runs-on: ${controlRunnerFor(contract)}`,
     '    timeout-minutes: 5',
     '    permissions: {}',
     '    steps:',
@@ -238,7 +263,7 @@ permissions:
 jobs:
   policy-guard:
     name: ${POLICY_GUARD_REQUIRED_CHECK}
-    runs-on: ubuntu-latest
+    runs-on: ${controlRunnerFor(contract)}
     timeout-minutes: 5
     steps:
       - name: Check protected policy changes through the GitHub API

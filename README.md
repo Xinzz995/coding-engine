@@ -183,6 +183,23 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 - **Git ≥ 2.29**（正式本地验证需要；更旧版本会明确返回不可验证，不会退回浅历史）
 - 已安装、已认证并可在终端调用 **`claude`**（Claude Code CLI）、**`codex`** 或 Cursor 的 **`agent`** / **`cursor-agent`**（取决于你用哪个 runner）
 
+coding-x 正式支持 Linux、macOS 和 Windows。这里的“支持系统”与“CI 用什么机器”是两件事：
+通用格式、安全扫描、候选构建和发布可以集中在 Ubuntu；目标项目只需验证自己真正部署或交付的系统，
+不必无条件生成三套任务。
+
+| 系统族  | 自动验证参考环境        | Node 证据 | 说明                                               |
+| ------- | ----------------------- | --------- | -------------------------------------------------- |
+| Linux   | Ubuntu 24.04 x64        | 22、24    | 同时运行 Linux 进程、挂载与文件身份专项检查        |
+| macOS   | macOS 26 arm64          | 22、24    | 同时运行 macOS 进程与文件系统专项检查              |
+| Windows | Windows Server 2022 x64 | 22、24    | Node 22 另跑标准用户下的原生 Job Object 与路径证明 |
+
+npm 包只接受 `linux`、`darwin`、`win32`。表中环境是持续自动验证的参考配置，不等于每个发行版、
+系统版本和处理器架构都已单独证明；Intel Mac、Linux arm64 和 Windows arm64 暂不写成“已验证”。
+每个正式候选只在 Ubuntu 打包一次，随后同一个压缩包会在上述三类系统的全新目录中通过 npm 真实安装
+并从 npm 创建的命令入口启动，三项全部成功后才允许进入 npm staging。
+0.35.0 发布前，仍由 0.34.1 逐字核对的质量与政策流程暂时保留旧 runner 标签；新版本发布后的独立
+政策更新会把这两个流程一并固定到表中的参考环境，避免候选版本先给自己签发正式通过。
+
 插件和 runner 是两件事：**插件**让交互式 AI 知道怎样做需求对齐、PRD、review 等工作流；**runner**才是 `npx coding-x` 在自动循环中启动的 AI 命令行程序。只装其中一个不能代替另一个。
 
 Windows v1 的 AI runner 必须是原生可执行文件，不能是 `.cmd/.bat` 包装器；如果 PATH 找到的是脚本，
@@ -611,7 +628,7 @@ npx coding-x codex      # 使用 Codex；也可以换成 claude 或 cursor
 npx coding-x --help             # 显示完整命令与参数后退出，不读取 workspace 或启动 runner
 npx coding-x init               # 交互确认后分阶段配置质量契约、原生 CI 和 GitHub 门禁
 npx coding-x init --contract quality.json  # 使用已人工确认的契约候选文件
-npx coding-x init --yes         # 非交互接受已展示的变更；不会代填“不适用”理由
+npx coding-x init --contract quality.json --yes  # 非交互使用已人工确认的契约并接受已展示的变更
 npx coding-x workspace init --workspace ./run  # 只初始化一个新的空 workspace
 npx coding-x workspace apply-prd --input /path/to/system-temp/request.json --workspace ./run
                                 # 原子应用 prd-to-json 已确认的临时候选
@@ -700,15 +717,15 @@ GitHub 状态给出。
 | 位置参数 `claude` / `codex` / `cursor`          | —            | 显式选择 runner；若 PRD 启用了模型路由，必须与 `models.runner` 一致。未显式指定时优先用 `models.runner`，否则默认 claude                                                                                                                                                   |
 | 位置参数 `init`                                 | —            | 先初始化新的空 workspace，再在功能分支分阶段初始化质量门禁：回读确认 GitHub 最小规则后生成质量契约、原生 CI 和模板；PR 最新提交出现可信检查后才加入 Ruleset。不会自动提交、推送、开 PR 或合并；未完成返回 6，配置或远端错误返回 2                                          |
 | 位置参数 `workspace init`                       | —            | 只初始化新的空 workspace，安装永久安全协议；已正确初始化时幂等返回，旧版、非空但未初始化或损坏目录会拒绝                                                                                                                                                                   |
-| 位置参数 `workspace apply-prd`                  | —            | 获取短租约并应用 `--input` 指定的已确认 PRD 候选；请求必须位于 workspace 外，输入失效、TDD 基线失败或租约不可用时不写业务文件；固定候选可显式加 `--shadow`，只放宽版本差异并以 `applied-shadow`/7 返回                                                                                                                                              |
+| 位置参数 `workspace apply-prd`                  | —            | 获取短租约并应用 `--input` 指定的已确认 PRD 候选；请求必须位于 workspace 外，输入失效、TDD 基线失败或租约不可用时不写业务文件；固定候选可显式加 `--shadow`，只放宽版本差异并以 `applied-shadow`/7 返回                                                                     |
 | 位置参数 `workspace record-review-decision`     | —            | 获取短租约，重新核对当前提交、Final Review、finding、现有决定和延期 Issue，再记录 `--input` 中的用户裁决；请求不能自带提交、时间或目标路径                                                                                                                                 |
-| 位置参数 `workspace recover\|resume-mutation`   | —            | 分别恢复已证明安全的中断运行，或继续已验证但未完成的 apply-prd / repair；中断的 shadow apply 会从受保护记录恢复候选身份并继续返回 7，不做 PID 猜测式自动接管                                                                                                                                                                           |
+| 位置参数 `workspace recover\|resume-mutation`   | —            | 分别恢复已证明安全的中断运行，或继续已验证但未完成的 apply-prd / repair；中断的 shadow apply 会从受保护记录恢复候选身份并继续返回 7，不做 PID 猜测式自动接管                                                                                                               |
 | 位置参数 `config path\|init\|validate`          | —            | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁                                                                                                                                                                                       |
 | 位置参数 `models [claude\|codex\|cursor]`       | —            | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json`                                                                                                                                                                                                 |
 | 位置参数 `hooks cursor install\|status\|remove` | —            | 在当前 Git 项目安全安装、只读检查或卸载 Cursor TDD 提交前检查；只管理 `.cursor/` 中 coding-x 拥有的内容，不改 Git hooks、索引或提交。install/remove 成功与 status 健康返回 0；缺失、冲突或过期返回 1                                                                       |
 | 位置参数 `repair`                               | —            | 获取短租约，修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；活动租约或未完成恢复会拒绝                                                                                                                                                                             |
 | 位置参数 `dashboard`                            | —            | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告                                                                                                                                                                |
-| 位置参数 `doctor`                               | —            | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库；普通错误退出 1，显式 shadow 且其余健康时退出 7                                  |
+| 位置参数 `doctor`                               | —            | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库；普通错误退出 1，显式 shadow 且其余健康时退出 7         |
 | 位置参数 `status`                               | —            | 终端速览 story、最终 Review 与 GitHub 交付状态，并显示重试/仲裁、实际模型路由和最近 validation target/protocol/error；损坏 state 全部按未验证，`--json` 增加 `recentValidation` 并标 `stateCorrupted`；退出码见下方独立表格                                                |
 | 位置参数 `report`                               | —            | 在同一短租约内核对最新 Review、Runner 与 GitHub 状态并（重）生成 `<workspace>/report.html`；观察后状态变化、无法核对或结果过期时报告不会显示交付就绪。循环结束复用 run 租约并从冻结 PRD 快照自动生成；退出码 0=可信状态下已生成 / 1=写入失败或 state 损坏 / 2=无可读工作区 |
 | `--max-iter <n>`                                | `50`         | 最大迭代轮数                                                                                                                                                                                                                                                               |
@@ -725,10 +742,10 @@ GitHub 状态给出。
 | `--stale-days <n>`                              | `30`         | 仅 `doctor`：active 区文件的 git 最后提交日期晚于 frontmatter `updated` 超过 n 天判为过期；`0` 表示晚一天即过期，`docs/archive/` 冷档案不参与                                                                                                                              |
 | `--contract <file>`                             | —            | 仅 `init`：读取仓库内已经人工确认的契约候选；不能读取仓库外路径                                                                                                                                                                                                            |
 | `--input <file>`                                | —            | 仅 `workspace apply-prd` / `workspace record-review-decision`：读取 workspace 外的严格 UTF-8 JSON 请求；不能把请求放进目标 workspace                                                                                                                                       |
-| `--yes`                                         | 关闭         | 仅 `init`：接受命令已经展示的远端和文件变更；不会猜测或自动填写缺失检查的不适用理由                                                                                                                                                                                        |
+| `--yes`                                         | 关闭         | 仅 `init`：接受命令已经展示的远端和文件变更；必须同时提供人工确认过的 `--contract`，不会替用户选择平台或填写不适用理由                                                                                                                                                     |
 | `--local`                                       | 关闭         | 仅 `doctor`：不查询 GitHub，只检查本地契约、派生快照、文档和 workspace；用于项目原生 CI                                                                                                                                                                                    |
 | `--json`                                        | 关闭         | `init`、`workspace`、`doctor`、`status`、`models` 输出单个 JSON 对象；交互提示不写入 JSON stdout                                                                                                                                                                           |
-| `--shadow`                                      | 关闭         | 只供固定候选 Dogfood，且只允许用于 run、doctor、`workspace apply-prd`；健康固定退出 7，不能表示正式通过；真实失败仍保留原失败码，其他子命令会拒绝该参数                                                                                                                                                                                   |
+| `--shadow`                                      | 关闭         | 只供固定候选 Dogfood，且只允许用于 run、doctor、`workspace apply-prd`；健康固定退出 7，不能表示正式通过；真实失败仍保留原失败码，其他子命令会拒绝该参数                                                                                                                    |
 | `--review-model <id>`                           | —            | 最终 Review 的精确模型 ID；不能使用 runner 默认值，因为结果必须能绑定并复现实际模型                                                                                                                                                                                        |
 
 ### `status` 子命令退出码
@@ -750,16 +767,16 @@ GitHub 状态给出。
 位置参数时；位置参数 `claude`/`codex`/`cursor` 只切换 runner，仍属 `run`，退出码规则相同）
 循环结束的进程退出码：
 
-| 退出码 | 含义                                                                    |
-| ------ | ----------------------------------------------------------------------- |
-| `0`    | 实现验证、本地最终 Review 和 GitHub 交付条件均已就绪                    |
-| `1`    | 机械检查或执行失败；包括最大轮次、连续无进展或普通未完成                |
-| `2`    | 配置、质量契约、固定版本、状态或 workspace 锁无效                       |
-| `3`    | 存在 `blocked` Story，等待人工处理                                      |
-| `4`    | 最终 Review 存在待人工处理的 finding                                    |
+| 退出码 | 含义                                                                       |
+| ------ | -------------------------------------------------------------------------- |
+| `0`    | 实现验证、本地最终 Review 和 GitHub 交付条件均已就绪                       |
+| `1`    | 机械检查或执行失败；包括最大轮次、连续无进展或普通未完成                   |
+| `2`    | 配置、质量契约、固定版本、状态或 workspace 锁无效                          |
+| `3`    | 存在 `blocked` Story，等待人工处理                                         |
+| `4`    | 最终 Review 存在待人工处理的 finding                                       |
 | `5`    | Validator 或最终 Review 无法可靠验证，例如结果缺失、模型异常或上下文不完整 |
-| `6`    | 本地已完成，但 PR、GitHub CI 或 Ruleset 尚未就绪                        |
-| `7`    | shadow 运行完成；只表示候选验证跑完，永远不能表示可交付                 |
+| `6`    | 本地已完成，但 PR、GitHub CI 或 Ruleset 尚未就绪                           |
+| `7`    | shadow 运行完成；只表示候选验证跑完，永远不能表示可交付                    |
 
 `init`/`workspace`/`repair`/`doctor`/`status`/`report`/`models`/`config`/`hooks` 等子命令的退出码语义各自独立，见上方参数表对应行说明。
 
@@ -819,7 +836,7 @@ GitHub 状态给出。
 - **Agent 调用凭证**：每次真实 Builder/Validator 子进程都记录 outcome、退出码与调用收口耗时；异常 stdout/stderr 尾部有界进入 evidence/status/report，成功 transcript 不落盘。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；Developer no-op、超时或异常退出累计达 `--stall-limit`（缺省 3）时提前终止（退出码 1）。结构化 Validator 异常不再空转重试，而是立即以不可验证退出码 5 停止并保留候选。
-- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令和允许目录；引擎在精确 HEAD 的项目外检出中准备依赖并逐项执行，失败机械打回并跳过该轮验证。验证检出保留最多 16 个目标提交的完整可达历史，但不复制无关分支或标签；开发仓库为 shallow/partial、缺少对象、启用替换历史、可达对象超过 10 万个或保守容量估算超过 1 GiB 时会返回不可验证，检出后还会复核对象集合与实际文件大小。版本、摘要、快照、验证环境或运行中契约漂移都会停止，超时会等受管进程集合确认收口后才继续。主动脱离平台 containment 的恶意进程属于明确非目标，coding-x 不是操作系统沙箱。
+- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令、允许目录和交付必须验证的平台。`init` 可以把现有固定 GitHub runner 作为建议，但最终平台必须由用户确认；服务器项目可以只选 Linux，桌面项目可以只选 macOS/Windows，跨平台工具再选择三项。CI 的额外 Ubuntu 控制任务不会自动变成部署要求。引擎在精确 HEAD 的项目外检出中准备依赖并逐项执行，失败机械打回并跳过该轮验证。验证检出保留最多 16 个目标提交的完整可达历史，但不复制无关分支或标签；开发仓库为 shallow/partial、缺少对象、启用替换历史、可达对象超过 10 万个或保守容量估算超过 1 GiB 时会返回不可验证，检出后还会复核对象集合与实际文件大小。版本、摘要、快照、验证环境或运行中契约漂移都会停止，当前系统没有适用检查也会失败而不是以零项通过。超时会等受管进程集合确认收口后才继续。主动脱离平台 containment 的恶意进程属于明确非目标，coding-x 不是操作系统沙箱。
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 安全写入与 Git 隔离检查**：builder 只 stage/commit story 文件并在受管范围内回写运行时状态；所有正式写入口共用 owner-bound 租约。`prd-to-json` 与 `/review-loop` 只准备临时请求，再由引擎写入；`doctor` 只读报告安全分类与 Git 隔离状态，不替用户删租约或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
@@ -893,7 +910,7 @@ my-project/
 | 退出码 `2`，提示活动 lease 或恢复状态阻断                  | `doctor` / `status` 的安全分类、是否仍有 coding-x 或项目检查进程                          | 活跃运行就等待或正常停止；中断状态按提示运行 `workspace recover` 或 `workspace resume-mutation`，不要删除 `engine.lock/`              |
 | `state.json` 或 `prd.json` JSON 损坏                       | `status`/`report` 的保守警告                                                              | 运行 `npx coding-x repair`；它会自行获取短租约并按固定清单修复，不会替你解决业务失败                                                  |
 | 退出码 `1`：达到最大轮次或 stall 熔断                      | `npx coding-x status`、终端异常尾部、`report.html` 时间线                                 | 区分代码失败、Developer 的 runner 认证/网络、超时和空转；处理根因后重跑，已有有效状态会续跑                                           |
-| 退出码 `5`：Validator 无法可靠验证                         | `npx coding-x status`、最近一次 Validator 结局、协议错误和当前提交                        | 修复 runner、结果、提交漂移或运行环境后重跑；候选不会被当成失败清除，也不会获得验收凭证                                             |
+| 退出码 `5`：Validator 无法可靠验证                         | `npx coding-x status`、最近一次 Validator 结局、协议错误和当前提交                        | 修复 runner、结果、提交漂移或运行环境后重跑；候选不会被当成失败清除，也不会获得验收凭证                                               |
 | 退出码 `3` 或 story `blocked`                              | `state.json` 对应 story 的 notes、报告红旗和仲裁标签                                      | 人决定改需求、修环境还是重试；需求/AC 有问题就改源 PRD、再运行 `prd-to-json`，然后重跑引擎                                            |
 | 运行中途需求改变                                           | 源 `docs/prds/prd-*.md`                                                                   | 先停止引擎；修改源 PRD 并重新转换。AC 变化的 story 会重验，旧证据会先归档                                                             |
 | UI story 没有浏览器证据                                    | PATH 中是否有 `agent-browser`、`.workspace/screenshots/`、报告截图对账                    | 安装/提供浏览器工具后真实操作；AC 要写明 URL、动作、期望结果，不能只写“页面正常”                                                      |

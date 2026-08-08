@@ -199,6 +199,62 @@ describe('release evidence script', () => {
     expect(stale.stderr).toContain('不是当前远端 main');
   });
 
+  it('accepts only the selected successful completed candidate run from current main', () => {
+    const root = rootFixture();
+    const runJson = join(root, 'candidate-run.json');
+    const commit = 'a'.repeat(40);
+    const selectedRunId = '123456';
+    const validRun = {
+      id: Number(selectedRunId),
+      head_sha: commit,
+      head_branch: 'main',
+      event: 'workflow_dispatch',
+      status: 'completed',
+      conclusion: 'success',
+      path: '.github/workflows/build-candidate.yml',
+    };
+    const args = [
+      'verify-candidate-run',
+      '--run-json',
+      runJson,
+      '--candidate-workflow-run-id',
+      selectedRunId,
+      '--commit',
+      commit,
+    ];
+
+    json(runJson, validRun);
+    const verified = run(args, root);
+    expect(verified.status, verified.stderr).toBe(0);
+    expect(JSON.parse(verified.stdout)).toMatchObject({
+      status: 'verified',
+      candidateWorkflowRunId: selectedRunId,
+      commit,
+      branch: 'main',
+      workflow: '.github/workflows/build-candidate.yml',
+    });
+
+    for (const conclusion of ['failure', 'cancelled', 'skipped', null]) {
+      json(runJson, { ...validRun, conclusion });
+      const rejected = run(args, root);
+      expect(rejected.status, `conclusion=${String(conclusion)}`).toBe(1);
+      expect(rejected.stderr).toContain('未成功完成');
+    }
+
+    for (const [label, changed] of [
+      ['run id', { id: 654321 }],
+      ['head', { head_sha: 'b'.repeat(40) }],
+      ['main', { head_branch: 'feature' }],
+      ['event', { event: 'push' }],
+      ['status', { status: 'in_progress' }],
+      ['path', { path: '.github/workflows/other.yml' }],
+    ] as const) {
+      json(runJson, { ...validRun, ...changed });
+      const rejected = run(args, root);
+      expect(rejected.status, label).toBe(1);
+    }
+  });
+
   it('binds the exact packed bytes to the npm stage id and rejects mismatches', () => {
     const root = rootFixture();
     const bytes = Buffer.from('fixed candidate tarball bytes');

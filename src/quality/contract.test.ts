@@ -11,6 +11,7 @@ import {
   parseReviewBaseQualityContract,
   qualityChecksMatchContract,
   readQualityContract,
+  requiredQualityPlatforms,
   type QualityContract,
 } from './contract.js';
 import { CODING_X_VERSION } from '../version.js';
@@ -191,6 +192,61 @@ function clone(): Record<string, any> {
 }
 
 describe('parseQualityContract', () => {
+  it('accepts explicit required platforms while allowing extra control jobs', () => {
+    const input = clone();
+    input.github.requiredPlatforms = ['macos', 'windows'];
+    const result = parseQualityContract(input);
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') return;
+    expect(requiredQualityPlatforms(result.contract)).toEqual(['macos', 'windows']);
+    expect(result.contract.github.jobs.map((job) => job.platform)).toContain('linux');
+  });
+
+  it('rejects empty, duplicate, unknown, or uncovered explicit required platforms', () => {
+    for (const [requiredPlatforms, expected] of [
+      [[], 'github.requiredPlatforms 不能为空'],
+      [['linux', 'linux'], 'github.requiredPlatforms 含重复值 linux'],
+      [['aix'], 'github.requiredPlatforms[0] 必须是 linux、macos 或 windows'],
+    ] as const) {
+      const input = clone();
+      input.github.requiredPlatforms = requiredPlatforms;
+      const result = parseQualityContract(input);
+      expect(result.status).toBe('invalid');
+      if (result.status === 'invalid') expect(result.errors).toContain(expected);
+    }
+
+    const uncovered = clone();
+    uncovered.github.requiredPlatforms = ['windows'];
+    uncovered.github.jobs = uncovered.github.jobs.filter(
+      (job: Record<string, unknown>) => job.platform !== 'windows',
+    );
+    const result = parseQualityContract(uncovered);
+    expect(result.status).toBe('invalid');
+    if (result.status === 'invalid') {
+      expect(result.errors).toContain(
+        'github.requiredPlatforms 声明的 windows 没有对应 GitHub job',
+      );
+    }
+  });
+
+  it('derives legacy schema 2 required platforms in first-job order without mutation or digest drift', () => {
+    const input = clone();
+    input.github.jobs = [
+      input.github.jobs[1],
+      input.github.jobs[0],
+      { ...structuredClone(input.github.jobs[1]), id: 'macos-second' },
+      input.github.jobs[2],
+    ];
+    const result = parseQualityContract(input);
+    expect(result.status).toBe('ready');
+    if (result.status !== 'ready') return;
+    const digest = result.digest;
+    expect(Object.hasOwn(result.contract.github, 'requiredPlatforms')).toBe(false);
+    expect(requiredQualityPlatforms(result.contract)).toEqual(['macos', 'linux', 'windows']);
+    expect(Object.hasOwn(result.contract.github, 'requiredPlatforms')).toBe(false);
+    expect(digestQualityContract(result.contract)).toBe(digest);
+  });
+
   it('accepts a complete cross-platform contract with structured and explicit shell commands', () => {
     const result = parseQualityContract(validContract());
     expect(result.status).toBe('ready');
@@ -743,6 +799,8 @@ describe('readQualityContract', () => {
       digest: expect.stringMatching(/^sha256:/),
     });
     if (result.status !== 'ready') return;
+    expect(Object.hasOwn(result.contract.github, 'requiredPlatforms')).toBe(false);
+    expect(requiredQualityPlatforms(result.contract)).toEqual(['linux', 'macos', 'windows']);
     const versionMatches = result.contract.codingXVersion === CODING_X_VERSION;
     expect(assessQualityRuntime(result.contract, CODING_X_VERSION, false)).toMatchObject({
       mode: versionMatches ? 'formal' : 'version-mismatch',

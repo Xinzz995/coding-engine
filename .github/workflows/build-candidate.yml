@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact stable version already merged to main (for example 0.33.0)
+        description: Exact stable version already merged to main (for example 0.35.0)
         required: true
         type: string
 
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   prepare:
     name: verify and pack exact npm candidate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       EXPECTED_VERSION: ${{ inputs.version }}
@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -101,15 +102,85 @@ jobs:
           const [evidencePath, summaryPath] = process.argv.slice(2)
           const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'))
           fs.appendFileSync(summaryPath, [
-            '## npm candidate ready for pre-stage verification',
+            '## npm candidate packed; platform installation proof is pending',
             '',
             `- package: ${evidence.packageName}@${evidence.version}`,
             `- commit: ${evidence.commit}`,
             `- candidate run ID: ${evidence.candidateWorkflowRunId}`,
             `- tarball SHA-256: ${evidence.tarball.sha256}`,
             '',
-            'Run coding-engine, Go, and Python Dogfood with this exact artifact.',
-            'Only after they pass, dispatch Stage verified npm candidate with this version and run ID.',
+            'This workflow is not successful until the same tarball installs on all three platforms.',
             '',
           ].join('\n'))
           NODE
+
+  platform_install:
+    name: install exact candidate (${{ matrix.platform }}, Node 22)
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: macos-26
+            platform: macos
+          - os: windows-2022
+            platform: windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Download the one candidate artifact from this run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-candidate-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-candidate
+
+      - name: Verify the downloaded tarball against packed evidence
+        run: >-
+          node build/release-evidence.mjs verify-tarball
+          --evidence "${{ runner.temp }}/npm-candidate/packed.json"
+          --tarball "${{ runner.temp }}/npm-candidate/coding-x-${{ inputs.version }}.tgz"
+
+      - name: Install and run the exact candidate through its npm command entry
+        run: >-
+          node build/candidate-install-smoke.mjs
+          --evidence "${{ runner.temp }}/npm-candidate/packed.json"
+          --tarball "${{ runner.temp }}/npm-candidate/coding-x-${{ inputs.version }}.tgz"
+          --expected-version "${{ inputs.version }}"
+          --expected-commit "${{ github.sha }}"
+          --candidate-workflow-run-id "${{ github.run_id }}"
+          --expected-platform "${{ matrix.platform }}"
+          --project-root "${{ github.workspace }}"
+          --temp-root "${{ runner.temp }}"
+
+  candidate_ready:
+    name: candidate install gate
+    needs: [prepare, platform_install]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Accept only successful preparation and three-platform installation
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          PLATFORM_RESULT: ${{ needs.platform_install.result }}
+        run: |
+          echo "prepare=$PREPARE_RESULT"
+          echo "platform_install=$PLATFORM_RESULT"
+          if [ "$PREPARE_RESULT" != "success" ] || [ "$PLATFORM_RESULT" != "success" ]; then
+            exit 1
+          fi
+          echo "The exact candidate installed on Linux, macOS, and Windows." >> "$GITHUB_STEP_SUMMARY"
+          echo "Run coding-engine, Go, and Python Dogfood with this exact artifact before staging." >> "$GITHUB_STEP_SUMMARY"
