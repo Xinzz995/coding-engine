@@ -203,9 +203,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(operationPath(state.workspace))).toBe(true);
     expect(
-      readdirSync(
-        join(state.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, 'settled-operations'),
-      ),
+      readdirSync(join(state.workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, 'settled-operations')),
     ).toHaveLength(0);
     await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
@@ -523,41 +521,50 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     });
   });
 
-  it('uses containment quarantine when termination acknowledgement becomes uncertain', async () => {
-    const state = await setup();
-    const controller = new AbortController();
-    let pgid: number | undefined;
+  it.each([
+    ['process-group', 'containment-unconfirmed'],
+    ['opaque-runner', 'operation-proof-missing'],
+  ] as const)(
+    'uses %s quarantine semantics after START when termination acknowledgement becomes uncertain',
+    async (posixProcessDomain, expectedReason) => {
+      const state = await setup();
+      const controller = new AbortController();
+      let pgid: number | undefined;
 
-    await expect(
-      runWorkspaceOperation(state.session, operationOptions(), (operation) =>
-        runDarkPosixSupervisedOperation(operation, {
-          target: {
-            executable: process.execPath,
-            args: ['-e', 'setInterval(() => {}, 1000)'],
-            cwd: state.workspace,
-            environment: [],
-          },
-          termination: { signal: controller.signal, reason: 'user-interrupt' },
-          timeouts: { termMs: 100, killMs: 3000, pollMs: 20 },
-          hooks: {
-            onArmed: ({ containment }) => {
-              if (containment.platform === 'posix-process-group-v1') pgid = containment.pgid;
-              controller.abort();
+      await expect(
+        runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+          runDarkPosixSupervisedOperation(operation, {
+            target: {
+              executable: process.execPath,
+              args: ['-e', 'setInterval(() => {}, 1000)'],
+              cwd: state.workspace,
+              environment: [],
             },
-            onTerminating: () => {
-              throw new Error('termination acknowledgement lost');
+            posixProcessDomain,
+            termination: { signal: controller.signal, reason: 'user-interrupt' },
+            timeouts: { termMs: 100, killMs: 3000, pollMs: 20 },
+            hooks: {
+              onArmed: ({ containment }) => {
+                if (containment.platform === 'posix-process-group-v1') pgid = containment.pgid;
+              },
+              onStarted: () => {
+                controller.abort();
+              },
+              onTerminating: () => {
+                throw new Error('termination acknowledgement lost');
+              },
             },
-          },
-        }),
-      ),
-    ).rejects.toThrow(/termination acknowledgement lost/u);
+          }),
+        ),
+      ).rejects.toThrow(/termination acknowledgement lost/u);
 
-    expect(
-      parseQuarantineRecord(readFileSync(join(operationPath(state.workspace), QUARANTINE_FILE)))
-        .reason,
-    ).toBe('containment-unconfirmed');
-    if (pgid !== undefined) {
-      expect(await waitForPosixProcessGroupEmpty(pgid, 5000, 20)).toBe(true);
-    }
-  });
+      expect(
+        parseQuarantineRecord(readFileSync(join(operationPath(state.workspace), QUARANTINE_FILE)))
+          .reason,
+      ).toBe(expectedReason);
+      if (pgid !== undefined) {
+        expect(await waitForPosixProcessGroupEmpty(pgid, 5000, 20)).toBe(true);
+      }
+    },
+  );
 });

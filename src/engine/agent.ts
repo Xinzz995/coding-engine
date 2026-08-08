@@ -344,6 +344,7 @@ export async function runAgent(opts: {
       cwd,
       environment: environmentEntries(environment),
       timeoutMs: opts.timeoutMs,
+      posixProcessDomain: 'opaque-runner',
       termination: opts.managed.termination,
       output: {
         mode: 'stream',

@@ -9,7 +9,7 @@ import { waitForPosixProcessGroupEmpty } from './posix-containment.js';
 import { DRAINED_RECEIPT_FILE } from './operation-records.js';
 import { parseQuarantineRecord, QUARANTINE_FILE } from './quarantine.js';
 import { parseDrainedReceipt } from './supervisor-protocol.js';
-import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from './types.js';
+import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR, RECOVERY_DIR } from './types.js';
 
 const roots: string[] = [];
 const workers = new Set<ChildProcessWithoutNullStreams>();
@@ -149,4 +149,65 @@ describe.runIf(process.platform !== 'win32')('delegated recovery after a real pa
     },
     40_000,
   );
+
+  it('permanently rejects recovery when an opaque POSIX runner loses its real parent over IPC', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'coding-x-delegated-opaque-parent-crash-'));
+    roots.push(workspace);
+    const parent = startWorker(['parent-opaque', workspace, 'legal']);
+    const started = await parent.line;
+    expect(started.type).toBe('started');
+    const pgid = Number(started.pgid);
+    const supervisorPid = Number(started.supervisorPid);
+    const markerPath = String(started.markerPath);
+    roots.push(String(started.markerRoot));
+    groups.add(pgid);
+    await waitUntil(() => existsSync(markerPath));
+
+    expect(parent.child.kill('SIGKILL')).toBe(true);
+    await once(parent.child, 'exit');
+    workers.delete(parent.child);
+
+    const operationPath = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+    const receiptPath = join(operationPath, DRAINED_RECEIPT_FILE);
+    await waitUntil(() => {
+      try {
+        process.kill(supervisorPid, 0);
+        return false;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === 'ESRCH';
+      }
+    });
+    expect(await waitForPosixProcessGroupEmpty(pgid, 5000, 20)).toBe(true);
+    groups.delete(pgid);
+    expect(parent.stderr()).toBe('');
+    const beforeRecovery = {
+      operationExists: existsSync(operationPath),
+      receiptExists: existsSync(receiptPath),
+    };
+
+    const recovery = startWorker(['recover', workspace]);
+    const result = await recovery.line;
+    const [exitCode] = (await once(recovery.child, 'exit')) as [number | null];
+    workers.delete(recovery.child);
+    expect(exitCode).toBe(0);
+    expect(recovery.stderr()).toBe('');
+    expect({
+      beforeRecovery,
+      result,
+      activeLeaseExists: existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR)),
+      recoveryClaimExists: existsSync(
+        join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, RECOVERY_DIR),
+      ),
+    }).toMatchObject({
+      beforeRecovery: { operationExists: true, receiptExists: false },
+      result: {
+        type: 'rejected',
+        code: 'isolated',
+        message: expect.stringContaining('operation-proof-missing'),
+        quarantine: null,
+      },
+      activeLeaseExists: true,
+      recoveryClaimExists: false,
+    });
+  }, 40_000);
 });

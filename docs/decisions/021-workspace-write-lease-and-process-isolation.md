@@ -1,7 +1,7 @@
 ---
 title: 021-workspace-write-lease-and-process-isolation
 status: active
-updated: 2026-08-08
+updated: 2026-08-09
 scope: root
 ---
 
@@ -28,7 +28,9 @@ ADR-008 用 `engine.lock` 防止两个 `run/repair` 同时写 workspace，ADR-00
 一个 owner 可以是父引擎及其同一时刻唯一的受管子进程委托，但任意时刻最多只有一个 owner
 domain 能修改 canonical 安全路径或业务路径。竞争者只能并发写各自唯一、路径不相交且永不作为
 权限/业务事实的 inert staging；失败后不再自行删除。它不声称防御同一操作系统账号下故意删锁、
-篡改记录、使用 WMI/setsid 等方式主动逃出 containment 的恶意代码。
+篡改记录，或目标项目代码使用 WMI/setsid 等方式主动逃出 containment。这个非目标只针对项目代码
+主动逃逸；受支持 AI Runner 自身可能正常地为内部命令创建独立 POSIX session/process group，不能
+把它归类为恶意行为，也不能继续用外层 Runner 进程组代表其完整命令域。
 
 0.34.0 初始化后永久保留目录型 `engine.lock/` 协议根，可持续让 0.33.x 的 run/repair 文件锁 acquire
 失败；但它不能追溯隔离一个已经运行、且旧锁文件已被删除的 0.33.x 进程，也不能阻止 0.33.x 中
@@ -104,6 +106,8 @@ quarantine 只有三个严格 reason：`containment-unconfirmed`、`operation-pr
 或根本没有 armed operation 时，才能在严格同机 reboot proof 后继续原 mode/delta 裁决；后两种是
 永久终态，reboot 不得绕过，只能改用新的空 workspace。recovery 后发现越界只能把第一种原子升级为
 integrity violation 并绑定 prior digest；安全记录损坏直接 invalid，不用 quarantine 掩盖。
+对于 opaque Runner，新的 workspace 只解决协议状态复用，不证明未知跨组进程已经死亡；继续前还必须
+独立确认旧进程不会再影响原项目目录。无法确认时应改用新的隔离项目检出或重启主机。
 
 诚实进程的释放顺序是：确认无活动 containment → 将完整 operation 目录原子移为本 owner 的 settled
 记录 → owner-checked 把整个 `lease/` 原子 rename 到 `engine.lock/incidents/` 下的 owner 专属
@@ -150,6 +154,22 @@ START 发出后可能已经运行项目代码，所以恢复必须把 armed 当�
 争抢同一个权威字节。receipt 还精确绑定 owner/protocol、delegation contract、containment、helper、
 supervisor identity、proof 与 `drainReason`；IPC DRAINED 只引用该 receipt 摘要，不复制裁决字段。
 
+POSIX 的 DATA 还在 START 前冻结内部 `process-group | opaque-runner` 结算策略。普通项目命令使用
+`process-group`；Developer、Validator 与真实 Final Review 这类受支持 AI Runner 使用
+`opaque-runner`。后者本身可能正常调用 `setsid` 为内部命令创建独立 session/process group，这不是
+目标项目的恶意逃逸，但意味着外层 launcher pgid 为空与 stdout/stderr EOF 不能证明 Runner 的完整
+命令域已经清空。
+
+opaque Runner 尚未接受 START 时，既有 `never-started-containment-empty-v1` 仍是充分证明。一旦
+START 已可能执行，timeout、user-interrupt、parent-shutdown、output-failure，或 Runner 自然以 signal
+结束、supervisor 观察到 `process-tree-not-empty` 时，POSIX helper 即使确认外层 pgid 为空且 pipes EOF
+也不得写 drained receipt。活 parent 在任何 settle 前安装永久 `operation-proof-missing`；parent 已死
+则保持 `armed + no receipt`，磁盘 evaluator 将它归为同一永久终态。两者都禁止恢复旧 workspace 或
+自动开始下一轮。Runner 自然以数字 code 0 或数字非零退出仍沿用合作式完成合同；这里明确保留“正常
+数字退出表示 Runner 已同步收口”的信任假设，出现反例时再收紧。该策略不声称能够识别或终止未知的
+跨组进程，只保证当前 workspace 不再被释放或复用。Windows Job Object 与普通 POSIX 项目命令合同
+不变。
+
 prepared/prepared-bound 还必须有 owner-live 的 abort-before-start 出口。supervisor 从未建立，或已
 确认项目代码零执行、prestart containment 清空、supervisor exact dead 且 baseline 完全未变时，父进程
 写入绑定 operation/baseline/active 摘要的 `prestart-abort.json`，再把完整 operation 原子移入 settled，
@@ -167,28 +187,31 @@ stdout/stderr 是有意传递的独立数据管道。否则项目后代持有控
 父进程在初始 prepared 后、prepared-bound 前死亡时，supervisor 从未得到 workspace path/DATA，因
 IPC EOF/握手超时退出，也没有 workspace 写能力；握手期限后可按未授权状态恢复。prepared-bound
 之后死亡时，恢复还必须核对持久化 supervisor 身份 exact dead；armed 继续按 START 可能已发出处理。
-父进程在 START 后死亡时，supervisor 必须主动终止 containment；若 canonical armed 后父进程在
-START 前死亡，supervisor 清空未启动 containment 并签发绑定摘要的 never-started receipt。磁盘记录
-仍保留，下一实例只有在重新确认 containment 清空后才能恢复。
+父进程在 START 后死亡时，supervisor 必须主动终止它能控制的 containment；普通 POSIX 项目命令与
+Windows 仍按平台合同签发完整 drained receipt，POSIX opaque Runner 则因完整命令域无法证明而不签发
+receipt，并永久隔离。若 canonical armed 后父进程在 START 前死亡，supervisor 清空未启动
+containment 并签发绑定摘要的 never-started receipt。磁盘记录仍保留，下一实例只有在取得该调用类型
+要求的完整证明后才能恢复。
 
 父进程死在 DATA 后、canonical armed 前时，supervisor 只终止仍停在 barrier/suspended 的 containment
 并退出，不得写无法绑定 armed digest 的 receipt；磁盘 prepared-bound 由 baseline unchanged +
-supervisor exact dead 恢复。只有 canonical armed 严格存在时，supervisor 才能重读并用其 frozen digest
-写 drained receipt。
+supervisor exact dead 恢复。只有 canonical armed 严格存在、且该调用结局允许权威结算时，supervisor
+才能重读并用其 frozen digest 写 drained receipt。
 
 POSIX supervisor 不仅位于 target containment 之外，还必须在独立 session/process group 中，并在
 回报可持久化 identity 前安装不会退出的 SIGINT/SIGTERM handler；它只接受 parent IPC 的 TERMINATE
 或 parent EOF。这样终端 Ctrl+C/对 parent 的 SIGTERM 只由 parent 进入统一收口，不会在 receipt 前
 杀掉见证者。它随后启动包内固定、尚不运行项目代码的 launcher；launcher
 建立独占 session/process group 并停在 START barrier，supervisor 把其 pgid 与精确 identity 回报给
-父进程持久化。START 后 launcher 才在同一 pgid 内启动目标，普通后代继续继承该组。正常路径只有
-当组内除 launcher 外无成员且 pipes EOF 时才让 launcher 退出，再以负 pgid 探测整个组为空并发送
-DRAINED。发送前 supervisor 使用 START 前缓存的 owner/protocol/active/baseline 摘要原子写并回读
-POSIX drained receipt。父进程硬崩溃时 supervisor 只经仍绑定原 ChildProcess 的固定 launcher IPC
+父进程持久化。START 后 launcher 才在同一 pgid 内启动目标，普通后代继续继承该组。允许签发
+process-group 证明的路径只有当组内除 launcher 外无成员且 pipes EOF 时才让 launcher 退出，再以负
+pgid 探测整个组为空并发送 DRAINED。发送前 supervisor 使用 START 前缓存的
+owner/protocol/active/baseline 摘要原子写并回读 POSIX drained receipt。父进程硬崩溃时 supervisor
+只经仍绑定原 ChildProcess 的固定 launcher IPC
 发送内部 `SIGNAL_GROUP(TERM|KILL)`；launcher 在自身进程内向自己的 process group 发信号，在系统
-调用前排除 PID/PGID 复用，再按 TERM→宽限→KILL 等待组消失并写同一 receipt；supervisor
-自己不在该组，因此能观察终点。若 supervisor 也被硬杀，已持久 pgid 继续阻断；pgid 被复用或成员
-身份无法判断时保持隔离。
+调用前排除 PID/PGID 复用，再按 TERM→宽限→KILL 等待组消失。普通项目命令可在此后写同一 receipt；
+opaque Runner 已接受 START 时不得仅凭该外层结果写 receipt。supervisor 自己不在该组，因此能观察
+外层终点。若 supervisor 也被硬杀，已持久 pgid 继续阻断；pgid 被复用或成员身份无法判断时保持隔离。
 
 Windows 不再用 `taskkill /T` 证明整树退出。npm 包分发由固定源码确定性构建、并随包携带的
 `.NET Framework 4.6` C# P/Invoke supervisor。Node 直接以 detached、新进程组、无窗口和三条继承
@@ -225,7 +248,7 @@ CI 实际证明 x64 Windows，AnyCPU 不等于已经证明 ARM64。helper 摘要
 
 ### 3. 根命令结果不等于调用完成
 
-接受 START 并实际启动项目代码后的自然完成必须同时满足：
+接受 START 并实际启动项目代码后，允许按合作式合同结算的自然数字退出必须同时满足：
 
 - 根命令结果已经取得；
 - stdout/stderr 全部 EOF；
@@ -236,20 +259,29 @@ CI 实际证明 x64 Windows，AnyCPU 不等于已经证明 ARM64。helper 摘要
 - Windows 在 supervisor 仍持 Job handle 时确认 ActiveProcesses 为零后写 receipt，随后 supervisor
   才退出；不声称能在匿名 Job 消失后重新查询它。
 
-timeout、用户中断与 parent 断链不要求先观察 STARTED/RESULT；它们直接终止 containment，但仍必须
-满足共同的 pipes EOF、集合精确为空、cached-digest receipt 与 supervisor 退出。receipt 额外绑定
-`drainReason=timeout|user-interrupt|parent-shutdown`。自然窗口结束后仍有成员时，
-`process-tree-not-empty` 由 supervisor 的平台集合测量产生并写入 receipt；parent 不用 TERMINATE 自报。
-IPC DRAINED 只携 receipt digest 与 proof，不再复制 reason/leftover。
+对 POSIX opaque Runner，这条自然数字退出路径保留合作式信任：Runner 数字退出表示其内部命令已经
+同步收口；外层 pgid 与 pipes 只证明可观察的 launcher 域，不单独升级为内部命令域证明。自然 signal
+不享受该信任，直接进入永久 proof-missing 隔离。
+
+普通 POSIX 项目命令和 Windows 的 timeout、用户中断与 parent 断链不要求先观察 STARTED/RESULT；
+它们直接终止 containment，但仍必须满足共同的 pipes EOF、平台集合精确为空、cached-digest receipt
+与 supervisor 退出。receipt 额外绑定 `drainReason=timeout|user-interrupt|parent-shutdown`。自然窗口
+结束后仍有成员时，`process-tree-not-empty` 由 supervisor 的平台集合测量产生并写入 receipt；parent
+不用 TERMINATE 自报。IPC DRAINED 只携 receipt digest 与 proof，不再复制 reason/leftover。
+
+POSIX opaque Runner 已接受 START 后的 timeout、用户中断、parent 断链、`output-failure`、自然 signal
+和 `process-tree-not-empty` 是上述 receipt 规则的明确例外：helper 尽力终止外层 containment，但不签发
+权威回执；workspace 进入永久 `operation-proof-missing`，本 invocation 不结算，也不得自动开始下一轮。
 
 prepared/prepared-bound 的 setup failure、能力失败或首个用户中断走上一节 abort-before-start，不要求
 不存在的 drained receipt；armed 但 supervisor 明确从未接受 START 时使用 never-started receipt。两类
 路径都必须原子 settle 整个 operation，不能删 active 文件假装调用从未发生。
 
-根命令即使 exit 0，只要仍有后代，结果也不得记为普通 passed/completed。若剩余进程清理成功，
-该调用产出 `process-tree-not-empty`，并按下文各 operation 的唯一退出语义裁决；随后可以回到
-owned-idle 并写有界失败证据；
-若清理无法确认则 quarantine，且不补写普通 evidence/report。
+根命令即使 exit 0，只要外层 containment 仍有后代，结果也不得记为普通 passed/completed。普通
+POSIX 项目命令或 Windows 若剩余进程清理成功，该调用产出 `process-tree-not-empty`，并按下文各
+operation 的唯一退出语义裁决；随后可以回到 owned-idle 并写有界失败证据。POSIX opaque Runner
+观察到同一结果时不签发 receipt，永久隔离；任何调用若清理无法确认也 quarantine，且不补写普通
+evidence/report。
 
 根结果出现后先给自然收口固定 5 秒：期间持续等待 pipes EOF 与 containment 为空，提前满足就采用
 根结果。期限后仍有成员才判 `process-tree-not-empty`；POSIX 再给 TERM 5 秒、KILL 后确认 5 秒，Windows 终止 Job
@@ -265,8 +297,9 @@ Issue #118 进一步收紧这些数字的含义：监督器生命周期只有准
 
 父进程的公开配置只暴露平台中立的 `prepareMs`、`naturalDrainMs`、`terminateDrainMs`、
 `ackExitMs` 和 `pollMs`，再显式翻译到 POSIX 与 Windows adapter。POSIX TERM 宽限是总终止预算内的
-平台私有子边界；Windows 不接收也不静默忽略 POSIX 专用公共字段。超时后只有已经安装且严格绑定的
-empty-containment receipt 可以作为证据保留；缺 DRAINED、ACK 后 supervisor 不退出、输出不关闭或
+平台私有子边界；Windows 不接收也不静默忽略 POSIX 专用公共字段。允许继续使用 workspace 的超时
+路径只有已经安装且严格绑定的 empty-containment receipt 可以作为证据；POSIX opaque Runner 已启动
+后的超时则明确不安装 receipt，并永久隔离。缺 DRAINED、ACK 后 supervisor 不退出、输出不关闭或
 最终身份无法确认都必须保留 operation 隔离并返回不可验证，不能把“已经发出 kill”当作收口成功。
 这里的有界保证要求操作系统调度与事件循环仍能推进；同步内核调用永久不返回、内核失效和断电仍
 属于本 ADR 已声明的不保证范围。
@@ -283,8 +316,9 @@ Windows 终端 Ctrl+C 产生的 SIGINT、正常返回和可捕获异常：
 
 1. 停止启动新 operation 和父进程普通写入；
 2. 在内存进入 terminating；
-3. 终止并确认当前 containment；
-4. 完成返回后 delta 校验，并把完整 operation 原子移入 settled；
+3. 终止当前可控制的 containment；普通 POSIX 项目命令与 Windows 继续确认平台集合，已启动的 POSIX
+   opaque Runner 则保留完整证明缺失；
+4. 只有取得该调用类型要求的权威证明后才做 delta 校验，并把完整 operation 原子移入 settled；
 5. 只有不存在 uncommitted mutation、quarantine、recovery 且 owner 仍安全时才走普通释放；
    recovery 必须使用自己的 finalization，其他情况保留完整 active lease；
 6. 再退出。
@@ -296,6 +330,9 @@ TerminateProcess 会无条件终止目标，必须按 hard-crash 恢复合同处
 强制终止允许进程立即消失，但正常控制流不得先删锁。同步 exit hook 只能尽力终止，不能把“已发
 kill”当成“已确认退出”。平台边界以 [Node.js signal events](https://nodejs.org/api/process.html#signal-events)
 为准。
+
+POSIX opaque Runner 已接受 START 后收到 SIGINT/SIGTERM 时，130/143 只表达用户中断来源，不表示
+Runner 内部命令域已经清空；workspace 同时进入永久 `operation-proof-missing`，且不得自动下一轮。
 
 首个受支持用户中断若发生在 mutation 内，只允许当前原子步骤到达边界，随后保留 mutation + active
 lease、不继续前向步骤也不 release；POSIX 按来源返回 130/143，Windows Ctrl+C 返回 130，之后只能
@@ -504,19 +541,31 @@ test fixture 执行。
 启用前 architecture/README 曾继续描述 0.33.3，避免用尚未接线的模块宣称 P1 已关闭；当前文档改为
 描述已经接线的启用状态。
 
+0.35.0 RC2 在 coding-engine 自托管 Dogfood 中证明：受支持 Codex Runner 可以把内部测试放入另一个
+POSIX session/process group，外层 Runner 超时退出后该测试仍继续运行，而旧回执允许下一轮开始。因此
+RC2 永久作废，不得进入 staging；它在其他仓库已经取得的绿色 Dogfood、request、receipt 与 Final
+Review 也不得复用。本修复合并后必须从新 main 构建新候选，三个 Dogfood 仓库分别使用全新安装、
+全新 workspace、全新 request 与 Final Review 完整重跑。扩大 Builder 预算只能匹配真实检查耗时，
+不能替代本决策的结算修复。
+
 ## 退出语义
 
 - 第二写者、租约丢失、隔离、恢复未完成、containment 能力不可用或终止无法确认：2；
 - 根命令正常非零且 containment 清空：沿用该调用原有 failed/error 语义；
-- 根命令成功但遗留后代、清理成功：固定产出 `process-tree-not-empty`，不自动重跑同一 invocation。
-  Builder/Validator 丢弃本次结果并进入既有有界下一轮，耗尽后 story 以 3 阻断；机械检查和
-  apply-prd baseline 以 1 失败，apply-prd 不开始业务 mutation；Final Review 轴为 unverifiable，
-  整体以 5 返回；其他独立命令以 1 返回；
+- 普通 POSIX 项目命令或 Windows 的根命令成功但遗留后代、清理成功：固定产出
+  `process-tree-not-empty`，不自动重跑同一 invocation。Builder/Validator 丢弃本次结果并进入既有
+  有界下一轮，耗尽后 story 以 3 阻断；机械检查和 apply-prd baseline 以 1 失败，apply-prd 不开始
+  业务 mutation；Final Review 轴为 unverifiable，整体以 5 返回；其他独立命令以 1 返回；
+- POSIX opaque Runner 已接受 START 后遇到 timeout、user-interrupt、parent-shutdown、output-failure、
+  自然 signal 或 `process-tree-not-empty`：不写 drained receipt，永久
+  `operation-proof-missing`，不结算 invocation、不恢复 workspace、不启动下一轮；没有用户信号时返回
+  隔离语义 2，有 SIGINT/SIGTERM 时仍分别返回 130/143；
 - delegated delta 越界、非法结构或安全记录被 child 改动：2 并保留 quarantine/invalid，不重试；若
   同时由受支持用户中断触发，POSIX 进程码仍为 130/143、Windows Ctrl+C 为 130，但 quarantine 优先于
   清理/release；
-- POSIX SIGINT/SIGTERM：130/143；Windows 终端 Ctrl+C/SIGINT：130；失败收口或 uncommitted mutation
-  保留 active lease；Windows 外部 SIGTERM/TerminateProcess 归 hard crash，不宣称优雅收口；
+- POSIX SIGINT/SIGTERM：130/143；Windows 终端 Ctrl+C/SIGINT：130；失败收口、已启动 opaque Runner
+  的完整证明缺失或 uncommitted mutation 保留 active lease；Windows 外部 SIGTERM/TerminateProcess
+  归 hard crash，不宣称优雅收口；
 - recovery-active 在最终 lease rename 前收到中断：即使 mutation committed 也保留 recovery + lease，
   不走普通 release；exact resume 完成 finalization；
 - 无用户中断的 mutation 内部失败：2，直到精确 resume 完成；第二次受支持中断或平台强制终止沿用
@@ -529,7 +578,9 @@ test fixture 执行。
 并发中的双写与迟到释放，不声称建立密码学隔离或 GitHub 证明。
 
 Windows Job Object 和 POSIX process group 都不覆盖项目代码主动使用平台逃逸机制创建的进程；
-检测到或无法确认时保留隔离。项目命令合同禁止这种逃逸。
+检测到或无法确认时保留隔离。项目命令合同禁止这种逃逸。受支持 AI Runner 自身在 POSIX 上正常
+创建独立 session/process group 不按恶意项目代码处理，而是按 opaque Runner 保守结算：外部终止后
+永久隔离 workspace。该结论不证明、也不宣称未知跨组进程已经被识别或杀死。
 
 ## 被取代范围
 

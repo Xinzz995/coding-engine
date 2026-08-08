@@ -353,6 +353,7 @@ async function runProcess(options: {
       cwd,
       environment: environmentEntries(environment),
       timeoutMs: options.timeoutMs,
+      posixProcessDomain: 'opaque-runner',
       termination: options.termination,
     });
     if (

@@ -35,6 +35,12 @@ type ManagedWorkspaceProcessBaseOptions = OperationDelegationScope & {
   readonly cwd: string;
   readonly environment: readonly { readonly name: string; readonly value: string }[];
   readonly timeoutMs: number;
+  /**
+   * Opaque runners may create command processes outside the POSIX launcher group. Windows Job
+   * Objects still contain them, but POSIX external termination cannot use the outer group as a
+   * complete settlement proof.
+   */
+  readonly posixProcessDomain?: 'process-group' | 'opaque-runner';
   readonly termination?: {
     readonly signal: AbortSignal;
     readonly reason: Exclude<SupervisorTerminationReason, 'timeout' | 'output-failure'>;
@@ -180,6 +186,7 @@ export async function runManagedWorkspaceProcess(
           }
           return await runDarkPosixSupervisedOperation(operation, {
             target: { ...target, executableArgv0: executableArgv0 ?? executable },
+            posixProcessDomain: options.posixProcessDomain,
             commandTimeoutMs: options.timeoutMs,
             termination: options.termination,
             timeouts: mapManagedTimeoutsToPosix(options.supervisorTimeouts),

@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { describe, it, expect, vi } from 'vitest';
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { readEvidence } from './evidence.js';
 import { setup, story, runLoop } from './loop-test-support.js';
+import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
 
 function useClaudeBin(command: string): () => void {
   const previous = process.env.CODING_X_CLAUDE_BIN;
@@ -15,7 +16,7 @@ function useClaudeBin(command: string): () => void {
 }
 
 describe('异常轮回写（builder 侧）', () => {
-  it('builder 输出写入失败后回写候选，并持久化准确的输出故障原因', async () => {
+  it('builder 输出写入失败：POSIX 永久隔离，Windows 仍按 Job 结算后回写', async () => {
     const { workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake-output-failure.mjs');
     writeFileSync(
@@ -35,44 +36,64 @@ describe('异常轮回写（builder 侧）', () => {
           callback();
         },
       });
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const restoreBin = useClaudeBin(`node ${fake}`);
+    const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let invocationRoot: string | undefined;
+    const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = originalCreate(options);
+      if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+      return temporary;
+    });
     try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 5000,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-          builderOutputForTests: {
-            stdout: new Writable({
-              write(_chunk, _encoding, callback): void {
-                setImmediate(() => callback(new Error('terminal-write-failed')));
-              },
-            }),
-            stderr: discard(),
-          },
-        }),
-      ).toBe(1);
-      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
-      expect(state).toMatchObject({ passes: false, validated: false, retryCount: 0 });
-      expect(state.notes).toContain('输出通道失败后被终止');
-      expect(state.notes).not.toContain('被信号终止');
-      expect(
-        readEvidence(workspace).records.find((record) => record.type === 'iteration'),
-      ).toMatchObject({
-        builderOutcome: 'error',
-        abortRollback: { storyId: 'US-001' },
-        builderInvocation: {
-          exitCode: null,
-          terminationReason: 'output-failure',
+      const code = await runLoop({
+        kind: 'claude',
+        maxIterations: 1,
+        devTimeoutMs: 5000,
+        valTimeoutMs: 5000,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
+        builderOutputForTests: {
+          stdout: new Writable({
+            write(_chunk, _encoding, callback): void {
+              setImmediate(() => callback(new Error('terminal-write-failed')));
+            },
+          }),
+          stderr: discard(),
         },
       });
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
+      const iteration = readEvidence(workspace).records.find(
+        (record) => record.type === 'iteration',
+      );
+      if (process.platform === 'win32') {
+        expect(code).toBe(1);
+        expect(state).toMatchObject({ passes: false, validated: false, retryCount: 0 });
+        expect(state.notes).toContain('输出通道失败后被终止');
+        expect(state.notes).not.toContain('被信号终止');
+        expect(iteration).toMatchObject({
+          builderOutcome: 'error',
+          abortRollback: { storyId: 'US-001' },
+          builderInvocation: {
+            exitCode: null,
+            terminationReason: 'output-failure',
+          },
+        });
+      } else {
+        expect(code).toBe(2);
+        expect(state).toMatchObject({ passes: true, validated: false, retryCount: 0, notes: '' });
+        expect(iteration).toBeUndefined();
+        expect(invocationRoot).toBeDefined();
+        expect(existsSync(invocationRoot!)).toBe(true);
+      }
     } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
+      createSpy.mockRestore();
+      restoreBin();
+      if (invocationRoot && existsSync(invocationRoot)) {
+        chmodSync(invocationRoot, 0o700);
+        rmSync(invocationRoot, { recursive: true, force: true });
+      }
     }
   }, 60_000);
 
@@ -165,36 +186,68 @@ describe('异常轮回写（builder 侧）', () => {
     expect((iters[0] as { validatorRan: boolean }).validatorRan).toBe(false);
   });
 
-  it('builder 超时且未动 state：不回写、不产生标记，iteration 记 timeout', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+  it('builder 超时且未动 state：POSIX 永久隔离且不进入下一轮，Windows 保留 Job 结算语义', async () => {
+    const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
+    const calls = join(projectRoot, 'builder-calls.txt');
     // fake：不写任何文件，睡到被引擎 SIGTERM（devTimeoutMs=400 触发超时）
     writeFileSync(
       fake,
       `
+      import { appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(calls)}, 'builder\\n');
       await new Promise((r) => setTimeout(r, 60_000));
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    const code = await runLoop({
-      kind: 'claude',
-      maxIterations: 1,
-      devTimeoutMs: 400,
-      valTimeoutMs: 5000,
-      workspace,
-      instructionsDir,
-      port: 0,
-      openBrowser: false,
+    const restoreBin = useClaudeBin(`node ${fake}`);
+    const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let invocationRoot: string | undefined;
+    const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = originalCreate(options);
+      if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+      return temporary;
     });
-    delete process.env.CODING_X_CLAUDE_BIN;
-    expect(code).toBe(1);
-    const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
-    expect(state['US-001'].passes).toBe(false);
-    expect(state['US-001'].notes).toBe('');
-    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
-    expect(iters).toHaveLength(1);
-    expect(iters[0]).toMatchObject({ iteration: 1, builderOutcome: 'timeout' });
-    expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
+    try {
+      const code = await runLoop({
+        kind: 'claude',
+        maxIterations: 2,
+        devTimeoutMs: 400,
+        valTimeoutMs: 5000,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
+      });
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+      expect(state['US-001']).toMatchObject({ passes: false, validated: false, notes: '' });
+      const callCount = readFileSync(calls, 'utf8').trim().split('\n').length;
+      const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+
+      if (process.platform === 'win32') {
+        expect(code).toBe(1);
+        expect(callCount).toBe(2);
+        expect(iterations).toHaveLength(2);
+        expect(iterations).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ iteration: 1, builderOutcome: 'timeout' }),
+            expect.objectContaining({ iteration: 2, builderOutcome: 'timeout' }),
+          ]),
+        );
+      } else {
+        expect(code).toBe(2);
+        expect(callCount).toBe(1);
+        expect(iterations).toEqual([]);
+        expect(invocationRoot).toBeDefined();
+        expect(existsSync(invocationRoot!)).toBe(true);
+      }
+    } finally {
+      createSpy.mockRestore();
+      restoreBin();
+      if (invocationRoot && existsSync(invocationRoot)) {
+        chmodSync(invocationRoot, 0o700);
+        rmSync(invocationRoot, { recursive: true, force: true });
+      }
+    }
   });
 
   it('agent 同轮置 blocked 且非零退出：不回写、evidence 如实记 agentBlocked', async () => {
@@ -294,7 +347,7 @@ describe('异常轮回写（validator 侧）', () => {
     }
   }, 60_000);
 
-  it('builder 置 true 后 validator 超时：回写 false 且不会从完成出口假绿', async () => {
+  it('builder 置 true 后 validator 超时：POSIX 隔离现场，Windows 结算后回写', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake-validator-timeout.mjs');
     const calls = join(projectRoot, 'calls.txt');
@@ -303,11 +356,12 @@ describe('异常轮回写（validator 侧）', () => {
       fake,
       `
       import { existsSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-      if (!existsSync(${JSON.stringify(calls)})) {
+      appendFileSync(${JSON.stringify(calls)}, 'x');
+      const invocation = readFileSync(${JSON.stringify(calls)}, 'utf8').length;
+      if (invocation === 1) {
         const state = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf-8'));
         state['US-001'].passes = true;
         writeFileSync(${JSON.stringify(statePath)}, JSON.stringify(state));
-        writeFileSync(${JSON.stringify(calls)}, 'builder');
         appendFileSync(${JSON.stringify(join(workspace, 'progress.md'))}, 'builder done\\n');
         process.exit(0);
       }
@@ -315,32 +369,50 @@ describe('异常轮回写（validator 侧）', () => {
     `,
     );
     const restoreClaudeBin = useClaudeBin(`node ${fake}`);
+    const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let invocationRoot: string | undefined;
+    const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = originalCreate(options);
+      if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+      return temporary;
+    });
     try {
-      expect(
-        await runLoop({
-          kind: 'claude',
-          maxIterations: 1,
-          devTimeoutMs: 5000,
-          valTimeoutMs: 400,
-          workspace,
-          instructionsDir,
-          port: 0,
-          openBrowser: false,
-        }),
-      ).toBe(1);
-      expect(JSON.parse(readFileSync(statePath, 'utf-8'))['US-001']).toMatchObject({
-        passes: false,
-        validated: false,
+      const code = await runLoop({
+        kind: 'claude',
+        maxIterations: 1,
+        devTimeoutMs: 5000,
+        valTimeoutMs: 400,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
       });
+      const state = JSON.parse(readFileSync(statePath, 'utf-8'))['US-001'];
       const iteration = readEvidence(workspace).records.find((r) => r.type === 'iteration');
-      expect(iteration).toMatchObject({
-        builderOutcome: 'completed',
-        validatorOutcome: 'timeout',
-        abortRollback: { storyId: 'US-001' },
-      });
-      expect(iteration).not.toHaveProperty('validationReceipt');
+      expect(readFileSync(calls, 'utf8')).toBe('xx');
+      if (process.platform === 'win32') {
+        expect(code).toBe(1);
+        expect(state).toMatchObject({ passes: false, validated: false });
+        expect(iteration).toMatchObject({
+          builderOutcome: 'completed',
+          validatorOutcome: 'timeout',
+          abortRollback: { storyId: 'US-001' },
+        });
+        expect(iteration).not.toHaveProperty('validationReceipt');
+      } else {
+        expect(code).toBe(2);
+        expect(state).toMatchObject({ passes: true, validated: false });
+        expect(iteration).toBeUndefined();
+        expect(invocationRoot).toBeDefined();
+        expect(existsSync(invocationRoot!)).toBe(true);
+      }
     } finally {
+      createSpy.mockRestore();
       restoreClaudeBin();
+      if (invocationRoot && existsSync(invocationRoot)) {
+        chmodSync(invocationRoot, 0o700);
+        rmSync(invocationRoot, { recursive: true, force: true });
+      }
     }
   }, 60_000);
 
