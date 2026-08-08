@@ -15,20 +15,14 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  environmentEntries,
-  runManagedWorkspaceProcess,
-} from '../workspace-safety/coordinator.js';
+import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession, type WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { observeManagedProcessSettlement } from '../workspace-safety/operation.js';
 import type { ReviewPackage } from './package.js';
-import {
-  ReviewTemporaryDirectory,
-  ReviewTemporaryDirectoryError,
-} from './temporary-directory.js';
+import { ReviewTemporaryDirectory, ReviewTemporaryDirectoryError } from './temporary-directory.js';
 import {
   codexReviewPermissionOverrides,
   parseCodexReviewJsonl,
@@ -608,13 +602,7 @@ describe('parseCodexReviewJsonl', () => {
         codexTurnCompleted(),
       ],
     ],
-    [
-      'a missing turn start',
-      [
-        codexAgentMessage({}, 'agent-1'),
-        codexTurnCompleted(),
-      ],
-    ],
+    ['a missing turn start', [codexAgentMessage({}, 'agent-1'), codexTurnCompleted()]],
     [
       'a duplicate final answer',
       [
@@ -626,11 +614,7 @@ describe('parseCodexReviewJsonl', () => {
     ],
     [
       'turn completion before the final answer',
-      [
-        { type: 'turn.started' },
-        codexTurnCompleted(),
-        codexAgentMessage({}, 'agent-1'),
-      ],
+      [{ type: 'turn.started' }, codexTurnCompleted(), codexAgentMessage({}, 'agent-1')],
     ],
     [
       'a duplicate turn completion',
@@ -1280,6 +1264,7 @@ describe('managed Final Review runner execution', () => {
         executable: process.execPath,
         args: ['--version'],
       });
+      expect(options).not.toHaveProperty('posixProcessDomain');
       return managedResult('codex-cli 1.2.3\n');
     };
 
@@ -1317,27 +1302,31 @@ describe('managed Final Review runner execution', () => {
     expect(() => realpathSync.native(retainedPath)).not.toThrow();
   });
 
-  it('cleans the Runner version domain after a natural closeout whose workspace delta is rejected', async () => {
-    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
-    const workspaceFailure = await confirmedWorkspaceRejection('natural');
-    let temporaryPath = '';
-    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
-      temporaryPath = options.cwd;
-      temporaryRoots.push(temporaryPath);
-      throw workspaceFailure;
-    };
+  it(
+    'cleans the Runner version domain after a natural closeout whose workspace delta is rejected',
+    async () => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const workspaceFailure = await confirmedWorkspaceRejection('natural');
+      let temporaryPath = '';
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        temporaryPath = options.cwd;
+        temporaryRoots.push(temporaryPath);
+        throw workspaceFailure;
+      };
 
-    await expect(
-      readRunnerVersion({
-        session: fakeSession,
-        runner: 'codex',
-        projectRoot: process.cwd(),
-        managedProcess: managed,
-      }),
-    ).rejects.toThrow(/semantic delta was not accepted/u);
-    expect(temporaryPath).not.toBe('');
-    expect(existsSync(temporaryPath)).toBe(false);
-  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
+      await expect(
+        readRunnerVersion({
+          session: fakeSession,
+          runner: 'codex',
+          projectRoot: process.cwd(),
+          managedProcess: managed,
+        }),
+      ).rejects.toThrow(/semantic delta was not accepted/u);
+      expect(temporaryPath).not.toBe('');
+      expect(existsSync(temporaryPath)).toBe(false);
+    },
+    MANAGED_WORKSPACE_TEST_TIMEOUT_MS,
+  );
 
   it('retains the Runner version domain after a supervised timeout', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -2041,31 +2030,34 @@ describe('managed Final Review runner execution', () => {
       },
       ['Runner 声明能够执行危险命令', 'Runner 声明成功调用了外部工具'],
     ],
-  ])('blocks deeply wrapped isolation claims in %s without retrying', async (_name, value, diagnostics) => {
-    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
-    let calls = 0;
-    const managed: typeof runManagedWorkspaceProcess = async () => {
-      calls += 1;
-      return managedResult(JSON.stringify(value), { exitCode: 1 });
-    };
+  ])(
+    'blocks deeply wrapped isolation claims in %s without retrying',
+    async (_name, value, diagnostics) => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      let calls = 0;
+      const managed: typeof runManagedWorkspaceProcess = async () => {
+        calls += 1;
+        return managedResult(JSON.stringify(value), { exitCode: 1 });
+      };
 
-    const result = await probeRunnerIsolation({
-      session: fakeSession,
-      runner: 'codex',
-      model: 'review-model',
-      projectRoot: process.cwd(),
-      runnerVersion: 'codex-test',
-      timeoutMs: 1000,
-      managedProcess: managed,
-    });
+      const result = await probeRunnerIsolation({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        projectRoot: process.cwd(),
+        runnerVersion: 'codex-test',
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
 
-    expect(result.ok).toBe(false);
-    for (const diagnostic of diagnostics) {
-      expect(result.failures.join('；')).toContain(diagnostic);
-    }
-    expect(result.failures.join('；')).not.toContain('DEEP_OUTSIDE_SECRET');
-    expect(calls).toBe(1);
-  });
+      expect(result.ok).toBe(false);
+      for (const diagnostic of diagnostics) {
+        expect(result.failures.join('；')).toContain(diagnostic);
+      }
+      expect(result.failures.join('；')).not.toContain('DEEP_OUTSIDE_SECRET');
+      expect(calls).toBe(1);
+    },
+  );
 
   it('does not parse or retry claim-shaped text outside explicit result wrappers', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -2703,8 +2695,7 @@ describe('managed Final Review runner execution', () => {
         JSON.stringify({ type: 'turn.started' }),
         JSON.stringify({
           type: 'error',
-          message:
-            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+          message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
         }),
       ].join('\n'),
       1,
@@ -2717,8 +2708,7 @@ describe('managed Final Review runner execution', () => {
         JSON.stringify({ type: 'turn.started', model_rerouted: true }),
         JSON.stringify({
           type: 'error',
-          message:
-            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+          message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
         }),
       ].join('\n'),
       1,
@@ -2744,8 +2734,7 @@ describe('managed Final Review runner execution', () => {
         JSON.stringify({ type: 'turn.started' }),
         JSON.stringify({
           type: 'error',
-          message:
-            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+          message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
         }),
       ].join('\n'),
       0,
@@ -2771,8 +2760,7 @@ describe('managed Final Review runner execution', () => {
         JSON.stringify({ type: 'turn.started' }),
         JSON.stringify({
           type: 'error',
-          message:
-            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+          message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
         }),
       ].join('\n'),
       1,
@@ -2965,61 +2953,69 @@ describe('managed Final Review runner execution', () => {
     expect(existsSync(invocationRoot)).toBe(true);
   });
 
-  it('cleans both Review domains after a natural closeout whose workspace delta is rejected', async () => {
-    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
-    const workspaceFailure = await confirmedWorkspaceRejection('natural');
-    const reviewPackage = managedPackageFixture();
-    let invocationRoot = '';
-    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
-      invocationRoot = dirname(options.args[1]);
-      temporaryRoots.push(invocationRoot);
-      throw workspaceFailure;
-    };
+  it(
+    'cleans both Review domains after a natural closeout whose workspace delta is rejected',
+    async () => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const workspaceFailure = await confirmedWorkspaceRejection('natural');
+      const reviewPackage = managedPackageFixture();
+      let invocationRoot = '';
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        invocationRoot = dirname(options.args[1]);
+        temporaryRoots.push(invocationRoot);
+        throw workspaceFailure;
+      };
 
-    await expect(
-      runSafeReviewAxis({
-        session: fakeSession,
-        runner: 'codex',
-        model: 'review-model',
-        runnerVersion: 'codex-test',
-        axis: 'engineering',
-        reviewPackage,
-        timeoutMs: 1000,
-        managedProcess: managed,
-      }),
-    ).rejects.toThrow(/semantic delta was not accepted/u);
-    expect(existsSync(invocationRoot)).toBe(false);
-    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
-    expect(existsSync(reviewPackage.root)).toBe(false);
-  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
+      await expect(
+        runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage,
+          timeoutMs: 1000,
+          managedProcess: managed,
+        }),
+      ).rejects.toThrow(/semantic delta was not accepted/u);
+      expect(existsSync(invocationRoot)).toBe(false);
+      expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+      expect(existsSync(reviewPackage.root)).toBe(false);
+    },
+    MANAGED_WORKSPACE_TEST_TIMEOUT_MS,
+  );
 
-  it('retains both Review domains after a timed-out closeout whose workspace delta is rejected', async () => {
-    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
-    const workspaceFailure = await confirmedWorkspaceRejection('timeout');
-    const reviewPackage = managedPackageFixture();
-    let invocationRoot = '';
-    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
-      invocationRoot = dirname(options.args[1]);
-      temporaryRoots.push(invocationRoot);
-      throw workspaceFailure;
-    };
+  it(
+    'retains both Review domains after a timed-out closeout whose workspace delta is rejected',
+    async () => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const workspaceFailure = await confirmedWorkspaceRejection('timeout');
+      const reviewPackage = managedPackageFixture();
+      let invocationRoot = '';
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        invocationRoot = dirname(options.args[1]);
+        temporaryRoots.push(invocationRoot);
+        throw workspaceFailure;
+      };
 
-    await expect(
-      runSafeReviewAxis({
-        session: fakeSession,
-        runner: 'codex',
-        model: 'review-model',
-        runnerVersion: 'codex-test',
-        axis: 'engineering',
-        reviewPackage,
-        timeoutMs: 1000,
-        managedProcess: managed,
-      }),
-    ).rejects.toThrow(/临时域已保留.*semantic delta was not accepted/u);
-    expect(existsSync(invocationRoot)).toBe(true);
-    expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
-    expect(existsSync(reviewPackage.root)).toBe(true);
-  }, MANAGED_WORKSPACE_TEST_TIMEOUT_MS);
+      await expect(
+        runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage,
+          timeoutMs: 1000,
+          managedProcess: managed,
+        }),
+      ).rejects.toThrow(/临时域已保留.*semantic delta was not accepted/u);
+      expect(existsSync(invocationRoot)).toBe(true);
+      expect(reviewPackage.cleanup()).toMatchObject({ status: 'retained' });
+      expect(existsSync(reviewPackage.root)).toBe(true);
+    },
+    MANAGED_WORKSPACE_TEST_TIMEOUT_MS,
+  );
 
   it('does not retry when the first Review event stream has a damaged shape', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -3183,6 +3179,7 @@ describe('managed Final Review runner execution', () => {
         kind: 'final-review',
         delegation: 'read-only-v1',
         executable: process.execPath,
+        posixProcessDomain: 'opaque-runner',
       });
       expect(options.args).toHaveLength(2);
       const config = JSON.parse(readFileSync(options.args[1], 'utf8')) as {
@@ -3273,9 +3270,7 @@ describe('managed Final Review runner execution', () => {
       await bootstrapWorkspace({ workspacePath: workspace });
       const lease = await acquireWorkspaceLease({ workspacePath: workspace, command: 'run' });
       const session = createWorkspaceSession(lease);
-      const reviewPackage = managedPackageFixture(
-        JSON.stringify({ diff: 'x'.repeat(128 * 1024) }),
-      );
+      const reviewPackage = managedPackageFixture(JSON.stringify({ diff: 'x'.repeat(128 * 1024) }));
       try {
         await expect(
           runSafeReviewAxis({
@@ -3350,10 +3345,10 @@ describe('managed Final Review runner execution', () => {
       } catch (error) {
         failure = error;
       } finally {
-        await session.close();
+        await session.close().catch(() => undefined);
       }
       expect(failure).toBeInstanceOf(RunnerPolicyViolation);
-      expect((failure as Error).message).toMatch(/临时域已保留.*后代进程/u);
+      expect((failure as Error).message).toMatch(/临时域已保留/u);
       const invocationPath = (failure as Error).message.match(/临时域已保留 ([^：]+)：/u)?.[1];
       expect(invocationPath).toBeTruthy();
       if (invocationPath) temporaryRoots.push(invocationPath);
@@ -3415,10 +3410,14 @@ describe('managed Final Review runner execution', () => {
         failure = error;
       } finally {
         controller.abort();
-        await session.close();
+        await session.close().catch(() => undefined);
       }
       expect(failure).toBeInstanceOf(RunnerPolicyViolation);
-      expect((failure as Error).message).toMatch(/临时域已保留.*被外部终止/u);
+      expect((failure as Error).message).toContain('临时域已保留');
+      expect((failure as Error).message).toContain('受管进程集合未证明已经结算');
+      expect((failure as Error).message).toContain(
+        'opaque runner process domain is unproven after termination',
+      );
       const invocationPath = (failure as Error).message.match(/临时域已保留 ([^：]+)：/u)?.[1];
       expect(invocationPath).toBeTruthy();
       if (invocationPath) temporaryRoots.push(invocationPath);

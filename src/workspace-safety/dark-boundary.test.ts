@@ -158,6 +158,47 @@ function functionCallsIdentifier(path: string, functionName: string, calleeName:
   return found;
 }
 
+function functionCallHasStringProperty(
+  path: string,
+  functionName: string,
+  calleeName: string,
+  argumentIndex: number,
+  propertyName: string,
+  propertyValue: string,
+): boolean {
+  let found = false;
+  const source = parsedSource(path);
+  const visitCalls = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === calleeName
+    ) {
+      const argument = node.arguments[argumentIndex];
+      if (argument && ts.isObjectLiteralExpression(argument)) {
+        found = argument.properties.some(
+          (property) =>
+            ts.isPropertyAssignment(property) &&
+            ((ts.isIdentifier(property.name) && property.name.text === propertyName) ||
+              (ts.isStringLiteral(property.name) && property.name.text === propertyName)) &&
+            ts.isStringLiteral(property.initializer) &&
+            property.initializer.text === propertyValue,
+        );
+      }
+    }
+    if (!found) ts.forEachChild(node, visitCalls);
+  };
+  const visitFunctions = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === functionName && node.body) {
+      visitCalls(node.body);
+      return;
+    }
+    ts.forEachChild(node, visitFunctions);
+  };
+  visitFunctions(source);
+  return found;
+}
+
 function resolvedLocalModule(importer: string, specifier: string): string | null {
   if (!specifier.startsWith('.')) return null;
   const sourceSpecifier = specifier.endsWith('.js') ? `${specifier.slice(0, -3)}.ts` : specifier;
@@ -347,6 +388,19 @@ describe('workspace safety activation boundary', () => {
     }
 
     expect(offenders).toEqual([]);
+  });
+
+  it('marks the Agent subprocess as an opaque POSIX runner domain', () => {
+    expect(
+      functionCallHasStringProperty(
+        join(SOURCE_ROOT, 'engine/agent.ts'),
+        'runAgent',
+        'runManagedWorkspaceProcess',
+        1,
+        'posixProcessDomain',
+        'opaque-runner',
+      ),
+    ).toBe(true);
   });
 
   it('keeps formal Review and review-decision on the managed observation boundary', () => {

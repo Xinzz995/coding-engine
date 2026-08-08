@@ -96,6 +96,7 @@ export interface PosixSupervisorHooks {
 
 export interface RunDarkPosixSupervisedOperationOptions {
   readonly target: SupervisorTarget;
+  readonly posixProcessDomain?: 'process-group' | 'opaque-runner';
   readonly commandTimeoutMs?: number;
   readonly termination?: {
     readonly signal: AbortSignal;
@@ -290,7 +291,8 @@ function processIdentity(pid: number): string {
   return observed.value;
 }
 
-function parseEvent(
+/** TEST-ONLY controlled parser entrypoint; production events still enter through the supervisor. */
+export function parsePosixSupervisorEventControlled(
   value: unknown,
 ):
   | ProtocolEvent
@@ -333,6 +335,9 @@ function parseEvent(
       invalid('RESULT.code is invalid');
     if (record.signal !== null && typeof record.signal !== 'string') {
       invalid('RESULT.signal is invalid');
+    }
+    if ((record.code === null) === (record.signal === null)) {
+      invalid('RESULT must contain exactly one of code or signal');
     }
     return {
       type: 'RESULT',
@@ -440,9 +445,9 @@ class PosixSupervisorProcess {
   }
 
   #push(message: unknown): void {
-    let event: ReturnType<typeof parseEvent>;
+    let event: ReturnType<typeof parsePosixSupervisorEventControlled>;
     try {
-      event = parseEvent(message);
+      event = parsePosixSupervisorEventControlled(message);
     } catch (error) {
       this.#fail(error);
       return;
@@ -487,7 +492,7 @@ class PosixSupervisorProcess {
   }
 
   async #consumeOutput(
-    event: Extract<ReturnType<typeof parseEvent>, { type: 'OUTPUT' }>,
+    event: Extract<ReturnType<typeof parsePosixSupervisorEventControlled>, { type: 'OUTPUT' }>,
   ): Promise<void> {
     if (!this.#discardOutput) {
       this.#outputBytes += event.data.length;
@@ -687,8 +692,12 @@ class PosixSupervisorProcess {
     envelope: StrictRecord,
     deadline: MonotonicDeadline,
     label: string,
+    beforeSend?: () => void,
   ): Promise<void> {
-    return deadline.run(() => this.send(envelope), () => posixDeadlineError(label));
+    return deadline.run(() => {
+      beforeSend?.();
+      return this.send(envelope);
+    }, () => posixDeadlineError(label));
   }
 
   disconnect(): void {
@@ -1018,6 +1027,7 @@ export async function runDarkPosixSupervisedOperation(
   let resolvedTimeouts: ResolvedTimeouts | undefined;
   let failureCloseoutDeadline: MonotonicDeadline | undefined;
   let outputDiscarded = false;
+  let startSent = false;
   const operationDeadline: OperationDeadlineState = { timedOut: false };
   const discardManagedOutput = (): void => {
     if (outputDiscarded) return;
@@ -1089,6 +1099,7 @@ export async function runDarkPosixSupervisedOperation(
         schemaVersion: 1,
         type: 'DATA',
         workspacePath: operation.workspacePath,
+        posixProcessDomain: options.posixProcessDomain ?? 'process-group',
         messageBase64: dataBytes.toString('base64'),
       },
       prepareDeadline,
@@ -1114,7 +1125,6 @@ export async function runDarkPosixSupervisedOperation(
       () => options.hooks?.onArmed?.({ supervisorPid: processHandle!.pid, containment }),
       () => posixDeadlineError('prepare hook'),
     );
-    let startSent = false;
     let terminationSent: SupervisorTerminationReason | undefined;
     let started: StartedEvent | undefined;
     let result: ResultEvent | undefined;
@@ -1165,8 +1175,12 @@ export async function runDarkPosixSupervisedOperation(
         },
         prepareDeadline,
         'START delivery',
+        () => {
+          // Once START delivery begins, the helper may accept it even if the parent-side send
+          // later fails. Treat that window conservatively as a started opaque runner domain.
+          startSent = true;
+        },
       );
-      startSent = true;
       terminationTrigger.startCommandTimer();
     }
 
@@ -1373,11 +1387,17 @@ export async function runDarkPosixSupervisedOperation(
             failureCloseoutDeadline,
           );
         } else {
+          const quarantineReason =
+            options.posixProcessDomain === 'opaque-runner' &&
+            startSent &&
+            !operation.receiptInstalled
+              ? 'operation-proof-missing'
+              : terminationAttempted || operation.receiptInstalled
+                ? 'containment-unconfirmed'
+                : 'operation-proof-missing';
           await quarantineUnfinishedPosixOperation(
             operation,
-            terminationAttempted || operation.receiptInstalled
-              ? 'containment-unconfirmed'
-              : 'operation-proof-missing',
+            quarantineReason,
             failureCloseoutDeadline,
             operationDeadline,
           );
@@ -1387,9 +1407,15 @@ export async function runDarkPosixSupervisedOperation(
       closeoutError = failure;
       if (!operationDeadline.timedOut && !operation.settled && !operation.quarantined) {
         try {
+          const quarantineReason =
+            options.posixProcessDomain === 'opaque-runner' &&
+            startSent &&
+            !operation.receiptInstalled
+              ? 'operation-proof-missing'
+              : 'containment-unconfirmed';
           await quarantineUnfinishedPosixOperation(
             operation,
-            'containment-unconfirmed',
+            quarantineReason,
             failureCloseoutDeadline,
             operationDeadline,
           );

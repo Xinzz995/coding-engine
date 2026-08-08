@@ -30,8 +30,9 @@ function output(value: unknown): void {
   writeFileSync(process.stdout.fd, `${JSON.stringify(value)}\n`);
 }
 
-if (mode === 'parent') {
+if (mode === 'parent' || mode === 'parent-opaque') {
   if (delta !== 'legal' && delta !== 'forbidden') throw new Error('parent delta is invalid');
+  const opaqueRunner = mode === 'parent-opaque';
   const identity = createIdentityProbe().current();
   await bootstrapWorkspace({
     workspacePath: workspace,
@@ -95,41 +96,43 @@ if (mode === 'parent') {
       markerRoot,
     });
   };
-  await runWorkspaceOperation(
-    session,
-    {
-      operationId: OPERATION_ID,
-      kind: 'builder',
-      delegation: 'builder-v1',
-      storyId: STORY_ID,
-      acceptanceHash: ACCEPTANCE_HASH,
-      checkCount: 1,
-      platform: process.platform === 'win32' ? 'windows-job-v1' : 'posix-process-group-v1',
-      helperBytes,
-    },
-    async (operation) => {
-      const invocation = {
-        target: {
-          executable: process.execPath,
-          args: ['-e', targetSource],
-          cwd: workspace,
-          environment: process.platform === 'win32' ? windowsTestTargetEnvironment() : [],
-        },
-        hooks: { onStarted },
-      };
-      if (process.platform === 'win32') {
-        await runDarkWindowsSupervisedOperation(operation, {
-          ...invocation,
-          timeouts: { naturalDrainMs: 100, terminateMs: 1000, ackMs: 5000, pollMs: 20 },
-        });
-        return;
-      }
-      await runDarkPosixSupervisedOperation(operation, {
+  const operationOptions = {
+    operationId: OPERATION_ID,
+    kind: 'builder' as const,
+    delegation: 'builder-v1' as const,
+    storyId: STORY_ID,
+    acceptanceHash: ACCEPTANCE_HASH,
+    checkCount: 1,
+    platform:
+      process.platform === 'win32'
+        ? ('windows-job-v1' as const)
+        : ('posix-process-group-v1' as const),
+    helperBytes,
+  };
+  await runWorkspaceOperation(session, operationOptions, async (operation) => {
+    const invocation = {
+      target: {
+        executable: process.execPath,
+        args: ['-e', targetSource],
+        cwd: workspace,
+        environment: process.platform === 'win32' ? windowsTestTargetEnvironment() : [],
+      },
+      hooks: { onStarted },
+    };
+    if (process.platform === 'win32') {
+      await runDarkWindowsSupervisedOperation(operation, {
         ...invocation,
-        timeouts: { naturalDrainMs: 100, termMs: 1000, killMs: 5000, pollMs: 20 },
+        timeouts: { naturalDrainMs: 100, terminateMs: 1000, ackMs: 5000, pollMs: 20 },
       });
-    },
-  );
+      return;
+    }
+    const posixInvocation = {
+      ...invocation,
+      timeouts: { naturalDrainMs: 100, termMs: 1000, killMs: 5000, pollMs: 20 },
+      ...(opaqueRunner ? { posixProcessDomain: 'opaque-runner' as const } : {}),
+    };
+    await runDarkPosixSupervisedOperation(operation, posixInvocation);
+  });
 } else if (mode === 'recover') {
   try {
     const recoveryPath = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, RECOVERY_DIR);

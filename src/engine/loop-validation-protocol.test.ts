@@ -1,19 +1,28 @@
-import { describe, it, expect } from 'vitest';
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { describe, it, expect, vi } from 'vitest';
+import { chmodSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import { runLoop as runProductionLoop } from './loop.js';
 import { readEvidence } from './evidence.js';
 import { setup, story, fakeBoundValidator, strictConfig } from './loop-test-support.js';
 import { FAKE_RUNNER_INPUT_SOURCE } from './loop-test-support.js';
-import { QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
+import { parseQuarantineRecord, QUARANTINE_FILE } from '../workspace-safety/quarantine.js';
 import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from '../workspace-safety/types.js';
+import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
 
 function expectIsolatedWithoutIteration(workspace: string): void {
   const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
   expect(existsSync(join(operation, QUARANTINE_FILE))).toBe(true);
   expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(true);
   expect(readEvidence(workspace).records.some((record) => record.type === 'iteration')).toBe(false);
+}
+
+function expectOpaqueOutputFailureIsolation(workspace: string): void {
+  expectIsolatedWithoutIteration(workspace);
+  const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+  expect(parseQuarantineRecord(readFileSync(join(operation, QUARANTINE_FILE))).reason).toBe(
+    'operation-proof-missing',
+  );
 }
 
 function discardingOutput(): Writable {
@@ -429,58 +438,83 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
   });
 
   it(
-    'returns 5 with a durable marker and no receipt after bounded output overflow is safely contained',
+    'permanently isolates POSIX after bounded output overflow while Windows records an unverifiable Validator',
     async () => {
       const { workspace, instructionsDir } = setup([
         story({ acceptanceCriteria: ['返回 401'] }),
       ]);
       const fake = fakeBoundValidator(workspace, 'output-overflow');
       process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+      let invocationRoot: string | undefined;
+      const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+        const temporary = originalCreate(options);
+        if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+        return temporary;
+      });
 
       try {
-        expect(
-          await runProductionLoop({
-            ...strictConfig(workspace, instructionsDir),
-            validatorOutputForTests: {
-              stdout: discardingOutput(),
-              stderr: discardingOutput(),
-            },
-          }),
-        ).toBe(5);
-        expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
-        expect(
-          JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'],
-        ).toMatchObject({
-          passes: true,
-          validated: false,
-          validationReceipt: null,
-          retryCount: 0,
-          validatorUnverifiable: { schemaVersion: 1 },
+        const code = await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
+          validatorOutputForTests: {
+            stdout: discardingOutput(),
+            stderr: discardingOutput(),
+          },
         });
+        const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
         const records = readEvidence(workspace).records;
         expect(records.some((record) => record.type === 'validation-claim')).toBe(false);
-        expect(records.find((record) => record.type === 'iteration')).toMatchObject({
-          validatorOutcome: 'error',
-          validationProtocol: 'invalid',
-          validationProtocolError: {
-            code: 'agent-aborted',
-            diagnostic: expect.stringContaining('输出通道失败'),
-          },
-          validatorInvocation: {
-            exitCode: null,
-            terminationReason: 'output-failure',
-            diagnosticTail: expect.any(String),
-          },
-        });
+        if (process.platform === 'win32') {
+          expect(code).toBe(5);
+          expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
+          expect(state).toMatchObject({
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            retryCount: 0,
+            validatorUnverifiable: { schemaVersion: 1 },
+          });
+          expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+            validatorOutcome: 'error',
+            validationProtocol: 'invalid',
+            validationProtocolError: {
+              code: 'agent-aborted',
+              diagnostic: expect.stringContaining('输出通道失败'),
+            },
+            validatorInvocation: {
+              exitCode: null,
+              terminationReason: 'output-failure',
+              diagnosticTail: expect.any(String),
+            },
+          });
+        } else {
+          expect(code).toBe(2);
+          expectOpaqueOutputFailureIsolation(workspace);
+          expect(state).toMatchObject({
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            retryCount: 0,
+            validatorUnverifiable: null,
+            notes: '',
+          });
+          expect(invocationRoot).toBeDefined();
+          expect(existsSync(invocationRoot!)).toBe(true);
+        }
       } finally {
+        createSpy.mockRestore();
         delete process.env.CODING_X_CLAUDE_BIN;
+        if (invocationRoot && existsSync(invocationRoot)) {
+          chmodSync(invocationRoot, 0o700);
+          rmSync(invocationRoot, { recursive: true, force: true });
+        }
       }
     },
     60_000,
   );
 
   it(
-    'returns 5 with no receipt when an asynchronous terminal write failure is safely contained',
+    'permanently isolates POSIX after terminal write failure while Windows records an unverifiable Validator',
     async () => {
       const { workspace, instructionsDir } = setup([
         story({ acceptanceCriteria: ['返回 401'] }),
@@ -492,43 +526,69 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
           setImmediate(() => callback(new Error('terminal-write-failed')));
         },
       });
+      const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+      let invocationRoot: string | undefined;
+      const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+        const temporary = originalCreate(options);
+        if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+        return temporary;
+      });
 
       try {
-        expect(
-          await runProductionLoop({
-            ...strictConfig(workspace, instructionsDir),
-            validatorOutputForTests: {
-              stdout: failingStdout,
-              stderr: discardingOutput(),
-            },
-          }),
-        ).toBe(5);
-        expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
-        const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
-        expect(state).toMatchObject({
-          passes: true,
-          validated: false,
-          validationReceipt: null,
-          retryCount: 0,
-          validatorUnverifiable: { schemaVersion: 1 },
+        const code = await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
+          validatorOutputForTests: {
+            stdout: failingStdout,
+            stderr: discardingOutput(),
+          },
         });
+        const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf8'))['US-001'];
         const records = readEvidence(workspace).records;
         expect(records.some((record) => record.type === 'validation-claim')).toBe(false);
-        expect(records.find((record) => record.type === 'iteration')).toMatchObject({
-          validatorOutcome: 'error',
-          validationProtocol: 'invalid',
-          validationProtocolError: {
-            code: 'agent-aborted',
-            diagnostic: 'Validator 输出通道失败后被终止',
-          },
-          validatorInvocation: {
-            exitCode: null,
-            terminationReason: 'output-failure',
-            diagnosticTail: 'validator output before sink failure',
-          },
-        });
+        if (process.platform === 'win32') {
+          expect(code).toBe(5);
+          expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
+          expect(state).toMatchObject({
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            retryCount: 0,
+            validatorUnverifiable: { schemaVersion: 1 },
+          });
+          expect(records.find((record) => record.type === 'iteration')).toMatchObject({
+            validatorOutcome: 'error',
+            validationProtocol: 'invalid',
+            validationProtocolError: {
+              code: 'agent-aborted',
+              diagnostic: 'Validator 输出通道失败后被终止',
+            },
+            validatorInvocation: {
+              exitCode: null,
+              terminationReason: 'output-failure',
+              diagnosticTail: 'validator output before sink failure',
+            },
+          });
+        } else {
+          expect(code).toBe(2);
+          expectOpaqueOutputFailureIsolation(workspace);
+          expect(state).toMatchObject({
+            passes: true,
+            validated: false,
+            validationReceipt: null,
+            retryCount: 0,
+            validatorUnverifiable: null,
+            notes: '',
+          });
+          expect(invocationRoot).toBeDefined();
+          expect(existsSync(invocationRoot!)).toBe(true);
+        }
       } finally {
+        createSpy.mockRestore();
         delete process.env.CODING_X_CLAUDE_BIN;
+        if (invocationRoot && existsSync(invocationRoot)) {
+          chmodSync(invocationRoot, 0o700);
+          rmSync(invocationRoot, { recursive: true, force: true });
+        }
       }
     },
     60_000,

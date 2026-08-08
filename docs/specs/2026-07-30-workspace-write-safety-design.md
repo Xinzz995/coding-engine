@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离设计
 status: active
-updated: 2026-08-08
+updated: 2026-08-09
 scope: root
 ---
 
@@ -1180,7 +1180,10 @@ suite、辅助 EXE 的可复现构建、进程身份和属性规则都属于旧 
 
 POSIX 另测 supervisor 与 launcher 分组、launcher 在 START 前零项目代码、launcher 提前退出、pgid
 仍有成员、group probe unknown 和 START 后 parent 立即 kill。真实测试只证明普通进程继承合同；
-主动 setsid/平台逃逸属于明确非目标。
+普通项目代码主动 setsid/平台逃逸属于明确非目标。受支持 AI Runner 自身可能正常创建独立 session，
+不能按恶意项目逃逸处理；当前启用合同为 ADR-021 的 opaque Runner 策略：START 前仍可签发
+never-started proof，START 后遇到外部终止、自然 signal 或 `process-tree-not-empty` 时不采用外层进程组
+回执，永久隔离 workspace 且禁止下一轮。该策略不宣称未知跨组进程已经被终止。
 
 ## PR 切换与兼容
 

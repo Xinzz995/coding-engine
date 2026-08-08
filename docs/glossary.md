@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-07-31
+updated: 2026-08-09
 scope: root
 ---
 
@@ -143,7 +143,7 @@ Builder 或 Validator 进程以异常结局结束的轮次。结局判定机械�
 禁用：失败轮、作废轮（异常结局不等于产品已知失败）
 
 **Agent 调用凭证**
-引擎对一次真实 Builder/Validator 子进程调用的机械观察：平台受管进程集合确认收口前的墙钟耗时、退出码，以及仅在异常时保留的有界 stdout/stderr 尾部。主动逃逸平台 containment 的恶意进程不在此证明内；输出内容是恢复诊断，不是 provider 事实、账单证明或验收结论。
+引擎对一次已经权威结算的真实 Builder/Validator 子进程调用的机械观察：取得与调用类型相符的收口证明前的墙钟耗时、退出码，以及仅在异常时保留的有界 stdout/stderr 尾部。普通项目代码主动逃逸平台 containment 的行为不在此证明内；受支持 POSIX AI Runner 已启动后被外部终止、以 signal 结束或观察到残留进程时不签发这种完成凭证，而是永久隔离 workspace。输出内容是恢复诊断，不是 provider 事实、账单证明或验收结论。
 禁用：调用日志、执行证明、成本凭证
 
 **空转轮（no-op）**
@@ -151,11 +151,11 @@ builder 正常退出但 state.json 与 progress.md 双无变化的轮次；跳�
 禁用：空跑轮、无效轮
 
 **回写待复核**
-Developer 异常轮与旧兼容路径的兜底机制：本轮被翻为 true 且未经验收的 passes 回写为 false，notes 追加 `[中断轮待复核]` 机械标记行（自带下轮重验指令）；不涨 retryCount（中断不是能力不足，不消耗打回预算）。结构化 Validator 不使用该机制，按 ADR-023 保留候选并退出 5。
+已经权威结算的 Developer 异常轮与旧兼容路径的兜底机制：本轮被翻为 true 且未经验收的 passes 回写为 false，notes 追加 `[中断轮待复核]` 机械标记行（自带下轮重验指令）；不涨 retryCount（中断不是能力不足，不消耗打回预算）。POSIX 不透明 Runner 外部终止后的永久隔离不执行这种回写，也不进入下一轮；结构化 Validator 不使用该机制，按 ADR-023 保留候选并退出 5。
 禁用：回滚（只回写验收状态，不回滚已落盘的提交与产物）
 
 **stall 熔断**
-空转轮、Developer 异常轮或旧兼容路径触发待复核回写的轮次，连续累计达 `--stall-limit`（缺省 3）即提前终止循环（退出码 1）；结构化 Validator 不可验证立即退出 5，不进入 stall 重试。
+空转轮、已经权威结算的 Developer 异常轮或旧兼容路径触发待复核回写的轮次，连续累计达 `--stall-limit`（缺省 3）即提前终止循环（退出码 1）；POSIX 不透明 Runner 外部终止后的永久隔离和结构化 Validator 不可验证都立即停止，不进入 stall 重试。
 禁用：空转保护、无进展终止
 
 **收敛出口**
@@ -196,7 +196,7 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 - builder 把 `passes=true` 作为候选结果；引擎生成 validation request，Validator 提交逐 AC claim，引擎确认目标绑定/协议/state 不变式后才写 verdict 或签发验收凭证；passes 与 validated 同时为 true 才是有效通过
 - 打回递增 retryCount，达到上限转 blocked；全部 story 有效通过或 blocked 即走收敛出口结束循环
 - Developer 异常轮触发回写待复核并计入 stall 熔断；结构化 Validator 异常保留候选并立即退出 5；空转轮跳过门禁与 Validator、同样计入熔断
-- 每次实际启动的 Builder/Validator 都产生 Agent 调用凭证；status/report 从证据索引恢复耗时、退出码和异常诊断，但不把输出内容当裁决依据
+- 每次已经权威结算的 Builder/Validator 都产生 Agent 调用凭证；proof-missing 不伪造普通 iteration，status/report 只显示安全协议与隔离事实
 - 对齐稿被正式 PRD 吸收（superseded），PRD 派生 prd.json（分层真相源的意图→执行方向）
 - 收口包含最终 Review finding 裁决、GitHub 交付核验与 `/compound-docs`（沉淀、熵 GC、状态收尾及显式授权后的物理归档）
 - 物理归档把完成态阶段文档从 active 区移入历史冷档案；状态收尾只改 status，不自动构成移动授权

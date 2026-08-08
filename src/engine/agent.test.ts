@@ -58,6 +58,59 @@ async function runManagedAgent(
   }
 }
 
+async function expectOpaqueTimeoutIsolation(cwd: string, timeoutMs: number): Promise<number> {
+  const fixture = await createManagedProcessTestSession();
+  const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+  const invocationRoots: string[] = [];
+  const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+    const temporary = originalCreate(options);
+    if (options.prefix === 'coding-x-agent-invocation-') invocationRoots.push(temporary.root);
+    return temporary;
+  });
+  let closeAttempted = false;
+  const startedAt = performance.now();
+  try {
+    const failure = await runAgent({
+      kind: 'claude',
+      prompt: '',
+      cwd,
+      timeoutMs,
+      managed: {
+        session: fixture.session,
+        operation: { kind: 'final-review', delegation: 'read-only-v1' },
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    const durationMs = performance.now() - startedAt;
+    expect(failure).toMatchObject({ code: 'isolated' });
+    expect(observeManagedProcessSettlement(failure)).toEqual({ status: 'unknown' });
+    expect((failure as Error).message).toContain(
+      'opaque runner process domain is unproven after termination',
+    );
+    expect(fixture.session.state).toBe('isolated');
+    expect(invocationRoots).toHaveLength(1);
+    expect(existsSync(invocationRoots[0])).toBe(true);
+
+    const closeFailure = await fixture.close().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    closeAttempted = true;
+    expect(closeFailure).toMatchObject({ code: 'isolated' });
+    return durationMs;
+  } finally {
+    createSpy.mockRestore();
+    if (!closeAttempted) await fixture.close().catch(() => undefined);
+    for (const root of invocationRoots) {
+      if (!existsSync(root)) continue;
+      chmodSync(root, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+}
+
 async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise<void> {
   const cwd = mkdtempSync(join(tmpdir(), 'coding-x-agent-tree-'));
   const marker = join(cwd, 'fake-agent-child.pid');
@@ -67,10 +120,7 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
   let childConfirmedGone = false;
   process.env.CODING_X_CLAUDE_BIN = `node ${fake} ${mode}`;
   try {
-    const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd, timeoutMs: 1000 });
-    expect(r).toMatchObject({ timedOut: true, exitCode: null });
-    expect(r.durationMs).toBeGreaterThanOrEqual(1000);
-    expect(r.outputTail).toBe('');
+    expect(await expectOpaqueTimeoutIsolation(cwd, 1000)).toBeGreaterThanOrEqual(1000);
     childPid = Number(readFileSync(marker, 'utf-8'));
     expect(Number.isSafeInteger(childPid) && childPid > 0).toBe(true);
 
@@ -509,11 +559,7 @@ describe('runAgent', () => {
       expect(observeManagedProcessSettlement(observed)).toEqual({ status: 'unknown' });
       expect(
         observeManagedProcessSettlement((observed as Error & { cause?: unknown }).cause),
-      ).toMatchObject({
-        status: 'confirmed',
-        drainReason: 'process-tree-not-empty',
-      });
-      expect((observed as Error).message).toContain('semantic delta was not accepted');
+      ).toEqual({ status: 'unknown' });
       expect((observed as Error).message).toContain('Agent Runner 临时域已保留');
       expect(invocationRoot).toBeDefined();
       expect(existsSync(invocationRoot!)).toBe(true);
@@ -745,12 +791,10 @@ describe('runAgent', () => {
     const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(acceptProcessWrite);
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(acceptProcessWrite);
     let settled = false;
-    let outcome:
-      | Promise<
-          | { type: 'completed'; result: Awaited<ReturnType<typeof runManagedAgent>> }
-          | { type: 'rejected'; error: unknown }
-        >
-      | null = null;
+    let outcome: Promise<
+      | { type: 'completed'; result: Awaited<ReturnType<typeof runManagedAgent>> }
+      | { type: 'rejected'; error: unknown }
+    > | null = null;
     try {
       const runningOutcome = runManagedAgent({
         kind: 'claude',
@@ -830,12 +874,26 @@ describe('runAgent', () => {
     }
   });
 
-  it('resolves timedOut=true and kills a hanging process', async () => {
+  it('applies the platform timeout settlement contract to a hanging process', async () => {
+    const original = process.env.CODING_X_CLAUDE_BIN;
     process.env.CODING_X_CLAUDE_BIN = `node ${fake} hang`;
-    const r = await runManagedAgent({ kind: 'claude', prompt: '', cwd: here, timeoutMs: 300 });
-    expect(r.timedOut).toBe(true);
-    expect(r.durationMs).toBeGreaterThanOrEqual(300);
-    delete process.env.CODING_X_CLAUDE_BIN;
+    try {
+      if (process.platform === 'win32') {
+        const result = await runManagedAgent({
+          kind: 'claude',
+          prompt: '',
+          cwd: here,
+          timeoutMs: 300,
+        });
+        expect(result.timedOut).toBe(true);
+        expect(result.durationMs).toBeGreaterThanOrEqual(300);
+      } else {
+        expect(await expectOpaqueTimeoutIsolation(here, 300)).toBeGreaterThanOrEqual(300);
+      }
+    } finally {
+      if (original === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+      else process.env.CODING_X_CLAUDE_BIN = original;
+    }
   });
 
   it.runIf(process.platform !== 'win32')(

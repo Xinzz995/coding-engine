@@ -1,11 +1,24 @@
-import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { bootstrapWorkspace } from './bootstrap.js';
 import { acquireWorkspaceLease } from './lease.js';
-import { QUARANTINE_FILE } from './quarantine.js';
-import { observeManagedProcessSettlement } from './operation.js';
+import { observeManagedProcessSettlement, SETTLED_OPERATIONS_DIR } from './operation.js';
+import { inspectPosixProcessPlacement } from './posix-containment.js';
+import { parseQuarantineRecord, QUARANTINE_FILE } from './quarantine.js';
 import { createWorkspaceSession } from './session.js';
 import {
   canonicalManagedProcessPath,
@@ -15,6 +28,20 @@ import {
 import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from './types.js';
 
 const roots: string[] = [];
+const escapedFixtures: Array<{
+  readonly controlRoot: string;
+  readonly stopPath: string;
+  readonly exitedPath: string;
+  readonly nonce: string;
+}> = [];
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('condition timed out');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 async function within<T>(promise: Promise<T>, milliseconds = 5_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -38,8 +65,34 @@ async function readySession() {
   return { workspace, session: createWorkspaceSession(lease) };
 }
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  const retainedRoots = new Set<string>();
+  let cleanupFailure: Error | undefined;
+  for (const fixture of escapedFixtures) {
+    try {
+      writeFileSync(fixture.stopPath, fixture.nonce, { flag: 'wx' });
+    } catch {
+      // The nonce-bound exit marker below still decides whether cleanup completed safely.
+    }
+    try {
+      await waitUntil(() => {
+        if (!existsSync(fixture.exitedPath)) return false;
+        const exited = JSON.parse(readFileSync(fixture.exitedPath, 'utf8')) as {
+          nonce: string;
+          reason: string;
+        };
+        return exited.nonce === fixture.nonce && exited.reason === 'stop-marker';
+      });
+    } catch (error) {
+      retainedRoots.add(fixture.controlRoot);
+      cleanupFailure ??= error instanceof Error ? error : new Error('fixture cleanup failed');
+    }
+  }
+  escapedFixtures.splice(0);
+  for (const root of roots.splice(0)) {
+    if (!retainedRoots.has(root)) rmSync(root, { recursive: true, force: true });
+  }
+  if (cleanupFailure) throw cleanupFailure;
 });
 
 describe.runIf(
@@ -206,6 +259,142 @@ describe.runIf(
     });
     await session.close();
   }, 20_000);
+
+  it.runIf(process.platform !== 'win32').each([
+    ['timeout', 'timeout'],
+    ['user interrupt', 'user-interrupt'],
+  ] as const)(
+    'permanently isolates an opaque POSIX runner after %s even when its detached no-stdio descendant escapes the launcher group',
+    async (_label, terminationReason) => {
+      const { workspace, session } = await readySession();
+      const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-opaque-runner-control-'));
+      roots.push(controlRoot);
+      const readyPath = join(controlRoot, 'detached-ready.json');
+      const stopPath = join(controlRoot, 'detached-stop');
+      const exitedPath = join(controlRoot, 'detached-exited.json');
+      const nonce = randomUUID();
+      const escapedFixture = { controlRoot, stopPath, exitedPath, nonce };
+      escapedFixtures.push(escapedFixture);
+      const targetPath = fileURLToPath(
+        new URL('./__fixtures__/posix-opaque-runner-target.mjs', import.meta.url),
+      );
+      const controller = new AbortController();
+      const options = {
+        kind: 'final-review' as const,
+        delegation: 'read-only-v1' as const,
+        executable: process.execPath,
+        args: [targetPath, readyPath, stopPath, exitedPath, nonce],
+        cwd: workspace,
+        environment: environmentEntries(process.env),
+        timeoutMs: terminationReason === 'timeout' ? 1_500 : 10_000,
+        ...(terminationReason === 'user-interrupt'
+          ? {
+              termination: {
+                signal: controller.signal,
+                reason: 'user-interrupt' as const,
+              },
+            }
+          : {}),
+        supervisorTimeouts: {
+          naturalDrainMs: 100,
+          terminateDrainMs: 3_000,
+          ackExitMs: 1_000,
+          pollMs: 20,
+        },
+        posixProcessDomain: 'opaque-runner' as const,
+      };
+
+      const running = runManagedWorkspaceProcess(session, options);
+      await waitUntil(() => existsSync(readyPath));
+      const ready = JSON.parse(readFileSync(readyPath, 'utf8')) as {
+        pid: number;
+        nonce: string;
+      };
+      expect(ready.nonce).toBe(nonce);
+      const detachedPid = ready.pid;
+      expect(inspectPosixProcessPlacement(detachedPid)).toMatchObject({
+        pid: detachedPid,
+        pgid: detachedPid,
+        sessionId: detachedPid,
+      });
+      if (terminationReason === 'user-interrupt') controller.abort();
+
+      const observed = await running.then(
+        (result) => ({ kind: 'resolved' as const, result }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      );
+      expect(observed).toMatchObject({ kind: 'rejected', error: { code: 'isolated' } });
+      if (observed.kind !== 'rejected') {
+        throw new Error('opaque POSIX runner unexpectedly settled');
+      }
+      const failure = observed.error;
+      expect(observeManagedProcessSettlement(failure)).toEqual({ status: 'unknown' });
+      expect(() => process.kill(detachedPid, 0)).not.toThrow();
+
+      const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+      expect(existsSync(operation)).toBe(true);
+      expect(parseQuarantineRecord(readFileSync(join(operation, QUARANTINE_FILE))).reason).toBe(
+        'operation-proof-missing',
+      );
+      expect(
+        readdirSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, SETTLED_OPERATIONS_DIR)),
+      ).toEqual([]);
+      expect(session.state).toBe('isolated');
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'permanently isolates an opaque POSIX runner after managed output fails',
+    async () => {
+      const { workspace, session } = await readySession();
+      const stdout = new Writable({
+        write(_chunk, _encoding, callback): void {
+          callback(new Error('controlled-output-failure'));
+        },
+      });
+      stdout.on('error', () => undefined);
+      const stderr = new Writable({
+        write(_chunk, _encoding, callback): void {
+          callback();
+        },
+      });
+
+      const failure = await runManagedWorkspaceProcess(session, {
+        kind: 'final-review',
+        delegation: 'read-only-v1',
+        executable: process.execPath,
+        args: ['-e', "setInterval(()=>process.stdout.write('output'),10)"],
+        cwd: workspace,
+        environment: environmentEntries(process.env),
+        timeoutMs: 10_000,
+        posixProcessDomain: 'opaque-runner',
+        output: { mode: 'stream', stdout, stderr },
+        supervisorTimeouts: {
+          naturalDrainMs: 100,
+          terminateDrainMs: 3_000,
+          ackExitMs: 1_000,
+          pollMs: 20,
+        },
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(failure).toMatchObject({ code: 'isolated' });
+      expect(observeManagedProcessSettlement(failure)).toEqual({ status: 'unknown' });
+      const operation = join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, OPERATION_DIR);
+      expect(parseQuarantineRecord(readFileSync(join(operation, QUARANTINE_FILE))).reason).toBe(
+        'operation-proof-missing',
+      );
+      expect(
+        readdirSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR, SETTLED_OPERATIONS_DIR)),
+      ).toEqual([]);
+      expect(session.state).toBe('isolated');
+      await expect(session.close()).rejects.toMatchObject({ code: 'isolated' });
+    },
+    20_000,
+  );
 });
 
 describe('managed process environment', () => {

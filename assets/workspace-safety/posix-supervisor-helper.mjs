@@ -41,6 +41,7 @@ let state = 'bound';
 let operationId;
 let workspacePath;
 let target;
+let posixProcessDomain;
 let launcher;
 let launcherIdentity;
 let launcherPgid;
@@ -384,6 +385,20 @@ async function finishWithReceipt(proof, drainReason) {
   armStageDeadline('ACK', deadlineAfter(timeouts.ackMs));
 }
 
+async function finishStartedDrain(drainReason) {
+  const opaqueProofMissing =
+    posixProcessDomain === 'opaque-runner' &&
+    !(
+      drainReason === 'natural' &&
+      Number.isSafeInteger(rootResult?.code) &&
+      rootResult?.signal === null
+    );
+  if (opaqueProofMissing) {
+    return failClosed('opaque runner process domain is unproven after termination');
+  }
+  return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', drainReason);
+}
+
 async function drainNeverStartedContainment(deadline = beginCloseout()) {
   const presence = probeGroup(launcherPgid);
   if (presence === 'unknown') throw new Error('POSIX group presence is unknown');
@@ -477,7 +492,7 @@ async function drainNormally() {
     // Re-read and tighten the shared closeout deadline instead of continuing with
     // the longer natural-drain deadline captured at entry.
     await terminateContainment(beginCloseout());
-    return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
+    return finishStartedDrain(terminalCause);
   }
   if (!naturallyDrained) {
     const members = groupMembers(launcherPgid);
@@ -489,7 +504,7 @@ async function drainNormally() {
       naturallyDrained = containmentIsNaturallyDrained();
       if (terminalCause) {
         await terminateContainment(beginCloseout());
-        return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
+        return finishStartedDrain(terminalCause);
       }
       if (!naturallyDrained) throw new Error('parent output acknowledgements did not settle');
     }
@@ -497,7 +512,7 @@ async function drainNormally() {
   if (!naturallyDrained) {
     terminalCause = 'process-tree-not-empty';
     await terminateContainment(beginCloseout());
-    return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
+    return finishStartedDrain(terminalCause);
   }
   terminalCause = 'natural';
   launcher.send({ schemaVersion: 1, type: 'RELEASE_AFTER_DRAIN' });
@@ -509,7 +524,7 @@ async function drainNormally() {
   ) {
     throw new Error('launcher group did not disappear after natural drain');
   }
-  return finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause);
+  return finishStartedDrain(terminalCause);
 }
 
 async function failClosed(message) {
@@ -563,7 +578,7 @@ async function handleParentDisconnect() {
       if (cleanupStarted) return;
       cleanupStarted = true;
       await terminateContainment(deadline);
-      await finishWithReceipt('posix-group-empty-and-pipes-eof-v1', 'parent-shutdown');
+      await finishStartedDrain('parent-shutdown');
       return process.exit(0);
     }
     if (state === 'armed' || state === 'termination-before-start') {
@@ -655,7 +670,8 @@ function handleLauncherMessage(message) {
         !(
           (message.code === null || Number.isSafeInteger(message.code)) &&
           (message.signal === null || typeof message.signal === 'string')
-        )
+        ) ||
+        (message.code === null) === (message.signal === null)
       ) {
         throw new Error('RESULT is out of order');
       }
@@ -684,7 +700,13 @@ function handleParentMessage(envelope) {
     if (envelope.type === 'DATA') {
       if (
         state !== 'bound' ||
-        !exactKeys(envelope, ['schemaVersion', 'type', 'workspacePath', 'messageBase64'])
+        !exactKeys(envelope, [
+          'schemaVersion',
+          'type',
+          'workspacePath',
+          'posixProcessDomain',
+          'messageBase64',
+        ])
       ) {
         throw new Error('DATA is out of order');
       }
@@ -696,6 +718,13 @@ function handleParentMessage(envelope) {
         throw new Error('DATA message binding is invalid');
       }
       workspacePath = resolve(boundedString(envelope.workspacePath, 'workspace path'));
+      if (
+        envelope.posixProcessDomain !== 'process-group' &&
+        envelope.posixProcessDomain !== 'opaque-runner'
+      ) {
+        throw new Error('POSIX process domain is invalid');
+      }
+      posixProcessDomain = envelope.posixProcessDomain;
       operationId = message.operationId;
       target = parseTarget(message.target);
       preparedAuthority = assertPreparedBoundAuthority(authorityContext());
@@ -822,7 +851,7 @@ function handleParentMessage(envelope) {
       if (!cleanupStarted) {
         cleanupStarted = true;
         void terminateContainment(deadline)
-          .then(() => finishWithReceipt('posix-group-empty-and-pipes-eof-v1', terminalCause))
+          .then(() => finishStartedDrain(terminalCause))
           .catch((error) =>
             failClosed(error instanceof Error ? error.message : 'termination failed'),
           );

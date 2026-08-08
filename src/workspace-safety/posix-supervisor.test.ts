@@ -20,7 +20,11 @@ import {
   probePosixProcessGroup,
   waitForPosixProcessGroupEmpty,
 } from './posix-containment.js';
-import { readDarkPosixHelperBundle, runDarkPosixSupervisedOperation } from './posix-supervisor.js';
+import {
+  parsePosixSupervisorEventControlled,
+  readDarkPosixHelperBundle,
+  runDarkPosixSupervisedOperation,
+} from './posix-supervisor.js';
 import { parseQuarantineRecord, QUARANTINE_FILE } from './quarantine.js';
 import { createWorkspaceSession, type WorkspaceSession } from './session.js';
 import { parseDrainedReceipt, type ContainmentDescriptor } from './supervisor-protocol.js';
@@ -146,6 +150,20 @@ afterEach(async () => {
 });
 
 describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration', () => {
+  it.each([
+    ['rejects neither code nor signal', null, null, false],
+    ['rejects both code and signal', 0, 'SIGTERM', false],
+    ['accepts a numeric exit', 23, null, true],
+    ['accepts a signal exit', null, 'SIGTERM', true],
+  ] as const)('%s in a RESULT event', (_label, code, signal, accepted) => {
+    const event = { schemaVersion: 1, type: 'RESULT', code, signal };
+    if (!accepted) {
+      expect(() => parsePosixSupervisorEventControlled(event)).toThrow(/exactly one/u);
+      return;
+    }
+    expect(parsePosixSupervisorEventControlled(event)).toEqual({ type: 'RESULT', code, signal });
+  });
+
   it('detects a deliberate IPC control descriptor in the inventory positive control', async () => {
     const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-fd-positive-'));
     roots.push(controlRoot);
@@ -627,12 +645,16 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
       value: `${index}:`.padEnd(320, 'x'),
     }));
     const controlBytes = Buffer.from(
-      `${JSON.stringify({
-        schemaVersion: 1,
-        type: 'DATA',
-        operationId: OPERATION_ID,
-        target: { ...target('', setupState.workspace), environment },
-      }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          type: 'DATA',
+          operationId: OPERATION_ID,
+          target: { ...target('', setupState.workspace), environment },
+        },
+        null,
+        2,
+      )}\n`,
       'utf8',
     );
     expect(controlBytes.length).toBeLessThanOrEqual(64 * 1024);
@@ -738,6 +760,83 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 15_000);
 
+  it('settles an opaque runner that exits naturally with a numeric non-zero code', async () => {
+    const setupState = await setup();
+
+    const outcome = await runWorkspaceOperation(
+      setupState.session,
+      operationOptions(),
+      async (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target('process.exit(23)', setupState.workspace),
+          posixProcessDomain: 'opaque-runner',
+          timeouts: { naturalDrainMs: 100, termMs: 100, killMs: 3000, pollMs: 20 },
+          hooks: {
+            onArmed: ({ containment }) => {
+              trackGroup(containment);
+            },
+          },
+        }),
+    );
+
+    groups.delete(outcome.containment.pgid);
+    expect(outcome).toMatchObject({
+      verdict: 'root-failed',
+      code: 23,
+      signal: null,
+      terminationReason: null,
+      leftover: false,
+      receipt: { drainReason: 'natural' },
+    });
+    expect(existsSync(outcome.settledPath)).toBe(true);
+    expect(probePosixProcessGroup(outcome.containment.pgid)).toBe('empty');
+    await setupState.session.close();
+  }, 15_000);
+
+  it.each([
+    ['natural signal exit', "process.kill(process.pid, 'SIGTERM')"],
+    [
+      'natural process-tree residue',
+      "require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}).unref();process.exit(0)",
+    ],
+  ] as const)(
+    'permanently isolates an opaque runner after %s',
+    async (_label, source) => {
+      const setupState = await setup();
+      let containment: ContainmentDescriptor | undefined;
+
+      await expect(
+        runWorkspaceOperation(setupState.session, operationOptions(), async (operation) =>
+          runDarkPosixSupervisedOperation(operation, {
+            target: target(source, setupState.workspace),
+            posixProcessDomain: 'opaque-runner',
+            timeouts: { naturalDrainMs: 100, termMs: 100, killMs: 3000, pollMs: 20 },
+            hooks: {
+              onArmed: ({ containment: armed }) => {
+                containment = armed;
+                trackGroup(armed);
+              },
+            },
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'isolated' });
+
+      expect(existsSync(join(operationPath(setupState.workspace), DRAINED_RECEIPT_FILE))).toBe(
+        false,
+      );
+      expect(
+        parseQuarantineRecord(
+          readFileSync(join(operationPath(setupState.workspace), QUARANTINE_FILE)),
+        ).reason,
+      ).toBe('operation-proof-missing');
+      if (containment?.platform === 'posix-process-group-v1') {
+        expect(await waitForPosixProcessGroupEmpty(containment.pgid, 5000, 20)).toBe(true);
+        groups.delete(containment.pgid);
+      }
+    },
+    15_000,
+  );
+
   it('independently re-reads canonical armed bytes before START and leaves target at zero execution on mismatch', async () => {
     const marker = 'must-not-run.txt';
     const setupState = await setup();
@@ -777,7 +876,7 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     }
   }, 15_000);
 
-  it('lets TERMINATE win after armed and proves that the target never started', async () => {
+  it('lets TERMINATE win for an opaque runner before START and proves that the target never started', async () => {
     const setupState = await setup();
     const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-control-'));
     roots.push(controlRoot);
@@ -794,6 +893,7 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
             setupState.workspace,
           ),
           termination: { signal: controller.signal, reason: 'user-interrupt' },
+          posixProcessDomain: 'opaque-runner',
           timeouts: { naturalDrainMs: 100, termMs: 100, killMs: 3000, pollMs: 20 },
           hooks: {
             onArmed: ({ containment }) => {
@@ -964,10 +1064,7 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
             },
             onRootResult: async () => {
               await waitUntil(
-                () =>
-                  existsSync(
-                    join(operationPath(setupState.workspace), DRAINED_RECEIPT_FILE),
-                  ),
+                () => existsSync(join(operationPath(setupState.workspace), DRAINED_RECEIPT_FILE)),
                 5000,
               );
               controller.abort();
@@ -1023,7 +1120,10 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     let supervisorFacts: { readonly pid: number; readonly identity: string } | undefined;
     try {
       await waitUntil(() => stdout.trim().split('\n').length >= 2, 10_000);
-      const lines = stdout.trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      const lines = stdout
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
       expect(lines[1]).toEqual({ phase: 'natural-drain' });
       const facts = lines[0] as {
         phase: 'started';

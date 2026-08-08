@@ -1,16 +1,18 @@
 ---
 title: 009-abort-round-semantics
 status: active
-updated: 2026-08-07
+updated: 2026-08-09
 scope: root
 ---
 
 # 009. 异常轮语义（agent 结局机械三分、回写待复核、stall 熔断、blocked 收敛出口）
 
 > 2026-07-31 当前状态：ADR-021 已用统一 session、workspace 写租约和 coordinator 取代本文旧的
-> pid-only 锁与局部 `terminateProcessTree` 收口边界。completed/error/timeout 只有在 containment
-> 确认清空且 delta 合法后才结算；父进程崩溃、终止失败或未完成 mutation 保留隔离并要求显式恢复。
-> 下文异常轮状态机仍有效，关于旧锁和旧进程树实现的段落只保留历史背景。
+> pid-only 锁与局部 `terminateProcessTree` 收口边界。completed/error/timeout 只有在取得与调用类型
+> 相符的收口证明且 delta 合法后才结算；POSIX 不透明 AI Runner 已启动后被外部终止、以信号结束或
+> 观察到残留进程时，不再凭外层进程组清空进入下一轮，而是永久隔离 workspace。父进程崩溃、终止
+> 失败或未完成 mutation 同样保留隔离。下文异常轮状态机仍有效，关于旧锁和旧进程树实现的段落只
+> 保留历史背景；当前结算与恢复边界以 ADR-021 为准。
 
 ## 背景
 
@@ -26,11 +28,11 @@ scope: root
 
 agent 结局机械三分（builder/validator 两侧同一判定，只看进程退出信号，不解析 agent 输出内容——`src/engine/loop.ts` 的 `outcomeOf`）：
 
-| 结局 | 判定 |
-|---|---|
-| `completed` | 进程退出且 `!timedOut && exitCode === 0` |
-| `timeout` | 引擎侧 dev/val 超时触发（SIGTERM→SIGKILL） |
-| `error` | `exitCode !== 0`（含 spawn 失败） |
+| 结局        | 判定                                       |
+| ----------- | ------------------------------------------ |
+| `completed` | 进程退出且 `!timedOut && exitCode === 0`   |
+| `timeout`   | 引擎侧 dev/val 超时触发（SIGTERM→SIGKILL） |
+| `error`     | `exitCode !== 0`（含 spawn 失败）          |
 
 异常结局（`timeout ∨ error`）触发以下机制：
 
@@ -41,8 +43,7 @@ agent 结局机械三分（builder/validator 两侧同一判定，只看进程�
 
 以上 Validator 异常的回写与 stall 规则是本 ADR 发布时的行为。ADR-023 已对正式结构化 Validator
 取代该局部规则：不可验证时保留候选、不增加 retry，并立即返回 5；Developer 与 legacy 测试兼容路径
-仍沿用本 ADR。
-5. **blocked 收敛出口**：全部 story 收敛（`passes` 或 `blocked`）时，若存在 `blocked` story，输出文案分叉列出具体 story 号并以退出码 3 结束（而非旧版「全部 story 已通过」的假绿文案 + 退出码 0）；`convergedExit` 单一函数同时服务 no-op 快路径与轮末完成判定两个收敛出口，保证两处行为一致。
+仍沿用本 ADR。5. **blocked 收敛出口**：全部 story 收敛（`passes` 或 `blocked`）时，若存在 `blocked` story，输出文案分叉列出具体 story 号并以退出码 3 结束（而非旧版「全部 story 已通过」的假绿文案 + 退出码 0）；`convergedExit` 单一函数同时服务 no-op 快路径与轮末完成判定两个收敛出口，保证两处行为一致。
 
 四条对外可见退出码：`0`=全部通过 / `1`=跑满未收敛或 stall 熔断 / `2`=workspace 锁占用（ADR-008）/ `3`=收敛但有 blocked 待人工（README 同步）。
 
@@ -58,7 +59,7 @@ agent 结局机械三分（builder/validator 两侧同一判定，只看进程�
 
 - validator 正常完成但 agent CLI 意外以非零码退出 → 触发误回写，多烧一轮重新走门禁与验收去确认——回写是幂等操作，代价是多一轮而非数据损坏，接受。
 - API 中断但 agent CLI 最终以 `exit 0` 结束 → 落在机械信号的盲区，该轮被判定为 `completed`，实质漏检；靠下一轮的幂等重试与 `/review-loop` 人审兜底。若实测中此类漏检频繁出现，需重新评估输出心跳等增强手段（当前明确不做）。
-- 回写与 agent 写 state 之间存在理论竞态窗口：超时路径下 `runAgent` 会终止整棵 agent 进程树（POSIX 独占进程组 SIGTERM→SIGKILL；Windows `taskkill /T /F`）并确认退出后才返回，因此引擎回写时已经是唯一写者；工作区锁（ADR-008）另保证引擎实例间互斥，窗口实际关闭，不构成真实风险。
+- 回写与 agent 写 state 之间存在理论竞态窗口。本文发布时假设超时会终止整棵 agent 进程树后再让引擎回写；ADR-021 已取代该假设：普通 POSIX 项目命令与 Windows 只有在平台收口证明成立后才把写权交回父进程，POSIX 不透明 AI Runner 已启动后被外部终止则永久 `operation-proof-missing`，不执行本轮回写、不释放 workspace、也不进入下一轮。这个边界避免与未知跨组进程并发写，但不宣称已经杀死它们。
 - blocked 置位与异常结局发生在同一轮时，收敛识别推迟到下一轮——异常轮提前 continue 到不了轮末完成判定，需等下一轮 builder 干净退出后才走收敛出口。方向 fail-safe（只推迟收敛、不假收敛），代价是多一轮；`maxIterations` 恰在此轮耗尽时以「跑满」退出码 1 结束而非 3。
 - 退出码 3（blocked 收敛）是新增对外行为，升级为 **0.22.0** minor 版本（硬约束 5）；README 的退出码表与 `--stall-limit` 参数说明随本轮同步。以退出码 0 判定「全部完成」的既有 CI 脚本，遇到存在 blocked story 的工作区时会从「误判为 0」变为「诚实收到 3」——这是行为订正，但外部消费方需要感知 3 是新增语义。
 - `state.json` 无 schema 变更（notes 仍是纯文本，无新增字段），旧版 workspace 零迁移；evidence 新增字段全部可选，旧 `evidence.jsonl` 与旧版报告渲染零破坏。
