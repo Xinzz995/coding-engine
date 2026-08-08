@@ -4,7 +4,7 @@ import type { QualityRiskCategory } from '../quality/contract.js';
 export const REVIEW_STATE_SCHEMA_VERSION = 2 as const;
 export const LEGACY_REVIEW_STATE_SCHEMA_VERSION = 1 as const;
 export const REVIEW_DECISIONS_SCHEMA_VERSION = 1 as const;
-export const REVIEW_RULES_VERSION = '1.3.0';
+export const REVIEW_RULES_VERSION = '1.4.0';
 export const REVIEW_STATE_FILE = 'final-review.json';
 export const REVIEW_DECISIONS_FILE = 'review-decisions.json';
 export const REVIEW_MARKDOWN_FILE = 'final-review.md';
