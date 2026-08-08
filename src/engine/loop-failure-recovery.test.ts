@@ -5,6 +5,15 @@ import { Writable } from 'node:stream';
 import { readEvidence } from './evidence.js';
 import { setup, story, runLoop } from './loop-test-support.js';
 
+function useClaudeBin(command: string): () => void {
+  const previous = process.env.CODING_X_CLAUDE_BIN;
+  process.env.CODING_X_CLAUDE_BIN = command;
+  return () => {
+    if (previous === undefined) delete process.env.CODING_X_CLAUDE_BIN;
+    else process.env.CODING_X_CLAUDE_BIN = previous;
+  };
+}
+
 describe('异常轮回写（builder 侧）', () => {
   it('builder 输出写入失败后回写候选，并持久化准确的输出故障原因', async () => {
     const { workspace, instructionsDir } = setup([story()]);
@@ -256,31 +265,34 @@ describe('异常轮回写（validator 侧）', () => {
       process.exit(1);
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    const code = await runLoop({
-      kind: 'claude',
-      maxIterations: 1,
-      devTimeoutMs: 5000,
-      valTimeoutMs: 5000,
-      workspace,
-      instructionsDir,
-      port: 0,
-      openBrowser: false,
-    });
-    delete process.env.CODING_X_CLAUDE_BIN;
-    expect(code).toBe(1); // 回写后未 resolved，跑满 1 轮
-    const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
-    expect(state['US-001'].passes).toBe(false);
-    expect(state['US-001'].notes).toContain('[中断轮待复核]');
-    expect(state['US-001'].notes).toContain('validator');
-    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
-    expect(iters).toHaveLength(1);
-    expect(iters[0]).toMatchObject({
-      builderOutcome: 'completed',
-      validatorOutcome: 'error',
-      abortRollback: { storyId: 'US-001' },
-    });
-  });
+    const restoreClaudeBin = useClaudeBin(`node ${fake}`);
+    try {
+      const code = await runLoop({
+        kind: 'claude',
+        maxIterations: 1,
+        devTimeoutMs: 5000,
+        valTimeoutMs: 5000,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
+      });
+      expect(code).toBe(1); // 回写后未 resolved，跑满 1 轮
+      const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
+      expect(state['US-001'].passes).toBe(false);
+      expect(state['US-001'].notes).toContain('[中断轮待复核]');
+      expect(state['US-001'].notes).toContain('validator');
+      const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+      expect(iters).toHaveLength(1);
+      expect(iters[0]).toMatchObject({
+        builderOutcome: 'completed',
+        validatorOutcome: 'error',
+        abortRollback: { storyId: 'US-001' },
+      });
+    } finally {
+      restoreClaudeBin();
+    }
+  }, 60_000);
 
   it('builder 置 true 后 validator 超时：回写 false 且不会从完成出口假绿', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([story()]);
@@ -302,7 +314,7 @@ describe('异常轮回写（validator 侧）', () => {
       await new Promise((resolve) => setTimeout(resolve, 60_000));
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const restoreClaudeBin = useClaudeBin(`node ${fake}`);
     try {
       expect(
         await runLoop({
@@ -328,9 +340,9 @@ describe('异常轮回写（validator 侧）', () => {
       });
       expect(iteration).not.toHaveProperty('validationReceipt');
     } finally {
-      delete process.env.CODING_X_CLAUDE_BIN;
+      restoreClaudeBin();
     }
-  });
+  }, 60_000);
 
   it('validator 正常完成：iteration 记 validatorOutcome completed，无回写', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([story()]);
@@ -352,21 +364,24 @@ describe('异常轮回写（validator 侧）', () => {
       process.exit(0);
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    const code = await runLoop({
-      kind: 'claude',
-      maxIterations: 2,
-      devTimeoutMs: 5000,
-      valTimeoutMs: 5000,
-      workspace,
-      instructionsDir,
-      port: 0,
-      openBrowser: false,
-    });
-    delete process.env.CODING_X_CLAUDE_BIN;
-    expect(code).toBe(0);
-    const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
-    expect(iters[0]).toMatchObject({ validatorOutcome: 'completed' });
-    expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
-  });
+    const restoreClaudeBin = useClaudeBin(`node ${fake}`);
+    try {
+      const code = await runLoop({
+        kind: 'claude',
+        maxIterations: 2,
+        devTimeoutMs: 5000,
+        valTimeoutMs: 5000,
+        workspace,
+        instructionsDir,
+        port: 0,
+        openBrowser: false,
+      });
+      expect(code).toBe(0);
+      const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
+      expect(iters[0]).toMatchObject({ validatorOutcome: 'completed' });
+      expect((iters[0] as { abortRollback?: unknown }).abortRollback).toBeUndefined();
+    } finally {
+      restoreClaudeBin();
+    }
+  }, 60_000);
 });

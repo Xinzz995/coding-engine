@@ -13,3 +13,4 @@ native/windows-supervisor/*.config text eol=lf
 native/windows-supervisor/*.json text eol=lf
 native/windows-supervisor/*.ps1 text eol=lf
 build/compile-windows-test-fixture.ps1 text eol=lf
+build/candidate-install-smoke.mjs text eol=lf

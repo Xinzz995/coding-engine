@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -18,7 +19,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CANDIDATE_INSTALL_SMOKE_SCRIPT,
   assertInstalledCandidate,
+  buildWindowsCommandEnvironment,
+  buildWindowsCommandInvocation,
   candidatePlatform,
+  readStableCandidateFile,
   runCandidateInstallSmoke,
   validateCandidateIdentity,
   validateDoctorResult,
@@ -239,12 +243,96 @@ afterEach(() => {
 });
 
 describe('candidate install smoke identity', () => {
+  it('keeps the imported executable script on LF checkouts', () => {
+    const attribute = execFileSync(
+      'git',
+      ['check-attr', 'eol', '--', 'build/candidate-install-smoke.mjs'],
+      { encoding: 'utf8' },
+    ).trim();
+    expect(attribute).toBe('build/candidate-install-smoke.mjs: eol: lf');
+  });
+
   it('installs the downloaded tarball directly without npm exec, npx, or repacking it', () => {
     const source = readFileSync(CANDIDATE_INSTALL_SMOKE_SCRIPT, 'utf8');
-    expect(source).toContain("'install',\n        tarballPath,");
+    expect(source).toContain("'install',\n        verifiedTarballPath,");
     expect(source).not.toMatch(/\bnpm\s+exec\b/iu);
     expect(source).not.toMatch(/\bnpx\b/iu);
     expect(source).not.toMatch(/['"](?:exec|pack)['"]\s*,/u);
+    expect(source).not.toMatch(/process\.env\.(?:npm_execpath|ComSpec|COMSPEC)/u);
+    expect(source).not.toMatch(/function\s+run\s*\(\s*command/u);
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a candidate file whose path identity changes after open',
+    () => {
+      const root = temporaryRoot();
+      const target = join(root, 'candidate.cmd');
+      const replacement = join(root, 'replacement.cmd');
+      writeFileSync(target, 'original candidate\n');
+      writeFileSync(replacement, 'replacement bytes\n');
+
+      expect(() =>
+        readStableCandidateFile(target, {
+          label: 'candidate command',
+          afterOpen: () => renameSync(replacement, target),
+        }),
+      ).toThrow(/identity changed after it was opened/u);
+    },
+  );
+
+  it('builds a fixed Windows command boundary and rejects command metacharacters', () => {
+    const invocation = buildWindowsCommandInvocation('C:\\safe path\\coding-x.cmd', [
+      'doctor',
+      '--workspace',
+      'D:\\runner temp\\workspace',
+      '--json',
+    ]);
+    expect(invocation).toEqual({
+      command: 'C:\\Windows\\System32\\cmd.exe',
+      args: [
+        '/d',
+        '/v:off',
+        '/s',
+        '/c',
+        '""C:\\safe path\\coding-x.cmd" "doctor" "--workspace" "D:\\runner temp\\workspace" "--json""',
+      ],
+      windowsVerbatimArguments: true,
+    });
+
+    for (const unsafe of ['%', '!', '&', '|', '<', '>', '^', '(', ')', '"', '\r', '\n', '\0']) {
+      expect(() =>
+        buildWindowsCommandInvocation('C:\\safe\\coding-x.cmd', ['doctor', `unsafe${unsafe}value`]),
+      ).toThrow(/safe character set/u);
+    }
+  });
+
+  it('replaces command-sensitive Windows environment values with fixed values', () => {
+    const environment = buildWindowsCommandEnvironment(
+      {
+        ComSpec: 'C:\\attacker&command.cmd',
+        COMSPEC: 'C:\\other-attacker.cmd',
+        Path: 'C:\\attacker-bin',
+        PATHEXT: '.EXE;&.CMD',
+        noDefaultCurrentDirectoryInExePath: '0',
+        KEEP: 'kept',
+      },
+      'C:\\Program Files\\nodejs\\node.exe',
+    );
+
+    expect(environment).toMatchObject({
+      ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+      PATH: 'C:\\Program Files\\nodejs;C:\\attacker-bin',
+      PATHEXT: '.COM;.EXE;.BAT;.CMD',
+      NoDefaultCurrentDirectoryInExePath: '1',
+      KEEP: 'kept',
+    });
+    expect(
+      Object.keys(environment).filter((key) =>
+        ['comspec', 'path', 'pathext', 'nodefaultcurrentdirectoryinexepath'].includes(
+          key.toLowerCase(),
+        ),
+      ),
+    ).toEqual(['ComSpec', 'PATH', 'PATHEXT', 'NoDefaultCurrentDirectoryInExePath']);
   });
 
   it('binds the exact version, head, workflow run, platform and tarball SHA-256', () => {
@@ -252,13 +340,15 @@ describe('candidate install smoke identity', () => {
     const tarball = tarballFixture(root);
     const evidence = evidenceFor(tarball);
 
-    expect(validateCandidateIdentity(identityOptions(tarball, evidence))).toMatchObject({
+    const validated = validateCandidateIdentity(identityOptions(tarball, evidence));
+    expect(validated).toMatchObject({
       version: VERSION,
       commit: COMMIT,
       candidateWorkflowRunId: RUN_ID,
       platform: candidatePlatform(process.platform),
       sha256: evidence.tarball.sha256,
     });
+    const verifiedBytes = Buffer.from(validated.tarballBytes);
 
     for (const [label, changed] of [
       ['version', { expectedVersion: '1.2.4' }],
@@ -278,6 +368,7 @@ describe('candidate install smoke identity', () => {
     }
 
     writeFileSync(tarball, Buffer.alloc(readFileSync(tarball).byteLength, 0x78));
+    expect(createHash('sha256').update(verifiedBytes).digest('hex')).toBe(evidence.tarball.sha256);
     expect(() => validateCandidateIdentity(identityOptions(tarball, evidence))).toThrow(/SHA-256/u);
   });
 

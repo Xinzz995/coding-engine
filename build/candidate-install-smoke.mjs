@@ -2,16 +2,20 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
+  openSync,
+  readSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, win32 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PACKAGE_NAME = 'coding-x';
@@ -34,21 +38,97 @@ const PLATFORM_TO_NODE = {
 };
 const COMMAND_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
+const MAX_CANDIDATE_FILE_BYTES = 64 * 1024 * 1024;
+const WINDOWS_SYSTEM_COMMAND_PROCESSOR = 'C:\\Windows\\System32\\cmd.exe';
+const WINDOWS_COMMAND_TOKEN = /^[A-Za-z0-9_ .:\\/\-]+$/u;
 
 function fail(message) {
   throw new Error(`candidate install smoke failed: ${message}`);
 }
 
+function sameFileSnapshot(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs
+  );
+}
+
+export function readStableCandidateFile(
+  path,
+  { label = 'candidate file', maxBytes = MAX_CANDIDATE_FILE_BYTES, afterOpen } = {},
+) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) fail(`${label} size limit is invalid`);
+  let descriptor;
+  try {
+    const noFollow = process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
+    const nonBlock = process.platform === 'win32' ? 0 : (constants.O_NONBLOCK ?? 0);
+    descriptor = openSync(path, constants.O_RDONLY | noFollow | nonBlock);
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1n ||
+      opened.size < 1n ||
+      opened.size > BigInt(maxBytes)
+    ) {
+      fail(`${label} must be a non-empty bounded single-link regular file`);
+    }
+    afterOpen?.();
+    const openedPath = lstatSync(path, { bigint: true });
+    if (
+      openedPath.isSymbolicLink() ||
+      !openedPath.isFile() ||
+      openedPath.nlink !== 1n ||
+      !sameFileSnapshot(opened, openedPath)
+    ) {
+      fail(`${label} identity changed after it was opened`);
+    }
+    const bytes = Buffer.allocUnsafe(Number(opened.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, null);
+      if (count === 0) break;
+      offset += count;
+    }
+    const trailing = Buffer.allocUnsafe(1);
+    const hasTrailingByte = readSync(descriptor, trailing, 0, 1, null) !== 0;
+    const afterHandle = fstatSync(descriptor, { bigint: true });
+    const afterPath = lstatSync(path, { bigint: true });
+    if (
+      offset !== bytes.length ||
+      hasTrailingByte ||
+      afterPath.isSymbolicLink() ||
+      !afterPath.isFile() ||
+      afterPath.nlink !== 1n ||
+      !sameFileSnapshot(opened, afterHandle) ||
+      !sameFileSnapshot(afterHandle, afterPath) ||
+      BigInt(bytes.length) !== afterHandle.size
+    ) {
+      fail(`${label} changed while it was being read`);
+    }
+    return bytes;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
 function readJson(path, label) {
   try {
-    return JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/u, ''));
+    return JSON.parse(
+      readStableCandidateFile(path, { label })
+        .toString('utf8')
+        .replace(/^\uFEFF/u, ''),
+    );
   } catch (error) {
     fail(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-function sha256(path) {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 function exactString(value, expected, label) {
@@ -58,9 +138,7 @@ function exactString(value, expected, label) {
 
 function requiredPath(value, label) {
   if (typeof value !== 'string' || value === '') fail(`${label} is required`);
-  const path = resolve(value);
-  if (!existsSync(path)) fail(`${label} does not exist: ${path}`);
-  return path;
+  return resolve(value);
 }
 
 function parseArgs(argv) {
@@ -159,14 +237,24 @@ export function validateCandidateIdentity(options) {
     'packed evidence tarball filename',
   );
   exactString(basename(tarballPath), evidence.tarball.filename, 'downloaded tarball filename');
-  const size = readFileSync(tarballPath).byteLength;
-  if (evidence.tarball.size !== size) {
+  if (
+    !Number.isSafeInteger(evidence.tarball.size) ||
+    evidence.tarball.size < 1 ||
+    evidence.tarball.size > MAX_CANDIDATE_FILE_BYTES
+  ) {
+    fail('packed evidence tarball size is invalid');
+  }
+  const tarballBytes = readStableCandidateFile(tarballPath, {
+    label: 'downloaded tarball',
+    maxBytes: evidence.tarball.size,
+  });
+  if (evidence.tarball.size !== tarballBytes.byteLength) {
     fail(
-      `downloaded tarball size mismatch: expected ${String(evidence.tarball.size)}, received ${String(size)}`,
+      `downloaded tarball size mismatch: expected ${String(evidence.tarball.size)}, received ${String(tarballBytes.byteLength)}`,
     );
   }
   if (!SHA_256.test(evidence.tarball.sha256 ?? '')) fail('packed evidence SHA-256 is invalid');
-  const actualSha256 = sha256(tarballPath);
+  const actualSha256 = sha256(tarballBytes);
   exactString(actualSha256, evidence.tarball.sha256, 'downloaded tarball SHA-256');
   return {
     version: expectedVersion,
@@ -174,6 +262,7 @@ export function validateCandidateIdentity(options) {
     candidateWorkflowRunId: expectedRunId,
     platform: expectedPlatform,
     sha256: actualSha256,
+    tarballBytes,
   };
 }
 
@@ -203,15 +292,11 @@ function equalStringSet(actual, expected) {
   );
 }
 
-function assertRegularNonEmptyFile(path, label) {
-  let info;
+function installedFileBytes(path, label) {
   try {
-    info = lstatSync(path);
-  } catch {
-    fail(`${label} is missing: ${path}`);
-  }
-  if (!info.isFile() || info.isSymbolicLink() || info.size < 1) {
-    fail(`${label} must be a non-empty regular file: ${path}`);
+    return readStableCandidateFile(path, { label });
+  } catch (error) {
+    fail(`${label} is unavailable: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -220,15 +305,15 @@ function assertInstalledPlatformHelpers(packageRoot, expectedPlatform) {
   if (expectedPlatform === 'windows') {
     for (const name of WINDOWS_HELPERS) {
       const path = join(helperRoot, name);
-      assertRegularNonEmptyFile(path, `installed Windows helper ${name}`);
-      if (!readFileSync(path).subarray(0, 2).equals(Buffer.from('MZ'))) {
+      const bytes = installedFileBytes(path, `installed Windows helper ${name}`);
+      if (!bytes.subarray(0, 2).equals(Buffer.from('MZ'))) {
         fail(`installed Windows helper ${name} does not have an MZ executable header`);
       }
     }
     return;
   }
   for (const name of POSIX_HELPERS) {
-    assertRegularNonEmptyFile(join(helperRoot, name), `installed POSIX helper ${name}`);
+    installedFileBytes(join(helperRoot, name), `installed POSIX helper ${name}`);
   }
 }
 
@@ -243,29 +328,13 @@ export function assertInstalledCandidate(installRoot, expectedVersion, expectedP
   }
   exactString(packageJson.bin?.[PACKAGE_NAME], 'dist/cli.js', 'installed package bin');
   const cliPath = join(packageRoot, 'dist', 'cli.js');
-  let cliInfo;
-  try {
-    cliInfo = lstatSync(cliPath);
-  } catch {
-    fail(`installed dist CLI is missing: ${cliPath}`);
-  }
-  if (!cliInfo.isFile() || cliInfo.isSymbolicLink())
-    fail('installed dist CLI is not a regular file');
+  installedFileBytes(cliPath, 'installed dist CLI');
   assertInstalledPlatformHelpers(packageRoot, expectedPlatform);
 
   const binRoot = join(installRoot, 'node_modules', '.bin');
   if (expectedPlatform === 'windows') {
     const commandPath = join(binRoot, 'coding-x.cmd');
-    let commandInfo;
-    try {
-      commandInfo = lstatSync(commandPath);
-    } catch {
-      fail(`npm Windows bin is missing: ${commandPath}`);
-    }
-    if (!commandInfo.isFile() || commandInfo.isSymbolicLink()) {
-      fail('npm Windows bin must be a regular .cmd file');
-    }
-    const command = readFileSync(commandPath, 'utf8');
+    const command = installedFileBytes(commandPath, 'npm Windows bin').toString('utf8');
     if (!/\.\.[\\/]coding-x[\\/]dist[\\/]cli\.js/iu.test(command)) {
       fail('npm Windows bin does not target coding-x/dist/cli.js');
     }
@@ -288,26 +357,34 @@ export function assertInstalledCandidate(installRoot, expectedVersion, expectedP
 
 function npmInvocation() {
   const candidates = [
-    process.env.npm_execpath,
     join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
     resolve(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
   ].filter((entry) => typeof entry === 'string' && entry !== '');
   const npmCli = candidates.find((entry) => existsSync(entry));
-  if (npmCli) return { command: process.execPath, args: [npmCli] };
+  if (npmCli) return npmCli;
   if (process.platform === 'win32') fail('cannot locate the setup-node npm CLI');
-  return { command: 'npm', args: [] };
+  return null;
 }
 
-function run(command, args, options = {}) {
-  return spawnSync(command, args, {
+function spawnOptions(options = {}) {
+  return {
     cwd: options.cwd,
     encoding: 'utf8',
-    env: { ...process.env, ...(options.env ?? {}) },
+    env: options.environment ?? process.env,
     maxBuffer: MAX_OUTPUT_BYTES,
     timeout: COMMAND_TIMEOUT_MS,
     windowsHide: true,
     shell: false,
+  };
+}
+
+function runNpm(npmCli, args, options = {}) {
+  const spawn = spawnOptions({
+    cwd: options.cwd,
+    environment: { ...process.env, ...(options.env ?? {}) },
   });
+  if (npmCli === null) return spawnSync('npm', args, spawn);
+  return spawnSync(process.execPath, [npmCli, ...args], spawn);
 }
 
 function commandFailure(label, result) {
@@ -321,19 +398,63 @@ function requireExit(label, result, expectedExit) {
   }
 }
 
-function quoteWindowsCommandArgument(value) {
-  if (/["%\r\n\0]/u.test(value))
-    fail('Windows command argument contains unsupported metacharacters');
+function windowsCommandToken(value) {
+  if (
+    typeof value !== 'string' ||
+    value === '' ||
+    value.trim() !== value ||
+    !WINDOWS_COMMAND_TOKEN.test(value)
+  ) {
+    fail('Windows command argument is outside the fixed safe character set');
+  }
   return `"${value}"`;
+}
+
+export function buildWindowsCommandInvocation(commandPath, args) {
+  const line = [commandPath, ...args].map(windowsCommandToken).join(' ');
+  return {
+    command: WINDOWS_SYSTEM_COMMAND_PROCESSOR,
+    args: ['/d', '/v:off', '/s', '/c', `"${line}"`],
+    windowsVerbatimArguments: true,
+  };
+}
+
+export function buildWindowsCommandEnvironment(
+  sourceEnvironment = process.env,
+  nodeExecutable = process.execPath,
+) {
+  const originalPath = Object.entries(sourceEnvironment).find(
+    ([key, value]) => key.toLowerCase() === 'path' && typeof value === 'string' && value !== '',
+  )?.[1];
+  const environment = Object.fromEntries(
+    Object.entries(sourceEnvironment).filter(
+      ([key]) =>
+        !['comspec', 'path', 'pathext', 'nodefaultcurrentdirectoryinexepath'].includes(
+          key.toLowerCase(),
+        ),
+    ),
+  );
+  return {
+    ...environment,
+    ComSpec: WINDOWS_SYSTEM_COMMAND_PROCESSOR,
+    PATH: [win32.dirname(nodeExecutable), originalPath].filter(Boolean).join(';'),
+    PATHEXT: '.COM;.EXE;.BAT;.CMD',
+    NoDefaultCurrentDirectoryInExePath: '1',
+  };
 }
 
 function runInstalledCommand(commandPath, args, cwd, platform) {
   if (platform === 'windows') {
-    const comspec = process.env.ComSpec ?? process.env.COMSPEC ?? 'cmd.exe';
-    const line = [commandPath, ...args].map(quoteWindowsCommandArgument).join(' ');
-    return run(comspec, ['/d', '/s', '/c', line], { cwd });
+    const invocation = buildWindowsCommandInvocation(commandPath, args);
+    return spawnSync(WINDOWS_SYSTEM_COMMAND_PROCESSOR, invocation.args, {
+      ...spawnOptions({
+        cwd,
+        environment: buildWindowsCommandEnvironment(),
+      }),
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    });
   }
-  return run(commandPath, args, { cwd });
+  return spawnSync(commandPath, args, spawnOptions({ cwd }));
 }
 
 function parseSingleJson(result, label) {
@@ -412,7 +533,7 @@ export function runCandidateInstallSmoke(rawOptions) {
   const projectRoot = requiredPath(rawOptions.projectRoot, 'project root');
   const tempRoot = requiredPath(rawOptions.tempRoot, 'runner temp root');
   const evidence = readJson(evidencePath, 'packed evidence');
-  const identity = validateCandidateIdentity({
+  const validatedIdentity = validateCandidateIdentity({
     evidence,
     tarballPath,
     expectedVersion: rawOptions.expectedVersion,
@@ -421,6 +542,7 @@ export function runCandidateInstallSmoke(rawOptions) {
     expectedPlatform: rawOptions.expectedPlatform,
     actualPlatform: process.platform,
   });
+  const { tarballBytes, ...identity } = validatedIdentity;
   assertProjectHead(projectRoot, identity.commit);
 
   const sandbox = mkdtempSync(join(tempRoot, 'coding-x-candidate-install-'));
@@ -431,13 +553,13 @@ export function runCandidateInstallSmoke(rawOptions) {
       join(installRoot, 'package.json'),
       `${JSON.stringify({ name: 'coding-x-candidate-install-smoke', version: '0.0.0', private: true }, null, 2)}\n`,
     );
-    const npm = npmInvocation();
-    const install = run(
-      npm.command,
+    const verifiedTarballPath = join(sandbox, evidence.tarball.filename);
+    writeFileSync(verifiedTarballPath, tarballBytes, { flag: 'wx', mode: 0o600 });
+    const install = runNpm(
+      npmInvocation(),
       [
-        ...npm.args,
         'install',
-        tarballPath,
+        verifiedTarballPath,
         '--ignore-scripts',
         '--no-audit',
         '--no-fund',
