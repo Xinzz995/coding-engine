@@ -119,6 +119,46 @@ jobs:
         timeout-minutes: 1
         shell: bash
         run: '''node'' ''dist/cli.js'' ''--help'''
+  checks_macos-node-22:
+    name: checks / macos-node-22
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: 'toolchain / node 22'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+      - name: 'setup / 1'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''ci'''
+      - name: 'test / tests'
+        working-directory: '.'
+        timeout-minutes: 45
+        shell: bash
+        run: '''npm'' ''test'' ''--'' ''--run'''
+      - name: 'test / legacy-compatibility'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''run'' ''test:legacy-compat'''
+      - name: 'build / build'
+        working-directory: '.'
+        timeout-minutes: 10
+        shell: bash
+        run: '''npm'' ''run'' ''build'''
+      - name: 'build / cli-smoke'
+        working-directory: '.'
+        timeout-minutes: 1
+        shell: bash
+        run: '''node'' ''dist/cli.js'' ''--help'''
   checks_macos-node-24:
     name: checks / macos-node-24
     runs-on: macos-latest
@@ -144,11 +184,6 @@ jobs:
         timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
-      - name: 'test / legacy-compatibility'
-        working-directory: '.'
-        timeout-minutes: 10
-        shell: bash
-        run: '''npm'' ''run'' ''test:legacy-compat'''
       - name: 'build / build'
         working-directory: '.'
         timeout-minutes: 10
@@ -272,7 +307,7 @@ jobs:
   quality-gate:
     name: quality-gate
     if: ${{ always() }}
-    needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]
+    needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-22, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -282,10 +317,11 @@ jobs:
         env:
           RESULT_1: ${{ needs.checks_ubuntu-node-22.result }}
           RESULT_2: ${{ needs.checks_ubuntu-node-24.result }}
-          RESULT_3: ${{ needs.checks_macos-node-24.result }}
-          RESULT_4: ${{ needs.checks_windows-node-22.result }}
-          RESULT_5: ${{ needs.checks_windows-node-24.result }}
-          RESULT_6: ${{ needs.checks_windows-native-standard-user.result }}
+          RESULT_3: ${{ needs.checks_macos-node-22.result }}
+          RESULT_4: ${{ needs.checks_macos-node-24.result }}
+          RESULT_5: ${{ needs.checks_windows-node-22.result }}
+          RESULT_6: ${{ needs.checks_windows-node-24.result }}
+          RESULT_7: ${{ needs.checks_windows-native-standard-user.result }}
         run: |
           failed=0
           for result in "${!RESULT_@}"; do

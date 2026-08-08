@@ -42,9 +42,11 @@ describe('GitHub workflow trust boundary', () => {
     const offenders = [];
     for (const { name, text } of workflowFiles()) {
       if (!/^\s{2}pull_request:\s*$/m.test(text)) continue;
-      const checkoutSteps = [...text.matchAll(
-        /^\s{6}- uses: actions\/checkout@[^\n]+\n((?:\s{8}[^\n]*\n|\s{10}[^\n]*\n)*)/gm,
-      )];
+      const checkoutSteps = [
+        ...text.matchAll(
+          /^\s{6}- uses: actions\/checkout@[^\n]+\n((?:\s{8}[^\n]*\n|\s{10}[^\n]*\n)*)/gm,
+        ),
+      ];
       for (const step of checkoutSteps) {
         if (!/^\s{10}persist-credentials: false\s*$/m.test(step[1])) {
           offenders.push(name);
@@ -52,5 +54,21 @@ describe('GitHub workflow trust boundary', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('keeps moving runner aliases only in the two 0.34.1-managed bootstrap workflows', () => {
+    const legacyManaged = new Set(['policy-guard.yml', 'quality-gate.yml']);
+    const offenders = [];
+    const observedLegacy = new Set();
+    for (const { name, text } of workflowFiles()) {
+      const aliases = [...text.matchAll(/\b(?:ubuntu|macos|windows)-latest\b/gu)].map(
+        (match) => match[0],
+      );
+      if (aliases.length === 0) continue;
+      if (!legacyManaged.has(name)) offenders.push(`${name}: ${aliases.join(', ')}`);
+      else observedLegacy.add(name);
+    }
+    expect(offenders).toEqual([]);
+    expect(observedLegacy).toEqual(legacyManaged);
   });
 });

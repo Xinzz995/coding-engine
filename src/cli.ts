@@ -99,7 +99,7 @@ export interface CliConfig {
   shadow: boolean;
   /** init 从用户确认过的文件读取契约；相对路径基于项目根。 */
   contractFile: string | undefined;
-  /** init 明确跳过是/否提示；不会替用户填写不适用理由。 */
+  /** init 明确跳过是/否提示；必须同时提供已经人工确认的 --contract。 */
   yes: boolean;
   /** doctor 只检查本地状态，不查询 GitHub。 */
   local: boolean;
@@ -156,7 +156,7 @@ runner:
   --shadow                       候选 Dogfood；仅用于 run、doctor、workspace apply-prd，永远不可交付
   --contract <file>              init 使用已确认的质量契约文件
   --input <file>                 workspace 写命令的严格 JSON 请求文件
-  --yes                          init 接受已展示的远端和文件变更
+  --yes                          init 接受已展示的变更；必须同时提供 --contract
   --local                        doctor 只检查本地状态，不查询 GitHub
   -h, --help                     显示本帮助并退出
 
@@ -762,8 +762,16 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'init') {
+    if (cfg.yes && !cfg.contractFile) {
+      const message =
+        'init 使用 --yes 时必须同时提供经人工确认的 --contract；--yes 不会代替平台选择';
+      if (cfg.json) console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
+      else console.error(`❌ ${message}`);
+      return 2;
+    }
     if (!cfg.yes && !process.stdin.isTTY) {
-      const message = '❌ init 需要交互确认；无终端环境请先核对契约，再显式使用 --yes';
+      const message =
+        '❌ init 需要交互确认；无终端环境请先核对契约，再同时使用 --contract 与 --yes';
       if (cfg.json) console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
       else console.error(message);
       return 2;
@@ -789,7 +797,9 @@ export async function main(argv: string[]): Promise<number> {
         },
         ask: async (question) => {
           if (cfg.yes) {
-            throw new Error(`${question} --yes 不会替用户填写理由；请交互运行或提供 --contract`);
+            throw new Error(
+              `${question} --yes 不会替用户选择平台或填写理由；请交互运行或提供 --contract`,
+            );
           }
           return prompt!.question(`${question} `);
         },

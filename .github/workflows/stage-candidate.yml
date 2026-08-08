@@ -24,7 +24,7 @@ concurrency:
 jobs:
   stage:
     name: submit selected candidate through stage-only OIDC
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: npm-staging
     permissions:
@@ -70,15 +70,10 @@ jobs:
           fi
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_WORKFLOW_RUN_ID" \
             > "$RUNNER_TEMP/candidate-run.json"
-          jq -e --arg sha "$CURRENT_MAIN_COMMIT" '
-            .id == ($ENV.CANDIDATE_WORKFLOW_RUN_ID | tonumber) and
-            .head_sha == $sha and
-            .head_branch == "main" and
-            .event == "workflow_dispatch" and
-            .status == "completed" and
-            .conclusion == "success" and
-            .path == ".github/workflows/build-candidate.yml"
-          ' "$RUNNER_TEMP/candidate-run.json" >/dev/null
+          node build/release-evidence.mjs verify-candidate-run \
+            --run-json "$RUNNER_TEMP/candidate-run.json" \
+            --candidate-workflow-run-id "$CANDIDATE_WORKFLOW_RUN_ID" \
+            --commit "$CURRENT_MAIN_COMMIT"
 
       - name: Download the selected candidate without project dependencies
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

@@ -1,6 +1,6 @@
 {
   "name": "coding-x",
-  "version": "0.34.1",
+  "version": "0.35.0",
   "description": "Ralph auto-coding harness — Developer/Validator loop engine + Claude Code plugin",
   "license": "MIT",
   "author": "Xinzz",
@@ -32,6 +32,11 @@
   "engines": {
     "node": ">=22"
   },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/cli.ts",
@@ -58,7 +63,8 @@
     "tsx": "^4.23.9",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.65.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0"
   },
   "overrides": {
     "tsup": {

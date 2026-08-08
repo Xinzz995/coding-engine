@@ -148,6 +148,8 @@ export interface QualityContract {
     pathRules: Array<{ paths: string[]; categories: QualityRiskCategory[] }>;
   };
   github: {
+    /** 目标项目交付前必须验证的平台；旧 v2 缺省时由 jobs 首次出现顺序只读派生。 */
+    requiredPlatforms?: QualityPlatform[];
     /** 明确表达系统、工具版本、准备命令和检查范围，工作流只从这里生成。 */
     jobs: QualityGitHubJob[];
     requiredChecks: string[];
@@ -195,6 +197,24 @@ export interface QualityRuntimeAssessment {
   actualVersion: string;
   versionMatches: boolean;
   deliveryReadyAllowed: boolean;
+}
+
+/**
+ * 返回目标项目明确要求的平台。旧 schema v2 没有该扩展字段时，只从 jobs 的首次
+ * 出现顺序派生新数组；不补写契约，也不改变其摘要。
+ */
+export function requiredQualityPlatforms(contract: QualityContract): QualityPlatform[] {
+  if (contract.github.requiredPlatforms !== undefined) {
+    return [...contract.github.requiredPlatforms];
+  }
+  const seen = new Set<QualityPlatform>();
+  const derived: QualityPlatform[] = [];
+  for (const job of contract.github.jobs) {
+    if (seen.has(job.platform)) continue;
+    seen.add(job.platform);
+    derived.push(job.platform);
+  }
+  return derived;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -792,10 +812,11 @@ function validateContract(value: unknown): string[] {
     root.github,
     'github',
     ['jobs', 'requiredChecks'],
-    ['requiredCodeScanning', 'immutableReleases', 'securityFeatures'],
+    ['requiredPlatforms', 'requiredCodeScanning', 'immutableReleases', 'securityFeatures'],
     errors,
   );
   if (github) {
+    const jobPlatforms = new Set<QualityPlatform>();
     if (!Array.isArray(github.jobs)) {
       errors.push('github.jobs 必须是数组');
     } else {
@@ -820,6 +841,8 @@ function validateContract(value: unknown): string[] {
         const platform = item.platform;
         if (typeof platform !== 'string' || !PLATFORMS.has(platform as QualityPlatform)) {
           errors.push(`${path}.platform 必须是 linux、macos 或 windows`);
+        } else {
+          jobPlatforms.add(platform as QualityPlatform);
         }
         if (!Array.isArray(item.toolchains)) {
           errors.push(`${path}.toolchains 必须是数组`);
@@ -879,6 +902,20 @@ function validateContract(value: unknown): string[] {
       for (const checkId of checkIds) {
         if (!coveredChecks.has(checkId))
           errors.push(`项目检查 ${checkId} 未被任何 GitHub job 覆盖`);
+      }
+    }
+    if (Object.hasOwn(github, 'requiredPlatforms')) {
+      platforms(github.requiredPlatforms, 'github.requiredPlatforms', errors);
+      if (Array.isArray(github.requiredPlatforms)) {
+        for (const platform of github.requiredPlatforms) {
+          if (
+            typeof platform === 'string' &&
+            PLATFORMS.has(platform as QualityPlatform) &&
+            !jobPlatforms.has(platform as QualityPlatform)
+          ) {
+            errors.push(`github.requiredPlatforms 声明的 ${platform} 没有对应 GitHub job`);
+          }
+        }
       }
     }
   }

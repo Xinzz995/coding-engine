@@ -1,7 +1,7 @@
 ---
-title: "coding-engine 与 coding-x 双层质量门禁设计"
+title: 'coding-engine 与 coding-x 双层质量门禁设计'
 status: done
-updated: 2026-08-02
+updated: 2026-08-08
 scope: root
 ---
 
@@ -81,13 +81,13 @@ coding-engine 首版仍位于个人 GitHub 仓库。Ruleset 能可靠阻止日�
 
 各层证据边界如下：
 
-| 层 | 能证明 | 不能证明 |
-|---|---|---|
-| 本地 Review | 指定 runner/model 在绑定输入上返回了何种结构化判断 | 模型判断一定正确；GitHub 上必然执行过 |
-| Validator | 当前 story 的验收标准获得了引擎签发的验证结果 | 工程结构优秀；交付条件全部满足 |
-| GitHub CI | 默认分支旧工作流对当前提交执行的机械任务结局 | 本地 AI Review 已运行；owner 永远不能改规则 |
-| Ruleset | 日常合并必须满足已配置的 PR 和状态检查 | 仓库 owner 无法删除规则 |
-| staged 制品 | 三个项目验证的是同一候选 tarball | 未经后续核验的 dist-tag、标签和 Release 自动一致 |
+| 层          | 能证明                                             | 不能证明                                         |
+| ----------- | -------------------------------------------------- | ------------------------------------------------ |
+| 本地 Review | 指定 runner/model 在绑定输入上返回了何种结构化判断 | 模型判断一定正确；GitHub 上必然执行过            |
+| Validator   | 当前 story 的验收标准获得了引擎签发的验证结果      | 工程结构优秀；交付条件全部满足                   |
+| GitHub CI   | 默认分支旧工作流对当前提交执行的机械任务结局       | 本地 AI Review 已运行；owner 永远不能改规则      |
+| Ruleset     | 日常合并必须满足已配置的 PR 和状态检查             | 仓库 owner 无法删除规则                          |
+| staged 制品 | 三个项目验证的是同一候选 tarball                   | 未经后续核验的 dist-tag、标签和 Release 自动一致 |
 
 ## 公开入口
 
@@ -115,7 +115,7 @@ coding-engine 首版仍位于个人 GitHub 仓库。Ruleset 能可靠阻止日�
 - 默认分支、GitHub `owner/repo` 和受保护发布引用；
 - Spec、验收标准和工程规范来源；
 - 测试、构建、静态检查、安全检查以及每个不适用项的理由；
-- 多模块范围、适用路径、工作目录、运行系统、工具链精确版本、任务检查范围、超时和生成产物目录；
+- 多模块范围、适用路径、工作目录、命令适用系统、交付必需平台、工具链精确版本、任务检查范围、超时和生成产物目录；交付必需平台与 CI job 宿主分开记录，额外 Ubuntu 控制任务不自动成为部署要求；
 - 项目外本地验证所需的准备命令，以及依赖/缓存可以产生的明确目录；二者必须单独确认，不能从 GitHub job setup 暗推；
 - 高风险目录、默认风险类别和项目覆盖项；
 - GitHub 必需检查名称，以及项目明确选择时才启用的代码扫描工具与阻断阈值；
@@ -132,6 +132,13 @@ action，不允许契约注入任意 action。
 隔离目录、依赖锁定和跨平台解释器路径不能仅凭 `pyproject.toml` 安全推断，因此新 Python 项目
 必须通过 `init --contract` 提供人工确认的 schema-v2 本地准备和允许目录。首版没有旧 Python
 项目迁移承诺；不能把候选 PR 自己提供的迁移命令当默认分支旧裁判。
+
+平台也不能由 coding-x 无条件补成三项。init 只读取已跟踪 workflow 中写死的 hosted runner 作为
+提示；CodeQL、发布任务使用 Ubuntu 并不能证明项目部署到 Linux，动态 matrix、表达式和 self-hosted
+也不能安全猜测。用户必须在任何写入前明确确认 `linux`、`macos`、`windows` 的非空子集；`--yes`
+不代填该答案，无人值守初始化必须提供人工确认的 `--contract`。新契约显式写
+`github.requiredPlatforms`，每个平台至少有一个对应 job；jobs 可以包含额外控制平台。旧 schema v2
+缺少该可选字段时只从 jobs 平台并集只读派生，不改源文件或摘要。
 
 PRD 中的 `qualityChecks` 由契约冻结派生，并记录契约摘要，不再要求用户维护第二份命令。
 GitHub 工作流也由同一契约生成。缺少契约、schema 过新、正式运行版本与固定版本不一致，
@@ -319,16 +326,16 @@ PR/base/head、评审轮次和状态。
 
 本地结构化状态使用三态：`passed`、`failed`、`unverifiable`。CLI 退出码：
 
-| 码 | 含义 |
-|---|---|
-| 0 | 本地与远端均可交付 |
-| 1 | 机械检查或执行失败 |
-| 2 | 配置、契约、版本或状态无效 |
-| 3 | story 已阻断 |
-| 4 | 存在待人工处理的 Review finding |
-| 5 | Review 无法验证 |
-| 6 | 本地已完成，但 PR、远端 CI 或规则尚未就绪 |
-| 7 | shadow 运行完成，不能表示可交付 |
+| 码  | 含义                                      |
+| --- | ----------------------------------------- |
+| 0   | 本地与远端均可交付                        |
+| 1   | 机械检查或执行失败                        |
+| 2   | 配置、契约、版本或状态无效                |
+| 3   | story 已阻断                              |
+| 4   | 存在待人工处理的 Review finding           |
+| 5   | Review 无法验证                           |
+| 6   | 本地已完成，但 PR、远端 CI 或规则尚未就绪 |
+| 7   | shadow 运行完成，不能表示可交付           |
 
 结构化结果和阅读用 Markdown 都只保存在被 Git 忽略的 workspace；它们不是共享交付凭证。
 `status/report` 必须分别展示 story 验证、本地 Review、远端 CI/规则和最终交付结论，不能用
@@ -391,8 +398,9 @@ Bootstrap 实际使用 0.33.1；0.33.0 的多轮候选
 ### 发布顺序
 
 1. 版本更新通过受保护 PR 合并到 `main`；
-2. 无发布身份的候选构建流程从精确 main 提交执行全部检查，保存固定 tarball、提交和
-   SHA-256；
+2. 无发布身份的候选构建流程从精确 main 提交执行全部检查，只打包一次并保存固定 tarball、提交和
+   SHA-256；Linux、macOS、Windows 随后下载同一 artifact、在仓库外用 npm 真实安装并经 npm bin
+   启动，任一失败、取消、超时或跳过都会让候选运行失败；
 3. coding-engine 和 Go/Python 合成试点都安装该 tarball；先用同一候选 CLI 的绝对路径执行
    shadow doctor 与 shadow apply-prd，再以 `--shadow` 运行候选能力；
 4. 三仓验证通过后，维护者选择候选运行；独立流程回读成功状态并要求候选仍是当前 main；

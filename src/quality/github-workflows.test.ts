@@ -37,6 +37,12 @@ function codingEngineContract(): QualityContract {
   return result.contract;
 }
 
+function pinnedRunnerContract(): QualityContract {
+  const contract = structuredClone(codingEngineContract());
+  contract.codingXVersion = '0.35.0';
+  return contract;
+}
+
 function goContract(): QualityContract {
   const contract = structuredClone(codingEngineContract());
   contract.modules = [
@@ -124,11 +130,16 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).not.toMatch(/paths(?:-ignore)?:/);
     expect(yaml).toContain('checks_ubuntu-node-22:');
     expect(yaml).toContain('checks_ubuntu-node-24:');
+    expect(yaml).toContain('checks_macos-node-22:');
     expect(yaml).toContain('checks_macos-node-24:');
     expect(yaml).toContain('checks_windows-node-22:');
     expect(yaml).toContain('checks_windows-node-24:');
     expect(yaml).toContain('checks_windows-native-standard-user:');
     expect(yaml.match(/runs-on: windows-2022/gu)).toHaveLength(3);
+    expect(yaml.match(/runs-on: ubuntu-latest/gu)).toHaveLength(3);
+    expect(yaml.match(/runs-on: macos-latest/gu)).toHaveLength(2);
+    expect(yaml).not.toContain('ubuntu-24.04');
+    expect(yaml).not.toContain('macos-26');
     expect(yaml).not.toContain('windows-latest');
     expect(yaml).toContain('build / windows-supervisor-reproducibility');
     expect(yaml).toContain(
@@ -149,11 +160,24 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).toContain('name: quality-gate');
     expect(yaml).toContain('if: ${{ always() }}');
     expect(yaml).toContain(
-      'needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]',
+      'needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-22, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]',
     );
     expect(yaml).toContain('must not fail, cancel, time out, or skip');
     expect(yaml).toContain('github.event.pull_request.number || github.ref');
     expect(yaml).not.toContain('github.event.pull_request.head.sha');
+  });
+
+  it('pins hosted runner labels only for contracts created by 0.35.0 or later', () => {
+    const contract = pinnedRunnerContract();
+    const quality = renderQualityGateWorkflow(contract);
+    const policy = renderPolicyGuardWorkflow(contract);
+    expect(quality.match(/runs-on: ubuntu-24\.04/gu)).toHaveLength(3);
+    expect(quality.match(/runs-on: macos-26/gu)).toHaveLength(2);
+    expect(policy).toContain('runs-on: ubuntu-24.04');
+    expect(`${quality}\n${policy}`).not.toMatch(/runs-on:\s*(?:ubuntu|macos|windows)-latest\b/u);
+
+    const legacyPolicy = renderPolicyGuardWorkflow(codingEngineContract());
+    expect(legacyPolicy).toContain('runs-on: ubuntu-latest');
   });
 
   it('pins checkout by full commit and serializes structured commands for each native shell', () => {
@@ -189,7 +213,7 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).not.toContain('setup-node');
     expect(yaml).not.toMatch(/(?:npx|node).*coding-x/);
     expect(yaml).not.toMatch(/\bnpm\b/);
-    expect(yaml).not.toContain('macos-latest');
+    expect(yaml).not.toContain('macos-26');
     expect(yaml).not.toContain('windows-2022');
   });
 });
@@ -220,6 +244,9 @@ describe('renderPolicyGuardWorkflow', () => {
       '.github/workflows/**',
       'AGENTS.md',
       'assets/workspace-safety/**',
+      'build/candidate-install-smoke.mjs',
+      'build/release-evidence.mjs',
+      'build/sync-plugin-versions.mjs',
       'build/vitest.windows-native.config.mjs',
       'docs/golden-principles.md',
       'native/windows-supervisor/**',

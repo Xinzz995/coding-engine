@@ -445,6 +445,21 @@ export async function runContractQualityChecks(
     .filter((check) => !check.command.platforms.includes(platform))
     .map((check) => check.id);
   const applicable = declared.filter((check) => check.command.platforms.includes(platform));
+  if (applicable.length === 0) {
+    return {
+      ok: false,
+      failure: {
+        command: '[quality-checks:platform]',
+        exitCode: null,
+        timedOut: false,
+        outputTail: `当前系统 ${platform} 没有适用的质量检查，不能以零项执行判定通过`,
+      },
+      total: 0,
+      ran: 0,
+      ms: Date.now() - started,
+      skipped,
+    };
+  }
   let ran = 0;
   for (const check of applicable) {
     ran += 1;

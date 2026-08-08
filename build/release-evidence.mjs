@@ -339,6 +339,41 @@ function commandVerifyTarball(args) {
   );
 }
 
+function commandVerifyCandidateRun(args) {
+  const run = readJson(required(args, 'run-json'));
+  const candidateWorkflowRunId = required(args, 'candidate-workflow-run-id');
+  const commit = required(args, 'commit');
+  if (!/^[1-9]\d*$/.test(candidateWorkflowRunId)) {
+    fail(`candidate workflow run ID 非法：${candidateWorkflowRunId}`);
+  }
+  if (!GIT_SHA.test(commit)) fail(`候选 commit 非法：${commit}`);
+  if (!run || typeof run !== 'object' || Array.isArray(run)) {
+    fail('GitHub candidate workflow run 必须是对象');
+  }
+  if (!Number.isSafeInteger(run.id) || String(run.id) !== candidateWorkflowRunId) {
+    fail('GitHub candidate workflow run ID 与选定 run 不一致');
+  }
+  if (run.head_sha !== commit) fail('GitHub candidate workflow run head 与当前 main 不一致');
+  if (run.head_branch !== 'main') fail('GitHub candidate workflow run 不是 main 分支');
+  if (run.event !== 'workflow_dispatch') {
+    fail('GitHub candidate workflow run 不是 workflow_dispatch 事件');
+  }
+  if (run.status !== 'completed') fail('GitHub candidate workflow run 尚未 completed');
+  if (run.conclusion !== 'success') fail('GitHub candidate workflow run 未成功完成');
+  if (run.path !== CANDIDATE_WORKFLOW) {
+    fail('GitHub candidate workflow run 路径不是受信任的候选工作流');
+  }
+  process.stdout.write(
+    `${JSON.stringify({
+      status: 'verified',
+      candidateWorkflowRunId,
+      commit,
+      branch: 'main',
+      workflow: CANDIDATE_WORKFLOW,
+    })}\n`,
+  );
+}
+
 function decodeProvenance(attestations) {
   const entries = Array.isArray(attestations?.attestations) ? attestations.attestations : [];
   const provenance = entries.find(
@@ -470,6 +505,7 @@ const [command, ...rawArgs] = process.argv.slice(2);
 const args = parseArgs(rawArgs);
 const commands = {
   'verify-source': commandVerifySource,
+  'verify-candidate-run': commandVerifyCandidateRun,
   'record-pack': commandRecordPack,
   'record-stage': commandRecordStage,
   'verify-tarball': commandVerifyTarball,
