@@ -24,10 +24,12 @@ import {
   type WorkspaceSafetyStatusSnapshot,
 } from '../workspace-safety/status.js';
 import { readFinalReviewState, type ReviewStateRead } from '../review/state.js';
+import { REVIEW_RULES_DIGEST } from '../review/rules.js';
 import {
   readWorkingQualityContractAuthority,
   type StoryValidationObservation,
 } from '../review/story-validation-observation.js';
+import { REVIEW_RULES_VERSION } from '../review/types.js';
 
 export type Phase =
   'idle' | 'developing' | 'gating' | 'validating' | 'done' | 'blocked' | 'shadow' | 'error';
@@ -39,7 +41,7 @@ export interface DashboardReviewCompletion {
 
 /**
  * Dashboard-only local completion check. It does not claim full remote Review currentness; it only
- * prevents a completed runtime from outliving its exact HEAD/Story receipt-set binding.
+ * prevents a completed runtime from outliving its exact HEAD, Story receipt-set and rule binding.
  */
 export function evaluateDashboardReviewCompletion(
   read: ReviewStateRead,
@@ -60,6 +62,12 @@ export function evaluateDashboardReviewCompletion(
   }
   if (review.binding.storyValidationDigest !== storyValidationDigest) {
     return { current: false, reason: '最终 Review 对应的 Story 验收凭证集合已变化' };
+  }
+  if (
+    review.binding.reviewRulesVersion !== REVIEW_RULES_VERSION ||
+    review.binding.reviewRulesDigest !== REVIEW_RULES_DIGEST
+  ) {
+    return { current: false, reason: '最终 Review 使用的规则已变化' };
   }
   if (review.status !== 'passed' || review.deliveryStatus !== 'ready' || review.shadow) {
     return { current: false, reason: '本次运行的最终 Review 尚未完成' };

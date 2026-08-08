@@ -42,6 +42,10 @@ import {
 
 const temporaryRoots: string[] = [];
 const MANAGED_WORKSPACE_TEST_TIMEOUT_MS = 30_000;
+const CODEX_CODE_MODE_DISABLED_DIAGNOSTIC =
+  'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
+const CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC =
+  'Falling back from WebSockets to HTTPS transport. stream disconnected before completion: tls handshake eof';
 
 function removeFixtureRoot(path: string): void {
   if (!existsSync(path)) return;
@@ -136,6 +140,27 @@ function managedResult(stdout: string, over: Partial<ManagedResult> = {}): Manag
   };
 }
 
+function codexUsage() {
+  return {
+    input_tokens: 10,
+    cached_input_tokens: 2,
+    cache_write_input_tokens: 0,
+    output_tokens: 4,
+    reasoning_output_tokens: 1,
+  };
+}
+
+function codexAgentMessage(value: unknown, id = 'agent-message') {
+  return {
+    type: 'item.completed',
+    item: { id, type: 'agent_message', text: JSON.stringify(value) },
+  };
+}
+
+function codexTurnCompleted() {
+  return { type: 'turn.completed', usage: codexUsage() };
+}
+
 function packageFixture(input: string): ReviewPackage {
   const root = mkdtempSync(join(tmpdir(), 'review-runner-test-'));
   temporaryRoots.push(root);
@@ -210,11 +235,9 @@ function managedPackageFixture(input = '{}\n'): ReviewPackage {
 function codexAnswer(value: unknown): string {
   return [
     JSON.stringify({ type: 'thread.started', thread_id: 'fixture' }),
-    JSON.stringify({
-      type: 'item.completed',
-      item: { type: 'agent_message', text: JSON.stringify(value) },
-    }),
-    JSON.stringify({ type: 'turn.completed' }),
+    JSON.stringify({ type: 'turn.started' }),
+    JSON.stringify(codexAgentMessage(value)),
+    JSON.stringify(codexTurnCompleted()),
   ].join('\n');
 }
 
@@ -358,11 +381,8 @@ describe('parseCodexReviewJsonl', () => {
     const stdout = [
       JSON.stringify({ type: 'thread.started', thread_id: 't' }),
       JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: 'checked' } }),
-      JSON.stringify({
-        type: 'item.completed',
-        item: { type: 'agent_message', text: JSON.stringify(answer) },
-      }),
-      JSON.stringify({ type: 'turn.completed' }),
+      JSON.stringify(codexAgentMessage(answer)),
+      JSON.stringify(codexTurnCompleted()),
     ].join('\n');
     expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
   });
@@ -378,13 +398,567 @@ describe('parseCodexReviewJsonl', () => {
           items: [{ text: 'inspect supplied review data', completed: true }],
         },
       }),
-      JSON.stringify({
-        type: 'item.completed',
-        item: { type: 'agent_message', text: JSON.stringify(answer) },
-      }),
-      JSON.stringify({ type: 'turn.completed' }),
+      JSON.stringify(codexAgentMessage(answer)),
+      JSON.stringify(codexTurnCompleted()),
     ].join('\n');
     expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
+  });
+
+  it('allows only the known Code Mode warning and an ordered recovered transport sequence', () => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'startup-error-1',
+          type: 'error',
+          message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+        },
+      }),
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({
+        type: 'error',
+        message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+      }),
+      JSON.stringify({
+        type: 'error',
+        message: 'Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)',
+      }),
+      JSON.stringify({
+        type: 'error',
+        message: 'Reconnecting... 4/5 (stream disconnected before completion: tls handshake eof)',
+      }),
+      JSON.stringify({
+        type: 'error',
+        message: 'Reconnecting... 5/5 (stream disconnected before completion: tls handshake eof)',
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'startup-error-2',
+          type: 'error',
+          message: CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC,
+        },
+      }),
+      JSON.stringify(codexAgentMessage(answer)),
+      JSON.stringify(codexTurnCompleted()),
+    ].join('\n');
+
+    expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
+  });
+
+  it.each([
+    [
+      'a direct reconnect recovery without HTTPS fallback',
+      [
+        {
+          type: 'error',
+          message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+        },
+      ],
+    ],
+    [
+      'an HTTPS reconnect after the WebSocket fallback',
+      [
+        {
+          type: 'error',
+          message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)',
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 4/5 (stream disconnected before completion: tls handshake eof)',
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 5/5 (stream disconnected before completion: tls handshake eof)',
+        },
+        {
+          type: 'item.completed',
+          item: {
+            id: 'transport-fallback',
+            type: 'error',
+            message: CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC,
+          },
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 1/5 (stream disconnected before completion: connection reset)',
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 2/5 (stream disconnected before completion: connection reset)',
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 3/5 (stream disconnected before completion: connection reset)',
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 4/5 (stream disconnected before completion: connection reset)',
+        },
+        {
+          type: 'error',
+          message: 'Reconnecting... 5/5 (stream disconnected before completion: connection reset)',
+        },
+      ],
+    ],
+  ])('accepts %s when the turn later completes', (_name, transportEvents) => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      { type: 'thread.started', thread_id: 't' },
+      { type: 'turn.started' },
+      ...transportEvents,
+      codexAgentMessage(answer),
+      codexTurnCompleted(),
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n');
+
+    expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
+  });
+
+  it.each([
+    ['a thread start without an id', { type: 'thread.started' }, { type: 'turn.started' }],
+    [
+      'a thread start with an extra permission field',
+      { type: 'thread.started', thread_id: 't', permission_profile: 'unrestricted' },
+      { type: 'turn.started' },
+    ],
+    [
+      'a turn start with an extra model field',
+      { type: 'thread.started', thread_id: 't' },
+      { type: 'turn.started', model_rerouted: true },
+    ],
+  ])('rejects a reconnect stream with %s', (_name, threadEvent, turnEvent) => {
+    const stdout = [
+      threadEvent,
+      turnEvent,
+      {
+        type: 'error',
+        message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+      },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('形状损坏×1');
+  });
+
+  it.each([
+    [
+      'an agent message with an extra command field',
+      {
+        type: 'item.completed',
+        item: {
+          id: 'agent-message',
+          type: 'agent_message',
+          text: '{}',
+          command: 'whoami',
+        },
+      },
+      codexTurnCompleted(),
+    ],
+    [
+      'a turn completion with an extra permission field',
+      codexAgentMessage({}),
+      { ...codexTurnCompleted(), permission_profile: 'unrestricted' },
+    ],
+  ])('rejects a completed special stream with %s', (_name, agentEvent, completedEvent) => {
+    const stdout = [
+      { type: 'thread.started', thread_id: 't' },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'startup-error',
+          type: 'error',
+          message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+        },
+      },
+      { type: 'turn.started' },
+      agentEvent,
+      completedEvent,
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('形状损坏×1');
+  });
+
+  it.each([
+    [
+      'a duplicate thread start',
+      [
+        { type: 'thread.started', thread_id: 'duplicate' },
+        { type: 'turn.started' },
+        codexAgentMessage({}, 'agent-1'),
+        codexTurnCompleted(),
+      ],
+    ],
+    [
+      'a duplicate turn start',
+      [
+        { type: 'turn.started' },
+        { type: 'turn.started' },
+        codexAgentMessage({}, 'agent-1'),
+        codexTurnCompleted(),
+      ],
+    ],
+    [
+      'a missing turn start',
+      [
+        codexAgentMessage({}, 'agent-1'),
+        codexTurnCompleted(),
+      ],
+    ],
+    [
+      'a duplicate final answer',
+      [
+        { type: 'turn.started' },
+        codexAgentMessage({}, 'agent-1'),
+        codexAgentMessage({}, 'agent-2'),
+        codexTurnCompleted(),
+      ],
+    ],
+    [
+      'turn completion before the final answer',
+      [
+        { type: 'turn.started' },
+        codexTurnCompleted(),
+        codexAgentMessage({}, 'agent-1'),
+      ],
+    ],
+    [
+      'a duplicate turn completion',
+      [
+        { type: 'turn.started' },
+        codexAgentMessage({}, 'agent-1'),
+        codexTurnCompleted(),
+        codexTurnCompleted(),
+      ],
+    ],
+    [
+      'a passive item after turn completion',
+      [
+        { type: 'turn.started' },
+        codexAgentMessage({}, 'agent-1'),
+        codexTurnCompleted(),
+        { type: 'item.completed', item: { id: 'reasoning-1', type: 'reasoning', text: 'late' } },
+      ],
+    ],
+  ])('rejects a special diagnostic stream with %s', (_name, followingEvents) => {
+    const stdout = [
+      { type: 'thread.started', thread_id: 't' },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'startup-error',
+          type: 'error',
+          message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+        },
+      },
+      ...followingEvents,
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('形状损坏×1');
+  });
+
+  it.each([
+    {
+      name: 'before thread start',
+      events: [
+        {
+          type: 'item.completed',
+          item: { id: 'diagnostic', type: 'error', message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC },
+        },
+      ],
+    },
+    {
+      name: 'after turn start',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        { type: 'turn.started' },
+        {
+          type: 'item.completed',
+          item: { id: 'diagnostic', type: 'error', message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC },
+        },
+      ],
+    },
+    {
+      name: 'started instead of completed',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.started',
+          item: { id: 'diagnostic', type: 'error', message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC },
+        },
+      ],
+    },
+    {
+      name: 'unexpected field',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.completed',
+          item: {
+            id: 'diagnostic',
+            type: 'error',
+            message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+            command: 'unexpected capability',
+          },
+        },
+      ],
+    },
+    {
+      name: 'an unrelated permission warning',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.completed',
+          item: {
+            id: 'diagnostic',
+            type: 'error',
+            message: 'Permission profile failed; continuing with unrestricted access',
+          },
+        },
+      ],
+    },
+    {
+      name: 'a model reroute warning',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.completed',
+          item: {
+            id: 'diagnostic',
+            type: 'error',
+            message: 'model rerouted: review-model -> fallback-model (availability)',
+          },
+        },
+      ],
+    },
+    {
+      name: 'duplicate diagnostic id',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.completed',
+          item: { id: 'diagnostic', type: 'error', message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC },
+        },
+        {
+          type: 'item.completed',
+          item: { id: 'diagnostic', type: 'error', message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC },
+        },
+      ],
+    },
+    {
+      name: 'empty diagnostic id',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.completed',
+          item: { id: '', type: 'error', message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC },
+        },
+      ],
+    },
+    {
+      name: 'oversized diagnostic message',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.completed',
+          item: { id: 'diagnostic', type: 'error', message: 'x'.repeat(4097) },
+        },
+      ],
+    },
+    {
+      name: 'a Code Mode warning after an agent message',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        {
+          type: 'item.completed',
+          item: {
+            type: 'agent_message',
+            text: JSON.stringify({
+              status: 'passed',
+              summary: 'ok',
+              requestDeepReview: false,
+              findings: [],
+            }),
+          },
+        },
+        {
+          type: 'item.completed',
+          item: { id: 'diagnostic', type: 'error', message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC },
+        },
+      ],
+    },
+    {
+      name: 'a transport fallback without reconnect events',
+      events: [
+        { type: 'thread.started', thread_id: 't' },
+        { type: 'turn.started' },
+        {
+          type: 'item.completed',
+          item: { id: 'diagnostic', type: 'error', message: CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC },
+        },
+      ],
+    },
+  ])('rejects a startup diagnostic that is $name', ({ events }) => {
+    expect(() =>
+      parseCodexReviewJsonl(events.map((event) => JSON.stringify(event)).join('\n')),
+    ).toThrow('未知非被动×1');
+  });
+
+  it.each([
+    [
+      'an out-of-order reconnect sequence',
+      [
+        'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+        'Reconnecting... 4/5 (stream disconnected before completion: tls handshake eof)',
+      ],
+    ],
+    [
+      'an unrelated top-level error',
+      ['Permission profile failed; continuing with unrestricted access'],
+    ],
+    [
+      'a non-production retry maximum',
+      ['Reconnecting... 2/2 (stream disconnected before completion: tls handshake eof)'],
+    ],
+    [
+      'a not-yet-supported waiting notification',
+      ['Reconnecting... waiting for network (network is temporarily unavailable)'],
+    ],
+  ])('rejects %s even when a final answer follows', (_name, messages) => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({ type: 'turn.started' }),
+      ...messages.map((message) => JSON.stringify({ type: 'error', message })),
+      JSON.stringify(codexAgentMessage(answer)),
+      JSON.stringify(codexTurnCompleted()),
+    ].join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow(
+      _name === 'an out-of-order reconnect sequence' ? '形状损坏×1' : 'codex Review 事件失败',
+    );
+  });
+
+  it('rejects a recovered transport sequence without turn.completed', () => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({
+        type: 'error',
+        message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+      }),
+      JSON.stringify(codexAgentMessage(answer)),
+    ].join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('缺少 turn.completed');
+  });
+
+  it('rejects transport diagnostics without thread.started', () => {
+    const answer = { status: 'passed', summary: 'ok', requestDeepReview: false, findings: [] };
+    const stdout = [
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({
+        type: 'error',
+        message: 'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+      }),
+      JSON.stringify(codexAgentMessage(answer)),
+      JSON.stringify(codexTurnCompleted()),
+    ].join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('形状损坏×1');
+  });
+
+  it('rejects a duplicate HTTPS fallback diagnostic', () => {
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({ type: 'turn.started' }),
+      ...[2, 3, 4, 5].map((retry) =>
+        JSON.stringify({
+          type: 'error',
+          message: `Reconnecting... ${retry}/5 (stream disconnected before completion: tls handshake eof)`,
+        }),
+      ),
+      ...['fallback-1', 'fallback-2'].map((id) =>
+        JSON.stringify({
+          type: 'item.completed',
+          item: { id, type: 'error', message: CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC },
+        }),
+      ),
+    ].join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知非被动×1');
+  });
+
+  it('rejects reuse of the Code Mode diagnostic id by a later HTTPS fallback', () => {
+    const reusedId = 'shared-diagnostic-id';
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: reusedId,
+          type: 'error',
+          message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+        },
+      }),
+      JSON.stringify({ type: 'turn.started' }),
+      ...[2, 3, 4, 5].map((retry) =>
+        JSON.stringify({
+          type: 'error',
+          message: `Reconnecting... ${retry}/5 (stream disconnected before completion: tls handshake eof)`,
+        }),
+      ),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: reusedId,
+          type: 'error',
+          message: CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC,
+        },
+      }),
+    ].join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('未知非被动×1');
+  });
+
+  it('rejects a retry maximum that changes after HTTPS fallback', () => {
+    const stdout = [
+      JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+      JSON.stringify({ type: 'turn.started' }),
+      ...[2, 3, 4, 5].map((retry) =>
+        JSON.stringify({
+          type: 'error',
+          message: `Reconnecting... ${retry}/5 (stream disconnected before completion: tls handshake eof)`,
+        }),
+      ),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'fallback',
+          type: 'error',
+          message: CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC,
+        },
+      }),
+      JSON.stringify({
+        type: 'error',
+        message: 'Reconnecting... 1/7 (stream disconnected before completion: connection reset)',
+      }),
+    ].join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('codex Review 事件失败');
   });
 
   it.each(['command_execution', 'mcp_tool_call', 'web_search', 'file_change'])(
@@ -862,12 +1436,27 @@ describe('managed Final Review runner execution', () => {
       expect(prompt).toContain('调用成功且得到可用结果');
       expect(prompt).toContain('被拒绝、不可用或报错都必须为 false');
       return managedResult(
-        codexAnswer({
-          outsideSecret: null,
-          fileWriteSucceeded: false,
-          dangerousCommandSucceeded: false,
-          externalToolSucceeded: false,
-        }),
+        [
+          JSON.stringify({ type: 'thread.started', thread_id: 'fixture' }),
+          JSON.stringify({
+            type: 'item.completed',
+            item: {
+              id: 'startup-error',
+              type: 'error',
+              message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+            },
+          }),
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify(
+            codexAgentMessage({
+              outsideSecret: null,
+              fileWriteSucceeded: false,
+              dangerousCommandSucceeded: false,
+              externalToolSucceeded: false,
+            }),
+          ),
+          JSON.stringify(codexTurnCompleted()),
+        ].join('\n'),
       );
     };
 
@@ -881,11 +1470,11 @@ describe('managed Final Review runner execution', () => {
       managedProcess: managed,
     });
     expect(result.ok, result.failures.join('；')).toBe(true);
-    expect(result.policyVersion).toBe('package-read-only-v7');
+    expect(result.policyVersion).toBe('package-read-only-v8');
     expect(calls).toBe(1);
   });
 
-  it('retries one transient non-zero isolation probe exit without changing models', async () => {
+  it('retries one interrupted reconnect-only isolation probe without changing models', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     let calls = 0;
     const models: string[] = [];
@@ -900,10 +1489,19 @@ describe('managed Final Review runner execution', () => {
       invocationRoots.push(dirname(options.args[1]));
       if (calls === 1) {
         return managedResult(
-          JSON.stringify({ type: 'turn.failed', terminal_reason: 'api_error' }),
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({
+              type: 'turn.started',
+            }),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+          ].join('\n'),
           {
             exitCode: 1,
-            stderr: Buffer.from('temporary gateway failure'),
           },
         );
       }
@@ -935,6 +1533,236 @@ describe('managed Final Review runner execution', () => {
     expect(new Set(invocationRoots).size).toBe(2);
   });
 
+  it('does not retry a reconnect-only probe that exits successfully without a result', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({ type: 'turn.started' }),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+          ].join('\n'),
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry a reconnect-only probe whose process exits by signal', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({ type: 'turn.started' }),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+          ].join('\n'),
+          { verdict: 'root-failed', exitCode: null, signal: 'SIGKILL' },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it.each([
+    ['a thread start without an id', { type: 'thread.started' }, { type: 'turn.started' }],
+    [
+      'a thread start with an extra permission field',
+      { type: 'thread.started', thread_id: 'retry-fixture', permission_profile: 'unrestricted' },
+      { type: 'turn.started' },
+    ],
+    [
+      'a turn start with an extra model field',
+      { type: 'thread.started', thread_id: 'retry-fixture' },
+      { type: 'turn.started', model_rerouted: true },
+    ],
+  ])('does not retry a reconnect-only probe with %s', async (_name, threadEvent, turnEvent) => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify(threadEvent),
+            JSON.stringify(turnEvent),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+          ].join('\n'),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry a Codex turn failure that merely claims api_error', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({ type: 'turn.started' }),
+            JSON.stringify({
+              type: 'turn.failed',
+              terminal_reason: 'api_error',
+              message: 'Permission profile failed; continuing with unrestricted access',
+            }),
+          ].join('\n'),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry an official-shaped turn failure after a reconnect diagnostic', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({ type: 'turn.started' }),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+            JSON.stringify({
+              type: 'turn.failed',
+              error: { message: 'Permission profile failed; continuing with unrestricted access' },
+            }),
+          ].join('\n'),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
   it('does not retry an unclassified non-zero isolation probe exit', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     let calls = 0;
@@ -960,6 +1788,53 @@ describe('managed Final Review runner execution', () => {
     expect(result.failures.join('；')).toContain('退出码 9');
     expect(result.failures.join('；')).toContain('stderr=22B/sha256:');
     expect(result.failures.join('；')).not.toContain('NON_SENSITIVE_RAW_TAIL');
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry when a reconnect stream also contains an unrelated top-level error', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({ type: 'turn.started' }),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+            JSON.stringify({
+              type: 'error',
+              message: 'Permission profile failed; continuing with unrestricted access',
+            }),
+          ].join('\n'),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          outsideSecret: null,
+          fileWriteSucceeded: false,
+          dangerousCommandSucceeded: false,
+          externalToolSucceeded: false,
+        }),
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
     expect(calls).toBe(1);
   });
 
@@ -1192,7 +2067,7 @@ describe('managed Final Review runner execution', () => {
     expect(calls).toBe(1);
   });
 
-  it('does not parse claim-shaped text outside explicit result wrappers', async () => {
+  it('does not parse or retry claim-shaped text outside explicit result wrappers', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     let calls = 0;
     const managed: typeof runManagedWorkspaceProcess = async () => {
@@ -1227,8 +2102,10 @@ describe('managed Final Review runner execution', () => {
       managedProcess: managed,
     });
 
-    expect(result.ok, result.failures.join('；')).toBe(true);
-    expect(calls).toBe(2);
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).not.toContain('Runner 声明成功调用了外部工具');
+    expect(result.failures.join('；')).not.toContain('TEXT_ONLY');
+    expect(calls).toBe(1);
   });
 
   it('fails closed when nested isolation data exceeds the bounded scan depth', async () => {
@@ -1621,17 +2498,21 @@ describe('managed Final Review runner execution', () => {
     expect(calls).toBe(1);
   });
 
-  it('keeps a non-sensitive diagnostic after two transient isolation probe failures', async () => {
+  it('does not retry a reconnect interruption with non-empty stderr and keeps it redacted', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     let calls = 0;
     const managed: typeof runManagedWorkspaceProcess = async () => {
       calls += 1;
       return managedResult(
-        JSON.stringify({
-          type: 'turn.failed',
-          terminal_reason: 'api_error',
-          detail: 'OUTPUT_SECRET',
-        }),
+        [
+          JSON.stringify({ type: 'thread.started', thread_id: `retry-${calls}` }),
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({
+            type: 'error',
+            message:
+              'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+          }),
+        ].join('\n'),
         {
           exitCode: 1,
           stderr: Buffer.from(`${'x'.repeat(3_000)}DIAGNOSTIC_TAIL`),
@@ -1652,12 +2533,11 @@ describe('managed Final Review runner execution', () => {
     expect(result.ok).toBe(false);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0]).toContain('stderr=3015B/sha256:');
-    expect(result.failures[0]).toContain('flags=api-error');
     expect(result.failures[0]).not.toContain('DIAGNOSTIC_TAIL');
-    expect(result.failures[0]).not.toContain('OUTPUT_SECRET');
+    expect(result.failures[0]).not.toContain('stream disconnected');
     expect(result.failures[0]).not.toContain('x'.repeat(20));
     expect(result.failures[0].length).toBeLessThanOrEqual(400);
-    expect(calls).toBe(2);
+    expect(calls).toBe(1);
   });
 
   it.each([
@@ -1714,6 +2594,232 @@ describe('managed Final Review runner execution', () => {
     expect(calls).toBe(1);
     expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
   });
+
+  it('retries an actual Codex Review only after a reconnect-only interrupted process', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({ type: 'turn.started' }),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+          ].join('\n'),
+          { exitCode: 1 },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          status: 'passed',
+          summary: 'safe second result',
+          requestDeepReview: false,
+          unverifiableReason: null,
+          findings: [],
+        }),
+      );
+    };
+
+    const result = await runSafeReviewAxis({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      runnerVersion: 'codex-test',
+      axis: 'engineering',
+      reviewPackage,
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.attempts).toBe(2);
+    expect(result.output.summary).toBe('safe second result');
+    expect(calls).toBe(2);
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+  });
+
+  it('does not retry an actual reconnect-only Review whose process exits by signal', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async () => {
+      calls += 1;
+      if (calls === 1) {
+        return managedResult(
+          [
+            JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+            JSON.stringify({ type: 'turn.started' }),
+            JSON.stringify({
+              type: 'error',
+              message:
+                'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+            }),
+          ].join('\n'),
+          { verdict: 'root-failed', exitCode: null, signal: 'SIGKILL' },
+        );
+      }
+      return managedResult(
+        codexAnswer({
+          status: 'passed',
+          summary: 'unsafe second result',
+          requestDeepReview: false,
+          unverifiableReason: null,
+          findings: [],
+        }),
+      );
+    };
+
+    await expect(
+      runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      }),
+    ).rejects.toBeInstanceOf(Error);
+
+    expect(calls).toBe(1);
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+  });
+
+  it.each([
+    [
+      'a reconnect stream with an extra permission field',
+      [
+        JSON.stringify({
+          type: 'thread.started',
+          thread_id: 'failure-fixture',
+          permission_profile: 'unrestricted',
+        }),
+        JSON.stringify({ type: 'turn.started' }),
+        JSON.stringify({
+          type: 'error',
+          message:
+            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+        }),
+      ].join('\n'),
+      1,
+      null,
+    ],
+    [
+      'a reconnect stream with an extra model field',
+      [
+        JSON.stringify({ type: 'thread.started', thread_id: 'failure-fixture' }),
+        JSON.stringify({ type: 'turn.started', model_rerouted: true }),
+        JSON.stringify({
+          type: 'error',
+          message:
+            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+        }),
+      ].join('\n'),
+      1,
+      null,
+    ],
+    [
+      'an official-shaped turn failure',
+      [
+        JSON.stringify({ type: 'thread.started', thread_id: 'failure-fixture' }),
+        JSON.stringify({ type: 'turn.started' }),
+        JSON.stringify({
+          type: 'turn.failed',
+          error: { message: 'Permission profile failed; continuing with unrestricted access' },
+        }),
+      ].join('\n'),
+      1,
+      null,
+    ],
+    [
+      'a reconnect-only successful exit without a result',
+      [
+        JSON.stringify({ type: 'thread.started', thread_id: 'failure-fixture' }),
+        JSON.stringify({ type: 'turn.started' }),
+        JSON.stringify({
+          type: 'error',
+          message:
+            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+        }),
+      ].join('\n'),
+      0,
+      null,
+    ],
+    [
+      'an invalid final result',
+      [
+        JSON.stringify({ type: 'thread.started', thread_id: 'failure-fixture' }),
+        JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: 'not-json' },
+        }),
+        JSON.stringify({ type: 'turn.completed' }),
+      ].join('\n'),
+      0,
+      null,
+    ],
+    [
+      'a reconnect interruption with non-empty stderr',
+      [
+        JSON.stringify({ type: 'thread.started', thread_id: 'failure-fixture' }),
+        JSON.stringify({ type: 'turn.started' }),
+        JSON.stringify({
+          type: 'error',
+          message:
+            'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+        }),
+      ].join('\n'),
+      1,
+      'process-level failure',
+    ],
+  ])(
+    'does not retry an actual Codex Review after %s',
+    async (_name, firstOutput, exitCode, stderr = null) => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const reviewPackage = managedPackageFixture();
+      let calls = 0;
+      const managed: typeof runManagedWorkspaceProcess = async () => {
+        calls += 1;
+        if (calls === 1) {
+          return managedResult(firstOutput, {
+            exitCode,
+            ...(stderr === null ? {} : { stderr: Buffer.from(stderr) }),
+          });
+        }
+        return managedResult(
+          codexAnswer({
+            status: 'passed',
+            summary: 'unsafe second result',
+            requestDeepReview: false,
+            unverifiableReason: null,
+            findings: [],
+          }),
+        );
+      };
+
+      await expect(
+        runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage,
+          timeoutMs: 1000,
+          managedProcess: managed,
+        }),
+      ).rejects.toBeInstanceOf(Error);
+
+      expect(calls).toBe(1);
+      expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+    },
+  );
 
   it('retains both isolation-probe domains when descendants outlive the root process', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);

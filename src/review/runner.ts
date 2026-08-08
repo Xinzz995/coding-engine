@@ -26,7 +26,7 @@ import {
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
 const MAX_RUNNER_OUTPUT_BYTES = 4 * 1024 * 1024;
-const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v7';
+const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v8';
 const FINAL_REVIEW_OPERATION = {
   kind: 'final-review',
   delegation: 'read-only-v1',
@@ -40,6 +40,12 @@ const CODEX_KNOWN_DISABLED_ITEM_TYPES = new Set([
   'mcp_tool_call',
   'web_search',
 ]);
+const CODEX_CODE_MODE_DISABLED_DIAGNOSTIC =
+  'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
+const CODEX_TRANSPORT_FALLBACK_PREFIX = 'Falling back from WebSockets to HTTPS transport. ';
+const CODEX_TRANSPORT_RETRY_MAXIMUM = 5;
+const MAX_CODEX_DIAGNOSTIC_ID_CHARS = 256;
+const MAX_CODEX_DIAGNOSTIC_REASON_CHARS = 4096;
 const CODEX_EVENT_SAFETY_CATEGORIES = [
   'shape-invalid',
   'known-disabled-tool',
@@ -496,6 +502,330 @@ interface CodexEventSafetyScan {
   readonly retryableServiceFailure: boolean;
 }
 
+interface CodexEventStreamState {
+  eventCount: number;
+  sawThreadStarted: boolean;
+  threadStartedCount: number;
+  startupWindowOpen: boolean;
+  sawTurnStarted: boolean;
+  turnStartedCount: number;
+  sawAgentMessage: boolean;
+  agentMessageCount: number;
+  sawTurnCompleted: boolean;
+  turnCompletedCount: number;
+  sawCodeModeDiagnostic: boolean;
+  transportDiagnosticCount: number;
+  transportRetryMaximum: number | null;
+  lastTransportRetry: number | null;
+  sawTransportFallback: boolean;
+  specialSequenceInvalid: boolean;
+  readonly diagnosticIds: Set<string>;
+}
+
+function codexEventStreamState(): CodexEventStreamState {
+  return {
+    eventCount: 0,
+    sawThreadStarted: false,
+    threadStartedCount: 0,
+    startupWindowOpen: false,
+    sawTurnStarted: false,
+    turnStartedCount: 0,
+    sawAgentMessage: false,
+    agentMessageCount: 0,
+    sawTurnCompleted: false,
+    turnCompletedCount: 0,
+    sawCodeModeDiagnostic: false,
+    transportDiagnosticCount: 0,
+    transportRetryMaximum: null,
+    lastTransportRetry: null,
+    sawTransportFallback: false,
+    specialSequenceInvalid: false,
+    diagnosticIds: new Set(),
+  };
+}
+
+function isSpecialCodexEventStream(state: CodexEventStreamState): boolean {
+  return (
+    state.sawCodeModeDiagnostic ||
+    state.transportDiagnosticCount > 0 ||
+    state.sawTransportFallback
+  );
+}
+
+function hasExactObjectKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const keys = Object.keys(value);
+  return keys.length === expected.length && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function isBoundedCodexId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_CODEX_DIAGNOSTIC_ID_CHARS &&
+    !value.includes('\0') &&
+    !value.includes('\r') &&
+    !value.includes('\n')
+  );
+}
+
+function isCodexUsage(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const usage = value as Record<string, unknown>;
+  const fields = [
+    'input_tokens',
+    'cached_input_tokens',
+    'cache_write_input_tokens',
+    'output_tokens',
+    'reasoning_output_tokens',
+  ] as const;
+  return (
+    hasExactObjectKeys(usage, fields) &&
+    fields.every(
+      (field) =>
+        typeof usage[field] === 'number' &&
+        Number.isSafeInteger(usage[field]) &&
+        usage[field] >= 0,
+    )
+  );
+}
+
+function hasExactCodexPassiveShape(
+  envelopeType: string,
+  envelope: Record<string, unknown>,
+  itemType: string | null,
+): boolean {
+  if (envelopeType === 'thread.started') {
+    return (
+      hasExactObjectKeys(envelope, ['type', 'thread_id']) &&
+      isBoundedCodexId(envelope.thread_id)
+    );
+  }
+  if (envelopeType === 'turn.started') return hasExactObjectKeys(envelope, ['type']);
+  if (envelopeType === 'turn.completed') {
+    return hasExactObjectKeys(envelope, ['type', 'usage']) && isCodexUsage(envelope.usage);
+  }
+  if (!CODEX_ITEM_ENVELOPE_TYPES.has(envelopeType) || itemType === null) return false;
+  if (!hasExactObjectKeys(envelope, ['type', 'item'])) return false;
+  const item = envelope.item;
+  if (typeof item !== 'object' || item === null || Array.isArray(item)) return false;
+  const record = item as Record<string, unknown>;
+  if (!isBoundedCodexId(record.id) || record.type !== itemType) return false;
+  if (itemType === 'agent_message' || itemType === 'reasoning') {
+    return (
+      envelopeType === 'item.completed' &&
+      hasExactObjectKeys(record, ['id', 'type', 'text']) &&
+      typeof record.text === 'string'
+    );
+  }
+  if (itemType !== 'todo_list' || !hasExactObjectKeys(record, ['id', 'type', 'items'])) {
+    return false;
+  }
+  if (!Array.isArray(record.items)) return false;
+  return record.items.every(
+    (item) =>
+      typeof item === 'object' &&
+      item !== null &&
+      !Array.isArray(item) &&
+      hasExactObjectKeys(item as Record<string, unknown>, ['text', 'completed']) &&
+      typeof (item as Record<string, unknown>).text === 'string' &&
+      typeof (item as Record<string, unknown>).completed === 'boolean',
+  );
+}
+
+type AcceptedCodexDiagnostic = 'code-mode-disabled' | 'transport-reconnect' | 'transport-fallback';
+
+function exactCodexErrorItem(envelope: Record<string, unknown>): {
+  id: string;
+  message: string;
+} | null {
+  if (!hasExactObjectKeys(envelope, ['type', 'item'])) return null;
+  const item = envelope.item;
+  if (typeof item !== 'object' || item === null || Array.isArray(item)) return null;
+  const record = item as Record<string, unknown>;
+  if (!hasExactObjectKeys(record, ['id', 'type', 'message']) || record.type !== 'error') {
+    return null;
+  }
+  if (
+    typeof record.id !== 'string' ||
+    record.id.length === 0 ||
+    record.id.length > MAX_CODEX_DIAGNOSTIC_ID_CHARS ||
+    record.id.includes('\0') ||
+    typeof record.message !== 'string' ||
+    record.message.length === 0 ||
+    record.message.includes('\0') ||
+    record.message.includes('\r') ||
+    record.message.includes('\n')
+  ) {
+    return null;
+  }
+  return { id: record.id, message: record.message };
+}
+
+function transportReconnect(
+  message: string,
+): { retry: number; maximum: number } | null {
+  const matched = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(([^\0\r\n]+)\)$/u.exec(
+    message,
+  );
+  if (!matched || matched[3].length > MAX_CODEX_DIAGNOSTIC_REASON_CHARS) return null;
+  const retry = Number(matched[1]);
+  const maximum = Number(matched[2]);
+  if (
+    !Number.isSafeInteger(retry) ||
+    !Number.isSafeInteger(maximum) ||
+    retry > maximum ||
+    maximum !== CODEX_TRANSPORT_RETRY_MAXIMUM
+  ) {
+    return null;
+  }
+  return { retry, maximum };
+}
+
+/**
+ * Accept only two observed, non-capability diagnostics: the exact fail-closed Code Mode notice,
+ * and an ordered Responses transport reconnect/fallback sequence. Configuration, permission,
+ * model-reroute, tool, later and unknown errors remain blocking.
+ */
+function acceptCodexDiagnostic(
+  envelopeType: string,
+  envelope: Record<string, unknown>,
+  state: CodexEventStreamState,
+): AcceptedCodexDiagnostic | null {
+  if (envelopeType === 'item.completed') {
+    const item = exactCodexErrorItem(envelope);
+    if (!item || state.diagnosticIds.has(item.id)) return null;
+    if (
+      item.message === CODEX_CODE_MODE_DISABLED_DIAGNOSTIC &&
+      state.startupWindowOpen &&
+      state.threadStartedCount === 1 &&
+      !state.specialSequenceInvalid &&
+      !state.sawCodeModeDiagnostic
+    ) {
+      state.sawCodeModeDiagnostic = true;
+      state.startupWindowOpen = false;
+      state.diagnosticIds.add(item.id);
+      state.eventCount += 1;
+      return 'code-mode-disabled';
+    }
+    const fallbackReason = item.message.startsWith(CODEX_TRANSPORT_FALLBACK_PREFIX)
+      ? item.message.slice(CODEX_TRANSPORT_FALLBACK_PREFIX.length)
+      : '';
+    if (
+      fallbackReason.length > 0 &&
+      fallbackReason.length <= MAX_CODEX_DIAGNOSTIC_REASON_CHARS &&
+      !fallbackReason.includes('\0') &&
+      !fallbackReason.includes('\r') &&
+      !fallbackReason.includes('\n') &&
+      state.sawThreadStarted &&
+      state.threadStartedCount === 1 &&
+      state.sawTurnStarted &&
+      state.turnStartedCount === 1 &&
+      !state.sawAgentMessage &&
+      !state.sawTurnCompleted &&
+      !state.specialSequenceInvalid &&
+      !state.sawTransportFallback &&
+      state.transportRetryMaximum !== null &&
+      state.lastTransportRetry === state.transportRetryMaximum
+    ) {
+      state.sawTransportFallback = true;
+      state.transportRetryMaximum = null;
+      state.lastTransportRetry = null;
+      state.diagnosticIds.add(item.id);
+      state.eventCount += 1;
+      return 'transport-fallback';
+    }
+    return null;
+  }
+
+  if (
+    envelopeType !== 'error' ||
+    !hasExactObjectKeys(envelope, ['type', 'message']) ||
+    typeof envelope.message !== 'string' ||
+    !state.sawThreadStarted ||
+    state.threadStartedCount !== 1 ||
+    !state.sawTurnStarted ||
+    state.turnStartedCount !== 1 ||
+    state.sawAgentMessage ||
+    state.sawTurnCompleted ||
+    state.specialSequenceInvalid
+  ) {
+    return null;
+  }
+  const reconnect = transportReconnect(envelope.message);
+  if (reconnect === null) return null;
+  if (state.lastTransportRetry === null) {
+    if (state.sawTransportFallback ? reconnect.retry !== 1 : reconnect.retry !== 2) return null;
+    state.transportRetryMaximum = reconnect.maximum;
+    state.lastTransportRetry = reconnect.retry;
+  } else {
+    if (
+      reconnect.maximum !== state.transportRetryMaximum ||
+      reconnect.retry !== state.lastTransportRetry + 1
+    ) {
+      return null;
+    }
+    state.lastTransportRetry = reconnect.retry;
+  }
+  state.transportDiagnosticCount += 1;
+  state.eventCount += 1;
+  return 'transport-reconnect';
+}
+
+function observeCodexEnvelope(
+  envelopeType: string,
+  itemType: string | null,
+  envelope: Record<string, unknown>,
+  state: CodexEventStreamState,
+): void {
+  if (!hasExactCodexPassiveShape(envelopeType, envelope, itemType)) {
+    state.specialSequenceInvalid = true;
+  }
+  if (state.sawTurnCompleted) state.specialSequenceInvalid = true;
+  if (envelopeType === 'thread.started') {
+    state.threadStartedCount += 1;
+    const validFirstThread = state.eventCount === 0 && state.threadStartedCount === 1;
+    if (!validFirstThread) state.specialSequenceInvalid = true;
+    state.sawThreadStarted = true;
+    state.startupWindowOpen = validFirstThread;
+    state.eventCount += 1;
+    return;
+  }
+  state.startupWindowOpen = false;
+  if (state.threadStartedCount !== 1) state.specialSequenceInvalid = true;
+  if (envelopeType === 'turn.started') {
+    state.turnStartedCount += 1;
+    if (
+      state.turnStartedCount !== 1 ||
+      state.sawAgentMessage ||
+      state.sawTurnCompleted
+    ) {
+      state.specialSequenceInvalid = true;
+    }
+    state.sawTurnStarted = true;
+  } else if (state.turnStartedCount !== 1) {
+    state.specialSequenceInvalid = true;
+  }
+  if (envelopeType === 'item.completed' && itemType === 'agent_message') {
+    state.agentMessageCount += 1;
+    if (state.agentMessageCount !== 1 || state.sawTurnCompleted) {
+      state.specialSequenceInvalid = true;
+    }
+    state.sawAgentMessage = true;
+  }
+  if (envelopeType === 'turn.completed') {
+    state.turnCompletedCount += 1;
+    if (
+      state.turnCompletedCount !== 1 ||
+      state.turnStartedCount !== 1 ||
+      state.agentMessageCount !== 1
+    ) {
+      state.specialSequenceInvalid = true;
+    }
+    state.sawTurnCompleted = true;
+  }
+  state.eventCount += 1;
+}
+
 function isolationClaimPolicyFailures(value: unknown): string[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return [];
   const claim = value as Record<string, unknown>;
@@ -614,6 +944,8 @@ function scanCodexEventSafety(stdout: string): CodexEventSafetyScan {
   let sawItemEnvelope = false;
   let sawTurnCompleted = false;
   let sawApiFailure = false;
+  let sawNonRetryableFailure = false;
+  const streamState = codexEventStreamState();
 
   for (const line of stdout.split(/\r?\n/u)) {
     if (line.trim() === '') continue;
@@ -636,11 +968,23 @@ function scanCodexEventSafety(stdout: string): CodexEventSafetyScan {
       continue;
     }
     const envelopeType = envelope.type;
+    const acceptedDiagnostic = acceptCodexDiagnostic(envelopeType, envelope, streamState);
+    if (acceptedDiagnostic !== null) {
+      if (acceptedDiagnostic === 'transport-reconnect') sawApiFailure = true;
+      continue;
+    }
     if (envelopeType === 'error' || envelopeType === 'turn.failed') {
       if (Object.hasOwn(envelope, 'item')) {
         categoryCounts['shape-invalid'] += 1;
       }
-      if (envelope.terminal_reason === 'api_error') sawApiFailure = true;
+      if (
+        envelopeType === 'error' &&
+        typeof envelope.message === 'string' &&
+        transportReconnect(envelope.message) !== null
+      ) {
+        categoryCounts['shape-invalid'] += 1;
+      }
+      sawNonRetryableFailure = true;
       continue;
     }
     if (CODEX_PASSIVE_ENVELOPE_TYPES.has(envelopeType)) {
@@ -648,6 +992,7 @@ function scanCodexEventSafety(stdout: string): CodexEventSafetyScan {
         categoryCounts['shape-invalid'] += 1;
       }
       if (envelopeType === 'turn.completed') sawTurnCompleted = true;
+      observeCodexEnvelope(envelopeType, null, envelope, streamState);
       continue;
     }
     if (!CODEX_ITEM_ENVELOPE_TYPES.has(envelopeType)) {
@@ -686,6 +1031,11 @@ function scanCodexEventSafety(stdout: string): CodexEventSafetyScan {
         // Model text shape is validated later. Safety scanning must continue through all events.
       }
     }
+    observeCodexEnvelope(envelopeType, itemType, envelope, streamState);
+  }
+
+  if (isSpecialCodexEventStream(streamState) && streamState.specialSequenceInvalid) {
+    categoryCounts['shape-invalid'] += 1;
   }
 
   const totalPolicyFailures = CODEX_EVENT_SAFETY_CATEGORIES.reduce(
@@ -712,6 +1062,7 @@ function scanCodexEventSafety(stdout: string): CodexEventSafetyScan {
     retryableServiceFailure:
       everyLineValid &&
       sawApiFailure &&
+      !sawNonRetryableFailure &&
       !sawItemEnvelope &&
       !sawTurnCompleted &&
       totalPolicyFailures === 0,
@@ -728,6 +1079,7 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
   const policyViolation = codexEventPolicyViolation(stdout);
   if (policyViolation) throw policyViolation;
   let finalMessage: string | null = null;
+  const streamState = codexEventStreamState();
   for (const [index, line] of stdout.split(/\r?\n/).entries()) {
     if (line.trim() === '') continue;
     let event: unknown;
@@ -741,6 +1093,7 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
     }
     const envelope = event as Record<string, unknown>;
     const envelopeType = typeof envelope.type === 'string' ? envelope.type : 'unknown';
+    if (acceptCodexDiagnostic(envelopeType, envelope, streamState) !== null) continue;
     if (envelopeType === 'error' || envelopeType === 'turn.failed') {
       throw new Error('codex Review 事件失败');
     }
@@ -748,6 +1101,7 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
       if (Object.hasOwn(envelope, 'item')) {
         throw new RunnerPolicyViolation('codex Review 事件形状损坏');
       }
+      observeCodexEnvelope(envelopeType, null, envelope, streamState);
       continue;
     }
     if (!CODEX_ITEM_ENVELOPE_TYPES.has(envelopeType)) {
@@ -771,8 +1125,12 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
       }
       finalMessage = record.text;
     }
+    observeCodexEnvelope(envelopeType, type, envelope, streamState);
   }
   if (finalMessage === null) throw new Error('codex JSONL 缺少最终 agent_message');
+  if (isSpecialCodexEventStream(streamState) && !streamState.sawTurnCompleted) {
+    throw new Error('codex Review 恢复的传输事件缺少 turn.completed');
+  }
   try {
     return JSON.parse(finalMessage);
   } catch {
@@ -1076,15 +1434,23 @@ async function invokeRaw(options: {
   temporaryUses?: readonly ManagedTemporaryUse[];
 }): Promise<{ result: ProcessResult; parsed: unknown }> {
   const result = await runProcess(options);
+  let codexRetryableServiceFailure = false;
   if (options.runner === 'codex') {
-    const policyViolation = codexEventPolicyViolation(result.stdout);
-    if (policyViolation) throw policyViolation;
+    const safetyScan = scanCodexEventSafety(result.stdout);
+    if (safetyScan.policyFailures.length > 0) {
+      throw new RunnerPolicyViolation(safetyScan.policyFailures.join('；'));
+    }
+    codexRetryableServiceFailure =
+      safetyScan.retryableServiceFailure && result.stderr.trim() === '';
   }
   if (result.timedOut) throw new Error(`${options.runner} Review 超时`);
   if (result.processTreeNotEmpty) {
     throw new RunnerPolicyViolation(`${options.runner} Review 根进程退出后仍有后代进程`);
   }
   if (result.exitCode !== 0) {
+    if (typeof result.exitCode === 'number' && result.exitCode !== 0 && codexRetryableServiceFailure) {
+      throw runnerRetryableServiceFailure(options.runner, result);
+    }
     throw runnerExitFailure(options.runner, result);
   }
   return { result, parsed: parsedFinalJson(options.runner, result.stdout) };
@@ -1224,7 +1590,12 @@ export async function probeRunnerIsolation(options: {
         if (safetyScan.policyFailures.length > 0) {
           throw new RunnerPolicyViolation(safetyScan.policyFailures.join('；'));
         }
-        if (safetyScan.retryableServiceFailure) {
+        if (
+          typeof result.exitCode === 'number' &&
+          result.exitCode !== 0 &&
+          result.stderr.trim() === '' &&
+          safetyScan.retryableServiceFailure
+        ) {
           throw runnerRetryableServiceFailure(options.runner, result);
         }
         if (result.exitCode !== 0) throw runnerExitFailure(options.runner, result);
@@ -1316,10 +1687,14 @@ export async function runSafeReviewAxis(options: {
       };
     } catch (error) {
       lastError = error;
+      const retryable =
+        error instanceof RunnerRetryableServiceFailure ||
+        (options.runner !== 'codex' &&
+          !(error instanceof RunnerPolicyViolation) &&
+          !(error instanceof ReviewTemporaryDirectoryError) &&
+          !(error instanceof WorkspaceSafetyError));
       if (
-        error instanceof RunnerPolicyViolation ||
-        error instanceof ReviewTemporaryDirectoryError ||
-        error instanceof WorkspaceSafetyError ||
+        !retryable ||
         options.termination?.signal.aborted
       )
         break;
@@ -1333,8 +1708,10 @@ export async function runSafeReviewAxis(options: {
   ) {
     throw new RunnerPolicyViolation(errorMessage(lastError), attempts);
   }
+  const attemptDescription =
+    attempts === 1 ? '无法完成' : '重试一次后仍无法完成';
   throw new Error(
-    `同一 ${options.runner}/${options.model} 重试一次后仍无法完成 ${options.axis} Review：` +
+    `同一 ${options.runner}/${options.model} ${attemptDescription} ${options.axis} Review：` +
       (lastError instanceof Error ? lastError.message : String(lastError)),
   );
 }

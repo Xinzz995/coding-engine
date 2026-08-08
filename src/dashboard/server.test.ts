@@ -12,7 +12,10 @@ import {
   readDisplayState,
 } from '../engine/state.js';
 import { readQualityContract } from '../quality/contract.js';
+import { REVIEW_RULES_DIGEST } from '../review/rules.js';
+import type { ReviewStateRead } from '../review/state.js';
 import type { StoryValidationObservation } from '../review/story-validation-observation.js';
+import { REVIEW_RULES_VERSION } from '../review/types.js';
 import {
   setState,
   buildApiResponse,
@@ -370,7 +373,12 @@ describe('buildApiResponse', () => {
         status: 'passed',
         deliveryStatus: 'ready',
         shadow: false,
-        binding: { headSha: head, storyValidationDigest: receiptSet },
+        binding: {
+          headSha: head,
+          storyValidationDigest: receiptSet,
+          reviewRulesVersion: REVIEW_RULES_VERSION,
+          reviewRulesDigest: REVIEW_RULES_DIGEST,
+        },
       },
     } as unknown as Parameters<typeof evaluateDashboardReviewCompletion>[0];
 
@@ -387,6 +395,18 @@ describe('buildApiResponse', () => {
     expect(evaluateDashboardReviewCompletion(ready, 'd'.repeat(40), receiptSet)).toMatchObject({
       current: false,
       reason: '最终 Review 对应的提交已变化',
+    });
+    const staleVersion = structuredClone(ready) as Extract<ReviewStateRead, { status: 'ready' }>;
+    staleVersion.state.binding.reviewRulesVersion = '1.3.0';
+    expect(evaluateDashboardReviewCompletion(staleVersion, head, receiptSet)).toMatchObject({
+      current: false,
+      reason: '最终 Review 使用的规则已变化',
+    });
+    const staleDigest = structuredClone(ready) as Extract<ReviewStateRead, { status: 'ready' }>;
+    staleDigest.state.binding.reviewRulesDigest = `sha256:${'d'.repeat(64)}`;
+    expect(evaluateDashboardReviewCompletion(staleDigest, head, receiptSet)).toMatchObject({
+      current: false,
+      reason: '最终 Review 使用的规则已变化',
     });
     expect(evaluateDashboardReviewCompletion({ status: 'missing' }, head, receiptSet)).toEqual({
       current: false,
