@@ -40,7 +40,7 @@ const COMMAND_TIMEOUT_MS = 5 * 60_000;
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_CANDIDATE_FILE_BYTES = 64 * 1024 * 1024;
 const WINDOWS_SYSTEM_COMMAND_PROCESSOR = 'C:\\Windows\\System32\\cmd.exe';
-const WINDOWS_COMMAND_TOKEN = /^[A-Za-z0-9_ .:\\/\-]+$/u;
+const WINDOWS_COMMAND_TOKEN = /^[A-Za-z0-9_ .:\\/~\-]+$/u;
 
 function fail(message) {
   throw new Error(`candidate install smoke failed: ${message}`);

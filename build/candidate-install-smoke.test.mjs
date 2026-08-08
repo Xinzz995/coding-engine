@@ -281,7 +281,7 @@ describe('candidate install smoke identity', () => {
   );
 
   it('builds a fixed Windows command boundary and rejects command metacharacters', () => {
-    const invocation = buildWindowsCommandInvocation('C:\\safe path\\coding-x.cmd', [
+    const invocation = buildWindowsCommandInvocation('C:\\Users\\RUNNER~1\\coding-x.cmd', [
       'doctor',
       '--workspace',
       'D:\\runner temp\\workspace',
@@ -294,7 +294,7 @@ describe('candidate install smoke identity', () => {
         '/v:off',
         '/s',
         '/c',
-        '""C:\\safe path\\coding-x.cmd" "doctor" "--workspace" "D:\\runner temp\\workspace" "--json""',
+        '""C:\\Users\\RUNNER~1\\coding-x.cmd" "doctor" "--workspace" "D:\\runner temp\\workspace" "--json""',
       ],
       windowsVerbatimArguments: true,
     });
