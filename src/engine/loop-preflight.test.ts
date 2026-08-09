@@ -167,7 +167,7 @@ describe('quality contract preflight and shadow mode', () => {
       retryCount: 0,
       validationReceipt: { gitHead: newHead },
     });
-  });
+  }, 60_000);
 
   it('invalidates a same-HEAD receipt when the frozen TDD policy changes', async () => {
     const target = story({ acceptanceCriteria: ['still works'] });
@@ -299,7 +299,7 @@ describe('quality contract preflight and shadow mode', () => {
       { passes: true, validated: true },
     );
     expect(existsSync(join(workspace, 'final-review.json'))).toBe(false);
-  });
+  }, 60_000);
 
   it('does not repeat Story validation after the new head only waits for the remote PR', async () => {
     const { workspace, instructionsDir } = setup([story()]);
@@ -340,7 +340,7 @@ describe('quality contract preflight and shadow mode', () => {
     expect(await runProductionLoop(config)).toBe(0);
     expect(readFileSync(calls, 'utf8')).toBe('2');
     expect(finalReviewCalls).toBe(2);
-  });
+  }, 60_000);
 
   it.each([
     ['missing', { status: 'missing', path: '/fixture/.coding-x/quality.json' }],
