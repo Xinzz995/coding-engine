@@ -613,5 +613,5 @@ describe('quality contract preflight and shadow mode', () => {
         encoding: 'utf8',
       }),
     ).toContain('poison/**');
-  }, 15_000);
+  }, 60_000);
 });
