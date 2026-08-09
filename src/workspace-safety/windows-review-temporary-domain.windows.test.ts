@@ -30,6 +30,23 @@ import { inspectWindowsPathAttributes } from './windows-path-attributes.js';
 const roots: string[] = [];
 const WINDOWS_REVIEW_WOF_TEST_TIMEOUT_MS = 120_000;
 const WINDOWS_REVIEW_MANAGED_TEST_TIMEOUT_MS = 2 * WINDOWS_IDENTITY_TOTAL_TIMEOUT_MS + 120_000;
+const MANAGED_REVIEW_RUNNER_SOURCE = [
+  'const fs=require("node:fs");',
+  'const prompt=fs.readFileSync(0);',
+  'if(prompt.length===0) process.exit(9);',
+  'const answer={status:"passed",summary:"ok",requestDeepReview:false,',
+  '  unverifiableReason:null,findings:[]};',
+  'const lastMessageIndex=process.argv.indexOf("--output-last-message");',
+  'if(lastMessageIndex<0 || !process.argv[lastMessageIndex+1]) process.exit(10);',
+  'fs.writeFileSync(process.argv[lastMessageIndex+1],JSON.stringify(answer));',
+  'const output=[',
+  '  JSON.stringify({type:"thread.started",thread_id:"fixture"}),',
+  '  JSON.stringify({type:"item.completed",item:{',
+  '    type:"agent_message",text:JSON.stringify(answer)}}),',
+  '  JSON.stringify({type:"turn.completed"}),',
+  '].join("\\n")+"\\n";',
+  'fs.writeSync(1,output);',
+].join('\n');
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -53,20 +70,7 @@ function managedReviewPackage(onPhase: (phase: string) => void = () => undefined
   const input = '{}\n';
   const schema = '{}\n';
   const manifest = '{}\n';
-  const runner = [
-    'const fs=require("node:fs");',
-    'const prompt=fs.readFileSync(0);',
-    'if(prompt.length===0) process.exit(9);',
-    'const answer={status:"passed",summary:"ok",requestDeepReview:false,',
-    '  unverifiableReason:null,findings:[]};',
-    'const output=[',
-    '  JSON.stringify({type:"thread.started",thread_id:"fixture"}),',
-    '  JSON.stringify({type:"item.completed",item:{',
-    '    type:"agent_message",text:JSON.stringify(answer)}}),',
-    '  JSON.stringify({type:"turn.completed"}),',
-    '].join("\\n")+"\\n";',
-    'fs.writeSync(1,output);',
-  ].join('\n');
+  const runner = MANAGED_REVIEW_RUNNER_SOURCE;
   const inputPath = join(temporary.root, 'review-input.json');
   const schemaPath = join(temporary.root, 'response-schema.json');
   const manifestPath = join(temporary.root, 'manifest.json');
@@ -155,6 +159,37 @@ function expectWindowsRenameDenied(source: string, destination: string): void {
   expect(existsSync(source)).toBe(true);
   expect(existsSync(destination)).toBe(false);
 }
+
+describe('fixed Review proxy fixture protocol', () => {
+  it('writes the same-call authoritative result as well as the JSONL event stream', () => {
+    const root = temporaryRoot('managed-proxy-protocol');
+    const runnerPath = join(root, 'exec');
+    const lastMessagePath = join(root, 'last-message.json');
+    writeFileSync(runnerPath, MANAGED_REVIEW_RUNNER_SOURCE);
+
+    const result = spawnSync(
+      process.execPath,
+      [runnerPath, '--output-last-message', lastMessagePath],
+      {
+        input: 'review prompt',
+        encoding: 'utf8',
+        windowsHide: true,
+        shell: false,
+      },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    const authoritative = JSON.parse(readFileSync(lastMessagePath, 'utf8')) as unknown;
+    const events = result.stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type: string; item?: { text?: string } });
+    const message = events.find((event) => event.type === 'item.completed');
+    expect(message?.item?.text).toBe(JSON.stringify(authoritative));
+    expect(events.at(-1)).toMatchObject({ type: 'turn.completed' });
+  });
+});
 
 describe.skipIf(process.platform !== 'win32')(
   'Windows Reviewer temporary-domain native proof',
