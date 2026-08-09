@@ -1729,6 +1729,12 @@ describe('managed Final Review runner execution', () => {
       retained: false,
     },
     {
+      name: 'a directory at the authoritative file path',
+      mutate: (target) => mkdirSync(target.path),
+      diagnostic: /权威最终消息(?:对象或大小非法|读取失败（EISDIR）)/u,
+      retained: false,
+    },
+    {
       name: 'an oversized file',
       mutate: (target, secret) =>
         writeFileSync(

@@ -364,9 +364,7 @@ function codexLastMessageFilesystemErrorCode(error: unknown): string {
     typeof error === 'object' && error !== null && 'code' in error
       ? (error as { readonly code?: unknown }).code
       : undefined;
-  return typeof code === 'string' && CODEX_LAST_MESSAGE_FS_ERROR_CODES.has(code)
-    ? code
-    : 'unknown';
+  return typeof code === 'string' && CODEX_LAST_MESSAGE_FS_ERROR_CODES.has(code) ? code : 'unknown';
 }
 
 function createCodexLastMessageOutput(projectRoot: string): CodexLastMessageOutput {
@@ -395,28 +393,25 @@ function readCodexLastMessageOutputControlled(output: CodexLastMessageOutput): s
   if (entries.length !== 1 || entries[0] !== 'last-message.json') {
     throw new RunnerPolicyViolation('Codex 权威输出临时域包含意外对象');
   }
-  const before = lstatSync(output.path, { bigint: true });
-  if (
-    before.isSymbolicLink() ||
-    !before.isFile() ||
-    before.nlink !== 1n ||
-    before.size > BigInt(MAX_RUNNER_OUTPUT_BYTES)
-  ) {
-    throw new RunnerPolicyViolation('Codex 权威最终消息对象或大小非法');
-  }
   const noFollow = process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
-  const descriptor = openSync(output.path, constants.O_RDONLY | noFollow);
+  const nonBlock = process.platform === 'win32' ? 0 : (constants.O_NONBLOCK ?? 0);
+  const descriptor = openSync(output.path, constants.O_RDONLY | noFollow | nonBlock);
   try {
     const opened = fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size > BigInt(MAX_RUNNER_OUTPUT_BYTES)) {
+      throw new RunnerPolicyViolation('Codex 权威最终消息对象或大小非法');
+    }
+    const pathAfterOpen = lstatSync(output.path, { bigint: true });
     if (
-      !opened.isFile() ||
-      opened.nlink !== 1n ||
-      opened.dev !== before.dev ||
-      opened.ino !== before.ino ||
-      opened.uid !== before.uid ||
-      opened.size !== before.size ||
-      opened.mtimeNs !== before.mtimeNs ||
-      opened.ctimeNs !== before.ctimeNs
+      pathAfterOpen.isSymbolicLink() ||
+      !pathAfterOpen.isFile() ||
+      pathAfterOpen.nlink !== 1n ||
+      pathAfterOpen.dev !== opened.dev ||
+      pathAfterOpen.ino !== opened.ino ||
+      pathAfterOpen.uid !== opened.uid ||
+      pathAfterOpen.size !== opened.size ||
+      pathAfterOpen.mtimeNs !== opened.mtimeNs ||
+      pathAfterOpen.ctimeNs !== opened.ctimeNs
     ) {
       throw new RunnerPolicyViolation('Codex 权威最终消息身份不稳定');
     }
@@ -431,17 +426,26 @@ function readCodexLastMessageOutputControlled(output: CodexLastMessageOutput): s
     if (offset !== bytes.length || readSync(descriptor, trailing, 0, 1, offset) !== 0) {
       throw new RunnerPolicyViolation('Codex 权威最终消息读取长度不稳定');
     }
-    const after = lstatSync(output.path, { bigint: true });
+    const descriptorAfterRead = fstatSync(descriptor, { bigint: true });
+    const pathAfterRead = lstatSync(output.path, { bigint: true });
     if (
-      after.isSymbolicLink() ||
-      !after.isFile() ||
-      after.nlink !== 1n ||
-      after.dev !== opened.dev ||
-      after.ino !== opened.ino ||
-      after.uid !== opened.uid ||
-      after.size !== opened.size ||
-      after.mtimeNs !== opened.mtimeNs ||
-      after.ctimeNs !== opened.ctimeNs
+      !descriptorAfterRead.isFile() ||
+      descriptorAfterRead.nlink !== 1n ||
+      descriptorAfterRead.dev !== opened.dev ||
+      descriptorAfterRead.ino !== opened.ino ||
+      descriptorAfterRead.uid !== opened.uid ||
+      descriptorAfterRead.size !== opened.size ||
+      descriptorAfterRead.mtimeNs !== opened.mtimeNs ||
+      descriptorAfterRead.ctimeNs !== opened.ctimeNs ||
+      pathAfterRead.isSymbolicLink() ||
+      !pathAfterRead.isFile() ||
+      pathAfterRead.nlink !== 1n ||
+      pathAfterRead.dev !== opened.dev ||
+      pathAfterRead.ino !== opened.ino ||
+      pathAfterRead.uid !== opened.uid ||
+      pathAfterRead.size !== opened.size ||
+      pathAfterRead.mtimeNs !== opened.mtimeNs ||
+      pathAfterRead.ctimeNs !== opened.ctimeNs
     ) {
       throw new RunnerPolicyViolation('Codex 权威最终消息读取期间发生变化');
     }
