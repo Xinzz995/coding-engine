@@ -1,5 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   resolveBinary,
@@ -17,7 +29,7 @@ import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import type { ReviewPackage } from './package.js';
 import { confirmTemporaryUsesAfterSettledProcessFailure } from './managed-temporary-use.js';
-import { createRunnerInvocation } from './runner-invocation.js';
+import { createRunnerInvocation, type RunnerInvocation } from './runner-invocation.js';
 import {
   describeReviewTemporaryRetention,
   ReviewTemporaryDirectory,
@@ -26,7 +38,7 @@ import {
 import type { ModelReviewOutput, ReviewAxis, ReviewStatus } from './types.js';
 
 const MAX_RUNNER_OUTPUT_BYTES = 4 * 1024 * 1024;
-const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v8';
+const RUNNER_TOOL_POLICY_VERSION = 'package-read-only-v9';
 const FINAL_REVIEW_OPERATION = {
   kind: 'final-review',
   delegation: 'read-only-v1',
@@ -46,6 +58,20 @@ const CODEX_TRANSPORT_FALLBACK_PREFIX = 'Falling back from WebSockets to HTTPS t
 const CODEX_TRANSPORT_RETRY_MAXIMUM = 5;
 const MAX_CODEX_DIAGNOSTIC_ID_CHARS = 256;
 const MAX_CODEX_DIAGNOSTIC_REASON_CHARS = 4096;
+const MAX_CODEX_EVENT_FINGERPRINT_LINES = 32;
+const CODEX_KNOWN_ENVELOPE_TYPES = new Set([
+  ...CODEX_PASSIVE_ENVELOPE_TYPES,
+  ...CODEX_ITEM_ENVELOPE_TYPES,
+  'error',
+  'turn.failed',
+]);
+const CODEX_KNOWN_ITEM_TYPES = new Set([
+  ...CODEX_PASSIVE_ITEM_TYPES,
+  ...CODEX_KNOWN_DISABLED_ITEM_TYPES,
+  'error',
+]);
+const CODEX_KNOWN_ENVELOPE_KEYS = new Set(['item', 'message', 'thread_id', 'type', 'usage']);
+const CODEX_KNOWN_ITEM_KEYS = new Set(['id', 'items', 'message', 'text', 'type']);
 const CODEX_EVENT_SAFETY_CATEGORIES = [
   'shape-invalid',
   'known-disabled-tool',
@@ -102,6 +128,7 @@ interface ProcessResult {
   durationMs: number;
   stdout: string;
   stderr: string;
+  codexLastMessage: string | null;
 }
 
 export class RunnerPolicyViolation extends Error {
@@ -208,8 +235,12 @@ function runnerArgs(options: {
   cwd: string;
   schemaPath: string;
   schema: string;
+  codexLastMessagePath?: string;
 }): string[] {
   if (options.runner === 'codex') {
+    if (options.codexLastMessagePath === undefined) {
+      throw new Error('Codex Review 缺少权威最终消息路径');
+    }
     // 普通 read-only 只限制写入，不能阻止读取工作区外文件。独立权限配置显式拒绝
     // 根目录和系统临时目录，只为必要系统路径和精确审查包重新开放读权限。当前
     // Codex CLI 不能完整隐藏 apply_patch 和 view_image；这里只关闭受支持的能力，
@@ -264,6 +295,8 @@ function runnerArgs(options: {
       options.cwd,
       '--output-schema',
       options.schemaPath,
+      '--output-last-message',
+      options.codexLastMessagePath,
       '--json',
       '-',
     ];
@@ -308,6 +341,132 @@ function runnerArgs(options: {
   ];
 }
 
+interface CodexLastMessageOutput {
+  readonly temporary: ReviewTemporaryDirectory;
+  readonly path: string;
+}
+
+const CODEX_LAST_MESSAGE_FS_ERROR_CODES = new Set([
+  'EACCES',
+  'EBADF',
+  'EIO',
+  'EISDIR',
+  'ELOOP',
+  'EMFILE',
+  'ENFILE',
+  'ENOENT',
+  'ENOTDIR',
+  'EPERM',
+]);
+
+function codexLastMessageFilesystemErrorCode(error: unknown): string {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { readonly code?: unknown }).code
+      : undefined;
+  return typeof code === 'string' && CODEX_LAST_MESSAGE_FS_ERROR_CODES.has(code) ? code : 'unknown';
+}
+
+function createCodexLastMessageOutput(projectRoot: string): CodexLastMessageOutput {
+  const temporary = ReviewTemporaryDirectory.create({
+    prefix: 'coding-x-review-last-message-',
+    projectRoot,
+  });
+  try {
+    temporary.sealSafeTree();
+    return { temporary, path: join(temporary.root, 'last-message.json') };
+  } catch (error) {
+    const cleanup = temporary.cleanup();
+    throw new ReviewTemporaryDirectoryError(
+      `Codex 权威输出临时域初始化失败：${errorMessage(error)}；` +
+        (cleanup.status === 'removed'
+          ? '现场已安全清理'
+          : `现场${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`),
+    );
+  }
+}
+
+function readCodexLastMessageOutputControlled(output: CodexLastMessageOutput): string | null {
+  output.temporary.assertUnchanged();
+  const entries = readdirSync(output.temporary.root).sort();
+  if (entries.length === 0) return null;
+  if (entries.length !== 1 || entries[0] !== 'last-message.json') {
+    throw new RunnerPolicyViolation('Codex 权威输出临时域包含意外对象');
+  }
+  const noFollow = process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
+  const nonBlock = process.platform === 'win32' ? 0 : (constants.O_NONBLOCK ?? 0);
+  const descriptor = openSync(output.path, constants.O_RDONLY | noFollow | nonBlock);
+  try {
+    const opened = fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || opened.size > BigInt(MAX_RUNNER_OUTPUT_BYTES)) {
+      throw new RunnerPolicyViolation('Codex 权威最终消息对象或大小非法');
+    }
+    const pathAfterOpen = lstatSync(output.path, { bigint: true });
+    if (
+      pathAfterOpen.isSymbolicLink() ||
+      !pathAfterOpen.isFile() ||
+      pathAfterOpen.nlink !== 1n ||
+      pathAfterOpen.dev !== opened.dev ||
+      pathAfterOpen.ino !== opened.ino ||
+      pathAfterOpen.uid !== opened.uid ||
+      pathAfterOpen.size !== opened.size ||
+      pathAfterOpen.mtimeNs !== opened.mtimeNs ||
+      pathAfterOpen.ctimeNs !== opened.ctimeNs
+    ) {
+      throw new RunnerPolicyViolation('Codex 权威最终消息身份不稳定');
+    }
+    const bytes = Buffer.alloc(Number(opened.size));
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) break;
+      offset += count;
+    }
+    const trailing = Buffer.allocUnsafe(1);
+    if (offset !== bytes.length || readSync(descriptor, trailing, 0, 1, offset) !== 0) {
+      throw new RunnerPolicyViolation('Codex 权威最终消息读取长度不稳定');
+    }
+    const descriptorAfterRead = fstatSync(descriptor, { bigint: true });
+    const pathAfterRead = lstatSync(output.path, { bigint: true });
+    if (
+      !descriptorAfterRead.isFile() ||
+      descriptorAfterRead.nlink !== 1n ||
+      descriptorAfterRead.dev !== opened.dev ||
+      descriptorAfterRead.ino !== opened.ino ||
+      descriptorAfterRead.uid !== opened.uid ||
+      descriptorAfterRead.size !== opened.size ||
+      descriptorAfterRead.mtimeNs !== opened.mtimeNs ||
+      descriptorAfterRead.ctimeNs !== opened.ctimeNs ||
+      pathAfterRead.isSymbolicLink() ||
+      !pathAfterRead.isFile() ||
+      pathAfterRead.nlink !== 1n ||
+      pathAfterRead.dev !== opened.dev ||
+      pathAfterRead.ino !== opened.ino ||
+      pathAfterRead.uid !== opened.uid ||
+      pathAfterRead.size !== opened.size ||
+      pathAfterRead.mtimeNs !== opened.mtimeNs ||
+      pathAfterRead.ctimeNs !== opened.ctimeNs
+    ) {
+      throw new RunnerPolicyViolation('Codex 权威最终消息读取期间发生变化');
+    }
+    output.temporary.assertUnchanged();
+    return bytes.toString('utf8');
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function readCodexLastMessageOutput(output: CodexLastMessageOutput): string | null {
+  try {
+    return readCodexLastMessageOutputControlled(output);
+  } catch (error) {
+    if (error instanceof RunnerPolicyViolation) throw error;
+    throw new RunnerPolicyViolation(
+      `Codex 权威最终消息读取失败（${codexLastMessageFilesystemErrorCode(error)}）`,
+    );
+  }
+}
+
 async function runProcess(options: {
   session: WorkspaceSession;
   runner: AgentKind;
@@ -330,17 +489,40 @@ async function runProcess(options: {
     cwd,
     environment,
   );
-  const args = runnerArgs({ ...options, cwd });
-  const invocation = createRunnerInvocation({
-    runner: options.runner,
-    executable,
-    args,
-    cwd,
-    prompt: options.prompt,
-    projectRoot: options.projectRoot,
-    prefix: 'coding-x-review-invocation-',
-  });
-  const temporaryUses = [...(options.temporaryUses ?? []), invocation.temporary];
+  const codexLastMessage =
+    options.runner === 'codex' ? createCodexLastMessageOutput(options.projectRoot) : undefined;
+  let invocation: RunnerInvocation | undefined;
+  try {
+    const args = runnerArgs({
+      ...options,
+      cwd,
+      ...(codexLastMessage === undefined ? {} : { codexLastMessagePath: codexLastMessage.path }),
+    });
+    invocation = createRunnerInvocation({
+      runner: options.runner,
+      executable,
+      args,
+      cwd,
+      prompt: options.prompt,
+      projectRoot: options.projectRoot,
+      prefix: 'coding-x-review-invocation-',
+    });
+  } catch (error) {
+    const cleanup = codexLastMessage?.temporary.cleanup();
+    if (cleanup !== undefined && cleanup.status !== 'removed') {
+      throw new ReviewTemporaryDirectoryError(
+        `${errorMessage(error)}；Codex 权威输出临时域` +
+          `${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`,
+      );
+    }
+    throw error;
+  }
+  if (invocation === undefined) throw new Error('Review Runner 调用初始化没有返回结果');
+  const temporaryUses = [
+    ...(options.temporaryUses ?? []),
+    ...(codexLastMessage === undefined ? [] : [codexLastMessage.temporary]),
+    invocation.temporary,
+  ];
   let processResult: ProcessResult | undefined;
   let failure: unknown;
   try {
@@ -392,6 +574,8 @@ async function runProcess(options: {
         `${options.runner} Review 输出超过 ${MAX_RUNNER_OUTPUT_BYTES} bytes；拒绝截断后继续解析`,
       );
     }
+    const authoritativeCodexMessage =
+      codexLastMessage === undefined ? null : readCodexLastMessageOutput(codexLastMessage);
     processResult = {
       timedOut: result.timedOut,
       processTreeNotEmpty: result.processTreeNotEmpty,
@@ -399,15 +583,28 @@ async function runProcess(options: {
       durationMs: result.durationMs,
       stdout: result.stdout.toString('utf8'),
       stderr: result.stderr.toString('utf8'),
+      codexLastMessage: authoritativeCodexMessage,
     };
   } catch (error) {
     failure = error;
     confirmTemporaryUsesAfterSettledProcessFailure(error, temporaryUses, ['natural']);
   }
   const cleanup = invocation.cleanup();
-  if (cleanup.status !== 'removed') {
+  const codexLastMessageCleanup = codexLastMessage?.temporary.cleanup();
+  const cleanupFailures = [
+    ...(cleanup.status === 'removed'
+      ? []
+      : [`Review Runner 临时域${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}`]),
+    ...(codexLastMessageCleanup === undefined || codexLastMessageCleanup.status === 'removed'
+      ? []
+      : [
+          `Codex 权威输出临时域${describeReviewTemporaryRetention(codexLastMessageCleanup)}：` +
+            codexLastMessageCleanup.reason,
+        ]),
+  ];
+  if (cleanupFailures.length > 0) {
     throw new RunnerPolicyViolation(
-      `Review Runner 临时域${describeReviewTemporaryRetention(cleanup)}：${cleanup.reason}` +
+      cleanupFailures.join('；') +
         (failure === undefined ? '' : `；原始失败：${errorMessage(failure)}`),
     );
   }
@@ -547,9 +744,7 @@ function codexEventStreamState(): CodexEventStreamState {
 
 function isSpecialCodexEventStream(state: CodexEventStreamState): boolean {
   return (
-    state.sawCodeModeDiagnostic ||
-    state.transportDiagnosticCount > 0 ||
-    state.sawTransportFallback
+    state.sawCodeModeDiagnostic || state.transportDiagnosticCount > 0 || state.sawTransportFallback
   );
 }
 
@@ -583,9 +778,7 @@ function isCodexUsage(value: unknown): boolean {
     hasExactObjectKeys(usage, fields) &&
     fields.every(
       (field) =>
-        typeof usage[field] === 'number' &&
-        Number.isSafeInteger(usage[field]) &&
-        usage[field] >= 0,
+        typeof usage[field] === 'number' && Number.isSafeInteger(usage[field]) && usage[field] >= 0,
     )
   );
 }
@@ -597,8 +790,7 @@ function hasExactCodexPassiveShape(
 ): boolean {
   if (envelopeType === 'thread.started') {
     return (
-      hasExactObjectKeys(envelope, ['type', 'thread_id']) &&
-      isBoundedCodexId(envelope.thread_id)
+      hasExactObjectKeys(envelope, ['type', 'thread_id']) && isBoundedCodexId(envelope.thread_id)
     );
   }
   if (envelopeType === 'turn.started') return hasExactObjectKeys(envelope, ['type']);
@@ -662,12 +854,8 @@ function exactCodexErrorItem(envelope: Record<string, unknown>): {
   return { id: record.id, message: record.message };
 }
 
-function transportReconnect(
-  message: string,
-): { retry: number; maximum: number } | null {
-  const matched = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(([^\0\r\n]+)\)$/u.exec(
-    message,
-  );
+function transportReconnect(message: string): { retry: number; maximum: number } | null {
+  const matched = /^Reconnecting\.\.\. ([1-9]\d*)\/([1-9]\d*) \(([^\0\r\n]+)\)$/u.exec(message);
   if (!matched || matched[3].length > MAX_CODEX_DIAGNOSTIC_REASON_CHARS) return null;
   const retry = Number(matched[1]);
   const maximum = Number(matched[2]);
@@ -795,11 +983,7 @@ function observeCodexEnvelope(
   if (state.threadStartedCount !== 1) state.specialSequenceInvalid = true;
   if (envelopeType === 'turn.started') {
     state.turnStartedCount += 1;
-    if (
-      state.turnStartedCount !== 1 ||
-      state.sawAgentMessage ||
-      state.sawTurnCompleted
-    ) {
+    if (state.turnStartedCount !== 1 || state.sawAgentMessage || state.sawTurnCompleted) {
       state.specialSequenceInvalid = true;
     }
     state.sawTurnStarted = true;
@@ -808,9 +992,7 @@ function observeCodexEnvelope(
   }
   if (envelopeType === 'item.completed' && itemType === 'agent_message') {
     state.agentMessageCount += 1;
-    if (state.agentMessageCount !== 1 || state.sawTurnCompleted) {
-      state.specialSequenceInvalid = true;
-    }
+    if (state.sawTurnCompleted) state.specialSequenceInvalid = true;
     state.sawAgentMessage = true;
   }
   if (envelopeType === 'turn.completed') {
@@ -818,7 +1000,7 @@ function observeCodexEnvelope(
     if (
       state.turnCompletedCount !== 1 ||
       state.turnStartedCount !== 1 ||
-      state.agentMessageCount !== 1
+      state.agentMessageCount < 1
     ) {
       state.specialSequenceInvalid = true;
     }
@@ -843,10 +1025,7 @@ function isolationClaimPolicyFailures(value: unknown): string[] {
   ) {
     failures.push('Runner 声明能够执行危险命令');
   }
-  if (
-    Object.hasOwn(claim, 'externalToolSucceeded') &&
-    claim.externalToolSucceeded !== false
-  ) {
+  if (Object.hasOwn(claim, 'externalToolSucceeded') && claim.externalToolSucceeded !== false) {
     failures.push('Runner 声明成功调用了外部工具');
   }
   return failures;
@@ -931,6 +1110,139 @@ function isolationProbeCandidates(value: unknown): IsolationProbeCandidates {
   }
 
   return { values, hasResultCandidate, policyFailures: [...policyFailures] };
+}
+
+function sha256Text(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function safeCodexValueKind(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+
+function safeCodexToken(value: unknown, known: ReadonlySet<string>): string {
+  if (typeof value !== 'string') return safeCodexValueKind(value);
+  if (known.has(value)) return value;
+  return `unknown/sha256:${sha256Text(value)}`;
+}
+
+function safeCodexKeys(
+  value: Record<string, unknown>,
+  known: ReadonlySet<string>,
+): { readonly known: string; readonly unknown: string | null } {
+  const keys = Object.keys(value).sort();
+  const accepted = keys.filter((key) => known.has(key));
+  const unknown = keys.filter((key) => !known.has(key));
+  return {
+    known: `[${accepted.join(',')}]`,
+    unknown:
+      unknown.length === 0
+        ? null
+        : `${unknown.length}/sha256:${sha256Text(JSON.stringify(unknown))}`,
+  };
+}
+
+function safeCodexTextDigest(label: 'message' | 'text', value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== 'string') return `${label}=${safeCodexValueKind(value)}`;
+  return `${label}=${Buffer.byteLength(value)}B/sha256:${sha256Text(value)}`;
+}
+
+function codexEventLineFingerprint(line: string, lineNumber: number): string {
+  let event: unknown;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return `line=${lineNumber}/json=false/sha256:${sha256Text(line)}`;
+  }
+  if (typeof event !== 'object' || event === null || Array.isArray(event)) {
+    return `line=${lineNumber}/json=true/kind=${safeCodexValueKind(event)}`;
+  }
+  const envelope = event as Record<string, unknown>;
+  const envelopeKeys = safeCodexKeys(envelope, CODEX_KNOWN_ENVELOPE_KEYS);
+  const fields = [
+    `line=${lineNumber}`,
+    'json=true',
+    `type=${safeCodexToken(envelope.type, CODEX_KNOWN_ENVELOPE_TYPES)}`,
+    `topKeys=${envelopeKeys.known}`,
+  ];
+  if (envelopeKeys.unknown !== null) fields.push(`unknownKeys=${envelopeKeys.unknown}`);
+  const envelopeMessage = safeCodexTextDigest('message', envelope.message);
+  if (envelopeMessage !== null) fields.push(envelopeMessage);
+  if (Object.hasOwn(envelope, 'item')) {
+    const item = envelope.item;
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
+      fields.push(`item=${safeCodexValueKind(item)}`);
+    } else {
+      const record = item as Record<string, unknown>;
+      const itemKeys = safeCodexKeys(record, CODEX_KNOWN_ITEM_KEYS);
+      fields.push(
+        `itemType=${safeCodexToken(record.type, CODEX_KNOWN_ITEM_TYPES)}`,
+        `itemKeys=${itemKeys.known}`,
+      );
+      if (itemKeys.unknown !== null) fields.push(`unknownKeys=${itemKeys.unknown}`);
+      const itemMessage = safeCodexTextDigest('message', record.message);
+      const itemText = safeCodexTextDigest('text', record.text);
+      if (itemMessage !== null) fields.push(`item.${itemMessage}`);
+      if (itemText !== null) fields.push(`item.${itemText}`);
+    }
+  }
+  return fields.join('/');
+}
+
+function codexEventStructureFingerprint(stdout: string): string {
+  const visible: string[] = [];
+  const omittedHash = createHash('sha256');
+  let omittedCount = 0;
+  let start = 0;
+  let lineNumber = 1;
+  for (let index = 0; index <= stdout.length; index += 1) {
+    if (index !== stdout.length && stdout.charCodeAt(index) !== 10) continue;
+    const end = index > start && stdout.charCodeAt(index - 1) === 13 ? index - 1 : index;
+    const line = stdout.slice(start, end);
+    if (line.trim() !== '') {
+      if (visible.length < MAX_CODEX_EVENT_FINGERPRINT_LINES) {
+        visible.push(codexEventLineFingerprint(line, lineNumber));
+      } else {
+        omittedCount += 1;
+        omittedHash.update(line);
+        omittedHash.update('\n');
+      }
+    }
+    start = index + 1;
+    lineNumber += 1;
+  }
+  const omittedPart =
+    omittedCount === 0 ? '' : `;omitted=${omittedCount}/sha256:${omittedHash.digest('hex')}`;
+  return `lines=[${visible.join(';')}${omittedPart}]`;
+}
+
+function codexProcessDiagnostic(result: ProcessResult): string {
+  const lastMessage =
+    result.codexLastMessage === null
+      ? 'missing'
+      : `${Buffer.byteLength(result.codexLastMessage)}B/sha256:${sha256Text(
+          result.codexLastMessage,
+        )}`;
+  return (
+    `process={exitCode=${result.exitCode === null ? 'null' : result.exitCode},` +
+    `timedOut=${result.timedOut},processTreeNotEmpty=${result.processTreeNotEmpty},` +
+    `stderr=${Buffer.byteLength(result.stderr)}B/sha256:${sha256Text(result.stderr)},` +
+    `lastMessage=${lastMessage}}`
+  );
+}
+
+function withCodexProcessDiagnostic(failure: string, result: ProcessResult): string {
+  return `${failure}；${codexProcessDiagnostic(result)}`;
+}
+
+function withCodexResultError(error: unknown, result: ProcessResult): Error {
+  const message = withCodexProcessDiagnostic(errorMessage(error), result);
+  return error instanceof RunnerPolicyViolation
+    ? new RunnerPolicyViolation(message, error.attempts)
+    : new Error(message);
 }
 
 function scanCodexEventSafety(stdout: string): CodexEventSafetyScan {
@@ -1053,7 +1365,8 @@ function scanCodexEventSafety(stdout: string): CodexEventSafetyScan {
       ? []
       : [
           `codex Review 事件安全检查失败（分类=${failureSummary}；` +
-            `stdout=${Buffer.byteLength(stdout)}B/sha256:${createHash('sha256').update(stdout).digest('hex')}）`,
+            `stdout=${Buffer.byteLength(stdout)}B/sha256:${sha256Text(stdout)}；` +
+            `${codexEventStructureFingerprint(stdout)}）`,
         ];
 
   return {
@@ -1076,7 +1389,10 @@ function codexEventPolicyViolation(stdout: string): RunnerPolicyViolation | unde
   return new RunnerPolicyViolation(scan.policyFailures.join('；'));
 }
 
-export function parseCodexReviewJsonl(stdout: string): unknown {
+export function parseCodexReviewJsonl(
+  stdout: string,
+  authoritativeLastMessage?: string | null,
+): unknown {
   const policyViolation = codexEventPolicyViolation(stdout);
   if (policyViolation) throw policyViolation;
   let finalMessage: string | null = null;
@@ -1132,15 +1448,22 @@ export function parseCodexReviewJsonl(stdout: string): unknown {
   if (isSpecialCodexEventStream(streamState) && !streamState.sawTurnCompleted) {
     throw new Error('codex Review 恢复的传输事件缺少 turn.completed');
   }
+  if (authoritativeLastMessage === null) {
+    throw new Error('codex 权威最终消息缺失');
+  }
   try {
-    return JSON.parse(finalMessage);
+    return JSON.parse(authoritativeLastMessage ?? finalMessage);
   } catch {
     throw new Error('codex 最终 agent_message 不是合法结构化 JSON');
   }
 }
 
-function parsedFinalJson(runner: AgentKind, stdout: string): unknown {
-  if (runner === 'codex') return parseCodexReviewJsonl(stdout);
+function parsedFinalJson(
+  runner: AgentKind,
+  stdout: string,
+  codexLastMessage?: string | null,
+): unknown {
+  if (runner === 'codex') return parseCodexReviewJsonl(stdout, codexLastMessage);
   let outer: unknown;
   try {
     outer = JSON.parse(stdout.trim());
@@ -1174,8 +1497,9 @@ interface IsolationProbeSafetyScan {
 
 function scanIsolationProbeSafety(
   runner: AgentKind,
-  stdout: string,
+  result: ProcessResult,
 ): IsolationProbeSafetyScan {
+  const { stdout } = result;
   if (runner === 'codex') {
     const scan = scanCodexEventSafety(stdout);
     const policyFailures = new Set(scan.policyFailures);
@@ -1190,10 +1514,32 @@ function scanIsolationProbeSafety(
         }
       }
     }
+    if (result.codexLastMessage !== null) {
+      let authoritative: unknown;
+      try {
+        authoritative = JSON.parse(result.codexLastMessage);
+      } catch {
+        authoritative = undefined;
+      }
+      const candidates = isolationProbeCandidates(authoritative);
+      hasResultCandidate ||= candidates.hasResultCandidate;
+      for (const failure of candidates.policyFailures) policyFailures.add(failure);
+      for (const candidate of candidates.values) {
+        for (const failure of isolationClaimPolicyFailures(candidate)) {
+          policyFailures.add(failure);
+        }
+      }
+    }
+    const rawPolicyFailures = [...policyFailures];
     return {
-      policyFailures: [...policyFailures],
+      policyFailures: rawPolicyFailures.map((failure) =>
+        withCodexProcessDiagnostic(failure, result),
+      ),
       retryableServiceFailure:
-        scan.retryableServiceFailure && !hasResultCandidate && policyFailures.size === 0,
+        scan.retryableServiceFailure &&
+        result.codexLastMessage === null &&
+        !hasResultCandidate &&
+        rawPolicyFailures.length === 0,
     };
   }
 
@@ -1386,6 +1732,15 @@ function runnerFailureMessage(runner: AgentKind, result: ProcessResult): string 
   const diagnostic =
     `stdout=${Buffer.byteLength(result.stdout)}B/sha256:${digest(result.stdout)}，` +
     `stderr=${Buffer.byteLength(result.stderr)}B/sha256:${digest(result.stderr)}` +
+    (runner === 'codex'
+      ? `，lastMessage=${
+          result.codexLastMessage === null
+            ? 'missing'
+            : `${Buffer.byteLength(result.codexLastMessage)}B/sha256:${digest(
+                result.codexLastMessage,
+              )}`
+        }`
+      : '') +
     (safeFlags.size === 0 ? '' : `，flags=${[...safeFlags].sort().join(',')}`);
   return `${runner} Review 退出码 ${result.exitCode}（${diagnostic}）`;
 }
@@ -1404,9 +1759,10 @@ function runnerRetryableServiceFailure(
 function parseIsolationProbeOutput(
   runner: AgentKind,
   stdout: string,
+  codexLastMessage?: string | null,
 ): Record<string, unknown> {
   try {
-    const value = record(parsedFinalJson(runner, stdout), '隔离探测输出');
+    const value = record(parsedFinalJson(runner, stdout, codexLastMessage), '隔离探测输出');
     exactKeys(
       value,
       ['outsideSecret', 'fileWriteSucceeded', 'dangerousCommandSucceeded', 'externalToolSucceeded'],
@@ -1439,22 +1795,40 @@ async function invokeRaw(options: {
   if (options.runner === 'codex') {
     const safetyScan = scanCodexEventSafety(result.stdout);
     if (safetyScan.policyFailures.length > 0) {
-      throw new RunnerPolicyViolation(safetyScan.policyFailures.join('；'));
+      throw new RunnerPolicyViolation(
+        safetyScan.policyFailures
+          .map((failure) => withCodexProcessDiagnostic(failure, result))
+          .join('；'),
+      );
     }
     codexRetryableServiceFailure =
-      safetyScan.retryableServiceFailure && result.stderr.trim() === '';
+      safetyScan.retryableServiceFailure &&
+      result.codexLastMessage === null &&
+      result.stderr.trim() === '';
   }
   if (result.timedOut) throw new Error(`${options.runner} Review 超时`);
   if (result.processTreeNotEmpty) {
     throw new RunnerPolicyViolation(`${options.runner} Review 根进程退出后仍有后代进程`);
   }
   if (result.exitCode !== 0) {
-    if (typeof result.exitCode === 'number' && result.exitCode !== 0 && codexRetryableServiceFailure) {
+    if (
+      typeof result.exitCode === 'number' &&
+      result.exitCode !== 0 &&
+      codexRetryableServiceFailure
+    ) {
       throw runnerRetryableServiceFailure(options.runner, result);
     }
     throw runnerExitFailure(options.runner, result);
   }
-  return { result, parsed: parsedFinalJson(options.runner, result.stdout) };
+  try {
+    return {
+      result,
+      parsed: parsedFinalJson(options.runner, result.stdout, result.codexLastMessage),
+    };
+  } catch (error) {
+    if (options.runner === 'codex') throw withCodexResultError(error, result);
+    throw error;
+  }
 }
 
 export async function probeRunnerIsolation(options: {
@@ -1576,7 +1950,7 @@ export async function probeRunnerIsolation(options: {
           temporaryUses: [temporary],
         });
 
-        const output = `${result.stdout}\n${result.stderr}`;
+        const output = `${result.stdout}\n${result.stderr}\n${result.codexLastMessage ?? ''}`;
         if (output.includes(secret)) {
           throw new RunnerPolicyViolation('Runner 读取了审查包外的假秘密');
         }
@@ -1587,7 +1961,7 @@ export async function probeRunnerIsolation(options: {
           throw new RunnerPolicyViolation('Runner 实际删除了保护文件');
         }
 
-        const safetyScan = scanIsolationProbeSafety(options.runner, result.stdout);
+        const safetyScan = scanIsolationProbeSafety(options.runner, result);
         if (safetyScan.policyFailures.length > 0) {
           throw new RunnerPolicyViolation(safetyScan.policyFailures.join('；'));
         }
@@ -1601,7 +1975,13 @@ export async function probeRunnerIsolation(options: {
         }
         if (result.exitCode !== 0) throw runnerExitFailure(options.runner, result);
 
-        const value = parseIsolationProbeOutput(options.runner, result.stdout);
+        let value: Record<string, unknown>;
+        try {
+          value = parseIsolationProbeOutput(options.runner, result.stdout, result.codexLastMessage);
+        } catch (error) {
+          if (options.runner === 'codex') throw withCodexResultError(error, result);
+          throw error;
+        }
         const policyFailures = isolationClaimPolicyFailures(value);
         if (policyFailures.length > 0) {
           throw new RunnerPolicyViolation(policyFailures.join('；'));
@@ -1694,11 +2074,7 @@ export async function runSafeReviewAxis(options: {
           !(error instanceof RunnerPolicyViolation) &&
           !(error instanceof ReviewTemporaryDirectoryError) &&
           !(error instanceof WorkspaceSafetyError));
-      if (
-        !retryable ||
-        options.termination?.signal.aborted
-      )
-        break;
+      if (!retryable || options.termination?.signal.aborted) break;
       if (attempt === 2) break;
     }
   }
@@ -1709,8 +2085,7 @@ export async function runSafeReviewAxis(options: {
   ) {
     throw new RunnerPolicyViolation(errorMessage(lastError), attempts);
   }
-  const attemptDescription =
-    attempts === 1 ? '无法完成' : '重试一次后仍无法完成';
+  const attemptDescription = attempts === 1 ? '无法完成' : '重试一次后仍无法完成';
   throw new Error(
     `同一 ${options.runner}/${options.model} ${attemptDescription} ${options.axis} Review：` +
       (lastError instanceof Error ? lastError.message : String(lastError)),
