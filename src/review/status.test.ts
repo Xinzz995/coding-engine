@@ -412,13 +412,13 @@ describe('collectCurrentReviewStatus currentness binding', () => {
     });
   });
 
-  it('invalidates a Review bound to rules version 1.2.0', () => {
+  it('invalidates a Review bound to the pre-multi-message rules version 1.4.0', () => {
     const workspace = temporaryDirectory('review-status-old-rules-version-');
     const context = reviewContext();
     writeBoundReview(workspace, context);
     const reviewPath = join(workspace, 'final-review.json');
     const saved = JSON.parse(readFileSync(reviewPath, 'utf8')) as FinalReviewState;
-    saved.binding.reviewRulesVersion = '1.2.0';
+    saved.binding.reviewRulesVersion = '1.4.0';
     writeFileSync(reviewPath, `${JSON.stringify(saved)}\n`);
 
     const result = collectCurrentReviewStatus({

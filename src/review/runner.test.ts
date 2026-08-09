@@ -3,6 +3,7 @@ import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -42,8 +43,15 @@ const CODEX_TRANSPORT_FALLBACK_DIAGNOSTIC =
   'Falling back from WebSockets to HTTPS transport. stream disconnected before completion: tls handshake eof';
 
 function removeFixtureRoot(path: string): void {
-  if (!existsSync(path)) return;
-  const info = lstatSync(path);
+  let info: ReturnType<typeof lstatSync>;
+  try {
+    info = lstatSync(path);
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
   if (info.isSymbolicLink() || !info.isDirectory()) {
     unlinkSync(path);
     return;
@@ -233,6 +241,42 @@ function codexAnswer(value: unknown): string {
     JSON.stringify(codexAgentMessage(value)),
     JSON.stringify(codexTurnCompleted()),
   ].join('\n');
+}
+
+type ManagedProcessOptions = Parameters<typeof runManagedWorkspaceProcess>[1];
+
+function codexOutputLastMessageTarget(options: ManagedProcessOptions): {
+  readonly path: string;
+  readonly root: string;
+  readonly invocationRoot: string;
+} {
+  const invocationRoot = dirname(options.args[1]);
+  const config = JSON.parse(readFileSync(options.args[1], 'utf8')) as { args: string[] };
+  const flagIndexes = config.args.flatMap((argument, index) =>
+    argument === '--output-last-message' ? [index] : [],
+  );
+  expect(flagIndexes).toHaveLength(1);
+  const flagIndex = flagIndexes[0];
+  const path = config.args[flagIndex + 1];
+  expect(typeof path).toBe('string');
+  expect(path).not.toBe('');
+  expect(resolve(path)).toBe(path);
+  expect(config.args.filter((argument) => argument === path)).toHaveLength(1);
+  const root = dirname(path);
+  expect(root).not.toBe(invocationRoot);
+  expect(existsSync(root)).toBe(true);
+  expect(readdirSync(root)).toEqual([]);
+  expect(existsSync(path)).toBe(false);
+  return { path, root, invocationRoot };
+}
+
+function writeCodexOutputLastMessage(
+  options: ManagedProcessOptions,
+  value: unknown,
+): ReturnType<typeof codexOutputLastMessageTarget> {
+  const target = codexOutputLastMessageTarget(options);
+  writeFileSync(target.path, `${JSON.stringify(value)}\n`);
+  return target;
 }
 
 function valid(over: Record<string, unknown> = {}) {
@@ -442,6 +486,37 @@ describe('parseCodexReviewJsonl', () => {
     expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
   });
 
+  it('accepts multiple exact agent messages in a Code Mode stream and parses only the last one', () => {
+    const draft = {
+      status: 'unverifiable',
+      summary: 'draft',
+      requestDeepReview: false,
+      unverifiableReason: 'still reviewing',
+      findings: [],
+    };
+    const answer = { status: 'passed', summary: 'final', requestDeepReview: false, findings: [] };
+    const stdout = [
+      { type: 'thread.started', thread_id: 't' },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'startup-error',
+          type: 'error',
+          message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+        },
+      },
+      { type: 'turn.started' },
+      codexAgentMessage(draft, 'agent-message-1'),
+      codexAgentMessage({ ...draft, summary: 'revised draft' }, 'agent-message-2'),
+      codexAgentMessage(answer, 'agent-message-3'),
+      codexTurnCompleted(),
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n');
+
+    expect(parseCodexReviewJsonl(stdout)).toEqual(answer);
+  });
+
   it.each([
     [
       'a direct reconnect recovery without HTTPS fallback',
@@ -603,15 +678,7 @@ describe('parseCodexReviewJsonl', () => {
       ],
     ],
     ['a missing turn start', [codexAgentMessage({}, 'agent-1'), codexTurnCompleted()]],
-    [
-      'a duplicate final answer',
-      [
-        { type: 'turn.started' },
-        codexAgentMessage({}, 'agent-1'),
-        codexAgentMessage({}, 'agent-2'),
-        codexTurnCompleted(),
-      ],
-    ],
+    ['a missing final answer', [{ type: 'turn.started' }, codexTurnCompleted()]],
     [
       'turn completion before the final answer',
       [{ type: 'turn.started' }, codexTurnCompleted(), codexAgentMessage({}, 'agent-1')],
@@ -651,6 +718,32 @@ describe('parseCodexReviewJsonl', () => {
       .join('\n');
 
     expect(() => parseCodexReviewJsonl(stdout)).toThrow('形状损坏×1');
+  });
+
+  it('still rejects a forbidden tool event inside an otherwise valid multi-message Code Mode stream', () => {
+    const stdout = [
+      { type: 'thread.started', thread_id: 't' },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'startup-error',
+          type: 'error',
+          message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+        },
+      },
+      { type: 'turn.started' },
+      codexAgentMessage({ status: 'passed' }, 'agent-message-1'),
+      {
+        type: 'item.started',
+        item: { id: 'tool-1', type: 'command_execution', command: 'whoami' },
+      },
+      codexAgentMessage({ status: 'passed', summary: 'final' }, 'agent-message-2'),
+      codexTurnCompleted(),
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n');
+
+    expect(() => parseCodexReviewJsonl(stdout)).toThrow('已知禁用工具×1');
   });
 
   it.each([
@@ -1036,6 +1129,84 @@ describe('parseCodexReviewJsonl', () => {
     expect(message).toMatch(/sha256:[a-f0-9]{64}/u);
     for (const secret of secrets) expect(message).not.toContain(secret);
   });
+
+  it('reports a bounded safe structural fingerprint for every Codex JSONL line', () => {
+    const secrets = {
+      malformed: 'MALFORMED_LINE_SECRET',
+      envelopeType: 'MALICIOUS_EVENT_TYPE',
+      topKey: 'MALICIOUS_TOP_KEY',
+      itemKey: 'MALICIOUS_ITEM_KEY',
+      message: 'MALICIOUS_MESSAGE_BODY',
+      text: 'MALICIOUS_TEXT_BODY',
+      path: '/private/secret/path',
+    };
+    const stdout = [
+      `not-json:${secrets.malformed}`,
+      JSON.stringify({
+        type: secrets.envelopeType,
+        message: secrets.message,
+        [secrets.topKey]: secrets.path,
+      }),
+      JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'tool-item',
+          type: 'command_execution',
+          message: secrets.message,
+          text: secrets.text,
+          [secrets.itemKey]: secrets.path,
+        },
+      }),
+    ].join('\n');
+
+    let failure: unknown;
+    try {
+      parseCodexReviewJsonl(stdout);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+    const message = (failure as Error).message;
+    expect(message).toMatch(/line[=:]1[^;\n]*json[=:]false/u);
+    expect(message).toMatch(/line[=:]2[^;\n]*json[=:]true/u);
+    expect(message).toMatch(/line[=:]3[^;\n]*json[=:]true/u);
+    expect(message).toMatch(/(?:envelopeType|type)[=:]unknown\/sha256:[a-f0-9]{64}/u);
+    expect(message).toContain('type=item.completed');
+    expect(message).toContain('itemType=command_execution');
+    expect(message).toContain('topKeys=[message,type]');
+    expect(message).toContain('topKeys=[item,type]');
+    expect(message).toContain('itemKeys=[id,message,text,type]');
+    expect(message).toMatch(/unknownKeys=1\/sha256:[a-f0-9]{64}/u);
+    expect(message).toMatch(
+      new RegExp(`message=${Buffer.byteLength(secrets.message)}B/sha256:[a-f0-9]{64}`, 'u'),
+    );
+    expect(message).toMatch(
+      new RegExp(`text=${Buffer.byteLength(secrets.text)}B/sha256:[a-f0-9]{64}`, 'u'),
+    );
+    for (const secret of Object.values(secrets)) expect(message).not.toContain(secret);
+  });
+
+  it('caps structural fingerprints at 32 lines and summarizes the omitted remainder', () => {
+    const secretType = 'OMITTED_EVENT_TYPE_SECRET';
+    const stdout = Array.from({ length: 35 }, () => JSON.stringify({ type: secretType })).join(
+      '\n',
+    );
+
+    let failure: unknown;
+    try {
+      parseCodexReviewJsonl(stdout);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+    const message = (failure as Error).message;
+    expect(message).toMatch(/line[=:]32(?:[^0-9]|$)/u);
+    expect(message).not.toMatch(/line[=:]33(?:[^0-9]|$)/u);
+    expect(message).toMatch(/omitted=3\/sha256:[a-f0-9]{64}/u);
+    expect(message).not.toContain(secretType);
+  });
 });
 
 describe('codexReviewPermissionOverrides', () => {
@@ -1149,7 +1320,7 @@ describe('Reviewer temporary-domain initialization cleanup', () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     const invocationRoot = injectNextExactSealFailure();
     let calls = 0;
-    const managed: typeof runManagedWorkspaceProcess = async () => {
+    const managed: typeof runManagedWorkspaceProcess = async (_session, _options) => {
       calls += 1;
       return managedResult('');
     };
@@ -1424,6 +1595,13 @@ describe('managed Final Review runner execution', () => {
       expect(prompt).toContain('Runner 隔离反向测试');
       expect(prompt).toContain('调用成功且得到可用结果');
       expect(prompt).toContain('被拒绝、不可用或报错都必须为 false');
+      const answer = {
+        outsideSecret: null,
+        fileWriteSucceeded: false,
+        dangerousCommandSucceeded: false,
+        externalToolSucceeded: false,
+      };
+      writeCodexOutputLastMessage(options, answer);
       return managedResult(
         [
           JSON.stringify({ type: 'thread.started', thread_id: 'fixture' }),
@@ -1436,14 +1614,7 @@ describe('managed Final Review runner execution', () => {
             },
           }),
           JSON.stringify({ type: 'turn.started' }),
-          JSON.stringify(
-            codexAgentMessage({
-              outsideSecret: null,
-              fileWriteSucceeded: false,
-              dangerousCommandSucceeded: false,
-              externalToolSucceeded: false,
-            }),
-          ),
+          JSON.stringify(codexAgentMessage(answer)),
           JSON.stringify(codexTurnCompleted()),
         ].join('\n'),
       );
@@ -1459,9 +1630,272 @@ describe('managed Final Review runner execution', () => {
       managedProcess: managed,
     });
     expect(result.ok, result.failures.join('；')).toBe(true);
-    expect(result.policyVersion).toBe('package-read-only-v8');
+    expect(result.policyVersion).toBe('package-read-only-v9');
     expect(calls).toBe(1);
   });
+
+  it('passes exactly one authoritative last-message path in an isolated empty output root', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    const answer = {
+      status: 'passed',
+      summary: 'authoritative result',
+      requestDeepReview: false,
+      unverifiableReason: null,
+      findings: [],
+    };
+    let outputRoot = '';
+    let invocationRoot = '';
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      const target = writeCodexOutputLastMessage(options, answer);
+      outputRoot = target.root;
+      invocationRoot = target.invocationRoot;
+      return managedResult(codexAnswer(answer));
+    };
+
+    const result = await runSafeReviewAxis({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      runnerVersion: 'codex-test',
+      axis: 'engineering',
+      reviewPackage,
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.output.summary).toBe('authoritative result');
+    expect(outputRoot).not.toBe('');
+    expect(invocationRoot).not.toBe('');
+    expect(existsSync(outputRoot)).toBe(false);
+    expect(existsSync(invocationRoot)).toBe(false);
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+  });
+
+  it('uses the authoritative last-message file when the final JSONL agent message is stale', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    const stale = valid({ summary: 'stale streamed answer' });
+    const authoritative = {
+      status: 'passed',
+      summary: 'final turn answer',
+      requestDeepReview: false,
+      unverifiableReason: null,
+      findings: [],
+    };
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      writeCodexOutputLastMessage(options, authoritative);
+      return managedResult(codexAnswer(stale));
+    };
+
+    const result = await runSafeReviewAxis({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      runnerVersion: 'codex-test',
+      axis: 'engineering',
+      reviewPackage,
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.output).toMatchObject({ status: 'passed', summary: 'final turn answer' });
+    expect(result.output.summary).not.toBe('stale streamed answer');
+    expect(calls).toBe(1);
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+  });
+
+  const invalidAuthoritativeOutputCases: ReadonlyArray<{
+    readonly name: string;
+    readonly mutate: (
+      target: ReturnType<typeof codexOutputLastMessageTarget>,
+      secret: string,
+    ) => void;
+    readonly diagnostic: RegExp;
+    readonly retained: boolean;
+  }> = [
+    {
+      name: 'a missing file',
+      mutate: () => undefined,
+      diagnostic: /权威最终(?:输出|消息).*(?:缺失|不存在)/u,
+      retained: false,
+    },
+    {
+      name: 'an empty file',
+      mutate: (target) => writeFileSync(target.path, ''),
+      diagnostic: /最终 agent_message.*(?:JSON|结构化)/u,
+      retained: false,
+    },
+    {
+      name: 'an oversized file',
+      mutate: (target, secret) =>
+        writeFileSync(
+          target.path,
+          Buffer.concat([Buffer.from(secret), Buffer.alloc(4 * 1024 * 1024 + 1)]),
+        ),
+      diagnostic: /权威输出临时域.*(?:非法条目|超过|大小)/u,
+      retained: true,
+    },
+    {
+      name: 'a symbolic link',
+      mutate: (target, secret) => {
+        const externalRoot = mkdtempSync(join(tmpdir(), 'review-authoritative-link-test-'));
+        temporaryRoots.push(externalRoot);
+        const externalPath = join(externalRoot, 'outside.json');
+        writeFileSync(externalPath, secret);
+        symlinkSync(externalPath, target.path);
+      },
+      diagnostic: /权威输出临时域.*(?:链接|非法条目|身份|安全)/u,
+      retained: true,
+    },
+    {
+      name: 'an extra file',
+      mutate: (target, secret) => {
+        writeFileSync(
+          target.path,
+          JSON.stringify({
+            status: 'passed',
+            summary: 'valid authority',
+            requestDeepReview: false,
+            unverifiableReason: null,
+            findings: [],
+          }),
+        );
+        writeFileSync(join(target.root, secret), 'pollution');
+      },
+      diagnostic: /权威输出临时域.*(?:意外对象|额外|唯一|目录)/u,
+      retained: false,
+    },
+    {
+      name: 'an extra directory',
+      mutate: (target, secret) => {
+        writeFileSync(
+          target.path,
+          JSON.stringify({
+            status: 'passed',
+            summary: 'valid authority',
+            requestDeepReview: false,
+            unverifiableReason: null,
+            findings: [],
+          }),
+        );
+        mkdirSync(join(target.root, secret));
+      },
+      diagnostic: /权威输出临时域.*(?:意外对象|额外|唯一|目录)/u,
+      retained: false,
+    },
+    {
+      name: 'non-JSON content',
+      mutate: (target, secret) => writeFileSync(target.path, `not-json:${secret}`),
+      diagnostic: /最终 agent_message.*(?:JSON|结构化)/u,
+      retained: false,
+    },
+  ];
+
+  it.each(invalidAuthoritativeOutputCases)(
+    'fails closed on $name without leaking its content',
+    async ({ name, mutate, diagnostic, retained }) => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const reviewPackage = managedPackageFixture();
+      const secret = `AUTHORITATIVE_SECRET_${name.replaceAll(' ', '_')}`;
+      let outputRoot = '';
+      let invocationRoot = '';
+      let calls = 0;
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        calls += 1;
+        const target = codexOutputLastMessageTarget(options);
+        outputRoot = target.root;
+        invocationRoot = target.invocationRoot;
+        temporaryRoots.push(outputRoot, invocationRoot);
+        mutate(target, secret);
+        return managedResult(
+          codexAnswer({
+            status: 'passed',
+            summary: 'streamed answer must not be trusted',
+            requestDeepReview: false,
+            unverifiableReason: null,
+            findings: [],
+          }),
+        );
+      };
+
+      let failure: unknown;
+      try {
+        await runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage,
+          timeoutMs: 1000,
+          managedProcess: managed,
+        });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(diagnostic);
+      expect((failure as Error).message).not.toContain(secret);
+      expect(calls).toBe(1);
+      expect(existsSync(outputRoot)).toBe(retained);
+      expect(existsSync(invocationRoot)).toBe(false);
+      expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'redacts the output path when the authoritative file cannot be opened',
+    async () => {
+      vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+      const reviewPackage = managedPackageFixture();
+      const answer = {
+        status: 'passed',
+        summary: 'permission test',
+        requestDeepReview: false,
+        unverifiableReason: null,
+        findings: [],
+      };
+      let outputRoot = '';
+      let outputPath = '';
+      let calls = 0;
+      const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+        calls += 1;
+        const target = writeCodexOutputLastMessage(options, answer);
+        outputRoot = target.root;
+        outputPath = target.path;
+        chmodSync(outputPath, 0o000);
+        return managedResult(codexAnswer(answer));
+      };
+
+      let failure: unknown;
+      try {
+        await runSafeReviewAxis({
+          session: fakeSession,
+          runner: 'codex',
+          model: 'review-model',
+          runnerVersion: 'codex-test',
+          axis: 'engineering',
+          reviewPackage,
+          timeoutMs: 1000,
+          managedProcess: managed,
+        });
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeInstanceOf(RunnerPolicyViolation);
+      expect((failure as Error).message).toMatch(/权威最终消息读取失败（(?:EACCES|EPERM)）/u);
+      expect((failure as Error).message).not.toContain(outputRoot);
+      expect((failure as Error).message).not.toContain(outputPath);
+      expect(calls).toBe(1);
+      expect(existsSync(outputRoot)).toBe(false);
+      expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+    },
+  );
 
   it('retries one interrupted reconnect-only isolation probe without changing models', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
@@ -1494,14 +1928,14 @@ describe('managed Final Review runner execution', () => {
           },
         );
       }
-      return managedResult(
-        codexAnswer({
-          outsideSecret: null,
-          fileWriteSucceeded: false,
-          dangerousCommandSucceeded: false,
-          externalToolSucceeded: false,
-        }),
-      );
+      const answer = {
+        outsideSecret: null,
+        fileWriteSucceeded: false,
+        dangerousCommandSucceeded: false,
+        externalToolSucceeded: false,
+      };
+      writeCodexOutputLastMessage(options, answer);
+      return managedResult(codexAnswer(answer));
     };
 
     const result = await probeRunnerIsolation({
@@ -1520,6 +1954,43 @@ describe('managed Final Review runner execution', () => {
     expect(models).toEqual(['review-model', 'review-model']);
     expect(new Set(probeRoots).size).toBe(1);
     expect(new Set(invocationRoots).size).toBe(2);
+  });
+
+  it('does not retry a reconnect-only isolation probe that produced a non-empty authority file', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const authoritySecret = 'RECONNECT_AUTHORITY_MUST_NOT_BE_RETRIED';
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      writeCodexOutputLastMessage(options, authoritySecret);
+      return managedResult(
+        [
+          JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({
+            type: 'error',
+            message:
+              'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+          }),
+        ].join('\n'),
+        { exitCode: 1 },
+      );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(calls).toBe(1);
+    expect(result.failures.join('；')).not.toContain(authoritySecret);
+    expect(result.failures.join('；')).toMatch(/lastMessage=\d+B\/sha256:[a-f0-9]{64}/u);
   });
 
   it('does not retry a reconnect-only probe that exits successfully without a result', async () => {
@@ -1858,20 +2329,99 @@ describe('managed Final Review runner execution', () => {
     expect(calls).toBe(1);
   });
 
-  it('does not retry an isolation probe result with an invalid schema shape', async () => {
+  it('attaches only safe event structure and process metadata to an isolation policy failure', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const secrets = {
+      itemKey: 'MALICIOUS_PROBE_ITEM_KEY',
+      text: 'MALICIOUS_PROBE_TEXT',
+      path: '/private/probe/secret-path',
+      stderr: 'MALICIOUS_PROBE_STDERR',
+    };
+    const agentText = JSON.stringify({ note: secrets.text, path: secrets.path });
     let calls = 0;
     const managed: typeof runManagedWorkspaceProcess = async () => {
       calls += 1;
-      if (calls === 1) return managedResult(codexAnswer({}));
       return managedResult(
-        codexAnswer({
-          outsideSecret: null,
-          fileWriteSucceeded: false,
-          dangerousCommandSucceeded: false,
-          externalToolSucceeded: false,
-        }),
+        [
+          JSON.stringify({ type: 'thread.started', thread_id: 'fixture' }),
+          JSON.stringify({
+            type: 'item.completed',
+            item: {
+              id: 'startup-error',
+              type: 'error',
+              message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+            },
+          }),
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({
+            type: 'item.completed',
+            item: {
+              id: 'agent-message',
+              type: 'agent_message',
+              text: agentText,
+              [secrets.itemKey]: secrets.path,
+            },
+          }),
+          JSON.stringify(codexTurnCompleted()),
+        ].join('\n'),
+        {
+          exitCode: 23,
+          timedOut: false,
+          processTreeNotEmpty: false,
+          stderr: Buffer.from(secrets.stderr),
+        },
       );
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    const failure = result.failures.join('；');
+    expect(failure).toContain('形状损坏×1');
+    expect(failure).toMatch(/line[=:]4[^;\n]*json[=:]true/u);
+    expect(failure).toContain('type=item.completed');
+    expect(failure).toContain('itemType=agent_message');
+    expect(failure).toContain('itemKeys=[id,text,type]');
+    expect(failure).toMatch(/unknownKeys=1\/sha256:[a-f0-9]{64}/u);
+    expect(failure).toMatch(
+      new RegExp(`text=${Buffer.byteLength(agentText)}B/sha256:[a-f0-9]{64}`, 'u'),
+    );
+    expect(failure).toContain('exitCode=23');
+    expect(failure).toContain('timedOut=false');
+    expect(failure).toContain('processTreeNotEmpty=false');
+    expect(failure).toMatch(
+      new RegExp(`stderr=${Buffer.byteLength(secrets.stderr)}B/sha256:[a-f0-9]{64}`, 'u'),
+    );
+    expect(failure).not.toContain(CODEX_CODE_MODE_DISABLED_DIAGNOSTIC);
+    for (const secret of Object.values(secrets)) expect(failure).not.toContain(secret);
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry an isolation probe result with an invalid schema shape', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      if (calls === 1) {
+        writeCodexOutputLastMessage(options, {});
+        return managedResult(codexAnswer({}));
+      }
+      const answer = {
+        outsideSecret: null,
+        fileWriteSucceeded: false,
+        dangerousCommandSucceeded: false,
+        externalToolSucceeded: false,
+      };
+      writeCodexOutputLastMessage(options, answer);
+      return managedResult(codexAnswer(answer));
     };
 
     const result = await probeRunnerIsolation({
@@ -1892,7 +2442,7 @@ describe('managed Final Review runner execution', () => {
   it('does not let malformed Codex output hide a later forbidden tool event', async () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     let calls = 0;
-    const managed: typeof runManagedWorkspaceProcess = async () => {
+    const managed: typeof runManagedWorkspaceProcess = async (_session, _options) => {
       calls += 1;
       if (calls === 1) {
         return managedResult(
@@ -1990,6 +2540,98 @@ describe('managed Final Review runner execution', () => {
 
     expect(result.ok).toBe(false);
     expect(result.failures.join('；')).toContain('Runner 声明成功调用了外部工具');
+    expect(calls).toBe(1);
+  });
+
+  it('checks dangerous claims in the authoritative isolation result even when JSONL is stale and safe', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const authoritySecret = 'AUTHORITATIVE_PROBE_SECRET';
+    const streamedSafe = {
+      outsideSecret: null,
+      fileWriteSucceeded: false,
+      dangerousCommandSucceeded: false,
+      externalToolSucceeded: false,
+    };
+    const authoritativeUnsafe = {
+      outsideSecret: authoritySecret,
+      fileWriteSucceeded: false,
+      dangerousCommandSucceeded: true,
+      externalToolSucceeded: false,
+    };
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      writeCodexOutputLastMessage(options, authoritativeUnsafe);
+      return managedResult(codexAnswer(streamedSafe));
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('Runner 声明能够读取审查包外文件');
+    expect(result.failures.join('；')).toContain('Runner 声明能够执行危险命令');
+    expect(result.failures.join('；')).not.toContain(authoritySecret);
+    expect(calls).toBe(1);
+  });
+
+  it('does not let a safe authoritative result wash out an earlier dangerous streamed message', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const streamedSecret = 'EARLY_STREAMED_PROBE_SECRET';
+    const safe = {
+      outsideSecret: null,
+      fileWriteSucceeded: false,
+      dangerousCommandSucceeded: false,
+      externalToolSucceeded: false,
+    };
+    const stdout = [
+      { type: 'thread.started', thread_id: 'fixture' },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'startup-error',
+          type: 'error',
+          message: CODEX_CODE_MODE_DISABLED_DIAGNOSTIC,
+        },
+      },
+      { type: 'turn.started' },
+      codexAgentMessage(
+        { ...safe, outsideSecret: streamedSecret, externalToolSucceeded: true },
+        'agent-message-1',
+      ),
+      codexAgentMessage(safe, 'agent-message-2'),
+      codexTurnCompleted(),
+    ]
+      .map((event) => JSON.stringify(event))
+      .join('\n');
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      writeCodexOutputLastMessage(options, safe);
+      return managedResult(stdout);
+    };
+
+    const result = await probeRunnerIsolation({
+      session: fakeSession,
+      runner: 'codex',
+      model: 'review-model',
+      projectRoot: process.cwd(),
+      runnerVersion: 'codex-test',
+      timeoutMs: 1000,
+      managedProcess: managed,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures.join('；')).toContain('Runner 声明能够读取审查包外文件');
+    expect(result.failures.join('；')).toContain('Runner 声明成功调用了外部工具');
+    expect(result.failures.join('；')).not.toContain(streamedSecret);
     expect(calls).toBe(1);
   });
 
@@ -2591,7 +3233,7 @@ describe('managed Final Review runner execution', () => {
     vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
     const reviewPackage = managedPackageFixture();
     let calls = 0;
-    const managed: typeof runManagedWorkspaceProcess = async () => {
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
       calls += 1;
       if (calls === 1) {
         return managedResult(
@@ -2607,15 +3249,15 @@ describe('managed Final Review runner execution', () => {
           { exitCode: 1 },
         );
       }
-      return managedResult(
-        codexAnswer({
-          status: 'passed',
-          summary: 'safe second result',
-          requestDeepReview: false,
-          unverifiableReason: null,
-          findings: [],
-        }),
-      );
+      const answer = {
+        status: 'passed',
+        summary: 'safe second result',
+        requestDeepReview: false,
+        unverifiableReason: null,
+        findings: [],
+      };
+      writeCodexOutputLastMessage(options, answer);
+      return managedResult(codexAnswer(answer));
     };
 
     const result = await runSafeReviewAxis({
@@ -2632,6 +3274,51 @@ describe('managed Final Review runner execution', () => {
     expect(result.attempts).toBe(2);
     expect(result.output.summary).toBe('safe second result');
     expect(calls).toBe(2);
+    expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
+  });
+
+  it('does not retry an actual reconnect-only Review that produced a non-empty authority file', async () => {
+    vi.stubEnv('CODING_X_CODEX_BIN', process.execPath);
+    const reviewPackage = managedPackageFixture();
+    const authoritySecret = 'REVIEW_RECONNECT_AUTHORITY_MUST_NOT_BE_RETRIED';
+    let calls = 0;
+    const managed: typeof runManagedWorkspaceProcess = async (_session, options) => {
+      calls += 1;
+      writeCodexOutputLastMessage(options, authoritySecret);
+      return managedResult(
+        [
+          JSON.stringify({ type: 'thread.started', thread_id: 'retry-fixture' }),
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({
+            type: 'error',
+            message:
+              'Reconnecting... 2/5 (stream disconnected before completion: tls handshake eof)',
+          }),
+        ].join('\n'),
+        { exitCode: 1 },
+      );
+    };
+
+    let failure: unknown;
+    try {
+      await runSafeReviewAxis({
+        session: fakeSession,
+        runner: 'codex',
+        model: 'review-model',
+        runnerVersion: 'codex-test',
+        axis: 'engineering',
+        reviewPackage,
+        timeoutMs: 1000,
+        managedProcess: managed,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).not.toContain(authoritySecret);
+    expect((failure as Error).message).toMatch(/lastMessage=\d+B\/sha256:[a-f0-9]{64}/u);
+    expect(calls).toBe(1);
     expect(reviewPackage.cleanup()).toEqual({ status: 'removed' });
   });
 
@@ -3144,15 +3831,15 @@ describe('managed Final Review runner execution', () => {
         const canonical = realpathSync.native(original.root);
         expect(options.cwd).toBe(canonical);
         expect(config.cwd).toBe(canonical);
-        return managedResult(
-          codexAnswer({
-            status: 'passed',
-            summary: 'ok',
-            requestDeepReview: false,
-            unverifiableReason: null,
-            findings: [],
-          }),
-        );
+        const answer = {
+          status: 'passed',
+          summary: 'ok',
+          requestDeepReview: false,
+          unverifiableReason: null,
+          findings: [],
+        };
+        writeCodexOutputLastMessage(options, answer);
+        return managedResult(codexAnswer(answer));
       };
 
       await expect(
@@ -3192,15 +3879,15 @@ describe('managed Final Review runner execution', () => {
       const prompt = readFileSync(config.promptPath, 'utf8');
       expect(prompt).toContain(input);
       expect(Buffer.byteLength(prompt)).toBeGreaterThan(Buffer.byteLength(input));
-      return managedResult(
-        codexAnswer({
-          status: 'passed',
-          summary: 'ok',
-          requestDeepReview: false,
-          unverifiableReason: null,
-          findings: [],
-        }),
-      );
+      const answer = {
+        status: 'passed',
+        summary: 'ok',
+        requestDeepReview: false,
+        unverifiableReason: null,
+        findings: [],
+      };
+      writeCodexOutputLastMessage(options, answer);
+      return managedResult(codexAnswer(answer));
     };
 
     await expect(
@@ -3251,6 +3938,7 @@ describe('managed Final Review runner execution', () => {
         runnerPath,
         [
           '#!/usr/bin/env node',
+          'import {writeFileSync} from "node:fs";',
           'const chunks=[];',
           'process.stdin.on("data",chunk=>chunks.push(chunk));',
           'process.stdin.on("end",()=>{',
@@ -3258,6 +3946,9 @@ describe('managed Final Review runner execution', () => {
           '  if(prompt.length<65536) process.exit(9);',
           '  const answer={status:"passed",summary:"ok",requestDeepReview:false,',
           '    unverifiableReason:null,findings:[]};',
+          '  const outputIndex=process.argv.indexOf("--output-last-message");',
+          '  if(outputIndex<0||!process.argv[outputIndex+1]) process.exit(8);',
+          '  writeFileSync(process.argv[outputIndex+1],JSON.stringify(answer)+"\\n");',
           '  process.stdout.write(JSON.stringify({type:"thread.started",thread_id:"fixture"})+"\\n");',
           '  process.stdout.write(JSON.stringify({type:"item.completed",item:{',
           '    type:"agent_message",text:JSON.stringify(answer)}})+"\\n");',
