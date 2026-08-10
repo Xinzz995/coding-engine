@@ -30,7 +30,9 @@ const candidate = () => ({
 // These cases exercise real child processes and temporary Git repositories. The
 // outer test budget must outlive the loop's own 5-second agent timeout so Vitest
 // never starts cleanup while an in-flight child is still settling on Windows.
-const HEAD_BINDING_TEST_TIMEOUT_MS = 30_000;
+// 2026-08-10 RC5 dogfood: macos-node-24 hosted runner exceeded 30s on the drift
+// cases, matching the slow-runner pattern already fixed at 60s in #198/#200.
+const HEAD_BINDING_TEST_TIMEOUT_MS = 60_000;
 
 function writeHeadAdvanceScript(
   fixture: ReturnType<typeof setup>,
