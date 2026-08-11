@@ -28,8 +28,11 @@ scope: root
 5. artifact digest：`sha256:97aaf69af4f296a4144ce6959f67f12deb8996ba7dfacaa9012522d0f1f7fccb`
 6. tarball 大小：`711873 bytes`
 7. tarball SHA-256：`d65507d9e568d8302991b8c47840e1aa6387094eebc4d62f3852f7fd768d6713`
-8. 固定 engine CLI：`/private/tmp/coding-x-rc6-materials.AZ0D9d/installs/engine/node_modules/.bin/coding-x`
-9. CLI SHA-256：`699b44321519e52827545eb1b62b8fb314a4695913883fe34398a1df080004c4`
+8. 固定 engine CLI：从第 7 项同一 tarball SHA-256 的候选包在仓库外建立的全新独立安装的真实命令
+   入口；一次性安装目录本身不构成身份。本轮实际入口（现场记录，供审计回溯，不构成重跑合同）：
+   `/private/tmp/coding-x-rc6-materials.AZ0D9d/installs/engine/node_modules/.bin/coding-x`
+9. CLI SHA-256：`699b44321519e52827545eb1b62b8fb314a4695913883fe34398a1df080004c4`（每次执行前
+   对实际入口解析出的 `dist/cli.js` 重新核对；不一致立即停止）
 10. PR #206 边界：PR #206 已合并并通过其 exact-head 全部检查；它只固定 RC6 相对 RC5 的测试预算
     修复边界，不签发发布许可。
 
@@ -87,11 +90,16 @@ tarball 和 tarball SHA-256
 | 8    | Final Review 使用 schema v2，并同时满足 `status=passed`、`deliveryStatus=shadow`、`shadow=true`、`remote.status=ready` 和当前 PR HEAD | 任一字段不符、Review 旧于当前 HEAD，或把 shadow 写成正式可交付                                        |
 | 9    | seed PR 与 Builder 最终 HEAD 的本地既有检查、Policy Guard、CodeQL、跨平台质量检查与总闸分别成功                                     | 只验证其中一个 HEAD、复用旧 PR 检查，或以 PR #206/来源 main 的检查替代本 PR 的 exact-head 检查          |
 
-固定运行命令不得拆换为全局命令、其他候选或默认 workspace：
+固定运行命令必须从身份第 8 项规则建立、并通过第 9 项摘要核对的候选命令入口整体执行，参数逐字
+保持；不得换用全局命令、其他候选或默认 workspace。环境被清理或需要恢复时，从同一 tarball
+SHA-256 重新建立全新安装并重新核对入口摘要后重跑，不得因一次性安装目录消失而放弃或伪造证据：
 
 ```bash
-/private/tmp/coding-x-rc6-materials.AZ0D9d/installs/engine/node_modules/.bin/coding-x codex --shadow --workspace <fresh-workspace> --no-open --port 0 --builder-model gpt-5.6-sol --validator-model gpt-5.6-sol --review-model gpt-5.6-sol --escalation-model gpt-5.6-sol --dev-timeout 60 --val-timeout 90 --max-iter 5
+<candidate-cli> codex --shadow --workspace <fresh-workspace> --no-open --port 0 --builder-model gpt-5.6-sol --validator-model gpt-5.6-sol --review-model gpt-5.6-sol --escalation-model gpt-5.6-sol --dev-timeout 60 --val-timeout 90 --max-iter 5
 ```
+
+`<candidate-cli>` 是按身份第 8、9 项建立并核对后的入口绝对路径；本轮实际执行使用的入口即身份
+第 8 项的现场记录路径。
 
 ## 两阶段远端收口
 
