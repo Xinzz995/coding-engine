@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "codingXVersion": "0.34.1",
+  "codingXVersion": "0.35.0",
   "repository": {
     "provider": "github",
     "fullName": "Xinzz995/coding-engine",
@@ -389,6 +389,7 @@
     ]
   },
   "github": {
+    "requiredPlatforms": ["linux", "macos", "windows"],
     "jobs": [
       {
         "id": "ubuntu-node-22",
