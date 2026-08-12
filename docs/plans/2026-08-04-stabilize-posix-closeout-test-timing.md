@@ -1,7 +1,7 @@
 ---
 title: 校准 POSIX closeout 故障注入测试时序
-status: active
-updated: 2026-08-04
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

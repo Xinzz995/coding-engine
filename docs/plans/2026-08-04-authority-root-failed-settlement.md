@@ -1,7 +1,7 @@
 ---
 title: Authority snapshot 已结算失败语义修复
-status: active
-updated: 2026-08-04
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

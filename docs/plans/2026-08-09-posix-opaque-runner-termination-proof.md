@@ -1,7 +1,7 @@
 ---
 title: POSIX 不透明 Runner 外部终止证明修复
-status: active
-updated: 2026-08-09
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

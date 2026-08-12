@@ -1,7 +1,7 @@
 ---
 title: Codex Review 多消息事件兼容与安全诊断
-status: active
-updated: 2026-08-09
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

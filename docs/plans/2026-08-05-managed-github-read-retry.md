@@ -1,7 +1,7 @@
 ---
 title: 正式 Review GitHub 只读瞬时故障重试
-status: active
-updated: 2026-08-05
+status: done
+updated: 2026-08-12
 scope: root
 ---
 
