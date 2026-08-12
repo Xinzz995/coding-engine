@@ -1,7 +1,7 @@
 ---
 title: "TDD 工作流与可验证覆盖率实施计划"
-status: active
-updated: 2026-07-23
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: 工作区写安全与子进程隔离设计
-status: active
-updated: 2026-08-09
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

@@ -1,7 +1,7 @@
 ---
 title: 干净验收链接批量核对与完整硬链接组
-status: active
-updated: 2026-08-03
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

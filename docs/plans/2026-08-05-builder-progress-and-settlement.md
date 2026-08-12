@@ -1,7 +1,7 @@
 ---
 title: Builder 进度追加与进程结算错误保真
-status: active
-updated: 2026-08-05
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

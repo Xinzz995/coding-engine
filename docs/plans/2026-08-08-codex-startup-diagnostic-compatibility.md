@@ -1,7 +1,7 @@
 ---
 title: Codex 启动诊断兼容修复
-status: active
-updated: 2026-08-08
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

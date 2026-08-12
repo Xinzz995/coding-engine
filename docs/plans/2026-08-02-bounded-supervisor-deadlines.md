@@ -1,7 +1,7 @@
 ---
 title: 受管进程监督器单调绝对时限实施计划
-status: active
-updated: 2026-08-02
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

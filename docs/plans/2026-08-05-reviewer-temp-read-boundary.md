@@ -1,7 +1,7 @@
 ---
 title: Final Reviewer 临时目录读取边界安全修复
-status: active
-updated: 2026-08-05
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

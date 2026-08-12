@@ -1,7 +1,7 @@
 ---
 title: 干净验证检出保留可达 Git 历史
-status: active
-updated: 2026-08-04
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

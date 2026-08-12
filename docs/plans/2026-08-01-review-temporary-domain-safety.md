@@ -1,7 +1,7 @@
 ---
 title: Reviewer 临时域身份与安全清理实施计划
-status: active
-updated: 2026-08-02
+status: done
+updated: 2026-08-12
 scope: root
 ---
 

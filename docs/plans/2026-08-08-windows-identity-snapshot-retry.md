@@ -1,7 +1,7 @@
 ---
 title: Windows 组合身份快照超时重试
-status: active
-updated: 2026-08-08
+status: done
+updated: 2026-08-12
 scope: root
 ---
 
