@@ -136,10 +136,10 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).toContain('checks_windows-node-24:');
     expect(yaml).toContain('checks_windows-native-standard-user:');
     expect(yaml.match(/runs-on: windows-2022/gu)).toHaveLength(3);
-    expect(yaml.match(/runs-on: ubuntu-latest/gu)).toHaveLength(3);
-    expect(yaml.match(/runs-on: macos-latest/gu)).toHaveLength(2);
-    expect(yaml).not.toContain('ubuntu-24.04');
-    expect(yaml).not.toContain('macos-26');
+    expect(yaml.match(/runs-on: ubuntu-24\.04/gu)).toHaveLength(3);
+    expect(yaml.match(/runs-on: macos-26/gu)).toHaveLength(2);
+    expect(yaml).not.toContain('ubuntu-latest');
+    expect(yaml).not.toContain('macos-latest');
     expect(yaml).not.toContain('windows-latest');
     expect(yaml).toContain('build / windows-supervisor-reproducibility');
     expect(yaml).toContain(
@@ -176,7 +176,9 @@ describe('renderQualityGateWorkflow', () => {
     expect(policy).toContain('runs-on: ubuntu-24.04');
     expect(`${quality}\n${policy}`).not.toMatch(/runs-on:\s*(?:ubuntu|macos|windows)-latest\b/u);
 
-    const legacyPolicy = renderPolicyGuardWorkflow(codingEngineContract());
+    const legacyContract = structuredClone(codingEngineContract());
+    legacyContract.codingXVersion = '0.34.1';
+    const legacyPolicy = renderPolicyGuardWorkflow(legacyContract);
     expect(legacyPolicy).toContain('runs-on: ubuntu-latest');
   });
 

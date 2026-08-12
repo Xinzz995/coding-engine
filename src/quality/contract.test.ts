@@ -17,7 +17,7 @@ import {
 import { CODING_X_VERSION } from '../version.js';
 
 // 独立于候选源码版本；仅在已发布版本通过旧裁判审查的 Policy PR 中更新。
-const CODING_ENGINE_STABLE_REFEREE_VERSION = '0.34.1';
+const CODING_ENGINE_STABLE_REFEREE_VERSION = '0.35.0';
 
 function validContract(): unknown {
   return {
@@ -799,7 +799,7 @@ describe('readQualityContract', () => {
       digest: expect.stringMatching(/^sha256:/),
     });
     if (result.status !== 'ready') return;
-    expect(Object.hasOwn(result.contract.github, 'requiredPlatforms')).toBe(false);
+    expect(Object.hasOwn(result.contract.github, 'requiredPlatforms')).toBe(true);
     expect(requiredQualityPlatforms(result.contract)).toEqual(['linux', 'macos', 'windows']);
     const versionMatches = result.contract.codingXVersion === CODING_X_VERSION;
     expect(assessQualityRuntime(result.contract, CODING_X_VERSION, false)).toMatchObject({

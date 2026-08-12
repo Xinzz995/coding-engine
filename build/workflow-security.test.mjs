@@ -56,19 +56,14 @@ describe('GitHub workflow trust boundary', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('keeps moving runner aliases only in the two 0.34.1-managed bootstrap workflows', () => {
-    const legacyManaged = new Set(['policy-guard.yml', 'quality-gate.yml']);
+  it('keeps every workflow on pinned hosted runner labels', () => {
     const offenders = [];
-    const observedLegacy = new Set();
     for (const { name, text } of workflowFiles()) {
       const aliases = [...text.matchAll(/\b(?:ubuntu|macos|windows)-latest\b/gu)].map(
         (match) => match[0],
       );
-      if (aliases.length === 0) continue;
-      if (!legacyManaged.has(name)) offenders.push(`${name}: ${aliases.join(', ')}`);
-      else observedLegacy.add(name);
+      if (aliases.length > 0) offenders.push(`${name}: ${aliases.join(', ')}`);
     }
     expect(offenders).toEqual([]);
-    expect(observedLegacy).toEqual(legacyManaged);
   });
 });
