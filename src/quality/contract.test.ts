@@ -799,7 +799,7 @@ describe('readQualityContract', () => {
       digest: expect.stringMatching(/^sha256:/),
     });
     if (result.status !== 'ready') return;
-    expect(Object.hasOwn(result.contract.github, 'requiredPlatforms')).toBe(false);
+    expect(Object.hasOwn(result.contract.github, 'requiredPlatforms')).toBe(true);
     expect(requiredQualityPlatforms(result.contract)).toEqual(['linux', 'macos', 'windows']);
     const versionMatches = result.contract.codingXVersion === CODING_X_VERSION;
     expect(assessQualityRuntime(result.contract, CODING_X_VERSION, false)).toMatchObject({
