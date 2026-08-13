@@ -29,7 +29,7 @@ coding-x 同时包含两部分：
 | ---------------------- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | **coding-x（控制端）** | 本仓库提供的插件和 npm 引擎，负责安排步骤、启动 agent、保存状态                                 | 安装一次；通常不需要修改它的源码                            |
 | **目标项目（目标端）** | 你真正想开发的网站、服务、App 或其他 Git 仓库                                                   | commands、skills 和 `npx coding-x` 都应在这个项目根目录执行 |
-| **runner**             | 真正执行 AI 任务的命令行工具：`claude`、`codex` 或 Cursor 的 `agent`（兼容旧名 `cursor-agent`） | 先安装并登录；coding-x 每轮调用它                           |
+| **runner**             | 真正执行 AI 任务的命令行工具：`claude`、`codex` 或 Cursor 的 `agent`（兼容旧名 `cursor-agent`）。三者均可开发；可签发验收凭证的 Validator 当前仅 `codex`（见「Validator 宿主隔离与 Runner 信任分层」） | 先安装并登录；coding-x 每轮调用它                           |
 
 例如，你要给 `my-shop` 增加优惠券功能：coding-x 是控制工具，`my-shop` 是目标项目，Codex 可以是 runner。**不要为了使用 coding-x，把 `my-shop` 的需求和 `.workspace/` 写进 coding-x 源码仓库。**
 
@@ -60,7 +60,7 @@ coding-x 同时包含两部分：
 下面是一条推荐的完整路线。不是每次都要执行所有可选步骤，后文会说明如何跳过。
 
 1. **准备目标项目。** 确认它是你信任的 Git 仓库，重要内容已经提交或备份，当前没有不明来源的改动。
-2. **安装插件和一个 runner。** Node.js 需要 ≥22；Claude Code、Codex 或 Cursor Agent 至少安装并登录一个。详细命令见「安装」。
+2. **安装插件和一个 runner。** Node.js 需要 ≥22；Claude Code、Codex 或 Cursor Agent 至少安装并登录一个。要跑通含验收凭证的完整循环需要 `codex`（当前唯一可签发凭证的 runner）。详细命令见「安装」。
 3. **进入目标项目根目录。** 后面的对话和终端命令都在这里进行，而不是在 coding-x 插件源码目录中进行。
 4. **第一次接入先初始化质量门禁，再运行 `/init-docs`。** `npx coding-x init` 先发现候选检查和规范，必须经你确认才配置 GitHub 最小规则并生成受 Git 管理的质量契约；`/init-docs` 只补缺失文档，不覆盖已有内容。
 5. **让当前会话理解项目。** 运行 `/priming`。它不改代码，只输出当前项目概览。
@@ -168,6 +168,7 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态。普通项目命令在进程组收口证明成立后沿用既有重试规则；POSIX 上已经启动的 AI runner 被超时、用户中断、父进程关闭或输出通道故障从外部终止时，不再自动启动下一轮，而是永久隔离当前 workspace。只有已随普通 iteration 写入的调用，才在存档中保留完整收口耗时、退出码和最近 2000 字符异常诊断；proof-missing 只保留安全协议、隔离状态、终端已显示内容和受保护现场。
 - **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；固定候选只有显式 shadow doctor/apply/run 才能在不放宽其他检查的前提下跨过版本差异，健康也固定返回 7。Story 凭证还绑定实际 coding-x 版本和 formal/shadow 模式，候选结果不能被正式模式或另一个候选复用。每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。schema v2 还要求明确确认本地依赖准备命令和允许产物目录，不能从 GitHub 工作流暗推。Node 缺少 lockfile、或 Python 无法安全推导隔离环境时，自动发现会停止并要求 `init --contract`，不会借用宿主全局依赖凑出绿色。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018、022）。
 - **精确提交的干净验证**：Developer 仍在开发目录工作；本地准备、项目检查、TDD、Validator 和最终 Review 前机械检查在项目外的临时 Git 检出运行。检出只包含精确 HEAD 的已跟踪内容，不复制 `.env`、`.claude`、旧依赖或其他忽略文件；submodule、LFS/custom filter、提交身份变化、tracked 改写和未允许产物都按不可验证停止。Validator 通过后先安全清理检出，才签发绑定完整机械/TDD 环境的凭证；清理无法证明成功时不会留下绿色（ADR-022）。
+- **Validator 宿主隔离与 Runner 信任分层**：签发验收凭证的 Validator 必须满足可机械证明的宿主隔离——引擎按固定 Runner profile 启动它（受监督版本与可执行摘要绑定、环境允许清单、HOME/配置/缓存指向单次调用的临时身份域、沙箱只允许写干净检出与授权输出区），并在每次验证前先跑一次引擎侧 canary 反测（sentinel 不外泄、越界读写被拒、受控项目检查可执行、结构化回执可解析）。当前只有固定审计版本的 `codex` 满足该边界：`claude`/`cursor` 仍可完整运行 Builder，但进入验证阶段会按不可验证保留候选并以退出码 5 停止，不会静默降级回宽权限执行；换用 `npx coding-x codex` 重跑即可对已有候选做 validation-only 验收。验收凭证从 v3 起额外绑定 profile 与 canary 证据摘要；旧版本签发的凭证保持可读但不再构成当前通过，升级后首次运行会安全失效并重验（ADR-023、025）。
 - **TDD 门禁（可选）**：启用 `prd.json.tdd` 后，Builder 按 `tdd` skill 对每个公共行为做真实 RED→同命令 GREEN→绿色重构；宿主 hook 在 agent commit 前提前检查，引擎仍在 Validator 前独立校验 Git 基线、政策摘要、新增覆盖忽略标记并运行项目原生 `coverageCheck`。hook 通过不能跳过引擎重跑；覆盖率证明代码被执行，不证明断言有效或历史上一定先写测试（ADR-017）。
 - **可信目标绑定**：每轮 Validator 都收到一次性 request ID、精确 story、AC 快照/hash 和调用前 Git HEAD，必须提交版本化、逐 AC、自洽的结构化 claim。缺结果、旧结果、错 story/hash/commit、漏 AC、产物变化或改写 `state.json` 全部 fail closed，不签发凭证（ADR-015）。该协议消除正常控制流中的错目标/无结果假绿，但同权限 agent 仍能伪造观察，不能替代机械门禁和人审。
 - **workspace 写入与 Git 隔离**：`.workspace/` 是运行时状态，不属于 story commit。`prd-to-json` 只在系统临时目录生成候选，再调用 `workspace apply-prd`；`/review-loop` 也只收集决定，再调用 `workspace record-review-decision`。两者都不直接改 workspace。Git 隔离检查仍只读，不会擅自修改 `.gitignore` 或 Git 索引。
@@ -181,7 +182,7 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 
 - **Node.js ≥ 22**
 - **Git ≥ 2.29**（正式本地验证需要；更旧版本会明确返回不可验证，不会退回浅历史）
-- 已安装、已认证并可在终端调用 **`claude`**（Claude Code CLI）、**`codex`** 或 Cursor 的 **`agent`** / **`cursor-agent`**（取决于你用哪个 runner）
+- 已安装、已认证并可在终端调用 **`claude`**（Claude Code CLI）、**`codex`** 或 Cursor 的 **`agent`** / **`cursor-agent`**（取决于你用哪个 runner；验收凭证当前只能由固定审计版本的 `codex` 签发）
 
 coding-x 正式支持 Linux、macOS 和 Windows。这里的“支持系统”与“CI 用什么机器”是两件事：
 通用格式、安全扫描、候选构建和发布可以集中在 Ubuntu；目标项目只需验证自己真正部署或交付的系统，
@@ -780,7 +781,7 @@ GitHub 状态给出。
 | `2`    | 配置、质量契约、固定版本、状态或 workspace 锁无效                          |
 | `3`    | 存在 `blocked` Story，等待人工处理                                         |
 | `4`    | 最终 Review 存在待人工处理的 finding                                       |
-| `5`    | Validator 或最终 Review 无法可靠验证，例如结果缺失、模型异常或上下文不完整 |
+| `5`    | Validator 或最终 Review 无法可靠验证，例如结果缺失、模型异常、上下文不完整或 Runner 宿主隔离无法证明（含 `claude`/`cursor` 作为 Validator、未审计的 runner 版本与 canary 反测未通过） |
 | `6`    | 本地已完成，但 PR、GitHub CI 或 Ruleset 尚未就绪                           |
 | `7`    | shadow 运行完成；只表示候选验证跑完，永远不能表示可交付                    |
 

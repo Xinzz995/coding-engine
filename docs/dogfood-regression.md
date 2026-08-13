@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-08-09
+updated: 2026-08-13
 scope: root
 ---
 
@@ -47,3 +47,4 @@ scope: root
 | 29  | 父进程崩溃、终止失败或未提交 mutation 不进行 pid stale 自动接管；新 writer 只能在显式 `workspace recover` 或 `resume-mutation` 完成精确恢复后进入                                                                                                                                                                                                                                                                              | ADR-021 崩溃恢复                                                                         | 制造 hard crash 与中断 mutation；重启 run/apply 必须拒绝，错误恢复身份也拒绝，精确恢复完成后才回到 ready                                                                                                                                    |
 | 30  | Developer 在开发目录实现；本地准备、契约检查、TDD、Validator 和最终 Review 前机械检查只读取项目外的精确 HEAD 检出。开发目录 `.env`、`.claude`、旧依赖和 ignored 源码不可见；回执绑定验证环境，submodule/LFS/filter、tracked 改写或越界产物都不得假绿                                                                                                                                                                           | ADR-022 精确提交干净验证                                                                 | 在真实运行前向开发目录放入同名 ignored 干扰文件，对账 Developer cwd、Validator cwd/环境、receipt v2 摘要和临时目录清理；再分别制造准备失败与越界变更，确认不签发凭证                                                                        |
 | 31  | Builder 只在 `progress.md` 末尾追加；历史 `## Codebase Patterns` 只读；可复用经验写入当轮“未来迭代的学习”；项目级沉淀由 `/compound-docs` 处理                                                                                                                                                                                                                                                                                  | 2026-08-05 Builder 追加指令冲突                                                          | 运行前保存 `progress.md` 前缀；运行后逐字确认此前字节不变且只新增本轮块，并确认没有新增或改写 `## Codebase Patterns`                                                                                                                        |
+| 32  | Validator 启动前引擎完成宿主隔离：codex 走固定审计版本 profile + 真实 canary 反测（不读宿主 memory/rules/MCP/插件/会话、不见预置凭据、越界读写被拒、受控项目检查与结构化回执可完成），凭证 v3 双摘要与 evidence `validatorProfile` 互绑且记录 canary 耗时；claude/cursor 运行启动即提示 ADR-025，进入验证阶段按不可验证保留候选并退出 5，无宽权限回退；单次调用临时身份域收口零残留，workspace 内无 validation-result.json | ADR-025 / #174 宿主隔离                                                                  | 对账启动提示、evidence `validatorProfile`（resolution/摘要/canaryDurationMs）、state 凭证 v3 双摘要、临时域与 workspace 文件系统残留；再分别用 claude/cursor 与未审计版本 codex 各跑一轮确认退出 5 且候选保留                                |

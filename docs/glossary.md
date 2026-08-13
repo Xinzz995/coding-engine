@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-08-09
+updated: 2026-08-13
 scope: root
 ---
 
@@ -45,6 +45,14 @@ Validator 按 v1 schema 提交的逐 AC 结构化结论（passed/failed、eviden
 **结构化验收协议**
 validation request → Validator claim → engine protocol verdict/receipt 的 runner-neutral 控制面合同。缺结果、错绑定、畸形 schema、产物变化或 Validator 改写 state 一律 invalid 并 fail closed。
 禁用：Validator IPC、结果文件协议（只描述媒介，掩盖目标绑定与状态机）
+
+**Validator Runner profile（Runner 隔离档案）**
+一次 Validator 调用的固定启动合同：由引擎机械产出的完整 argv、净化环境允许清单、单次调用临时身份域、审计版本与可执行摘要绑定，digest 覆盖全部安全输入。解析失败或无法证明一律按 ADR-023 判不可验证，不降级回宽权限执行；当前只有固定审计版本的 Codex 可解析为 ready（ADR-025）。
+禁用：runner 配置、启动参数集（掩盖「机械产出且不可协商」的合同性质）
+
+**canary 反测**
+每次 Validator 调用前，引擎在同一密封 profile 下执行的有界隔离反测调用。结论只由引擎侧机械观察产生：sentinel token 缺席、越界读写探针被拒、受控项目检查与结构化回执可完成、临时域无逃逸挂载；模型自述只进诊断。证据与 profileDigest 精确互绑、跨调用不可复用；执行器故障不产出证据，解析器失败关闭。
+禁用：隔离自测、canary 测试（易与项目测试混淆；它是逐调用的运行时反测）
 
 **假绿**
 系统显示 story 或交付通过，但实际上未完成指定 AC、没有验证指定产物，或必要检查被跳过。结构化验收协议关闭单 Story 的无结果、错目标和旧结果；最终 Review 负责 Spec/工程/结构判断，GitHub 总闸负责机械检查不可跳过，三者不能互相冒充。
@@ -194,6 +202,7 @@ story 尚未升级时的 builder 模型选择：单次 CLI 覆盖优先，否则
 
 - 一个 prd.json 包含多个 story；一个 story 有多条 acceptanceCriteria
 - builder 把 `passes=true` 作为候选结果；引擎生成 validation request，Validator 提交逐 AC claim，引擎确认目标绑定/协议/state 不变式后才写 verdict 或签发验收凭证；passes 与 validated 同时为 true 才是有效通过
+- Validator 启动前引擎先解析 Validator Runner profile 并完成 canary 反测；两者任一无法证明即按不可验证退出 5、保留候选；验收凭证（v3）额外绑定 profile 与 canary 证据摘要，旧版本凭证安全失效待重验（ADR-025）
 - 打回递增 retryCount，达到上限转 blocked；全部 story 有效通过或 blocked 即走收敛出口结束循环
 - 已经权威结算的 Developer 异常轮触发回写待复核并计入 stall 熔断；结构化 Validator 异常保留候选并立即退出 5；空转轮跳过门禁与 Validator、同样计入熔断
 - 普通 iteration 写入时附带当时已经权威结算的 Builder/Validator 调用凭证；proof-missing 使整轮不写普通 iteration，此前已结算侧也不单独持久化，只保留安全协议与隔离事实且不计入 stall
