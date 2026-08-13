@@ -55,8 +55,15 @@ Runner profile 摘要与 canary 反测证据摘要；claude/cursor 进入验证�
 本 PRD 的首个 seed 提交（`2e32a12`）在自托管首轮运行中揭示：0.36 的隔离验证检出只含精确
 HEAD（与 TDD 基线引用），`npm run format:check` 因依赖 `origin/main` 引用在验证域内不可执行；
 Validator 按合同拒绝伪造 claim、引擎按 missing-result 保留候选并退出 5，行为全部 fail-closed。
-本修订把该命令的证明职责移交本 PR 最新 head 的远端 quality-gate；这是 0.36 验证域隔离下项目
-完成合同的适配事实，必须记入证明计划，不构成对候选包的修改。
+
+第二轮自托管（seed 修订 `2af3711`）进一步揭示两条 0.36 隔离边界：Validator 在隔离检出内重跑
+`npm test` 时，coding-engine 自身的嵌套进程监督用例（POSIX supervisor、workspace 安全协调器等）
+与 Validator 宿主隔离域冲突而批量失败；同时 npm 以重定向后的临时身份域为 `HOME` 运行，缓存写入
+产生符号链接，收口检查按「临时域包含链接」判定 identity-or-tree-unverified，保留现场并以退出码
+2 fail-closed。两轮均未伪造任何结论。据此，本修订把 AC 10 调整为证明职责划分的文档验收：隔离
+检出内由引擎机械门禁执行当前系统适用检查集，其余由本 PR 最新 head 的远端 quality-gate 证明，
+Validator 不在隔离身份域内重跑全量测试套件或执行 npm 安装。这些是 0.36 验证域隔离下「引擎自身
+作为被验证项目」的适配事实，必须记入证明计划，不构成对候选包的修改。
 
 ## Goals
 
@@ -107,18 +114,22 @@ Validator 按合同拒绝伪造 claim、引擎按 missing-result 保留候选并
       负向断言：未审计版本 codex 与 cursor 进入验证阶段均退出 5 且候选保留、不增加重试。
 - [ ] 计划记录 ADR-025 正向证据要求：审计版 codex 的 shadow run 中 evidence `validatorProfile`
       的 `resolution=ready` 记录、canary 耗时，以及 v3 凭证 `runnerProfileDigest` 与
-      `canaryEvidenceDigest` 与 evidence 互绑；同时记录两条已知边界——cursor 作为 Builder 时
-      POSIX supervisor 的 process-unsettled fail-closed 行为，以及隔离验证检出不含
+      `canaryEvidenceDigest` 与 evidence 互绑；同时记录三条已知边界——cursor 作为 Builder 时
+      POSIX supervisor 的 process-unsettled fail-closed 行为；隔离验证检出不含
       `origin/main` 导致依赖远端引用的项目命令（如本仓 `format:check`）在验证域内不可执行、
-      首轮自托管按 missing-result 退出 5 的事实。
+      首轮自托管按 missing-result 退出 5 的事实；以及 Validator 在隔离域内重跑本仓全量测试
+      触发嵌套进程监督用例冲突、npm 缓存在临时身份域产生符号链接导致
+      identity-or-tree-unverified 保留现场并退出 2 的事实。
 - [ ] 计划逐项记录本 PR 的 Shadow 强完成合同、两阶段远端收口和失败观察，不用「运行成功」概括代替。
 - [ ] 计划明确 npm staging、2FA 批准、`next`、`latest`、`v0.36.0` 标签和 GitHub Release 均未执行，
       PR #223 的合并和 Shadow 退出 7 都不构成任何发布许可。
 - [ ] 不修改运行代码、测试、质量契约、工作流、版本、依赖或发布资产。
-- [ ] `npm run lint`、`npm run typecheck`、`npm test`、`npm run repository-health` 与
-      `npm run build` 在隔离验证检出内全部通过。`npm run format:check` 依赖 `origin/main`
-      引用，在只含精确 HEAD 的隔离验证检出内不可执行（0.36 验证域隔离的既定边界，ADR-022 /
-      ADR-025），由本 PR 最新 head 的远端 quality-gate `format` 检查证明，不得因此放宽其余检查。
+- [ ] 计划记录质量证明职责划分：隔离检出内由引擎机械门禁执行当前系统适用检查集（本轮 macOS
+      为 tests、legacy-compatibility、build、cli-smoke、typecheck、repository-health）；
+      format、lint、dependency-audit、Windows 原生证明与全平台矩阵由本 PR 最新 head 的远端
+      quality-gate 证明；并声明 Validator 不在隔离身份域内重跑全量测试套件或执行 npm 安装
+      （本仓嵌套进程监督用例与隔离域冲突、npm 缓存会在临时身份域产生符号链接，均为 0.36
+      已知边界），不得因此放宽任何一项机械检查的证明义务。
 
 ## 本 PR Shadow 强完成合同
 
