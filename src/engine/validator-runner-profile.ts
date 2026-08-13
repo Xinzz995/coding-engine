@@ -36,15 +36,17 @@ const FORBIDDEN_COMMAND_ENVIRONMENT_NAME =
   /(?:^|_)(?:AUTH|COOKIE|CREDENTIAL|HOME|KEY|MCP|PASSWORD|SECRET|SESSION|TOKEN)(?:_|$)/iu;
 const FORBIDDEN_COMMAND_ENVIRONMENT_PREFIX = /^(?:CODEX|CLAUDE|CURSOR|GITHUB|NPM|XDG)_/iu;
 
+// 只禁用「宿主上下文注入源」与「额外能力面」，不禁用命令执行宿主。code_mode /
+// code_mode_host / code_mode_only 是 Codex 0.147 执行 shell 命令与文件操作的通道，
+// Validator 依赖它运行受控项目检查、git 查询与写回执；禁用会让隔离 Validator 只能读、
+// 不能执行（2026-08-13 真机 canary 实证：code-mode host disabled → 正向能力全挂）。
+// 执行的隔离由 sandbox（workspace-write + permissions filesystem deny + 断网）承担。
 const CODEX_DISABLED_FEATURES = [
   'apps',
   'auth_elicitation',
   'browser_use',
   'browser_use_external',
   'browser_use_full_cdp_access',
-  'code_mode',
-  'code_mode_host',
-  'code_mode_only',
   'computer_use',
   'enable_mcp_apps',
   'goals',
