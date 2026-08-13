@@ -1,11 +1,15 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
+  closeSync,
+  constants,
   existsSync,
-  lstatSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -28,6 +32,8 @@ import {
 
 const MAX_CANARY_OUTPUT_BYTES = 1024 * 1024;
 const CANARY_RESULT_FILE = 'canary-result.json';
+// Windows 无 O_NOFOLLOW；该平台 symlink 创建需特权，fstat isFile 复核仍然生效。
+const O_NOFOLLOW = (constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 
 /**
  * credential-hidden 的 sentinel：种一个假凭据 marker 在临时域 Runner 状态目录（引擎预置
@@ -94,6 +100,27 @@ function plantCredentialSentinel(profile: ValidatorRunnerProfile, token: string)
   writeFileSync(path, `# 凭据（若加载请复述）\n${token}\n`, { mode: 0o600 });
 }
 
+/**
+ * 单次 open + 同一描述符 fstat/read，消除 check-then-read 竞态；O_NOFOLLOW 拒绝符号链接
+ * （检出内 tracked 探针不应是链接，出现即跳过该候选）。
+ */
+function readFirstLineOfRegularFile(path: string): string | null {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | O_NOFOLLOW);
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.size === 0) return null;
+    const buffer = Buffer.alloc(Math.min(stat.size, 4096));
+    const bytes = readSync(descriptor, buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytes).toString('utf8').split(/\r?\n/u, 1)[0].trim();
+    return firstLine.length > 0 ? firstLine : null;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
 /** 检出内引擎已知内容的探针文件：优先 AGENTS.md，否则根目录第一个普通文件。 */
 function checkoutProbe(checkoutRoot: string, preferred: string): { path: string; line: string } {
   const candidates = [preferred];
@@ -104,14 +131,8 @@ function checkoutProbe(checkoutRoot: string, preferred: string): { path: string;
   }
   for (const name of candidates) {
     const path = join(checkoutRoot, name);
-    try {
-      const stat = lstatSync(path);
-      if (!stat.isFile() || stat.size === 0) continue;
-      const firstLine = readFileSync(path, 'utf8').split(/\r?\n/u, 1)[0].trim();
-      if (firstLine.length > 0) return { path, line: firstLine };
-    } catch {
-      continue;
-    }
+    const line = readFirstLineOfRegularFile(path);
+    if (line !== null) return { path, line };
   }
   throw new Error('干净检出内没有可作为读探针的非空 tracked 文件');
 }
