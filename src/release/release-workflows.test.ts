@@ -132,7 +132,7 @@ describe('release candidate workflow boundaries', () => {
   it('keeps the supported OS allowlist and every published version source aligned', () => {
     const packageJson = JSON.parse(readFileSync(resolve('package.json'), 'utf8'));
     const packageLock = JSON.parse(readFileSync(resolve('package-lock.json'), 'utf8'));
-    const expectedVersion = '0.35.0';
+    const expectedVersion = '0.36.0';
     const expectedOs = ['darwin', 'linux', 'win32'];
 
     expect(packageJson).toMatchObject({ version: expectedVersion, os: expectedOs });
