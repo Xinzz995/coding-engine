@@ -1,6 +1,6 @@
-import { chmodSync, copyFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ManagedWorkspaceProcessOptions } from '../workspace-safety/coordinator.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import {
@@ -14,6 +14,7 @@ import {
   type ValidatorRunnerObservation,
 } from './validator-runner-observation.js';
 import {
+  HOST_CONTEXT_ISOLATION_EXPECTATIONS,
   resolveValidatorRunnerProfile,
   validatorCanaryEvidenceDigest,
   validatorRunnerTemporaryDomain,
@@ -25,7 +26,71 @@ import {
 type ManagedTermination = ManagedWorkspaceProcessOptions['termination'];
 
 export type ValidatorHostIsolationUnverifiableCode =
-  ValidatorRunnerProfileUnverifiableCode | 'runner-unobservable';
+  ValidatorRunnerProfileUnverifiableCode | 'runner-unobservable' | 'host-context-unverifiable';
+
+/** 允许出现在临时域 CODEX_HOME 里的引擎预置文件；其余（AGENTS.md/config/memory 等）视为污染。 */
+const ALLOWED_RUNNER_STATE_ENTRIES = new Set(['auth.json']);
+
+export interface HostContextIsolationFact {
+  readonly enforced: boolean;
+  readonly failures: readonly string[];
+}
+
+/**
+ * 机械核对宿主上下文注入隔离的静态事实（ADR-025，替代运行时 sentinel）：
+ * 1. profile.args 含该 runner 的忽略/禁用参数全集；
+ * 2. 环境的 CODEX_HOME/HOME/XDG 都落在引擎临时身份域内（宿主真实配置被重定向切断）；
+ * 3. 临时域 CODEX_HOME 除引擎预置 auth 外无任何配置文件（无自造/残留注入源）。
+ * 三项组合成「宿主自动注入向量已被切断」的可审计事实；任一不满足即不可验证。
+ */
+export function assertHostContextIsolation(
+  profile: ValidatorRunnerProfile,
+): HostContextIsolationFact {
+  const failures: string[] = [];
+  if (profile.runner === 'codex') {
+    const expectations = HOST_CONTEXT_ISOLATION_EXPECTATIONS.codex;
+    for (const arg of expectations.requiredArgs) {
+      if (!profile.args.includes(arg)) failures.push(`缺少隔离参数 ${arg}`);
+    }
+    for (const feature of expectations.requiredDisabledFeatures) {
+      const disabled = profile.args.some(
+        (value, index) => value === '--disable' && profile.args[index + 1] === feature,
+      );
+      if (!disabled) failures.push(`未禁用注入能力 ${feature}`);
+    }
+  }
+  const identityRoot = profile.temporary.root;
+  const withinIdentity = (value: string | undefined, label: string): void => {
+    if (value === undefined || !pathWithinIdentity(identityRoot, value)) {
+      failures.push(`${label} 未落在临时身份域内`);
+    }
+  };
+  withinIdentity(profile.environment.HOME, 'HOME');
+  withinIdentity(profile.environment.CODEX_HOME, 'CODEX_HOME');
+  withinIdentity(profile.environment.XDG_CONFIG_HOME, 'XDG_CONFIG_HOME');
+  withinIdentity(profile.environment.XDG_DATA_HOME, 'XDG_DATA_HOME');
+  withinIdentity(profile.environment.XDG_CACHE_HOME, 'XDG_CACHE_HOME');
+  try {
+    for (const entry of readdirSync(profile.temporary.runnerState)) {
+      if (!ALLOWED_RUNNER_STATE_ENTRIES.has(entry)) {
+        failures.push(`临时域 Runner 状态目录存在非预置文件 ${entry}`);
+      }
+    }
+  } catch (error) {
+    failures.push(
+      `无法核对临时域 Runner 状态目录：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return { enforced: failures.length === 0, failures };
+}
+
+function pathWithinIdentity(parent: string, candidate: string): boolean {
+  const relativePath = relative(resolve(parent), resolve(candidate));
+  return (
+    relativePath === '' ||
+    (relativePath !== '..' && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+  );
+}
 
 /** 引擎侧 canary 执行器合同：只接受引擎机械观察产出的证据，模型自述不构成通过。 */
 export type ValidatorCanaryProvider = (
@@ -75,6 +140,8 @@ export type ValidatorHostIsolationOutcome =
       };
       /** 凭证 v3 绑定（`sha256:` 前缀）。 */
       readonly binding: { readonly profileDigest: string; readonly canaryDigest: string };
+      /** 宿主上下文注入隔离的静态事实核对结果（ready 时必为 enforced）。 */
+      readonly hostContextIsolation: HostContextIsolationFact;
     } & ValidatorHostIsolationHandle)
   | ({
       readonly status: 'unverifiable';
@@ -177,6 +244,18 @@ export async function establishValidatorHostIsolation(
     }
     const profile =
       initial.status === 'ready' ? initial.profile : (initial.profile as ValidatorRunnerProfile);
+    // 宿主注入隔离的静态事实核对必须在 canary 前完成：此刻临时域仍为引擎预置的纯净态
+    // （canary 稍后会种 credential 探针），能真实核对「Runner 状态目录除 auth 外无配置」。
+    const hostContextIsolation = assertHostContextIsolation(profile);
+    if (!hostContextIsolation.enforced) {
+      return {
+        status: 'unverifiable',
+        code: 'host-context-unverifiable',
+        message: `宿主上下文注入隔离无法证明：${hostContextIsolation.failures.join('；')}`,
+        profileDigest: profile.profileDigest,
+        ...handle,
+      };
+    }
     const canary = await request.canaryProvider?.(profile);
     const resolution = resolveValidatorRunnerProfile({ ...profileRequest, canary });
     if (resolution.status !== 'ready') {
@@ -202,6 +281,7 @@ export async function establishValidatorHostIsolation(
         profileDigest: `sha256:${resolution.profile.profileDigest}`,
         canaryDigest: `sha256:${validatorCanaryEvidenceDigest(canary as ValidatorRunnerCanaryEvidence)}`,
       },
+      hostContextIsolation,
       ...handle,
     };
   } catch (error) {

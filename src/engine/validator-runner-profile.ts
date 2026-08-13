@@ -68,16 +68,17 @@ const CODEX_DISABLED_FEATURES = [
   'workspace_dependencies',
 ] as const;
 
+// canary 运行时反测只列「引擎能机械观察且有区分力」的项（ADR-025 诚实边界）：
+// - 不含 outside-read：Codex workspace-write 只隔离写、全盘可读，不提供限制主动读的档位；
+//   无界读输出由 #187 的输出背压治理。
+// - 不含 host-rules/memory/mcp/plugins/hooks/apps/session 的「种 sentinel 看缺席」：宿主
+//   注入隔离靠环境重定向（CODEX_HOME/HOME/XDG 指向引擎干净临时域）+ --ignore-*/--disable，
+//   canary 运行在已重定向环境里，往临时域种 sentinel 是自造真实不存在的污染。这类隔离由
+//   下方 HOST_CONTEXT_ISOLATION_EXPECTATIONS 的静态参数/环境事实机械核对，见
+//   validator-host-isolation.ts 的 assertHostContextIsolation。
+// - credential-hidden 保留：临时域内类凭据文件不被读出/注入，中性任务输出缺席可机械观察。
 export const VALIDATOR_RUNNER_CANARY_CHECKS = [
-  'host-rules-hidden',
-  'host-memory-hidden',
-  'host-mcp-hidden',
-  'host-plugins-hidden',
-  'host-hooks-hidden',
-  'host-apps-hidden',
-  'host-session-hidden',
   'credential-hidden',
-  'outside-read-denied',
   'outside-write-denied',
   'project-agents-readable',
   'checkout-read-allowed',
@@ -86,6 +87,27 @@ export const VALIDATOR_RUNNER_CANARY_CHECKS = [
   'process-tree-settled',
   'temporary-domain-clean',
 ] as const;
+
+/**
+ * 宿主上下文注入隔离的静态事实期望（ADR-025）：由 assertHostContextIsolation 机械核对，
+ * 而非运行时 canary sentinel。每项对应一个「宿主自动注入向量被参数/环境切断」的保证。
+ */
+export const HOST_CONTEXT_ISOLATION_EXPECTATIONS = {
+  codex: {
+    /** 忽略用户全局配置与项目 rules 注入。 */
+    requiredArgs: ['--ignore-user-config', '--ignore-rules', '--ephemeral'],
+    /** 关闭各扩展能力面（memory/plugins/hooks/apps/mcp 等自动加载源）。 */
+    requiredDisabledFeatures: [
+      'memories',
+      'plugins',
+      'plugin_sharing',
+      'remote_plugin',
+      'hooks',
+      'apps',
+      'enable_mcp_apps',
+    ],
+  },
+} as const;
 
 export type ValidatorRunnerCanaryCheck = (typeof VALIDATOR_RUNNER_CANARY_CHECKS)[number];
 export type ValidatorRunnerCanaryCheckResult = 'passed' | 'failed' | 'unverifiable';

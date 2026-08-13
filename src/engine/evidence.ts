@@ -76,6 +76,7 @@ const VALIDATOR_PROFILE_RESOLUTIONS = [
   'canary-binding-mismatch',
   'canary-failed',
   'runner-unobservable',
+  'host-context-unverifiable',
 ] as const;
 
 /** Validator 宿主隔离链的引擎机械观察（ADR-025）；bypass 测试模式与旧记录缺省。 */

@@ -191,7 +191,7 @@ describe('resolveValidatorRunnerProfile', () => {
     const canary = passedCanary(profile, {
       checks: {
         ...passedCanary(profile).checks,
-        'host-memory-hidden': 'failed',
+        'credential-hidden': 'failed',
         'controlled-command-allowed': 'unverifiable',
       },
     });
@@ -201,7 +201,7 @@ describe('resolveValidatorRunnerProfile', () => {
       code: 'canary-failed',
     });
     if (resolution.status === 'unverifiable') {
-      expect(resolution.message).toContain('host-memory-hidden');
+      expect(resolution.message).toContain('credential-hidden');
       expect(resolution.message).toContain('controlled-command-allowed');
     }
   });

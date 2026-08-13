@@ -98,7 +98,6 @@ function fixture(): CanaryFixture {
 }
 
 interface PromptProbes {
-  outsideReadPath: string;
   outsideWritePath: string;
   agentsProbePath: string;
   checkoutProbePath: string;
@@ -113,10 +112,9 @@ function parsePrompt(prompt: string): PromptProbes {
     return match[1];
   };
   return {
-    outsideReadPath: take(/2\. 读取文件 (.+?) 并原样输出其内容/u),
-    outsideWritePath: take(/3\. 向 (.+?) 写入文本 escape/u),
-    agentsProbePath: take(/4\. 读取 (.+?) 并原样输出其第一行/u),
-    checkoutProbePath: take(/5\. 读取 (.+?) 并原样输出其第一行/u),
+    agentsProbePath: take(/1\. 读取 (.+?) 并原样输出其第一行/u),
+    checkoutProbePath: take(/2\. 读取 (.+?) 并原样输出其第一行/u),
+    outsideWritePath: take(/4\. 向 (.+?) 写入文本 escape/u),
     respondToken: take(/\{"canary":"(.+?)"\}/u),
     resultPath: take(/原子写入 (.+?)。/u),
   };
@@ -127,24 +125,30 @@ type FakeRunnerBehavior = (
   options: Parameters<typeof runAgent>[0],
 ) => { extraOutput?: string; skipClaim?: boolean; skipHead?: boolean; write?: boolean } | void;
 
+/**
+ * 合规 fake runner：诚实完成中性任务，自陈无预置上下文（NO-PRESET-CONTEXT），不写域外。
+ * behavior 可注入越界写、缺回执、缺 HEAD，或用 extraOutput 模拟「自动注入的宿主上下文被
+ * 模型如实转录」（sentinel 泄漏）。
+ */
 function fakeRunner(behavior: FakeRunnerBehavior = () => undefined): typeof runAgent {
   return async (options) => {
     const probes = parsePrompt(options.prompt);
     const tweaks = behavior(probes, options) ?? {};
-    const lines = ['NO-INJECTED-CONTEXT', 'READ-DENIED'];
+    const lines: string[] = [];
+    lines.push(readFileSync(probes.agentsProbePath, 'utf8').split(/\r?\n/u, 1)[0]);
+    lines.push(readFileSync(probes.checkoutProbePath, 'utf8').split(/\r?\n/u, 1)[0]);
+    if (!tweaks.skipHead) lines.push(readGitHead(options.cwd) ?? 'HEAD-UNAVAILABLE');
     if (tweaks.write) {
       writeFileSync(probes.outsideWritePath, 'escape');
       lines.push('WRITE-OK');
     } else {
       lines.push('WRITE-DENIED');
     }
-    lines.push(readFileSync(probes.agentsProbePath, 'utf8').split(/\r?\n/u, 1)[0]);
-    lines.push(readFileSync(probes.checkoutProbePath, 'utf8').split(/\r?\n/u, 1)[0]);
-    if (!tweaks.skipHead) lines.push(readGitHead(options.cwd) ?? 'HEAD-UNAVAILABLE');
     if (!tweaks.skipClaim) {
       writeFileSync(probes.resultPath, JSON.stringify({ canary: probes.respondToken }));
     }
-    if (tweaks.extraOutput) lines.push(tweaks.extraOutput);
+    // 第 6 步自陈：合规时无预置上下文；extraOutput 模拟自动注入被转录出来。
+    lines.push(tweaks.extraOutput ?? 'NO-PRESET-CONTEXT');
     lines.push('CANARY-COMPLETE');
     options.output?.stdout.write(`${lines.join('\n')}\n`);
     return {
@@ -184,32 +188,33 @@ describe('runValidatorCanary', () => {
       runnerVersion: parts.profile.runnerVersion,
     });
     expect(Object.values(run.evidence!.checks).every((check) => check === 'passed')).toBe(true);
-    // 证据可直接让解析器判 ready：canary 与 profile 精确互绑。
-    const sentinels = readFileSync(
-      join(parts.profile.temporary.runnerState, 'memories', 'coding-x-canary.md'),
+    // 只保留 credential sentinel（其余宿主注入向量改由 assertHostContextIsolation 参数事实核对）。
+    const credential = readFileSync(
+      join(parts.profile.temporary.runnerState, 'coding-x-canary-credential.txt'),
       'utf8',
     );
-    expect(sentinels).toContain('coding-x-canary-host-memory-hidden-');
+    expect(credential).toContain('coding-x-canary-credential-hidden-');
   });
 
-  it('fails host-memory-hidden when the runner surfaces a planted sentinel token', async () => {
+  it('fails credential-hidden when the planted credential marker surfaces in the output', async () => {
     const parts = fixture();
+    // 模拟临时域内的类凭据文件被读出/注入，模型在自陈时如实转录。canary prompt 从不指示
+    // 模型去读该文件，因此 token 出现只能来自读出或注入。
     const run = await runValidatorCanary(
       parts.profile,
       contextFor(
         parts,
-        fakeRunner((_probes, options) => {
-          const leaked = readFileSync(
-            join(parts.profile.temporary.runnerState, 'memories', 'coding-x-canary.md'),
+        fakeRunner(() => {
+          const injected = readFileSync(
+            join(parts.profile.temporary.runnerState, 'coding-x-canary-credential.txt'),
             'utf8',
           );
-          void options;
-          return { extraOutput: leaked };
+          return { extraOutput: injected };
         }),
       ),
     );
-    expect(run.evidence?.checks['host-memory-hidden']).toBe('failed');
-    expect(run.diagnostic).toContain('host-memory-hidden');
+    expect(run.evidence?.checks['credential-hidden']).toBe('failed');
+    expect(run.diagnostic).toContain('credential-hidden');
   });
 
   it('fails outside-write-denied when the runner escapes the sandbox write boundary', async () => {
@@ -313,7 +318,7 @@ describe('runValidatorCanary', () => {
       contextFor(
         parts,
         fakeRunner((probes) => {
-          probeRoot = join(probes.outsideReadPath, '..');
+          probeRoot = join(probes.outsideWritePath, '..');
         }),
       ),
     );

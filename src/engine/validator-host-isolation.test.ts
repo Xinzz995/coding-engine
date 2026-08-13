@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
-import { establishValidatorHostIsolation } from './validator-host-isolation.js';
+import {
+  assertHostContextIsolation,
+  establishValidatorHostIsolation,
+} from './validator-host-isolation.js';
 import {
   VALIDATOR_RUNNER_CANARY_CHECKS,
   VALIDATOR_RUNNER_CANARY_SCHEMA_VERSION,
@@ -228,5 +231,72 @@ describe('establishValidatorHostIsolation', () => {
     });
     expect(outcome).toMatchObject({ status: 'unverifiable', code: 'runner-unobservable' });
     expect(outcome.dispose().status).toBe('removed');
+  });
+});
+
+describe('assertHostContextIsolation', () => {
+  async function readyProfile(parts: ReturnType<typeof fixture>): Promise<ValidatorRunnerProfile> {
+    const outcome = await establishValidatorHostIsolation({
+      ...baseRequest(parts),
+      canaryProvider: (profile) => passedCanaryFor(profile),
+    });
+    if (outcome.status !== 'ready') throw new Error('expected ready profile');
+    outcome.dispose();
+    return outcome.profile;
+  }
+
+  it('enforced for a freshly resolved profile whose identity domain holds only auth', async () => {
+    const parts = fixture();
+    const outcome = await establishValidatorHostIsolation({
+      ...baseRequest(parts),
+      canaryProvider: (profile) => passedCanaryFor(profile),
+    });
+    expect(outcome.status).toBe('ready');
+    if (outcome.status !== 'ready') return;
+    expect(outcome.hostContextIsolation.enforced).toBe(true);
+    // 核对通过后种 credential 探针，此刻 Runner 状态目录仍只应有 auth（探针在 canary 内种）。
+    outcome.dispose();
+  });
+
+  it('fails when a non-preset config file appears in the runner state directory', async () => {
+    const parts = fixture();
+    const profile = await readyProfile(parts);
+    // 域已被 dispose；重建 Runner 状态目录并放入非预置的 AGENTS.md 模拟污染。
+    mkdirSync(profile.temporary.runnerState, { recursive: true });
+    writeFileSync(join(profile.temporary.runnerState, 'AGENTS.md'), 'global rules\n');
+    cleanups.push(() => rmSync(profile.temporary.root, { recursive: true, force: true }));
+    const fact = assertHostContextIsolation(profile);
+    expect(fact.enforced).toBe(false);
+    expect(fact.failures.some((f) => f.includes('AGENTS.md'))).toBe(true);
+  });
+
+  it('fails when required isolation args are missing from the profile', async () => {
+    const parts = fixture();
+    const profile = await readyProfile(parts);
+    mkdirSync(profile.temporary.runnerState, { recursive: true });
+    writeFileSync(join(profile.temporary.runnerState, 'auth.json'), '{}');
+    cleanups.push(() => rmSync(profile.temporary.root, { recursive: true, force: true }));
+    const stripped = {
+      ...profile,
+      args: profile.args.filter((a) => a !== '--ignore-rules'),
+    } as ValidatorRunnerProfile;
+    const fact = assertHostContextIsolation(stripped);
+    expect(fact.enforced).toBe(false);
+    expect(fact.failures.some((f) => f.includes('--ignore-rules'))).toBe(true);
+  });
+
+  it('fails when an environment redirect escapes the identity domain', async () => {
+    const parts = fixture();
+    const profile = await readyProfile(parts);
+    mkdirSync(profile.temporary.runnerState, { recursive: true });
+    writeFileSync(join(profile.temporary.runnerState, 'auth.json'), '{}');
+    cleanups.push(() => rmSync(profile.temporary.root, { recursive: true, force: true }));
+    const escaped = {
+      ...profile,
+      environment: { ...profile.environment, CODEX_HOME: '/Users/host/.codex' },
+    } as ValidatorRunnerProfile;
+    const fact = assertHostContextIsolation(escaped);
+    expect(fact.enforced).toBe(false);
+    expect(fact.failures.some((f) => f.includes('CODEX_HOME'))).toBe(true);
   });
 });
