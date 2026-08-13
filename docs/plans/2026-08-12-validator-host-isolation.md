@@ -50,10 +50,11 @@ main（6fb9914）现状事实：
    前即返回 native-boundary-incomplete；Codex 版本以受监督 `--version` 实测值与固定值精确比对，
    不一致判 unsupported-version；两者都不存在宽权限回退。
    验证：三 Runner 分支测试；版本漂移注入测试；真实 Claude/Cursor 运行证明诚实 unverifiable。
-4. 每次 Validator 调用前，引擎自有 canary 执行器在同一 profile 与临时身份域内完成 16 项反测；
-   结论只由引擎侧机械观察产生（sentinel token 是否出现在输出与结果、越界写目标是否存在、进程
-   树是否结算、临时域内容是否符合白名单、结构化 canary 结果是否匹配 schema），模型自述只作
-   诊断。canary 非全部通过即走第 2 条。
+4. 每次 Validator 调用前，引擎先机械核对宿主注入隔离的静态参数/环境事实（第一层），再由引擎
+   自有 canary 执行器在同一 profile 与临时身份域内完成 8 项运行时反测（第二层）；结论只由引擎
+   侧机械观察产生（越界写目标是否存在、进程树是否结算、临时域内容是否符合白名单、结构化 canary
+   结果是否匹配 schema、预置凭据是否外泄），模型自述只作诊断。任一层不通过即走第 2 条。
+   （原设想的 16 项 sentinel 经真机审计收敛为两层，见「真机审计裁决」。）
    验证：fake-runner 注入「自称通过但 token 泄漏」「越界写成功」「无结构化结果」场景必须
    fail-closed；真实 Codex canary 至少在一个平台留下 dogfood 记录。
 5. canary 证据与 profile 精确互绑：runner/版本/平台/架构/模型/可执行摘要/profileDigest 任一不
@@ -120,20 +121,42 @@ runner-neutral。
 unsupported-version 判不可验证。`--disable` 清单是版本特定事实，随 pin 一起重审计。
 Claude/Cursor 原生边界补齐并通过真实 canary 后可直接升级为认证 Runner，无需重开决策。
 
-## canary 反测的观察机制
+## 宿主隔离的两层机制（2026-08-13 真机审计后定稿）
 
-16 项反测的通过判据全部是引擎侧机械观察，模型自述不构成通过依据：
+原计划设想的「16 项 canary sentinel」经真机审计收敛为两层，因为环境重定向式隔离无法用
+「在已重定向环境里种 sentinel」可靠验证（详见下方「真机审计裁决」）：
 
-- host-rules/memory/mcp/plugins/hooks/apps/session-hidden：sentinel token 种入临时域伪 HOME 的
-  对应配置位置；任何输出、结果或检出内容出现 token 即失败（token 缺席 + 参数审计共同构成
-  负向证据；无法证明的内部行为由版本固定兜底）。
-- credential-hidden：预置认证材料的已知片段不得出现在任何输出与结果。
-- outside-read-denied / outside-write-denied：以源项目根等引擎已知内容路径为探针，读探针内容
-  token 不得出现，写探针目标文件必须不存在。
+**第一层 · 宿主注入隔离 = 静态参数/环境事实核对**（`assertHostContextIsolation`，canary 前）：
+- `CODEX_HOME`/`HOME`/`XDG_CONFIG/DATA/CACHE` 全部落在引擎单次调用临时域内（宿主真实配置被
+  重定向切断）；
+- 临时域 Runner 状态目录除引擎预置 `auth.json` 外为空（无自造/残留注入源）；
+- profile.args 含 `--ignore-user-config`/`--ignore-rules`/`--ephemeral` 与 `--disable` 全集
+  （memories/plugins/plugin_sharing/remote_plugin/hooks/apps/enable_mcp_apps）。
+任一不满足即 `host-context-unverifiable` 退出 5。这覆盖 rules/memory/mcp/plugins/hooks/apps/
+session 的自动注入向量。
+
+**第二层 · canary 运行时反测 = 8 项引擎机械观察**（模型自述只进诊断）：
+- credential-hidden：临时域内假凭据 marker（fake token，绝不复制真 auth）不得出现在输出/回执。
+- outside-write-denied：越界写探针目标文件必须不存在。
 - project-agents-readable / checkout-read-allowed / controlled-command-allowed：读检出内既有
-  tracked 文件与运行 `git rev-parse HEAD` 等固定无害命令，引擎核对已知内容/HEAD 出现。
-- structured-claim-returned：canary 按微型 schema 写结构化结果到授权输出区，引擎严格解析。
-- process-tree-settled / temporary-domain-clean：复用受管 operation 收口证明与临时域内容白名单。
+  tracked 文件与运行 `git rev-parse HEAD`，引擎核对已知内容/精确 HEAD 出现。
+- structured-claim-returned：canary 按 respondToken 写结构化回执到授权输出区，引擎严格解析。
+- process-tree-settled / temporary-domain-clean：受管 operation 收口证明与临时域无符号链接。
+
+**不覆盖读隔离**：Codex `workspace-write` 全盘可读、无读隔离档位；威胁模型只防自动注入，不防
+被恶意 AC 诱导的主动读（Validator 验收本就需读检出与依赖），无界读输出由 #187 输出背压治理。
+
+## 真机审计裁决（2026-08-13，codex 0.147.0-alpha.6.5）
+
+用真实 Codex（`/Applications/ChatGPT.app/Contents/Resources/codex`）跑通端到端后固化的三条裁决：
+1. profile 不得禁用 `code_mode`/`code_mode_host`/`code_mode_only`——它们是 Codex 命令执行宿主，
+   禁用会让 Validator 只能读、不能跑 git/检查/写回执（真机报 `code-mode host disabled`）。
+2. 移除 `outside-read-denied`：Codex `workspace-write` 结构上全盘可读，该检查无法通过且威胁
+   模型不要求（用户 2026-08-13 裁决「诚实化边界」）。
+3. host-* 注入检查从「运行时种 sentinel」改为「静态参数/环境事实核对」：canary 运行在已重定向
+   环境里，往临时域种 sentinel 是自造真实不存在的污染（用户 2026-08-13 裁决「参数事实断言」）。
+真机端到端结果：canary `resolution=ready`、验证闭环 `exit 0`、`validated=true`、v3 凭证含
+profile 与 canary 双摘要、`canaryDurationMs≈34s`。
 
 ## 分批实施
 
@@ -236,6 +259,10 @@ Claude/Cursor 原生边界补齐并通过真实 canary 后可直接升级为认�
   canary 判据约定）、dogfood-regression 断言 32、架构地图（模块表新行、主循环与数据流）。
   status/报告对原因码的呈现核对完成：`validationProtocolError` 诊断全文（含原因码与消息）已经
   由既有协议错误管道展示，不另做 `validatorProfile` 专门渲染。
-- 待办（需真实 runner 环境与用户参与）：真实 Codex canary 与验证闭环 dogfood、按升级协议对
-  当时实测 Codex 版本重审计并更新 pin、Python Monorepo 1800+ 文件 `.venv` R7 重放、
-  claude/cursor 诚实 unverifiable 真实记录、0.36.0 发布线（版本 bump 随发布 PR）。
+- 真机复验完成（2026-08-13，codex 0.147.0-alpha.6.5）：三条真机裁决已固化（见「真机审计
+  裁决」），端到端 `exit 0` + `validated=true` + v3 双摘要凭证 + `canaryDurationMs≈34s`；期间
+  修掉 code_mode 执行宿主被禁的真实 bug，并按用户两次裁决（诚实化读边界、host-* 改参数事实）
+  收敛 canary 为「静态参数事实 + 8 项运行时反测」两层。canary 判据、宿主注入机制、pin 版本
+  已与实测一致。
+- 待办（需用户参与/发布线）：Python Monorepo 1800+ 文件 `.venv` R7 重放、claude/cursor 诚实
+  unverifiable 真实记录、0.36.0 发布线（版本 bump 随发布 PR）。
