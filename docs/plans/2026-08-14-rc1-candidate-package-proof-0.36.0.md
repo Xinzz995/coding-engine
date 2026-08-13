@@ -80,10 +80,23 @@ fail-closed 的已知边界，不是候选失败后可绕过的异常，也不�
 按合同拒绝伪造 claim，引擎按 `missing-result` 保留候选并退出 5。这个结果是 ADR-022 / ADR-025
 边界下的 fail-closed 事实，不是可以绕过的普通失败，也不能记作 Shadow 完成证据。
 
-隔离验证检出内的 `npm run lint`、`npm run typecheck`、`npm test`、
-`npm run repository-health` 与 `npm run build` 必须全部通过。`format:check` 的证明职责由本 PR
-最新 head 的远端 quality-gate `format` 检查承担，必须绑定同一 head 且成功；不得复用旧 head 的
-结果，也不得借此放宽、跳过或用自述替代其余五项检查。
+第二轮自托管（seed 修订 `2af3711`）进一步揭示第三条已知边界：Validator 在隔离身份域内重跑
+`npm test` 时，本仓的 POSIX supervisor、workspace 安全协调器等嵌套进程监督用例与宿主隔离域
+冲突并批量失败；同时 npm 以重定向后的临时身份域为 `HOME` 写缓存时产生符号链接，收口检查按
+`identity-or-tree-unverified` 保留现场并退出 2。这是 0.36 对“引擎自身作为被验证项目”的
+fail-closed 边界，不得伪造通过，也不得记作 Shadow 完成证据。
+
+### 质量证明职责划分
+
+| 证明职责 | 必须覆盖的检查 | 绑定与失败观察 |
+| --- | --- | --- |
+| 隔离检出内的引擎机械门禁 | 当前系统适用检查集；本轮 macOS 为 `tests`、`legacy-compatibility`、`build`、`cli-smoke`、`typecheck`、`repository-health` | 六项必须绑定当前 HEAD 并全部通过；任一失败、取消、超时、跳过或仍在运行都不成立 |
+| 本 PR 最新 head 的远端 quality-gate | `format`、`lint`、`dependency-audit`、Windows 原生证明（`windows-native-proof`、Windows supervisor 与 path inspector 可复现性）及全平台矩阵 | 必须逐项绑定同一最新 head 并成功；旧 head、只看总闸或缺少任一分项都不成立 |
+
+Validator 只在隔离身份域内完成 profile、canary、目标核对与结构化 claim，不在那里重跑本仓全量
+测试套件，也不执行 npm 安装。这样分工是对上述嵌套进程冲突与 npm 缓存符号链接边界的适配，不是
+豁免：引擎机械门禁和远端 quality-gate 的每项证明义务都必须保留，不能用 Validator 自述、旧结果或
+另一层的绿色结果替代。
 
 ## 本 PR Shadow 强完成合同
 
@@ -99,8 +112,8 @@ requestId 和当前 PR HEAD。
 | 5 | 固定命令整体执行并走完 Shadow | 逐字使用下方命令；最终返回 7 | 参数被删改、换用默认 `.workspace`、全局命令或其他候选；任何 1–6 都是失败 |
 | 6 | Story 状态与全新 v3 回执同时成立 | `blocked=false`、`passes=true`、`validated=true`；回执绑定当前 PR HEAD、`coding-x@0.36.0`、runner `codex`、审计版本 `0.147.0-alpha.6.5`、模型 `gpt-5.6-sol` 与本次 requestId；双摘要与同轮 ready evidence 互绑 | 只有 Agent 自述或 `passes=true`；状态任一不符；回执旧版、旧 HEAD、旧 requestId、身份不符或摘要不互绑 |
 | 7 | Final Review 完成 Shadow 远端判定 | schema v2 同时满足 `status=passed`、`deliveryStatus=shadow`、`shadow=true`、`remote.status=ready`，并绑定当前 PR HEAD | Review 字段缺失或不符、绑定旧 HEAD、远端未就绪，或把 Shadow 当作正式可交付 |
-| 8 | 隔离验证域内可执行的项目检查完整 | `npm run lint`、`npm run typecheck`、`npm test`、`npm run repository-health` 与 `npm run build` 全部通过 | 任一检查失败、取消、超时、跳过或仍在运行；把 `format:check` 的不可执行扩大成其余检查的豁免 |
-| 9 | seed 与最终 HEAD 的本地和远端门禁均完整 | seed PR 与 Builder 最终 HEAD 的可执行本地检查、Policy Guard、CodeQL、跨平台质量检查和总闸分别成功；本 PR 最新 head 的远端 quality-gate `format` 成功证明格式 | 只看总闸、不核对分项；跳过 seed 或最终 HEAD；用旧 head 的 `format` 结果；失败、取消、超时、跳过或仍在运行 |
+| 8 | 隔离检出内的引擎机械门禁完整 | 本轮 macOS 的 `tests`、`legacy-compatibility`、`build`、`cli-smoke`、`typecheck`、`repository-health` 全部通过；Validator 不重跑全量测试或执行 npm 安装 | 任一检查失败、取消、超时、跳过或仍在运行；由 Validator 重跑引发嵌套监督冲突，或 npm 缓存符号链接触发 `identity-or-tree-unverified` 退出 2 |
+| 9 | seed 与最终 HEAD 的本地和远端门禁均完整 | seed PR 与 Builder 最终 HEAD 的可执行本地检查分别成功；本 PR 最新 head 的 Policy Guard、CodeQL、`format`、`lint`、`dependency-audit`、Windows 原生证明、全平台矩阵和总闸逐项成功 | 只看总闸、不核对分项；跳过 seed 或最终 HEAD；使用旧 head 结果；失败、取消、超时、跳过或仍在运行 |
 
 固定运行命令如下；`<candidate-cli>`、`<fresh-workspace>` 都必须替换为已经按上文规则核对的绝对
 路径，其他参数逐字保持：
@@ -112,13 +125,13 @@ requestId 和当前 PR HEAD。
 ### 两阶段远端收口
 
 1. **阶段一：形成并推送 Builder 最终 HEAD。** 先对 seed HEAD 与 Builder 最终 HEAD 分别完成各自
-   可执行域的本地既有检查；隔离验证检出内的五项检查必须全绿，`format:check` 按上文边界留待
-   远端同 head 证明。再精确提交和推送最终 HEAD。推送前远端检查尚未生成或未就绪时，只允许记录为
-   中间退出 6；这不是完成、不是失败豁免，也不能进入 Final Review。
-2. **阶段二：固定同一 HEAD 完成远端判定。** 等待该最终 HEAD 的 Policy Guard、CodeQL、跨平台质量
-   检查、总闸与 quality-gate `format` 逐项成功，再让绑定同一 HEAD 的 Final Review 得到
-   `remote.status=ready`。任一检查失败、取消、超时、跳过、指向其他 HEAD，或最终仍是退出 6，都必须
-   停止并修复后以新的最终 HEAD 重走两阶段。
+   可执行域的本地既有检查；隔离检出内由引擎机械门禁完成本轮 macOS 的六项适用检查，Validator
+   不重跑全量测试套件或执行 npm 安装。再精确提交和推送最终 HEAD。推送前远端检查尚未生成或未
+   就绪时，只允许记录为中间退出 6；这不是完成、不是失败豁免，也不能进入 Final Review。
+2. **阶段二：固定同一 HEAD 完成远端判定。** 等待该最终 HEAD 的 Policy Guard、CodeQL、
+   quality-gate `format`、`lint`、`dependency-audit`、Windows 原生证明、全平台矩阵与总闸逐项成功，
+   再让绑定同一 HEAD 的 Final Review 得到 `remote.status=ready`。任一检查失败、取消、超时、跳过、
+   指向其他 HEAD，或最终仍是退出 6，都必须停止并修复后以新的最终 HEAD 重走两阶段。
 
 ## 发布状态与恢复
 
