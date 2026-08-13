@@ -1,11 +1,16 @@
 ---
 title: Validator 输出、不可验证退出与宿主隔离修复
-status: active
-updated: 2026-08-07
+status: superseded
+updated: 2026-08-12
 scope: root
 ---
 
 # Validator 输出、不可验证退出与宿主隔离修复
+
+> 2026-08-12：批次 A/B（完成合同 1-5、8 的输出与退出语义部分）已由 #187、#189 交付进
+> 默认分支；批次 C/D（完成合同 6-7，宿主隔离与真实复验）经 ADR-025 重新裁决为分层 Runner
+> 信任后，由 `2026-08-12-validator-host-isolation.md` 接管。本文的「原生能力对照与适配裁决」
+> 一节（三 Runner 各自适配为正式支持）已被 ADR-025 取代，仅存档追溯。
 
 ## 背景与事实边界
 
