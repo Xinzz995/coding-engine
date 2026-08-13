@@ -52,6 +52,12 @@ Runner profile 摘要与 canary 反测证据摘要；claude/cursor 进入验证�
   `canaryEvidenceDigest` 与 evidence `ready` 记录互绑）。cursor 作为 Builder 时 POSIX
   supervisor 按 process-unsettled 保留现场并拒绝恢复，属 fail-closed 设计行为，已如实记录。
 
+本 PRD 的首个 seed 提交（`2e32a12`）在自托管首轮运行中揭示：0.36 的隔离验证检出只含精确
+HEAD（与 TDD 基线引用），`npm run format:check` 因依赖 `origin/main` 引用在验证域内不可执行；
+Validator 按合同拒绝伪造 claim、引擎按 missing-result 保留候选并退出 5，行为全部 fail-closed。
+本修订把该命令的证明职责移交本 PR 最新 head 的远端 quality-gate；这是 0.36 验证域隔离下项目
+完成合同的适配事实，必须记入证明计划，不构成对候选包的修改。
+
 ## Goals
 
 - 新增一份短小的 RC1 证明计划，记录同一候选在三个托管系统的安装证明、三仓 Dogfood 边界与
@@ -101,14 +107,18 @@ Runner profile 摘要与 canary 反测证据摘要；claude/cursor 进入验证�
       负向断言：未审计版本 codex 与 cursor 进入验证阶段均退出 5 且候选保留、不增加重试。
 - [ ] 计划记录 ADR-025 正向证据要求：审计版 codex 的 shadow run 中 evidence `validatorProfile`
       的 `resolution=ready` 记录、canary 耗时，以及 v3 凭证 `runnerProfileDigest` 与
-      `canaryEvidenceDigest` 与 evidence 互绑；同时记录 cursor 作为 Builder 时 POSIX supervisor
-      的 process-unsettled fail-closed 行为为已知边界。
+      `canaryEvidenceDigest` 与 evidence 互绑；同时记录两条已知边界——cursor 作为 Builder 时
+      POSIX supervisor 的 process-unsettled fail-closed 行为，以及隔离验证检出不含
+      `origin/main` 导致依赖远端引用的项目命令（如本仓 `format:check`）在验证域内不可执行、
+      首轮自托管按 missing-result 退出 5 的事实。
 - [ ] 计划逐项记录本 PR 的 Shadow 强完成合同、两阶段远端收口和失败观察，不用「运行成功」概括代替。
 - [ ] 计划明确 npm staging、2FA 批准、`next`、`latest`、`v0.36.0` 标签和 GitHub Release 均未执行，
       PR #223 的合并和 Shadow 退出 7 都不构成任何发布许可。
 - [ ] 不修改运行代码、测试、质量契约、工作流、版本、依赖或发布资产。
-- [ ] `npm run format:check`、`npm run lint`、`npm run typecheck`、`npm test`、
-      `npm run repository-health` 与 `npm run build` 全部通过。
+- [ ] `npm run lint`、`npm run typecheck`、`npm test`、`npm run repository-health` 与
+      `npm run build` 在隔离验证检出内全部通过。`npm run format:check` 依赖 `origin/main`
+      引用，在只含精确 HEAD 的隔离验证检出内不可执行（0.36 验证域隔离的既定边界，ADR-022 /
+      ADR-025），由本 PR 最新 head 的远端 quality-gate `format` 检查证明，不得因此放宽其余检查。
 
 ## 本 PR Shadow 强完成合同
 
