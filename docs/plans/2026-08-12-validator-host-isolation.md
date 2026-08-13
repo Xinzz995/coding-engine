@@ -264,5 +264,14 @@ profile 与 canary 双摘要、`canaryDurationMs≈34s`。
   修掉 code_mode 执行宿主被禁的真实 bug，并按用户两次裁决（诚实化读边界、host-* 改参数事实）
   收敛 canary 为「静态参数事实 + 8 项运行时反测」两层。canary 判据、宿主注入机制、pin 版本
   已与实测一致。
-- 待办（需用户参与/发布线）：Python Monorepo 1800+ 文件 `.venv` R7 重放、claude/cursor 诚实
-  unverifiable 真实记录、0.36.0 发布线（版本 bump 随发布 PR）。
+- 剩余真实复验完成（2026-08-13，对应完成合同第 3、9 条与 dogfood 断言 32）：
+  - claude 2.1.220 真实轮：受监督 `--version` 观察 → `native-boundary-incomplete` → 启动
+    提示 + 退出 5 + 候选保留（`passes=true`、`retryCount=0`）+ 证据记录，无宽权限回退。
+  - cursor（agent 2026.07.20-8cc9c0b）真实轮：同上语义，退出 5 + 候选保留。
+  - R7 重放（真实 `coding-x-dogfood-python` 仓，只读使用 + 独立 /tmp workspace）：质量契约
+    prepare 在干净检出内重建 `.venv`（2020 个文件，事故时 1837 同量级）并真实运行 pytest
+    门禁；宿主隔离链全真实（canary ready 50.4s）；Validator 结构化验收真实 3 条 AC 全部
+    passed；输出有界（stderr 34 KiB）且「哈希+路径」递归指纹行数为 0；invocation exit 0、
+    112.9s 正常收口；`exit 0` + v3 凭证（绑定真实 HEAD e64dda9）+ state/receipt/evidence/
+    退出码相互一致；dogfood 仓工作树零污染。
+- 待办（发布线）：0.36.0 版本 bump 与迁移说明随发布 PR。
