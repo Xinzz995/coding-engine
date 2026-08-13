@@ -119,6 +119,10 @@ runner:
   codex                          使用 Codex
   cursor                         使用 Cursor Agent
 
+  三个 runner 均可运行 Builder（开发）。可签发验收凭证的 Validator 当前仅
+  codex：固定审计版本加每次调用的宿主隔离反测（ADR-025）；其余 runner 进入
+  验证阶段时按不可验证保留候选并以退出码 5 停止，不降级回宽权限执行。
+
 命令:
   init                           初始化安全 workspace、质量契约与 GitHub 交付门禁
   workspace init                只初始化一个新的空 workspace
@@ -166,7 +170,7 @@ status 退出码:
   2                              workspace 安全状态未就绪/不可读，或最终 Review 状态损坏
   3                              存在 blocked Story
   4                              最终 Review 有待人工处理的 finding
-  5                              Validator 或最终 Review 无法可靠验证
+  5                              Validator 或最终 Review 无法可靠验证（含 Runner 宿主隔离无法证明）
   6                              最终 Review 未完成或已失效，或 GitHub CI / Ruleset 未就绪
   7                              Shadow 已完成，但不能表示可交付
 
@@ -176,7 +180,7 @@ run 退出码:
   2                              配置、状态或 workspace 安全边界无效
   3                              存在 blocked Story
   4                              最终 Review 有待人工处理的 finding
-  5                              Validator 或最终 Review 无法可靠验证
+  5                              Validator 或最终 Review 无法可靠验证（含 Runner 宿主隔离无法证明）
   6                              本地已完成，但 PR、CI 或 Ruleset 未就绪
   7                              Shadow 已完成，但不能表示可交付
 

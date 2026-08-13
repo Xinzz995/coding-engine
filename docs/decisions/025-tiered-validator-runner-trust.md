@@ -2,7 +2,7 @@
 title: 025-tiered-validator-runner-trust
 status: active
 implementation: planned
-updated: 2026-08-10
+updated: 2026-08-13
 scope: root
 ---
 
@@ -34,6 +34,16 @@ sandbox 与 shell 环境政策组合出可机械证明的边界；Claude（2.1.2
    版本；未完成前新版本按 unsupported-version 判为 unverifiable，不得临时放宽。
 5. 文档诚实边界：README 与用户文档必须区分「可用于开发（三 Runner）」与「可签发凭证（当前仅
    Codex）」，不声明未经证明的认证能力。
+6. 可证明边界的范围（2026-08-13 真机审计精确化）：固定 Runner profile + canary 证明的是
+   **写隔离**（sandbox `workspace-write` + permissions filesystem deny，越界写被拒）、**断网**、
+   **命令执行可用**（受控项目检查/git/结构化回执）、**宿主上下文自动注入被切断**。Codex 的
+   `workspace-write` 结构上**全盘可读、不提供读隔离档位**，因此本决策不声称「读隔离」——威胁
+   模型只覆盖宿主上下文的「自动注入」（破坏可重复性与权限边界，#174 的真实事故），不防御被
+   恶意 AC 诱导的主动读；Validator 为完成验收本就需要读检出与依赖，无界读输出由 ADR/#187 的
+   输出背压治理。宿主注入隔离由**静态参数/环境事实**机械核对（`CODEX_HOME`/`HOME`/`XDG` 重定向
+   到引擎单次调用临时域 + 临时域除预置 auth 外为空 + `--ignore-user-config`/`--ignore-rules`/
+   `--disable` 全集），而非运行时「种 sentinel 看缺席」——canary 运行在已重定向环境里，往临时域
+   种 sentinel 是自造真实不存在的污染。canary 运行时只保留引擎能机械观察且有区分力的反测。
 
 ## 当前事实
 

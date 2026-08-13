@@ -20,6 +20,7 @@ import {
   tryReadEngineOwnedFields,
   INITIAL_STORY_STATE,
   type RunState,
+  type ValidationRunnerBinding,
 } from './state.js';
 import {
   runQualityChecks,
@@ -45,7 +46,19 @@ import {
   type ValidationHeadAbortEvidence,
   type ValidationHeadAbortPhase,
   type ValidationTargetEvidence,
+  type ValidatorProfileEvidence,
 } from './evidence.js';
+import {
+  establishValidatorHostIsolation,
+  type ValidatorCanaryProvider,
+  type ValidatorHostIsolationOutcome,
+} from './validator-host-isolation.js';
+import { runValidatorCanary } from './validator-canary.js';
+import {
+  validatorCanaryEvidenceDigest,
+  VALIDATOR_RUNNER_PROFILE_POLICY_VERSION,
+} from './validator-runner-profile.js';
+import type { ValidatorRunnerObservation } from './validator-runner-observation.js';
 import {
   clearValidationResultWithWriter,
   acceptanceHash,
@@ -174,6 +187,15 @@ export interface LoopConfig {
   unsafeAllowProjectScopedRunnerForValidationTests?: boolean;
   /** @internal 历史 receipt fixture 的机械环境摘要；实际版本与模式仍由引擎强制绑定。 */
   validationEnvironmentDigestForTests?: string;
+  /**
+   * @internal 历史 fixture 的 Runner 宿主隔离绑定（ADR-025）：设置时跳过真实 profile/canary
+   * 链并以该绑定签发凭证；生产由真实链提供，缺失时凭证签发失败关闭。
+   */
+  validatorRunnerBindingForTests?: ValidationRunnerBinding;
+  /** @internal 测试注入 Runner 机械观察；生产始终受监督探测真实可执行文件。 */
+  validatorRunnerObservationForTests?: ValidatorRunnerObservation;
+  /** @internal 测试注入 canary 证据提供器；生产由引擎 canary 执行器提供。 */
+  validatorCanaryForTests?: ValidatorCanaryProvider;
   /**
    * 仅供历史单测 fixture：允许旧 Validator 直接改 state。CLI 从不设置；生产默认
    * 必须提交结构化 validation result，禁止静默降级。
@@ -306,6 +328,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         return [[name, value]];
       }),
     );
+    if (
+      !cfg.legacyValidatorProtocolForTests &&
+      !cfg.validatorRunnerBindingForTests &&
+      runKind !== 'codex'
+    ) {
+      console.warn(
+        `\n⚠️  当前 runner（${runKind}）尚无法证明 Validator 宿主隔离（ADR-025）：Builder 可正常运行，` +
+          '进入验证阶段将按不可验证保留候选并以退出码 5 停止。可签发验收凭证的 runner：codex（固定审计版本）。\n',
+      );
+    }
     if (!cfg.unsafeUseProjectRootForValidationTests) {
       cleanValidationManager = new CleanValidationCheckoutManager(
         projectRoot,
@@ -1781,6 +1813,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       });
       const validatorModel = validatorChoice.model;
       const structuredValidation = !cfg.legacyValidatorProtocolForTests;
+      // Runner 宿主隔离绑定（ADR-025）：真实 profile/canary 链建立后按本轮解析结果赋值；
+      // 测试注入沿用 receipt fixture 模式。缺失时 issueValidationReceipt 失败关闭。
+      let roundValidatorRunnerBinding: ValidationRunnerBinding | undefined =
+        cfg.validatorRunnerBindingForTests;
       const validatorStateSnapshot = tryReadState(statePath);
       const currentValidatorStateSnapshot = currentStory
         ? validatorStateSnapshot?.[currentStory]
@@ -1821,6 +1857,20 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           }
         | undefined;
       let validatorStateMutation = false;
+      // Validator 宿主隔离（ADR-025）：真实链按本轮建立；bypass 测试模式沿用注入绑定。
+      let validatorIsolation: ValidatorHostIsolationOutcome | null = null;
+      let validatorProfileEvidence: ValidatorProfileEvidence | undefined;
+      const settleValidatorIsolation = (): void => {
+        if (!validatorIsolation) return;
+        const cleanup = validatorIsolation.dispose();
+        validatorIsolation = null;
+        if (cleanup.status !== 'removed') {
+          throw new WorkspaceSafetyError(
+            'isolated',
+            `Validator 临时身份域未能安全清理（${cleanup.status}）：${cleanup.reason}`,
+          );
+        }
+      };
       const rejectProtocol = (code: LoopValidationProtocolErrorCode, diagnostic: string) => {
         validationProtocol = 'invalid';
         validationProtocolError = {
@@ -1968,8 +2018,84 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               validationHeadFailure ??= 'Validator 干净检出无法读取精确 HEAD';
             }
           }
+          if (canStartValidator && structuredValidation && !cfg.validatorRunnerBindingForTests) {
+            // 引擎自有 canary 执行器（ADR-025）：与验证同一密封 profile 的有界反测调用；
+            // 结论只来自引擎机械观察，执行器内部故障不产出证据（canary-missing 失败关闭）。
+            let canaryDurationMs: number | undefined;
+            const engineCanaryProvider: ValidatorCanaryProvider = async (profile) => {
+              const run = await runValidatorCanary(profile, {
+                session,
+                story: {
+                  storyId: currentStoryObj.id,
+                  acceptanceHash: acceptanceHash(
+                    currentStoryObj.id,
+                    currentStoryObj.acceptanceCriteria,
+                  ),
+                  checkCount: currentStoryObj.acceptanceCriteria.length,
+                  gitHead: validatorHead!,
+                },
+                timeoutMs: Math.min(cfg.valTimeoutMs, 180_000),
+                termination: commandSignals.termination,
+                ...(validationCheckout && !cfg.unsafeAllowProjectScopedRunnerForValidationTests
+                  ? { forbiddenExecutableRoot: projectRoot }
+                  : {}),
+              });
+              canaryDurationMs = run.durationMs;
+              if (run.diagnostic) {
+                console.warn(`⚠️  Validator 隔离反测：${run.diagnostic}`);
+              }
+              return run.evidence;
+            };
+            validatorIsolation = await establishValidatorHostIsolation({
+              session,
+              runner: runKind,
+              model: validatorModel ?? null,
+              projectRoot,
+              engineWorkspaceRoot: workspace,
+              cleanCheckoutRoot: validationRoot,
+              commandContractSha256: qualityRead.digest.replace(/^sha256:/u, ''),
+              termination: commandSignals.termination,
+              ...(cfg.validatorRunnerObservationForTests
+                ? { observationForTests: cfg.validatorRunnerObservationForTests }
+                : {}),
+              canaryProvider: cfg.validatorCanaryForTests ?? engineCanaryProvider,
+            });
+            if (validatorIsolation.status === 'unverifiable') {
+              validatorProfileEvidence = {
+                policyVersion: VALIDATOR_RUNNER_PROFILE_POLICY_VERSION,
+                resolution: validatorIsolation.code,
+                ...(validatorIsolation.profileDigest
+                  ? { profileDigest: validatorIsolation.profileDigest }
+                  : {}),
+              };
+              canStartValidator = false;
+              validatorOutcome = 'skipped';
+              rejectProtocol(
+                'environment-unverifiable',
+                `Validator Runner 宿主隔离无法证明（${validatorIsolation.code}）：` +
+                  validatorIsolation.message,
+              );
+              settleValidatorIsolation();
+            } else {
+              validatorProfileEvidence = {
+                policyVersion: validatorIsolation.profile.policyVersion,
+                resolution: 'ready',
+                runnerVersion: validatorIsolation.profile.runnerVersion,
+                profileDigest: validatorIsolation.profile.profileDigest,
+                canaryEvidenceDigest: validatorCanaryEvidenceDigest(validatorIsolation.canary),
+                ...(canaryDurationMs !== undefined ? { canaryDurationMs } : {}),
+              };
+              roundValidatorRunnerBinding = validatorIsolation.binding;
+            }
+          }
           if (canStartValidator) {
-            validationRequest = createValidationRequest(currentStoryObj, workspace, validatorHead);
+            validationRequest = createValidationRequest(
+              currentStoryObj,
+              workspace,
+              validatorHead,
+              undefined,
+              validatorIsolation?.status === 'ready' ? validatorIsolation.resultPath : undefined,
+            );
             if (structuredValidation) {
               validationTarget = {
                 requestId: validationRequest.requestId,
@@ -1998,43 +2124,65 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           validatorOutcome = 'skipped';
           rejectProtocol('candidate-not-passing', '无法建立绑定当前 Story 与提交的 Validator 请求');
         }
+        // 任何预调用失败路径都必须先收口临时身份域；清理无法证明成功时失败关闭。
+        if (!canStartValidator) settleValidatorIsolation();
 
         if (canStartValidator) {
           validatorActuallyRan = true;
-          const val = await runAgent({
-            kind: runKind,
-            prompt: validatorPrompt,
-            cwd: validationRoot,
-            timeoutMs: cfg.valTimeoutMs,
-            model: validatorModel,
-            env: validationCheckout
-              ? {
-                  ...validationCheckout.processEnvironment,
-                  ...validationRunnerEnvironment,
-                  CODING_X_WORKSPACE: agentEnv.CODING_X_WORKSPACE,
-                  CODING_X_PROJECT_ROOT: validationRoot,
-                }
-              : { ...agentEnv, CODING_X_PROJECT_ROOT: validationRoot },
-            inheritProcessEnvironment: validationCheckout ? false : undefined,
-            forbiddenExecutableRoot:
-              validationCheckout && !cfg.unsafeAllowProjectScopedRunnerForValidationTests
-                ? projectRoot
-                : undefined,
-            ...(cfg.validatorOutputForTests ? { output: cfg.validatorOutputForTests } : {}),
-            managed: {
-              session,
-              termination: commandSignals.termination,
-              operation: {
-                kind: 'validator',
-                delegation: 'validator-v1',
-                storyId: validationRequest!.storyId,
-                requestId: validationRequest!.requestId,
-                acceptanceHash: validationRequest!.acceptanceHash,
-                checkCount: validationRequest!.acceptanceCriteria.length,
-                gitHead: validationRequest!.gitHead!,
+          const readyIsolation =
+            validatorIsolation && validatorIsolation.status === 'ready' ? validatorIsolation : null;
+          let val: Awaited<ReturnType<typeof runAgent>>;
+          try {
+            val = await runAgent({
+              kind: runKind,
+              prompt: validatorPrompt,
+              cwd: validationRoot,
+              timeoutMs: cfg.valTimeoutMs,
+              ...(readyIsolation
+                ? { sealedInvocation: readyIsolation.sealedInvocation }
+                : {
+                    model: validatorModel,
+                    env: validationCheckout
+                      ? {
+                          ...validationCheckout.processEnvironment,
+                          ...validationRunnerEnvironment,
+                          CODING_X_WORKSPACE: agentEnv.CODING_X_WORKSPACE,
+                          CODING_X_PROJECT_ROOT: validationRoot,
+                        }
+                      : { ...agentEnv, CODING_X_PROJECT_ROOT: validationRoot },
+                    inheritProcessEnvironment: validationCheckout ? false : undefined,
+                  }),
+              forbiddenExecutableRoot:
+                validationCheckout && !cfg.unsafeAllowProjectScopedRunnerForValidationTests
+                  ? projectRoot
+                  : undefined,
+              ...(cfg.validatorOutputForTests ? { output: cfg.validatorOutputForTests } : {}),
+              managed: {
+                session,
+                termination: commandSignals.termination,
+                operation: {
+                  kind: 'validator',
+                  delegation: 'validator-v1',
+                  storyId: validationRequest!.storyId,
+                  requestId: validationRequest!.requestId,
+                  acceptanceHash: validationRequest!.acceptanceHash,
+                  checkCount: validationRequest!.acceptanceCriteria.length,
+                  gitHead: validationRequest!.gitHead!,
+                },
               },
-            },
-          });
+            });
+          } catch (error) {
+            // 受管进程失败（containment 由 runAgent 的受管 operation 裁决）：尽力收口
+            // 临时身份域；原始失败优先上抛，域保留事实随警告与 retention 分类留存。
+            try {
+              settleValidatorIsolation();
+            } catch (retention) {
+              console.warn(
+                `⚠️  ${retention instanceof Error ? retention.message : String(retention)}`,
+              );
+            }
+            throw error;
+          }
           validatorOutcome = outcomeOf(val);
           validatorInvocation = invocationOf(val, validatorOutcome);
           const stateRawAfterValidator = rawOf(statePath);
@@ -2091,6 +2239,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               }
             }
             rejectProtocol('artifact-changed', validatorHeadDiagnostic);
+            settleValidatorIsolation();
           } else if (!structuredValidation) {
             // 历史单测专用兼容路径：生产 CLI 永不进入。旧 Validator 直接写 state，
             // 仍按 v0.25 receipt 语义恢复引擎字段并判定。
@@ -2129,6 +2278,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                           currentStoryObj,
                           validationRequest,
                           roundValidationEnvironmentDigest,
+                          roundValidatorRunnerBinding,
                         )
                       : { state: stateAfter, changed: false };
                   if (issued.changed) {
@@ -2157,6 +2307,8 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 `⚠️  validation result 清理失败，下轮会再次拒绝旧文件：${err instanceof Error ? err.message : String(err)}`,
               );
             }
+            // claim 已读入内存；接受结论前先收口临时身份域（含预置认证），失败即不可采信。
+            settleValidatorIsolation();
 
             if (validatorOutcome !== 'completed') {
               rejectProtocol('agent-aborted', `Validator ${abortDesc(val)}`);
@@ -2221,6 +2373,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                       currentStoryObj,
                       validationRequest,
                       roundValidationEnvironmentDigest,
+                      roundValidatorRunnerBinding,
                     )
                   : { state: passed, changed: false };
                 if (issued.changed) {
@@ -2268,6 +2421,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         );
       }
 
+      // 兜底收口：任何未覆盖分支泄漏的临时身份域在此清理；健康域幂等无副作用。
+      settleValidatorIsolation();
+
       // 每轮一条 iteration 不变式：continue 路径（builder 异常/no-op/门禁打回）各自留痕后跳出，
       // 走到这里的轮在此记录——evidence 时间线零空洞（v0.22.0，dogfood 发现 B）。
       await recordIteration({
@@ -2288,6 +2444,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(validatorStateMutation ? { validatorStateMutation: true as const } : {}),
         ...(validatorEscalationTriggered ? { escalationTriggeredBy: 'validator' as const } : {}),
         ...(validatorDiagnostic ? { validatorDiagnostic } : {}),
+        ...(validatorProfileEvidence ? { validatorProfile: validatorProfileEvidence } : {}),
       });
 
       if (commandSignals.exitCode !== null) {

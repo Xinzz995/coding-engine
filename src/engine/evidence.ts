@@ -66,6 +66,33 @@ export interface ValidationHeadAbortEvidence {
 /** 单次 coding-x run 的稳定身份；用于把同轮命令事实与最终 iteration 精确关联。 */
 export type EvidenceRunId = string;
 
+const VALIDATOR_PROFILE_RESOLUTIONS = [
+  'ready',
+  'invalid-profile',
+  'unsupported-platform',
+  'unsupported-version',
+  'native-boundary-incomplete',
+  'canary-missing',
+  'canary-binding-mismatch',
+  'canary-failed',
+  'runner-unobservable',
+  'host-context-unverifiable',
+] as const;
+
+/** Validator 宿主隔离链的引擎机械观察（ADR-025）；bypass 测试模式与旧记录缺省。 */
+export interface ValidatorProfileEvidence {
+  policyVersion: string;
+  resolution: (typeof VALIDATOR_PROFILE_RESOLUTIONS)[number];
+  /** 受监督 `--version` 观察值；观察失败时缺省。 */
+  runnerVersion?: string;
+  /** raw hex profile 摘要；profile 未构建成功时缺省。 */
+  profileDigest?: string;
+  /** raw hex canary 证据摘要；仅 ready 时存在。 */
+  canaryEvidenceDigest?: string;
+  /** 引擎 canary 执行器的实际墙钟耗时；测试注入或旧记录缺省。 */
+  canaryDurationMs?: number;
+}
+
 /**
  * evidence.jsonl 的记录 schema 单源（判别联合）。append-only、每行一条独立 JSON：
  * 坏行只损失自己（agent 写坏一行不毁全文件），行序即事件序。
@@ -122,6 +149,8 @@ export type EvidenceRecord =
       escalationTriggeredBy?: 'gate' | 'validator' | 'noop';
       /** validator 机械打回时的 notes 快照；有界保存，避免后续成功轮覆盖失败上下文。 */
       validatorDiagnostic?: string;
+      /** Validator Runner 宿主隔离解析结果；旧记录与 bypass 测试模式缺省。 */
+      validatorProfile?: ValidatorProfileEvidence;
       /** agent 对引擎独占字段的改动；引擎已恢复。 */
       stateRouteTamper?: Array<{
         /** 实际被改写的 story；旧 evidence 缺省时消费端回退 iteration.storyId。 */
@@ -446,6 +475,29 @@ function isValidationChecks(v: unknown): v is ValidationCheck[] {
   );
 }
 
+function isValidatorProfileEvidence(v: unknown): v is ValidatorProfileEvidence {
+  return (
+    isRec(v) &&
+    typeof v.policyVersion === 'string' &&
+    v.policyVersion.length > 0 &&
+    v.policyVersion.length <= 200 &&
+    VALIDATOR_PROFILE_RESOLUTIONS.includes(
+      v.resolution as (typeof VALIDATOR_PROFILE_RESOLUTIONS)[number],
+    ) &&
+    (v.runnerVersion === undefined ||
+      (typeof v.runnerVersion === 'string' && v.runnerVersion.length <= 200)) &&
+    (v.profileDigest === undefined ||
+      (typeof v.profileDigest === 'string' && /^[a-f0-9]{64}$/u.test(v.profileDigest))) &&
+    (v.canaryEvidenceDigest === undefined ||
+      (typeof v.canaryEvidenceDigest === 'string' &&
+        /^[a-f0-9]{64}$/u.test(v.canaryEvidenceDigest))) &&
+    (v.canaryDurationMs === undefined ||
+      (typeof v.canaryDurationMs === 'number' &&
+        Number.isFinite(v.canaryDurationMs) &&
+        v.canaryDurationMs >= 0))
+  );
+}
+
 // 落盘数据不直接类型断言（patterns 约定）：按 type 分支逐字段校验，未知 type 一律不认——
 // 前向兼容（新版本引擎写的记录类型，旧版本消费方跳过不炸）。
 function isEvidenceRecord(v: unknown): v is EvidenceRecord {
@@ -509,6 +561,7 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
           v.escalationTriggeredBy === 'validator' ||
           v.escalationTriggeredBy === 'noop') &&
         (v.validatorDiagnostic === undefined || isBoundedDiagnostic(v.validatorDiagnostic)) &&
+        (v.validatorProfile === undefined || isValidatorProfileEvidence(v.validatorProfile)) &&
         (v.stateRouteTamper === undefined || isStateRouteTamper(v.stateRouteTamper)) &&
         (v.stateValidationTamper === undefined || isStateRouteTamper(v.stateValidationTamper))
       );
