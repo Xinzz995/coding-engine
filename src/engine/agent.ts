@@ -263,6 +263,16 @@ export async function runAgent(opts: {
   inheritProcessEnvironment?: boolean;
   /** Validator clean checkout rejects a Runner executable resolved from the developer tree. */
   forbiddenExecutableRoot?: string;
+  /**
+   * Validator 宿主隔离 profile 产出的密封调用（ADR-025）：argv 与环境完全由 profile
+   * 固定，`env`/`inheritProcessEnvironment`/`model` 不再参与构造；containment、prompt
+   * stdin 代理与有界尾部语义不变。
+   */
+  sealedInvocation?: {
+    readonly executable: string;
+    readonly args: readonly string[];
+    readonly environment: Readonly<Record<string, string>>;
+  };
   /** @internal 流式输出目标；生产缺省使用当前进程 stdout/stderr。 */
   output?: { readonly stdout: Writable; readonly stderr: Writable };
   /** 所有 agent/reviewer 子进程都必须绑定当前 workspace owner domain。 */
@@ -275,23 +285,30 @@ export async function runAgent(opts: {
     };
   };
 }): Promise<RunResult> {
-  const environment = {
-    ...(opts.inheritProcessEnvironment === false ? {} : process.env),
-    ...opts.env,
-  };
-  const argv = buildManagedAgentArgs(opts.kind, opts.model, environment);
+  const environment: NodeJS.ProcessEnv = opts.sealedInvocation
+    ? { ...opts.sealedInvocation.environment }
+    : {
+        ...(opts.inheritProcessEnvironment === false ? {} : process.env),
+        ...opts.env,
+      };
 
   let executable: string;
   let args: string[];
   let cwd: string;
   try {
-    ({ executable, args } = resolveRunnerInvocation(
-      opts.kind,
-      argv[0],
-      argv.slice(1),
-      opts.cwd,
-      environment,
-    ));
+    if (opts.sealedInvocation) {
+      executable = opts.sealedInvocation.executable;
+      args = [...opts.sealedInvocation.args];
+    } else {
+      const argv = buildManagedAgentArgs(opts.kind, opts.model, environment);
+      ({ executable, args } = resolveRunnerInvocation(
+        opts.kind,
+        argv[0],
+        argv.slice(1),
+        opts.cwd,
+        environment,
+      ));
+    }
     if (opts.forbiddenExecutableRoot && pathWithin(opts.forbiddenExecutableRoot, executable)) {
       throw new Error('AI Runner executable 解析到开发工作树内，不能用于干净 Validator');
     }

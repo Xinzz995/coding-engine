@@ -15,6 +15,7 @@ import {
   acceptanceHash,
   parseValidationResultBytes,
   VALIDATION_PROTOCOL_VERSION,
+  VALIDATION_RESULT_FILE,
   VALIDATION_RESULT_MAX_BYTES,
   type ValidationProtocolOutcome,
   type ValidationRequest,
@@ -22,10 +23,10 @@ import {
 import type { Story } from './prd.js';
 import type { WorkspaceWriter } from '../workspace-safety/session.js';
 
-export const VALIDATION_RESULT_FILE = 'validation-result.json';
 export {
   acceptanceHash,
   VALIDATION_PROTOCOL_VERSION,
+  VALIDATION_RESULT_FILE,
   VALIDATION_RESULT_MAX_BYTES,
   VALIDATION_TEXT_MAX_CHARS,
 } from '../contracts/validation-contract.js';
@@ -158,6 +159,8 @@ export function createValidationRequest(
   workspace: string,
   gitHead: string | null,
   requestId: string = randomUUID(),
+  /** 宿主隔离 profile 提供的临时域固定 claim 路径；缺省保持 workspace 内旧位置。 */
+  resultPathOverride?: string,
 ): ValidationRequest {
   const criteria = [...story.acceptanceCriteria];
   return {
@@ -167,7 +170,7 @@ export function createValidationRequest(
     acceptanceHash: acceptanceHash(story.id, criteria),
     acceptanceCriteria: criteria,
     gitHead,
-    resultPath: join(workspace, VALIDATION_RESULT_FILE),
+    resultPath: resultPathOverride ?? join(workspace, VALIDATION_RESULT_FILE),
   };
 }
 

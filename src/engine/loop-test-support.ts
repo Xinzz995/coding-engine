@@ -50,6 +50,13 @@ const runnerArgv = codingXStdinPrompt.length > 0
 
 export const TEST_QUALITY_DIGEST = `sha256:${'a'.repeat(64)}`;
 export const TEST_VALIDATION_ENVIRONMENT_DIGEST = `sha256:${'e'.repeat(64)}`;
+/** 历史 fixture 的 Runner 宿主隔离绑定（ADR-025）；真实链路测试用真实 profile/canary 摘要。 */
+export const TEST_VALIDATOR_PROFILE_DIGEST = `sha256:${'d'.repeat(64)}`;
+export const TEST_VALIDATOR_CANARY_DIGEST = `sha256:${'c'.repeat(64)}`;
+export const TEST_VALIDATOR_RUNNER_BINDING = {
+  profileDigest: TEST_VALIDATOR_PROFILE_DIGEST,
+  canaryDigest: TEST_VALIDATOR_CANARY_DIGEST,
+} as const;
 export const TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST = bindStoryValidationRuntimeIdentity(
   TEST_VALIDATION_ENVIRONMENT_DIGEST,
   { mode: 'formal', actualCodingXVersion: CODING_X_VERSION },
@@ -232,7 +239,7 @@ export function validationReceiptFor(
   },
 ): ValidationReceipt {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     requestId,
     gitHead,
     acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
@@ -240,6 +247,8 @@ export function validationReceiptFor(
       TEST_VALIDATION_ENVIRONMENT_DIGEST,
       runtimeIdentity,
     ),
+    runnerProfileDigest: TEST_VALIDATOR_PROFILE_DIGEST,
+    canaryEvidenceDigest: TEST_VALIDATOR_CANARY_DIGEST,
   };
 }
 
@@ -351,6 +360,7 @@ export const runLoop = (cfg: LoopConfig): Promise<number> =>
     legacyValidatorProtocolForTests: true,
     unsafeUseProjectRootForValidationTests: true,
     validationEnvironmentDigestForTests: TEST_VALIDATION_ENVIRONMENT_DIGEST,
+    validatorRunnerBindingForTests: cfg.validatorRunnerBindingForTests ?? TEST_VALIDATOR_RUNNER_BINDING,
     finalReviewRunner: cfg.finalReviewRunner ?? finalReviewPass,
   });
 
@@ -554,6 +564,7 @@ export function strictConfig(workspace: string, instructionsDir: string): LoopCo
     finalReviewRunner: finalReviewPass,
     unsafeUseProjectRootForValidationTests: true,
     validationEnvironmentDigestForTests: TEST_VALIDATION_ENVIRONMENT_DIGEST,
+    validatorRunnerBindingForTests: TEST_VALIDATOR_RUNNER_BINDING,
   };
 }
 

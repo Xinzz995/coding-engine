@@ -338,7 +338,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
         validated: true,
         notes: 'builder done',
         validationReceipt: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           validationEnvironmentDigest: TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST,
         },
       });

@@ -242,6 +242,7 @@ export type StoryValidationInvalidReason =
   | 'head-mismatch'
   | 'acceptance-mismatch'
   | 'missing-environment-binding'
+  | 'missing-runner-binding'
   | 'environment-mismatch';
 
 export type StoryValidationEvaluation =
@@ -295,13 +296,23 @@ export function evaluateStoryValidation(
   if (receipt.acceptanceHash !== expectedHash) {
     return { valid: false, reason: 'acceptance-mismatch', receipt, acceptanceHash: expectedHash };
   }
-  if (
-    receipt.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
-    !isSha256Digest(receipt.validationEnvironmentDigest)
-  ) {
+  if (receipt.schemaVersion === 1 || !isSha256Digest(receipt.validationEnvironmentDigest)) {
     return {
       valid: false,
       reason: 'missing-environment-binding',
+      receipt,
+      acceptanceHash: expectedHash,
+    };
+  }
+  // v2 凭证缺少 Runner 宿主隔离绑定（ADR-025）：沿 v1 先例安全失效，保留候选待重验。
+  if (
+    receipt.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
+    !isSha256Digest(receipt.runnerProfileDigest) ||
+    !isSha256Digest(receipt.canaryEvidenceDigest)
+  ) {
+    return {
+      valid: false,
+      reason: 'missing-runner-binding',
       receipt,
       acceptanceHash: expectedHash,
     };
@@ -554,7 +565,9 @@ function sameValidationReceipt(
     left.requestId === right.requestId &&
     left.gitHead === right.gitHead &&
     left.acceptanceHash === right.acceptanceHash &&
-    left.validationEnvironmentDigest === right.validationEnvironmentDigest
+    left.validationEnvironmentDigest === right.validationEnvironmentDigest &&
+    left.runnerProfileDigest === right.runnerProfileDigest &&
+    left.canaryEvidenceDigest === right.canaryEvidenceDigest
   );
 }
 
@@ -690,6 +703,13 @@ export function restoreValidated(
   };
 }
 
+export interface ValidationRunnerBinding {
+  /** `sha256:` 前缀的 Validator Runner profile 摘要（ADR-025）。 */
+  readonly profileDigest: string;
+  /** `sha256:` 前缀的引擎侧 canary 证据摘要。 */
+  readonly canaryDigest: string;
+}
+
 /** @deprecated 旧两参数调用保留类型兼容，但不会签发无目标身份的裸布尔凭证。 */
 export function issueValidationReceipt(
   state: RunState,
@@ -701,21 +721,40 @@ export function issueValidationReceipt(
   story: Pick<Story, 'id' | 'acceptanceCriteria'>,
   request: ValidationRequest,
 ): { state: RunState; changed: boolean };
-/** 结构化 Validator passed claim 已核对后，以本轮 request 签发持久凭证。 */
+/** @deprecated v2 兼容；缺少 Runner 宿主隔离绑定时失败关闭（ADR-025）。 */
 export function issueValidationReceipt(
   state: RunState,
   story: Pick<Story, 'id' | 'acceptanceCriteria'>,
   request: ValidationRequest,
   validationEnvironmentDigest: string,
 ): { state: RunState; changed: boolean };
+/**
+ * 结构化 Validator passed claim 已核对后，以本轮 request 与 Runner 隔离绑定签发持久凭证。
+ * runnerBinding 为 undefined（宿主隔离链未证明）时失败关闭，不签发。
+ */
+export function issueValidationReceipt(
+  state: RunState,
+  story: Pick<Story, 'id' | 'acceptanceCriteria'>,
+  request: ValidationRequest,
+  validationEnvironmentDigest: string,
+  runnerBinding: ValidationRunnerBinding | undefined,
+): { state: RunState; changed: boolean };
 export function issueValidationReceipt(
   state: RunState,
   storyOrId: string | Pick<Story, 'id' | 'acceptanceCriteria'>,
   request?: ValidationRequest,
   validationEnvironmentDigest?: string,
+  runnerBinding?: ValidationRunnerBinding,
 ): { state: RunState; changed: boolean } {
-  // 没有 Story/AC/request 绑定就无法安全签发；兼容入口必须失败关闭。
-  if (typeof storyOrId === 'string' || !request || !isSha256Digest(validationEnvironmentDigest))
+  // 没有 Story/AC/request/Runner 隔离绑定就无法安全签发；兼容入口必须失败关闭。
+  if (
+    typeof storyOrId === 'string' ||
+    !request ||
+    !isSha256Digest(validationEnvironmentDigest) ||
+    !runnerBinding ||
+    !isSha256Digest(runnerBinding.profileDigest) ||
+    !isSha256Digest(runnerBinding.canaryDigest)
+  )
     return { state, changed: false };
   const story = storyOrId;
   const expectedHash = acceptanceHash(story.id, story.acceptanceCriteria);
@@ -754,6 +793,8 @@ export function issueValidationReceipt(
     gitHead: request.gitHead,
     acceptanceHash: request.acceptanceHash,
     validationEnvironmentDigest,
+    runnerProfileDigest: runnerBinding.profileDigest,
+    canaryEvidenceDigest: runnerBinding.canaryDigest,
   };
   if (current.validated && sameValidationReceipt(current.validationReceipt ?? null, receipt)) {
     return { state, changed: false };

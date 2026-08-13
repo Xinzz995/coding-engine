@@ -54,6 +54,10 @@ const code = await runLoop({
   finalReviewRunner: () => Promise.resolve({ exitCode: 0, message: 'fixture final review passed' }),
   unsafeUseProjectRootForValidationTests: true,
   validationEnvironmentDigestForTests: validationEnvironmentDigest,
+  validatorRunnerBindingForTests: {
+    profileDigest: `sha256:${'d'.repeat(64)}`,
+    canaryDigest: `sha256:${'c'.repeat(64)}`,
+  },
 });
 
 process.exitCode = code;

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 
 export const VALIDATION_PROTOCOL_VERSION = 1 as const;
-export const VALIDATION_RECEIPT_SCHEMA_VERSION = 2 as const;
+export const VALIDATION_RECEIPT_SCHEMA_VERSION = 3 as const;
+export const VALIDATION_RESULT_FILE = 'validation-result.json';
 export const VALIDATION_RESULT_MAX_BYTES = 64 * 1024;
 export const VALIDATION_TEXT_MAX_CHARS = 2000;
 
@@ -49,11 +50,24 @@ export type ValidationReceipt =
       /** v1 remains readable only so the engine can invalidate it safely. */
       schemaVersion: 1;
       validationEnvironmentDigest?: never;
+      runnerProfileDigest?: never;
+      canaryEvidenceDigest?: never;
+    })
+  | (ValidationReceiptBase & {
+      /** v2 lacks the runner host-isolation binding; readable only for safe invalidation. */
+      schemaVersion: 2;
+      validationEnvironmentDigest: string;
+      runnerProfileDigest?: never;
+      canaryEvidenceDigest?: never;
     })
   | (ValidationReceiptBase & {
       schemaVersion: typeof VALIDATION_RECEIPT_SCHEMA_VERSION;
       /** Engine-owned digest of the clean-checkout execution contract. */
       validationEnvironmentDigest: string;
+      /** Digest of the resolved Validator runner host-isolation profile (ADR-025). */
+      runnerProfileDigest: string;
+      /** Digest of the engine-observed canary evidence bound to that profile. */
+      canaryEvidenceDigest: string;
     });
 
 export interface ValidationResultBinding {
@@ -117,26 +131,35 @@ export function acceptanceHash(storyId: string, acceptanceCriteria: readonly str
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
 
-/** 严格读取 v1/v2 凭证；v1 只为安全失效迁移，不再是当前通过。 */
+/** 严格读取 v1/v2/v3 凭证；v1、v2 只为安全失效迁移，不再是当前通过。 */
 export function parseValidationReceipt(value: unknown): ValidationReceipt | null {
   if (!isRecord(value)) return null;
-  const legacy = value.schemaVersion === 1;
-  if (!hasExactKeys(value, legacy
-    ? ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash']
-    : [
-        'schemaVersion',
-        'requestId',
-        'gitHead',
-        'acceptanceHash',
-        'validationEnvironmentDigest',
-      ])) return null;
+  const expectedKeys =
+    value.schemaVersion === 1
+      ? ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash']
+      : value.schemaVersion === 2
+        ? ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash', 'validationEnvironmentDigest']
+        : [
+            'schemaVersion',
+            'requestId',
+            'gitHead',
+            'acceptanceHash',
+            'validationEnvironmentDigest',
+            'runnerProfileDigest',
+            'canaryEvidenceDigest',
+          ];
+  if (!hasExactKeys(value, expectedKeys)) return null;
   if (
-    (value.schemaVersion !== 1 && value.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION) ||
+    (value.schemaVersion !== 1 &&
+      value.schemaVersion !== 2 &&
+      value.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION) ||
     typeof value.requestId !== 'string' ||
     value.requestId.trim().length === 0 ||
     !isGitHead(value.gitHead) ||
     !isAcceptanceHash(value.acceptanceHash) ||
-    (!legacy && !isSha256Digest(value.validationEnvironmentDigest))
+    (value.schemaVersion !== 1 && !isSha256Digest(value.validationEnvironmentDigest)) ||
+    (value.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION &&
+      (!isSha256Digest(value.runnerProfileDigest) || !isSha256Digest(value.canaryEvidenceDigest)))
   ) {
     return null;
   }
@@ -145,13 +168,21 @@ export function parseValidationReceipt(value: unknown): ValidationReceipt | null
     gitHead: value.gitHead,
     acceptanceHash: value.acceptanceHash,
   };
-  return legacy
-    ? { schemaVersion: 1, ...base }
-    : {
-        schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
-        ...base,
-        validationEnvironmentDigest: value.validationEnvironmentDigest as string,
-      };
+  if (value.schemaVersion === 1) return { schemaVersion: 1, ...base };
+  if (value.schemaVersion === 2) {
+    return {
+      schemaVersion: 2,
+      ...base,
+      validationEnvironmentDigest: value.validationEnvironmentDigest as string,
+    };
+  }
+  return {
+    schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
+    ...base,
+    validationEnvironmentDigest: value.validationEnvironmentDigest as string,
+    runnerProfileDigest: value.runnerProfileDigest as string,
+    canaryEvidenceDigest: value.canaryEvidenceDigest as string,
+  };
 }
 
 function invalidSchema(diagnostic: string): ValidationProtocolOutcome {

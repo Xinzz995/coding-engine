@@ -37,6 +37,9 @@ import { acceptanceHash, createValidationRequest } from './validation-protocol.j
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 const ENVIRONMENT = `sha256:${'e'.repeat(64)}`;
+const PROFILE_DIGEST = `sha256:${'d'.repeat(64)}`;
+const CANARY_DIGEST = `sha256:${'c'.repeat(64)}`;
+const RUNNER_BINDING = { profileDigest: PROFILE_DIGEST, canaryDigest: CANARY_DIGEST } as const;
 
 function storyIdentity(id: string, acceptanceCriteria: string[] = ['AC 1']) {
   return { id, acceptanceCriteria };
@@ -49,9 +52,21 @@ function receiptFor(
   requestId = 'request-1',
 ): ValidationReceipt {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     requestId,
     gitHead,
+    acceptanceHash: acceptanceHash(id, acceptanceCriteria),
+    validationEnvironmentDigest: ENVIRONMENT,
+    runnerProfileDigest: PROFILE_DIGEST,
+    canaryEvidenceDigest: CANARY_DIGEST,
+  };
+}
+
+function receiptV2For(id: string, acceptanceCriteria: string[] = ['AC 1']): ValidationReceipt {
+  return {
+    schemaVersion: 2,
+    requestId: 'request-1',
+    gitHead: HEAD_A,
     acceptanceHash: acceptanceHash(id, acceptanceCriteria),
     validationEnvironmentDigest: ENVIRONMENT,
   };
@@ -88,7 +103,7 @@ function tempDir(): string {
 describe('parseValidationReceipt', () => {
   const valid = receiptFor('US-001');
 
-  it('accepts exactly the v2 schema and keeps v1 readable for fail-closed migration', () => {
+  it('accepts exactly the v3 schema and keeps v1/v2 readable for fail-closed migration', () => {
     expect(parseValidationReceipt(valid)).toEqual(valid);
     expect(
       parseValidationReceipt({
@@ -98,6 +113,7 @@ describe('parseValidationReceipt', () => {
         acceptanceHash: valid.acceptanceHash,
       }),
     ).toMatchObject({ schemaVersion: 1 });
+    expect(parseValidationReceipt(receiptV2For('US-001'))).toMatchObject({ schemaVersion: 2 });
   });
 
   it.each([
@@ -107,7 +123,14 @@ describe('parseValidationReceipt', () => {
     ['bad head', { ...valid, gitHead: 'not-a-head' }],
     ['empty head', { ...valid, gitHead: '' }],
     ['bad hash', { ...valid, acceptanceHash: 'sha256:nope' }],
-    ['wrong version', { ...valid, schemaVersion: 3 }],
+    ['wrong version', { ...valid, schemaVersion: 4 }],
+    ['v2 with runner binding', { ...receiptV2For('US-001'), runnerProfileDigest: PROFILE_DIGEST }],
+    ['missing runner binding', (() => {
+      const { canaryEvidenceDigest: _omitted, ...rest } = valid;
+      return rest;
+    })()],
+    ['bad profile digest', { ...valid, runnerProfileDigest: 'not-a-digest' }],
+    ['bad canary digest', { ...valid, canaryEvidenceDigest: 'not-a-digest' }],
   ])('rejects %s', (_label, value) => {
     expect(parseValidationReceipt(value)).toBeNull();
   });
@@ -463,6 +486,15 @@ describe('current Validator receipt evaluation', () => {
     expect(evaluateStoryValidation(story, legacy, HEAD_A, ENVIRONMENT)).toMatchObject({
       valid: false,
       reason: 'missing-environment-binding',
+    });
+    // v2 凭证缺 Runner 宿主隔离绑定（ADR-025）：沿 v1 先例安全失效，等待重验签 v3。
+    const v2: RunState[string] = {
+      ...current,
+      validationReceipt: receiptV2For(story.id, story.acceptanceCriteria),
+    };
+    expect(evaluateStoryValidation(story, v2, HEAD_A, ENVIRONMENT)).toMatchObject({
+      valid: false,
+      reason: 'missing-runner-binding',
     });
     expect(
       evaluateStoryValidation(story, current, HEAD_A, `sha256:${'f'.repeat(64)}`),
@@ -1038,7 +1070,7 @@ describe('validated engine ownership', () => {
   it('issues a complete request-bound receipt only for the matching passing candidate', () => {
     const story = storyIdentity('US-001', ['first', 'second']);
     const request = createValidationRequest(story, '/tmp/workspace', HEAD_A, 'request-1');
-    const issued = issueValidationReceipt(base(), story, request, ENVIRONMENT);
+    const issued = issueValidationReceipt(base(), story, request, ENVIRONMENT, RUNNER_BINDING);
     expect(issued.changed).toBe(true);
     expect(validationOwnershipOf(issued.state['US-001'])).toEqual({
       validated: true,
@@ -1046,10 +1078,19 @@ describe('validated engine ownership', () => {
       validatorUnverifiable: null,
     });
     expect(isStoryPassedAt(story, issued.state['US-001'], HEAD_A, ENVIRONMENT)).toBe(true);
-    expect(issueValidationReceipt(issued.state, story, request, ENVIRONMENT).changed).toBe(false);
+    expect(
+      issueValidationReceipt(issued.state, story, request, ENVIRONMENT, RUNNER_BINDING).changed,
+    ).toBe(false);
 
-    // 旧入口不能再签发无身份的裸布尔结论。
+    // 旧入口不能再签发无身份的裸布尔结论；缺 Runner 隔离绑定同样失败关闭（ADR-025）。
     expect(issueValidationReceipt(base(), 'US-001').changed).toBe(false);
+    expect(issueValidationReceipt(base(), story, request, ENVIRONMENT).changed).toBe(false);
+    expect(
+      issueValidationReceipt(base(), story, request, ENVIRONMENT, {
+        profileDigest: 'not-a-digest',
+        canaryDigest: CANARY_DIGEST,
+      }).changed,
+    ).toBe(false);
     expect(
       issueValidationReceipt(
         {
@@ -1058,6 +1099,7 @@ describe('validated engine ownership', () => {
         story,
         request,
         ENVIRONMENT,
+        RUNNER_BINDING,
       ).changed,
     ).toBe(false);
     expect(
@@ -1068,6 +1110,7 @@ describe('validated engine ownership', () => {
         story,
         request,
         ENVIRONMENT,
+        RUNNER_BINDING,
       ).changed,
     ).toBe(false);
   });
@@ -1089,7 +1132,7 @@ describe('validated engine ownership', () => {
     });
     expect(markValidatorUnverifiable(marked.state, story, HEAD_A).changed).toBe(false);
 
-    const issued = issueValidationReceipt(marked.state, story, request, ENVIRONMENT);
+    const issued = issueValidationReceipt(marked.state, story, request, ENVIRONMENT, RUNNER_BINDING);
     expect(issued.changed).toBe(true);
     expect(issued.state['US-001'].validatorUnverifiable).toBeNull();
   });
@@ -1125,7 +1168,9 @@ describe('validated engine ownership', () => {
       { ...request, acceptanceCriteria: ['second', 'first'] },
     ];
     for (const invalid of invalidRequests) {
-      expect(issueValidationReceipt(base(), story, invalid, ENVIRONMENT).changed).toBe(false);
+      expect(
+        issueValidationReceipt(base(), story, invalid, ENVIRONMENT, RUNNER_BINDING).changed,
+      ).toBe(false);
     }
   });
 

@@ -67,7 +67,7 @@ function workspace(): string {
         passes: true,
         validated: true,
         validationReceipt: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           requestId: 'report-test-request',
           gitHead: head,
           acceptanceHash: acceptanceHash('US-001', ['report is current']),
@@ -77,6 +77,8 @@ function workspace(): string {
             tddConfig: null,
             runtimeIdentity: FORMAL_RUNTIME,
           }),
+          runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
+          canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
         },
         notes: '',
         retryCount: 0,
