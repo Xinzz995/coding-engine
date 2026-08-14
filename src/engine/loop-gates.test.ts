@@ -21,7 +21,7 @@ import {
 
 describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
   it('validation-only clears the candidate only when a project command explicitly fails', async () => {
-    const { workspace, instructionsDir } = setup([story()], {
+    const { workspace, instructionsDir, head } = setup([story()], {
       qualityChecks: ['node -e "process.exit(7)"'],
     });
     writeFileSync(
@@ -30,6 +30,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: head(),
           validationReceipt: null,
           notes: 'candidate',
           retryCount: 2,
@@ -63,7 +64,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
   });
 
   it('stops at blocked after a fifth validation-only project-check failure without Developer', async () => {
-    const { workspace, instructionsDir } = setup([story()], {
+    const { workspace, instructionsDir, head } = setup([story()], {
       qualityChecks: ['node -e "process.exit(7)"'],
     });
     writeFileSync(
@@ -72,6 +73,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: head(),
           validationReceipt: null,
           notes: 'candidate',
           retryCount: 4,
@@ -129,7 +131,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         security: { notApplicable: 'fixture' },
       },
     } as QualityContract;
-    const { workspace, instructionsDir } = setup([story()], {
+    const { workspace, instructionsDir, head } = setup([story()], {
       qualityContractDigest: digest,
       qualityChecks: contract.checks,
     });
@@ -139,6 +141,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: head(),
           validationReceipt: null,
           notes: 'candidate',
           retryCount: 2,
@@ -417,6 +420,7 @@ describe('runLoop TDD gate', { timeout: 30_000, concurrent: false }, () => {
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: fixture.head(),
           validationReceipt: null,
           notes: 'candidate',
           retryCount: 4,

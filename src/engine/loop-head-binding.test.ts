@@ -20,6 +20,7 @@ import {
 const candidate = () => ({
   passes: true,
   validated: false,
+  storyBaseGitHead: 'a'.repeat(40),
   validationReceipt: null,
   notes: 'candidate',
   retryCount: 2,
@@ -90,11 +91,14 @@ function writeHeadAdvancingValidator(
     }
     if (mode === 'invalid') writeFileSync(request.resultPath, '{');
     if (mode === 'valid' || mode === 'state-mutation') writeFileSync(request.resultPath, JSON.stringify({
-      version: 1,
+      version: 2,
       requestId: request.requestId,
       storyId: request.storyId,
       acceptanceHash: request.acceptanceHash,
       gitHead: request.gitHead,
+      storyBaseGitHead: request.storyBaseGitHead,
+      changeManifestDigest: request.changeManifestDigest,
+      changedPathCount: request.changedPathCount,
       verdict: 'passed',
       checks: request.acceptanceCriteria.map((_, index) => ({
         acIndex: index + 1,
@@ -143,11 +147,14 @@ function writeBuilderThenHeadAdvancingValidator(fixture: ReturnType<typeof setup
       cwd: process.cwd(),
     });
     writeFileSync(request.resultPath, JSON.stringify({
-      version: 1,
+      version: 2,
       requestId: request.requestId,
       storyId: request.storyId,
       acceptanceHash: request.acceptanceHash,
       gitHead: request.gitHead,
+      storyBaseGitHead: request.storyBaseGitHead,
+      changeManifestDigest: request.changeManifestDigest,
+      changedPathCount: request.changedPathCount,
       verdict: 'passed',
       checks: request.acceptanceCriteria.map((_, index) => ({
         acIndex: index + 1,
@@ -215,6 +222,7 @@ describe('runLoop Git HEAD validation chain', () => {
           'US-002': {
             passes: true,
             validated: true,
+            storyBaseGitHead: initialHead,
             validationReceipt: validationReceiptFor(second, initialHead),
             notes: 'old validated story',
             retryCount: 0,
@@ -596,6 +604,7 @@ describe('runLoop Git HEAD validation chain', () => {
           'US-002': {
             passes: true,
             validated: true,
+            storyBaseGitHead: initialHead,
             validationReceipt: validationReceiptFor(second, initialHead),
             notes: 'old validated story',
             retryCount: 0,

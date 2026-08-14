@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import type { ManagedGateContext } from '../engine/gate.js';
+import { isGitHead } from '../contracts/validation-contract.js';
 import { GIT_NULL_CONFIG_PATH } from '../engine/git-environment.js';
 import {
   createValidationProcessEnvironment,
@@ -15,6 +16,62 @@ import {
 } from './contract.js';
 
 const MAX_TRACKED_QUALITY_CONTRACT_BYTES = 1024 * 1024;
+
+export type DefaultBranchGitHeadRead =
+  | { status: 'ready'; gitHead: string }
+  | { status: 'unavailable'; message: string };
+
+/** 受管读取质量契约默认分支的本地 origin 跟踪提交，不联网、不猜测替代基线。 */
+export async function readDefaultBranchGitHead(options: {
+  projectRoot: string;
+  defaultBranch: string;
+  session: WorkspaceSession;
+  termination?: ManagedGateContext['termination'];
+}): Promise<DefaultBranchGitHeadRead> {
+  const environment = createValidationProcessEnvironment(options.projectRoot, options.projectRoot);
+  Object.assign(environment, {
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: GIT_NULL_CONFIG_PATH,
+    GIT_TERMINAL_PROMPT: '0',
+  });
+  let git: string;
+  try {
+    git = resolveValidationGitExecutable(options.projectRoot, options.projectRoot, environment);
+  } catch (error) {
+    return {
+      status: 'unavailable',
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const ref = `refs/remotes/origin/${options.defaultBranch}^{commit}`;
+  const result = await runManagedWorkspaceProcess(options.session, {
+    kind: 'quality-check',
+    delegation: 'read-only-v1',
+    executable: git,
+    args: ['--no-replace-objects', 'rev-parse', '--verify', '--end-of-options', ref],
+    cwd: realpathSync.native(options.projectRoot),
+    environment: environmentEntries(environment),
+    timeoutMs: 60_000,
+    ...(options.termination ? { termination: options.termination } : {}),
+  });
+  const output = result.stdout.toString('utf8').trim().toLowerCase();
+  if (
+    result.verdict !== 'completed' ||
+    result.exitCode !== 0 ||
+    result.timedOut ||
+    result.processTreeNotEmpty ||
+    !isGitHead(output)
+  ) {
+    const detail = Buffer.concat([result.stdout, result.stderr]).toString('utf8').slice(-2000).trim();
+    return {
+      status: 'unavailable',
+      message:
+        detail ||
+        `无法读取 origin/${options.defaultBranch}；请先获取默认分支远端引用后重试`,
+    };
+  }
+  return { status: 'ready', gitHead: output };
+}
 
 /**
  * 通过受管 Git 子进程读取精确 HEAD 上的质量契约。

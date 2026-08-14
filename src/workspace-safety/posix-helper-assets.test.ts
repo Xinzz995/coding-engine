@@ -243,14 +243,20 @@ describe.runIf(process.platform !== 'win32')('fixed POSIX helper assets', () => 
           version: 'validator-result-v1', requestId, storyId: 'story-1',
           acceptanceHash: hash, checkCount: 1, gitHead: head
         }, rules: [] },
+        { version: 'validator-v1', semantic: {
+          version: 'validator-result-v2', requestId, storyId: 'story-1',
+          acceptanceHash: hash, checkCount: 1, gitHead: head,
+          storyBaseGitHead: head, changeManifestDigest: hash, changedPathCount: 2
+        }, rules: [] },
       ];
       for (const contract of valid) validateContract(contract);
       const invalid = [
         { version: 'read-only-v1', rules: [] },
         { version: 'read-only-v1', semantic: { version: 'read-only-v1', extra: true }, rules: [] },
         { version: 'validator-v1', semantic: {
-          version: 'validator-result-v1', requestId, storyId: 'story-1',
-          acceptanceHash: hash, checkCount: -1, gitHead: head
+          version: 'validator-result-v2', requestId, storyId: 'story-1',
+          acceptanceHash: hash, checkCount: 1, gitHead: head,
+          storyBaseGitHead: head, changeManifestDigest: hash, changedPathCount: -1
         }, rules: [] },
       ];
       for (const contract of invalid) {

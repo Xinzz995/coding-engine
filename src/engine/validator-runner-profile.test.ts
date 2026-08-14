@@ -1,6 +1,7 @@
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { AgentKind } from './agent.js';
+import { VALIDATION_PROTOCOL_VERSION } from '../contracts/validation-contract.js';
 import {
   resolveValidatorRunnerProfile,
   VALIDATOR_RUNNER_CANARY_CHECKS,
@@ -38,7 +39,7 @@ function request(
     sourceProjectRoot: '/workspace/project',
     engineWorkspaceRoot: '/workspace/project/.workspace',
     identityRoot: '/private/tmp/coding-x-validator/identity',
-    claimProtocolVersion: 1,
+    claimProtocolVersion: VALIDATION_PROTOCOL_VERSION,
     commandContractSha256: DIGEST_B,
     hostEnvironment: {
       PATH: '/usr/bin:/bin',
@@ -312,7 +313,7 @@ describe('resolveValidatorRunnerProfile', () => {
     ['project executable', { executablePath: '/workspace/project/node_modules/.bin/codex' }],
     ['bad executable digest', { executableSha256: 'not-a-digest' }],
     ['bad command digest', { commandContractSha256: 'not-a-digest' }],
-    ['unaudited claim protocol', { claimProtocolVersion: 2 }],
+    ['unaudited claim protocol', { claimProtocolVersion: VALIDATION_PROTOCOL_VERSION + 1 }],
   ])('rejects invalid profile boundary: %s', (_name, override) => {
     expect(resolveValidatorRunnerProfile(request('codex', override))).toMatchObject({
       status: 'unverifiable',

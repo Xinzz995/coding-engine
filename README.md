@@ -839,7 +839,7 @@ GitHub 状态给出。
 ### 引擎（`npx coding-x`）
 
 - **Developer → Validator 双 agent 循环**：开发方实现单个 story 并提交，验收方独立逐条核对验收标准。
-- **引擎验收凭证 + 可信目标绑定**：`passes=true` 只是 builder 候选；引擎向 Validator 注入 request ID/story/AC hash/Git HEAD，严格消费逐 AC claim，确认 schema、绑定、产物和 state 不变式后才写 verdict 或签发 `validated=true`。凭证同时绑定机械验证环境、实际 coding-x 版本和 formal/shadow 模式，切换正式模式或候选版本会保留实现候选并强制重验（ADR-013、015、018）。
+- **引擎验收凭证 + 可信目标绑定**：`passes=true` 只是 builder 候选；引擎在每个 story 第一次实现前固定起点，向 Validator 注入 request ID/story/AC hash、固定起点、最终 Git HEAD 与整段变化摘要，严格消费逐 AC claim，确认 schema、绑定、产物和 state 不变式后才写 verdict 或签发 `validated=true`。验证检出会按质量契约建立冻结的 `origin/<defaultBranch>` 引用；引用缺失会在任何 Agent 启动前停止。凭证同时绑定机械验证环境、实际 coding-x 版本和 formal/shadow 模式，切换正式模式、候选版本或默认分支基线会保留实现候选并强制重验（ADR-013、015、018、026）。
 - **Agent 调用凭证**：已经权威结算的 Builder/Validator 调用，只有在所属普通 iteration 成功写入时，才把 outcome、退出码、收口耗时和有界异常尾部带入 evidence/status/report；成功 transcript 不落盘。若同轮后续调用发生 proof-missing，整轮不写普通 iteration，此前已结算的调用也不单独持久化，只保留安全协议与隔离事实。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；已经取得权威收口证明的 Developer no-op、超时或异常退出累计达 `--stall-limit`（缺省 3）时提前终止（退出码 1）。POSIX 不透明 Runner 外部终止后的永久隔离不进入 stall 重试；结构化 Validator 异常也不空转重试，而是立即以不可验证退出码 5 停止并保留候选。

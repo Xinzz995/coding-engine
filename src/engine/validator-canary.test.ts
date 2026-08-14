@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
+import { VALIDATION_PROTOCOL_VERSION } from '../contracts/validation-contract.js';
 import type { runAgent } from './agent.js';
 import { readGitHead } from './validation-protocol.js';
 import { runValidatorCanary } from './validator-canary.js';
@@ -87,7 +88,7 @@ function fixture(): CanaryFixture {
     sourceProjectRoot: projectRoot,
     engineWorkspaceRoot: join(projectRoot, '.workspace'),
     identityRoot,
-    claimProtocolVersion: 1,
+    claimProtocolVersion: VALIDATION_PROTOCOL_VERSION,
     commandContractSha256: DIGEST_B,
     hostEnvironment: { PATH: process.env.PATH },
   });
@@ -170,6 +171,9 @@ function contextFor(parts: CanaryFixture, runAgentForTests: typeof runAgent) {
       acceptanceHash: `sha256:${'f'.repeat(64)}`,
       checkCount: 1,
       gitHead: parts.head,
+      storyBaseGitHead: 'e'.repeat(40),
+      changeManifestDigest: `sha256:${'d'.repeat(64)}`,
+      changedPathCount: 1,
     },
     timeoutMs: 5_000,
     runAgentForTests,

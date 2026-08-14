@@ -27,15 +27,33 @@ export interface StoryValidationRuntimeIdentity {
   readonly actualCodingXVersion: string;
 }
 
-export function candidateStoryValidationEnvironmentPolicy(tddConfig: TddConfig | null): {
+export function validationDefaultBranchReference(
+  contract: Pick<QualityContract, 'repository'>,
+  gitHead: string,
+): { ref: string; target: string } {
+  if (!isGitHead(gitHead)) throw new Error('默认分支验证基线必须是完整 Git commit id');
+  return {
+    ref: `refs/remotes/origin/${contract.repository.defaultBranch}`,
+    target: gitHead,
+  };
+}
+
+export function candidateStoryValidationEnvironmentPolicy(
+  tddConfig: TddConfig | null,
+  contract: Pick<QualityContract, 'repository'>,
+  defaultBranchGitHead: string,
+): {
   additionalRefs: string[];
+  referenceAliases: Array<{ ref: string; target: string }>;
   additionalPolicy: {
     domain: typeof STORY_VALIDATION_ENVIRONMENT_DOMAIN;
     tdd: TddConfig | null;
   };
 } {
+  const defaultBranch = validationDefaultBranchReference(contract, defaultBranchGitHead);
   return {
-    additionalRefs: tddConfig ? [tddConfig.baselineRef] : [],
+    additionalRefs: [...(tddConfig ? [tddConfig.baselineRef] : []), defaultBranch.target],
+    referenceAliases: [defaultBranch],
     additionalPolicy: {
       domain: STORY_VALIDATION_ENVIRONMENT_DOMAIN,
       tdd: tddConfig,
@@ -43,10 +61,18 @@ export function candidateStoryValidationEnvironmentPolicy(tddConfig: TddConfig |
   };
 }
 
-export function finalReviewMechanicalEnvironmentPolicy(): {
+export function finalReviewMechanicalEnvironmentPolicy(
+  contract: Pick<QualityContract, 'repository'>,
+  defaultBranchGitHead: string,
+): {
+  additionalRefs: string[];
+  referenceAliases: Array<{ ref: string; target: string }>;
   additionalPolicy: { domain: typeof FINAL_REVIEW_MECHANICAL_ENVIRONMENT_DOMAIN };
 } {
+  const defaultBranch = validationDefaultBranchReference(contract, defaultBranchGitHead);
   return {
+    additionalRefs: [defaultBranch.target],
+    referenceAliases: [defaultBranch],
     additionalPolicy: { domain: FINAL_REVIEW_MECHANICAL_ENVIRONMENT_DOMAIN },
   };
 }
@@ -58,6 +84,7 @@ export interface StoryValidationCurrentnessInput {
   state: RunState;
   stateStatus: StoryValidationStateStatus;
   headSha: string | null;
+  defaultBranchGitHead: string | null;
   workingContract: QualityContractReadResult;
   trackedContract: QualityContractReadResult;
   platform: QualityPlatform;
@@ -102,6 +129,7 @@ export type StoryValidationUnverifiableReason =
   | 'state-invalid'
   | 'story-set-invalid'
   | 'head-unreadable'
+  | 'default-branch-unavailable'
   | 'working-contract-unavailable'
   | 'tracked-contract-unavailable'
   | 'contract-mismatch'
@@ -167,13 +195,21 @@ function contractDiagnostic(result: QualityContractReadResult): string {
 
 /** 候选 Story Validator 使用的环境域：绑定候选 HEAD 契约与完整 TDD 政策。 */
 export function digestCandidateStoryValidationEnvironment(options: {
-  contract: Pick<QualityContract, 'checks' | 'generatedPaths' | 'localValidation'>;
+  contract: Pick<
+    QualityContract,
+    'checks' | 'generatedPaths' | 'localValidation' | 'repository'
+  >;
   headSha: string;
+  defaultBranchGitHead: string;
   tddConfig: TddConfig | null;
   runtimeIdentity: StoryValidationRuntimeIdentity;
   platform?: QualityPlatform;
 }): string {
-  const policy = candidateStoryValidationEnvironmentPolicy(options.tddConfig);
+  const policy = candidateStoryValidationEnvironmentPolicy(
+    options.tddConfig,
+    options.contract,
+    options.defaultBranchGitHead,
+  );
   const baseDigest = validationEnvironmentDigest({
     contract: options.contract,
     head: options.headSha,
@@ -208,15 +244,19 @@ export function bindStoryValidationRuntimeIdentity(
 
 /** 默认分支旧契约裁决的机械 Final Review 环境；禁止拿它核对 Story 凭证。 */
 export function digestFinalReviewMechanicalEnvironment(options: {
-  contract: Pick<QualityContract, 'checks' | 'generatedPaths' | 'localValidation'>;
+  contract: Pick<
+    QualityContract,
+    'checks' | 'generatedPaths' | 'localValidation' | 'repository'
+  >;
   headSha: string;
+  defaultBranchGitHead: string;
   platform?: QualityPlatform;
 }): string {
   return validationEnvironmentDigest({
     contract: options.contract,
     head: options.headSha,
     ...(options.platform ? { platform: options.platform } : {}),
-    ...finalReviewMechanicalEnvironmentPolicy(),
+    ...finalReviewMechanicalEnvironmentPolicy(options.contract, options.defaultBranchGitHead),
   });
 }
 
@@ -294,6 +334,13 @@ export function evaluateStoryValidationCurrentness(
         '当前 Git HEAD 不可读取或不是完整提交 ID',
       );
     }
+    if (!input.defaultBranchGitHead || !isGitHead(input.defaultBranchGitHead)) {
+      return unverifiableStoryValidationCurrentness(
+        input,
+        'default-branch-unavailable',
+        '质量契约默认分支的本地 origin 跟踪提交不可读取',
+      );
+    }
     const working = readyContract(input.workingContract);
     if (!working) {
       return unverifiableStoryValidationCurrentness(
@@ -367,7 +414,11 @@ export function evaluateStoryValidationCurrentness(
         contract: tracked.contract,
         head: input.headSha,
         platform: input.platform,
-        ...candidateStoryValidationEnvironmentPolicy(tddConfig),
+        ...candidateStoryValidationEnvironmentPolicy(
+          tddConfig,
+          tracked.contract,
+          input.defaultBranchGitHead,
+        ),
       });
     const storyValidationEnvironmentDigest = bindStoryValidationRuntimeIdentity(
       mechanicalEnvironmentDigest,

@@ -39,6 +39,7 @@ const HEAD_B = 'b'.repeat(40);
 const ENVIRONMENT = `sha256:${'e'.repeat(64)}`;
 const PROFILE_DIGEST = `sha256:${'d'.repeat(64)}`;
 const CANARY_DIGEST = `sha256:${'c'.repeat(64)}`;
+const CHANGE_MANIFEST_DIGEST = `sha256:${'f'.repeat(64)}`;
 const RUNNER_BINDING = { profileDigest: PROFILE_DIGEST, canaryDigest: CANARY_DIGEST } as const;
 
 function storyIdentity(id: string, acceptanceCriteria: string[] = ['AC 1']) {
@@ -52,13 +53,16 @@ function receiptFor(
   requestId = 'request-1',
 ): ValidationReceipt {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     requestId,
     gitHead,
     acceptanceHash: acceptanceHash(id, acceptanceCriteria),
     validationEnvironmentDigest: ENVIRONMENT,
     runnerProfileDigest: PROFILE_DIGEST,
     canaryEvidenceDigest: CANARY_DIGEST,
+    storyBaseGitHead: HEAD_B,
+    changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+    changedPathCount: 2,
   };
 }
 
@@ -103,7 +107,7 @@ function tempDir(): string {
 describe('parseValidationReceipt', () => {
   const valid = receiptFor('US-001');
 
-  it('accepts exactly the v3 schema and keeps v1/v2 readable for fail-closed migration', () => {
+  it('accepts exactly the v4 schema and keeps v1-v3 readable for fail-closed migration', () => {
     expect(parseValidationReceipt(valid)).toEqual(valid);
     expect(
       parseValidationReceipt({
@@ -114,6 +118,17 @@ describe('parseValidationReceipt', () => {
       }),
     ).toMatchObject({ schemaVersion: 1 });
     expect(parseValidationReceipt(receiptV2For('US-001'))).toMatchObject({ schemaVersion: 2 });
+    expect(
+      parseValidationReceipt({
+        schemaVersion: 3,
+        requestId: valid.requestId,
+        gitHead: valid.gitHead,
+        acceptanceHash: valid.acceptanceHash,
+        validationEnvironmentDigest: valid.validationEnvironmentDigest,
+        runnerProfileDigest: valid.runnerProfileDigest,
+        canaryEvidenceDigest: valid.canaryEvidenceDigest,
+      }),
+    ).toMatchObject({ schemaVersion: 3 });
   });
 
   it.each([
@@ -123,7 +138,7 @@ describe('parseValidationReceipt', () => {
     ['bad head', { ...valid, gitHead: 'not-a-head' }],
     ['empty head', { ...valid, gitHead: '' }],
     ['bad hash', { ...valid, acceptanceHash: 'sha256:nope' }],
-    ['wrong version', { ...valid, schemaVersion: 4 }],
+    ['wrong version', { ...valid, schemaVersion: 5 }],
     ['v2 with runner binding', { ...receiptV2For('US-001'), runnerProfileDigest: PROFILE_DIGEST }],
     ['missing runner binding', (() => {
       const { canaryEvidenceDigest: _omitted, ...rest } = valid;
@@ -131,6 +146,9 @@ describe('parseValidationReceipt', () => {
     })()],
     ['bad profile digest', { ...valid, runnerProfileDigest: 'not-a-digest' }],
     ['bad canary digest', { ...valid, canaryEvidenceDigest: 'not-a-digest' }],
+    ['bad Story base', { ...valid, storyBaseGitHead: 'not-a-head' }],
+    ['bad change manifest', { ...valid, changeManifestDigest: 'not-a-digest' }],
+    ['bad changed path count', { ...valid, changedPathCount: -1 }],
   ])('rejects %s', (_label, value) => {
     expect(parseValidationReceipt(value)).toBeNull();
   });
@@ -156,6 +174,7 @@ describe('tryReadState', () => {
     expect(tryReadState(file)?.['US-001']).toMatchObject({
       passes: true,
       validated: false,
+      storyBaseGitHead: null,
       validationReceipt: null,
     });
     rmSync(dir, { recursive: true, force: true });
@@ -170,6 +189,7 @@ describe('tryReadState', () => {
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: HEAD_B,
           validationReceipt,
           notes: 'n',
           retryCount: 2,
@@ -245,6 +265,7 @@ describe('tryReadState', () => {
     );
     expect(tryReadEngineOwnedFields(file, 'US-001')).toEqual({
       validated: 'missing',
+      storyBaseGitHead: undefined,
       validationReceipt: 'missing',
       validatorUnverifiable: 'missing',
       escalated: 'missing',
@@ -264,12 +285,14 @@ describe('tryReadState', () => {
     );
     expect(tryReadEngineOwnedFields(file, 'US-001')).toEqual({
       validated: false,
+      storyBaseGitHead: undefined,
       validationReceipt: 'missing',
       validatorUnverifiable: 'missing',
       escalated: true,
     });
     expect(tryReadEngineOwnedFields(file, 'US-404')).toEqual({
       validated: 'missing',
+      storyBaseGitHead: undefined,
       validationReceipt: 'missing',
       validatorUnverifiable: 'missing',
       escalated: 'missing',
@@ -335,6 +358,7 @@ describe('initialStateFor', () => {
     expect(s['US-001']).toEqual({
       passes: true,
       validated: false,
+      storyBaseGitHead: null,
       validationReceipt: null,
       validatorUnverifiable: null,
       notes: 'x',
@@ -410,6 +434,7 @@ describe('current Validator receipt evaluation', () => {
     'US-001': {
       passes: true,
       validated: true,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: receiptFor(story.id, story.acceptanceCriteria),
       notes: '',
       retryCount: 0,
@@ -509,6 +534,7 @@ describe('current Validator receipt evaluation', () => {
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: HEAD_B,
           validationReceipt: receiptFor('US-001', []),
           notes: '',
           retryCount: 0,
@@ -549,6 +575,7 @@ describe('current Validator receipt evaluation', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-001', []),
         notes: '',
         retryCount: 0,
@@ -589,6 +616,7 @@ describe('current Validator receipt evaluation', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-001', []),
         notes: 'keep',
         retryCount: 3,
@@ -623,6 +651,7 @@ describe('current Validator receipt evaluation', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-001', []),
         notes: '',
         retryCount: 0,
@@ -632,6 +661,7 @@ describe('current Validator receipt evaluation', () => {
       'US-002': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-002', []),
         notes: '',
         retryCount: 0,
@@ -655,6 +685,7 @@ describe('current Validator receipt evaluation', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-001', [], HEAD_A, 'request-a'),
         notes: '',
         retryCount: 0,
@@ -673,6 +704,7 @@ describe('current Validator receipt evaluation', () => {
       'US-003': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-003', [], HEAD_A, 'request-c'),
         notes: '',
         retryCount: 0,
@@ -714,6 +746,7 @@ describe('current Validator receipt evaluation', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-001', [], HEAD_A),
         notes: '',
         retryCount: 0,
@@ -723,6 +756,7 @@ describe('current Validator receipt evaluation', () => {
       'US-002': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-002', [], HEAD_B),
         notes: '',
         retryCount: 0,
@@ -751,6 +785,7 @@ describe('current Validator receipt evaluation', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: receiptFor('US-001', [], HEAD_A),
         notes: '',
         retryCount: 0,
@@ -859,6 +894,7 @@ describe('selectNextStory / allStoriesResolvedAt', () => {
   const candidate = (id: string, validated: boolean): RunState[string] => ({
     passes: true,
     validated,
+    storyBaseGitHead: HEAD_B,
     validationReceipt: validated ? receiptFor(id, []) : null,
     notes: '',
     retryCount: 0,
@@ -973,6 +1009,7 @@ describe('validated engine ownership', () => {
     'US-001': {
       passes: true,
       validated: false,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: null,
       validatorUnverifiable: null,
       notes: '',
@@ -1008,6 +1045,7 @@ describe('validated engine ownership', () => {
     const expectedReceipt = receiptFor('US-001');
     const expected = {
       validated: true,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: expectedReceipt,
       validatorUnverifiable: null,
     };
@@ -1023,6 +1061,7 @@ describe('validated engine ownership', () => {
       expected,
       received: {
         validated: true,
+        storyBaseGitHead: HEAD_B,
         validationReceipt: { ...expectedReceipt, requestId: 'forged-request' },
         validatorUnverifiable: null,
       },
@@ -1033,11 +1072,13 @@ describe('validated engine ownership', () => {
     expect(deleted.state['US-001']).toEqual({
       ...fallback,
       validated: true,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: expectedReceipt,
       validatorUnverifiable: null,
     });
     expect(deleted.tamper?.received).toEqual({
       validated: 'missing',
+      storyBaseGitHead: undefined,
       validationReceipt: 'missing',
       validatorUnverifiable: 'missing',
     });
@@ -1046,12 +1087,14 @@ describe('validated engine ownership', () => {
   it('detects deleting either ownership field and preserves identity when unchanged', () => {
     const expected = {
       validated: false,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: null,
       validatorUnverifiable: null,
     };
     const state = base();
     const unchanged = restoreValidationOwnership(state, 'US-001', expected, undefined, {
       validated: false,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: null,
       validatorUnverifiable: null,
     });
@@ -1060,6 +1103,7 @@ describe('validated engine ownership', () => {
 
     const missingReceipt = restoreValidationOwnership(state, 'US-001', expected, undefined, {
       validated: false,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: 'missing',
       validatorUnverifiable: null,
     });
@@ -1069,11 +1113,22 @@ describe('validated engine ownership', () => {
 
   it('issues a complete request-bound receipt only for the matching passing candidate', () => {
     const story = storyIdentity('US-001', ['first', 'second']);
-    const request = createValidationRequest(story, '/tmp/workspace', HEAD_A, 'request-1');
+    const request = createValidationRequest(
+      story,
+      '/tmp/workspace',
+      {
+        gitHead: HEAD_A,
+        storyBaseGitHead: HEAD_B,
+        changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+        changedPathCount: 2,
+      },
+      'request-1',
+    );
     const issued = issueValidationReceipt(base(), story, request, ENVIRONMENT, RUNNER_BINDING);
     expect(issued.changed).toBe(true);
     expect(validationOwnershipOf(issued.state['US-001'])).toEqual({
       validated: true,
+      storyBaseGitHead: HEAD_B,
       validationReceipt: receiptFor('US-001', ['first', 'second']),
       validatorUnverifiable: null,
     });
@@ -1117,7 +1172,17 @@ describe('validated engine ownership', () => {
 
   it('binds a Validator-unverifiable marker to the exact candidate and clears it on receipt', () => {
     const story = storyIdentity('US-001', ['first', 'second']);
-    const request = createValidationRequest(story, '/tmp/workspace', HEAD_A, 'request-1');
+    const request = createValidationRequest(
+      story,
+      '/tmp/workspace',
+      {
+        gitHead: HEAD_A,
+        storyBaseGitHead: HEAD_B,
+        changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+        changedPathCount: 2,
+      },
+      'request-1',
+    );
     const marked = markValidatorUnverifiable(base(), story, HEAD_A);
     expect(marked.changed).toBe(true);
     expect(marked.state['US-001']).toMatchObject({
@@ -1159,7 +1224,17 @@ describe('validated engine ownership', () => {
 
   it('refuses empty/non-Git/wrong Story/wrong hash/wrong ordered criteria requests', () => {
     const story = storyIdentity('US-001', ['first', 'second']);
-    const request = createValidationRequest(story, '/tmp/workspace', HEAD_A, 'request-1');
+    const request = createValidationRequest(
+      story,
+      '/tmp/workspace',
+      {
+        gitHead: HEAD_A,
+        storyBaseGitHead: HEAD_B,
+        changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+        changedPathCount: 2,
+      },
+      'request-1',
+    );
     const invalidRequests = [
       { ...request, requestId: '' },
       { ...request, gitHead: null },

@@ -77,7 +77,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
   });
 
   it('preserves a validation-only candidate and retry count when Validator is unverifiable', async () => {
-    const { projectRoot, workspace, instructionsDir } = setup([
+    const { projectRoot, workspace, instructionsDir, head } = setup([
       story({ acceptanceCriteria: ['返回 401'] }),
     ]);
     writeFileSync(
@@ -86,6 +86,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: head(),
           validationReceipt: null,
           notes: 'existing candidate',
           retryCount: 2,
@@ -128,7 +129,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
   });
 
   it('clears a validation-only candidate and increments retry only for a valid failed claim', async () => {
-    const { projectRoot, workspace, instructionsDir } = setup([
+    const { projectRoot, workspace, instructionsDir, head } = setup([
       story({ acceptanceCriteria: ['返回 401'] }),
     ]);
     writeFileSync(
@@ -137,6 +138,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: head(),
           validationReceipt: null,
           notes: 'existing candidate',
           retryCount: 2,
@@ -171,7 +173,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
   });
 
   it('stops at blocked after a fifth validation-only Validator failure without Developer', async () => {
-    const { projectRoot, workspace, instructionsDir } = setup([
+    const { projectRoot, workspace, instructionsDir, head } = setup([
       story({ acceptanceCriteria: ['返回 401'] }),
     ]);
     writeFileSync(
@@ -180,6 +182,7 @@ describe('runLoop structured validation protocol', { timeout: 30_000, concurrent
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: head(),
           validationReceipt: null,
           notes: 'existing candidate',
           retryCount: 4,

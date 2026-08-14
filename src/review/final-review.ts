@@ -365,6 +365,7 @@ export async function runFinalReview(options: {
   const mechanicalValidationEnvironmentDigest = digestFinalReviewMechanicalEnvironment({
     contract: context.baseContract,
     headSha: context.headSha,
+    defaultBranchGitHead: context.baseSha,
   });
   let gate: ContractGateResult | null = null;
   let mechanicalEnvironmentError: string | null = null;
@@ -374,7 +375,7 @@ export async function runFinalReview(options: {
         sourceRoot: context.root,
         head: context.headSha,
         contract: context.baseContract,
-        ...finalReviewMechanicalEnvironmentPolicy(),
+        ...finalReviewMechanicalEnvironmentPolicy(context.baseContract, context.baseSha),
         managed: managedGate,
       });
       mechanicalRoot = mechanicalCheckout.root;

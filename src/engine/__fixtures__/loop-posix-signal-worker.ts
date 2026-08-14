@@ -33,6 +33,7 @@ const qualityContract = {
   },
   generatedPaths: [],
   localValidation: { prepare: [], allowedPaths: [] },
+  repository: { provider: 'github', fullName: 'fixture/coding-x', defaultBranch: 'main' },
 } as unknown as QualityContract;
 
 const code = await runLoop({
@@ -54,6 +55,10 @@ const code = await runLoop({
   finalReviewRunner: () => Promise.resolve({ exitCode: 0, message: 'fixture final review passed' }),
   unsafeUseProjectRootForValidationTests: true,
   validationEnvironmentDigestForTests: validationEnvironmentDigest,
+  storyChangeManifestForTests: () => ({
+    digest: `sha256:${'f'.repeat(64)}`,
+    changedPathCount: 1,
+  }),
   validatorRunnerBindingForTests: {
     profileDigest: `sha256:${'d'.repeat(64)}`,
     canaryDigest: `sha256:${'c'.repeat(64)}`,

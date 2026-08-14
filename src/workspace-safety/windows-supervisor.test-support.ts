@@ -238,12 +238,15 @@ export type PreparedSemanticFixture =
       readonly kind: 'validator';
       readonly delegation: 'validator-v1';
       readonly semantic: {
-        readonly version: 'validator-result-v1';
+        readonly version: 'validator-result-v2';
         readonly requestId: string;
         readonly storyId: string;
         readonly acceptanceHash: string;
         readonly checkCount: number;
         readonly gitHead: string;
+        readonly storyBaseGitHead: string;
+        readonly changeManifestDigest: string;
+        readonly changedPathCount: number;
       };
     }
   | {

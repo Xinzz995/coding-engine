@@ -61,6 +61,8 @@ const roots: string[] = [];
 const fixtureProcesses = createCrossProcessFixtureTracker();
 const ACCEPTANCE_HASH = `sha256:${'c'.repeat(64)}`;
 const GIT_HEAD = 'd'.repeat(40);
+const STORY_BASE_GIT_HEAD = 'e'.repeat(40);
+const CHANGE_MANIFEST_DIGEST = `sha256:${'f'.repeat(64)}`;
 const setup = async () => await setupOperationTest(roots);
 
 afterEach(async () => {
@@ -384,12 +386,15 @@ describe('workspace operation protocol', () => {
           readFileSync(join(operationPath(matching.workspace), DELEGATED_BASELINE_FILE)),
         );
         expect(baseline.contract.semantic).toEqual({
-          version: 'validator-result-v1',
+          version: 'validator-result-v2',
           requestId: OPERATION_ID,
           storyId: STORY_ID,
           acceptanceHash: ACCEPTANCE_HASH,
           checkCount: 1,
           gitHead: GIT_HEAD,
+          storyBaseGitHead: STORY_BASE_GIT_HEAD,
+          changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+          changedPathCount: 1,
         });
         const { machine, armed } = await driveToArmed(operation);
         expect(armed.delegationContractDigest).toBe(baseline.contractDigest);
@@ -397,11 +402,14 @@ describe('workspace operation protocol', () => {
         writeFileSync(
           join(matching.workspace, 'validation-result.json'),
           JSON.stringify({
-            version: 1,
+            version: 2,
             requestId: OPERATION_ID,
             storyId: STORY_ID,
             acceptanceHash: ACCEPTANCE_HASH,
             gitHead: GIT_HEAD,
+            storyBaseGitHead: STORY_BASE_GIT_HEAD,
+            changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+            changedPathCount: 1,
             verdict: 'passed',
             checks: [{ acIndex: 1, passed: true, evidence: 'verified' }],
             summary: 'verified',
@@ -417,7 +425,7 @@ describe('workspace operation protocol', () => {
     );
     expect(existsSync(settled.settledPath)).toBe(true);
     expect(settled.candidate).toMatchObject({
-      version: 'validator-result-v1',
+      version: 'validator-result-v2',
       result: { verdict: 'passed' },
     });
     await matching.session.close();
@@ -458,11 +466,14 @@ describe('workspace operation protocol', () => {
             writeFileSync(
               join(workspace, 'validation-result.json'),
               JSON.stringify({
-                version: 1,
+                version: 2,
                 requestId: OPERATION_ID,
                 storyId: STORY_ID,
                 acceptanceHash: ACCEPTANCE_HASH,
                 gitHead: GIT_HEAD,
+                storyBaseGitHead: STORY_BASE_GIT_HEAD,
+                changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+                changedPathCount: 1,
                 verdict,
                 checks: [{ acIndex: 1, passed: false, evidence: 'not verified' }],
                 summary: 'not verified',
@@ -481,7 +492,7 @@ describe('workspace operation protocol', () => {
       expect(existsSync(settled.settledPath)).toBe(true);
       if (verdict === 'failed') {
         expect(settled.candidate).toMatchObject({
-          version: 'validator-result-v1',
+          version: 'validator-result-v2',
           result: { verdict: 'failed' },
         });
       } else {

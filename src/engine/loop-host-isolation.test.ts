@@ -77,11 +77,14 @@ function fakeIsolationRunner(workspace: string, canaryMarker: string): string {
         evidence: 'fixture verified AC',
       }));
       writeFileSync(request.resultPath, JSON.stringify({
-        version: 1,
+        version: 2,
         requestId: request.requestId,
         storyId: request.storyId,
         acceptanceHash: request.acceptanceHash,
         gitHead: request.gitHead,
+        storyBaseGitHead: request.storyBaseGitHead,
+        changeManifestDigest: request.changeManifestDigest,
+        changedPathCount: request.changedPathCount,
         verdict: 'passed',
         checks,
         summary: '全部 AC 通过',
@@ -181,7 +184,7 @@ describe('runLoop Validator host isolation (ADR-025)', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'runs the sealed Codex profile with the real engine canary end to end and binds the v3 receipt',
+    'runs the sealed Codex profile with the real engine canary end to end and binds the v4 receipt',
     async () => {
       const fixture = setupGitProject([story({ acceptanceCriteria: ['AC 1'] })]);
       const canaryMarker = join(fixture.instructionsDir, 'canary-result-path.txt');
@@ -240,7 +243,7 @@ describe('runLoop Validator host isolation (ADR-025)', () => {
       expect(state['US-001'].validated).toBe(true);
       // 凭证与证据索引互绑：同一 profile 与 canary 摘要出现在两处。
       expect(state['US-001'].validationReceipt).toMatchObject({
-        schemaVersion: 3,
+        schemaVersion: 4,
         runnerProfileDigest: `sha256:${iteration.validatorProfile!.profileDigest}`,
         canaryEvidenceDigest: `sha256:${iteration.validatorProfile!.canaryEvidenceDigest}`,
       });

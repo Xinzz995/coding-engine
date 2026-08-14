@@ -236,6 +236,7 @@ describe('workspace 写租约', () => {
         [target.id]: {
           passes: true,
           validated: true,
+          storyBaseGitHead: head(),
           validationReceipt: validationReceiptFor(target, head()),
           notes: '',
           retryCount: 0,

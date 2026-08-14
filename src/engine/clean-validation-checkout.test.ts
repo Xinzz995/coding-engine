@@ -604,6 +604,81 @@ describe.runIf(
     }
   }, 60_000);
 
+  it('recreates the frozen origin default branch alias and hashes the full multi-commit Story range', async () => {
+    const source = repository({ 'base.txt': 'base\n' });
+    const base = source.head();
+    writeFileSync(join(source.root, 'first.txt'), 'first commit\n');
+    execFileSync('git', ['add', 'first.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'first Story change'], { cwd: source.root });
+    const first = source.head();
+    writeFileSync(join(source.root, 'second.txt'), 'second commit\n');
+    execFileSync('git', ['add', 'second.txt'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'second Story change'], { cwd: source.root });
+    const head = source.head();
+    expect(
+      execFileSync('git', ['for-each-ref', '--format=%(refname)', 'refs/remotes/origin'], {
+        cwd: source.root,
+        encoding: 'utf8',
+      }),
+    ).toBe('');
+
+    const managed = await createManagedProcessTestSession();
+    let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+    try {
+      checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head,
+        additionalRefs: [base],
+        referenceAliases: [{ ref: 'refs/remotes/origin/main', target: base }],
+        contract: contract(),
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      expect(
+        execFileSync('git', ['rev-parse', '--verify', 'origin/main^{commit}'], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe(base);
+      expect(
+        execFileSync('git', ['diff', '--name-only', 'origin/main..HEAD'], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        })
+          .trim()
+          .split('\n'),
+      ).toEqual(['first.txt', 'second.txt']);
+      expect(
+        execFileSync('git', ['diff', '--name-only', 'HEAD^..HEAD'], {
+          cwd: checkout.root,
+          encoding: 'utf8',
+        }).trim(),
+      ).toBe('second.txt');
+
+      const complete = await checkout.storyChangeManifest(base, '完整 Story ');
+      const lastCommitOnly = await checkout.storyChangeManifest(first, '末次提交 ');
+      expect(complete).toMatchObject({
+        version: 'story-change-manifest-v1',
+        storyBaseGitHead: base,
+        gitHead: head,
+        changedPathCount: 2,
+        digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      });
+      expect(lastCommitOnly.changedPathCount).toBe(1);
+      expect(lastCommitOnly.digest).not.toBe(complete.digest);
+      await expect(checkout.storyChangeManifest(base, '重复核对 ')).resolves.toEqual(complete);
+      await checkout.assertCurrent('默认分支别名与完整变化范围');
+      execFileSync('git', ['update-ref', 'refs/remotes/origin/main', head], {
+        cwd: checkout.root,
+      });
+      await expect(checkout.assertCurrent('默认分支别名被改写后')).rejects.toMatchObject({
+        code: 'identity-changed',
+      });
+    } finally {
+      checkout?.cleanup();
+      await managed.close();
+    }
+  }, 60_000);
+
   it('bounds history by logical object size even when source delta storage is tiny', async () => {
     const source = repository({ 'anchor.txt': 'anchor\n' });
     const basePayload = Buffer.alloc(1024 * 1024);

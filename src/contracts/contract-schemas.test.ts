@@ -14,6 +14,8 @@ const STORY_ID = 'US-001';
 const REQUEST_ID = '00000000-0000-4000-8000-000000000020';
 const ACCEPTANCE_HASH = `sha256:${'a'.repeat(64)}`;
 const GIT_HEAD = 'b'.repeat(40);
+const STORY_BASE_GIT_HEAD = 'c'.repeat(40);
+const CHANGE_MANIFEST_DIGEST = `sha256:${'d'.repeat(64)}`;
 
 const builder: BuilderStateSemanticContract = {
   version: 'builder-state-v1',
@@ -23,12 +25,15 @@ const builder: BuilderStateSemanticContract = {
 };
 
 const validator: ValidatorResultSemanticContract = {
-  version: 'validator-result-v1',
+  version: 'validator-result-v2',
   requestId: REQUEST_ID,
   storyId: STORY_ID,
   acceptanceHash: ACCEPTANCE_HASH,
   checkCount: 1,
   gitHead: GIT_HEAD,
+  storyBaseGitHead: STORY_BASE_GIT_HEAD,
+  changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+  changedPathCount: 1,
 };
 
 function state(overrides: Record<string, unknown> = {}): Buffer {
@@ -51,11 +56,14 @@ function state(overrides: Record<string, unknown> = {}): Buffer {
 function result(overrides: Partial<ValidationResult> = {}): Buffer {
   return Buffer.from(
     JSON.stringify({
-      version: 1,
+      version: 2,
       requestId: REQUEST_ID,
       storyId: STORY_ID,
       acceptanceHash: ACCEPTANCE_HASH,
       gitHead: GIT_HEAD,
+      storyBaseGitHead: STORY_BASE_GIT_HEAD,
+      changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+      changedPathCount: 1,
       verdict: 'passed',
       checks: [{ acIndex: 1, passed: true, evidence: 'verified' }],
       summary: 'verified',
@@ -137,6 +145,9 @@ describe('neutral validation result contract', () => {
     ['storyId', { storyId: 'US-999' }],
     ['acceptanceHash', { acceptanceHash: `sha256:${'c'.repeat(64)}` }],
     ['gitHead', { gitHead: 'd'.repeat(40) }],
+    ['storyBaseGitHead', { storyBaseGitHead: 'e'.repeat(40) }],
+    ['changeManifestDigest', { changeManifestDigest: `sha256:${'e'.repeat(64)}` }],
+    ['changedPathCount', { changedPathCount: 2 }],
   ])('rejects a wrong %s binding', (_label, overrides) => {
     expect(parseValidationResultBytes(result(overrides), validator)).toMatchObject({
       ok: false,

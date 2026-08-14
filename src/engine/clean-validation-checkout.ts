@@ -16,12 +16,14 @@ import type { ManagedGateContext } from './gate.js';
 import { runContractPrepareCommands } from './gate.js';
 import { resolveExecutablePath } from './agent.js';
 import { GIT_NULL_CONFIG_PATH } from './git-environment.js';
-import { isGitHead } from '../contracts/validation-contract.js';
+import { isChangedPathCount, isGitHead, isSha256Digest } from '../contracts/validation-contract.js';
 import { snapshotQualityContract, type QualityContract } from '../quality/contract.js';
 import {
   CLEAN_VALIDATION_CHECKOUT_VERSION,
   normalizeValidationAdditionalRefs,
+  normalizeValidationReferenceAliases,
   validationEnvironmentDigest,
+  type ValidationGitReferenceAlias,
 } from '../quality/validation-environment.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import {
@@ -96,6 +98,7 @@ export interface CleanValidationCheckoutOptions {
   readonly head: string;
   readonly contract: QualityContract;
   readonly additionalRefs?: readonly string[];
+  readonly referenceAliases?: readonly ValidationGitReferenceAlias[];
   readonly additionalPolicy?: unknown;
   readonly managed: ManagedGateContext;
   /** @internal 精确清理测试观察；生产不设置。 */
@@ -138,8 +141,20 @@ export interface CleanValidationCheckout {
   /** 在任何项目命令运行前解析并固定的 Git executable，供 TDD 内部探测使用。 */
   readonly gitExecutable: string;
   readonly additionalRefs: readonly string[];
+  readonly referenceAliases: readonly ValidationGitReferenceAlias[];
+  storyChangeManifest(storyBaseGitHead: string, context: string): Promise<StoryChangeManifest>;
   assertCurrent(context: string): Promise<void>;
   cleanup(): CleanValidationCheckoutCleanup;
+}
+
+export const STORY_CHANGE_MANIFEST_VERSION = 'story-change-manifest-v1' as const;
+
+export interface StoryChangeManifest {
+  readonly version: typeof STORY_CHANGE_MANIFEST_VERSION;
+  readonly storyBaseGitHead: string;
+  readonly gitHead: string;
+  readonly digest: string;
+  readonly changedPathCount: number;
 }
 
 function directoryIdentity(path: string): DirectoryIdentity {
@@ -690,6 +705,21 @@ const run = (args) => {
   }
   return stdout;
 };
+const runWithStatus = (args, allowedStatuses) => {
+  const result = spawnSync(request.git, args, {
+    cwd: request.root,
+    env: process.env,
+    encoding: null,
+    maxBuffer: ${MAX_GIT_OUTPUT_BYTES},
+    windowsHide: true,
+  });
+  const stdout = Buffer.from(result.stdout ?? []);
+  const stderr = Buffer.from(result.stderr ?? []);
+  if (result.error || !allowedStatuses.includes(result.status)) {
+    throw new Error(Buffer.concat([stdout, stderr]).toString('utf8').slice(-2000) || result.error?.message || args[0]);
+  }
+  return { status: result.status, stdout };
+};
 const runOptionalMatch = (args) => {
   const result = spawnSync(request.git, args, {
     cwd: request.root,
@@ -884,11 +914,55 @@ try {
       '-c', 'core.autocrlf=false',
       'checkout', '--quiet', '--detach', '--force', request.head,
     ]);
+    if (!Array.isArray(request.referenceAliases)) throw new Error('验证 Git 引用请求非法');
+    for (const alias of request.referenceAliases) {
+      if (
+        !alias || typeof alias.ref !== 'string' || typeof alias.target !== 'string' ||
+        !alias.ref.startsWith('refs/remotes/origin/')
+      ) throw new Error('验证 Git 引用形状非法');
+      run(['check-ref-format', alias.ref]);
+      run(['cat-file', '-e', alias.target + '^{commit}']);
+      run(['update-ref', '--no-deref', alias.ref, alias.target]);
+    }
     const tree = run(['rev-parse', request.head + '^{tree}']).toString('utf8').trim();
     const indexTree = run(['write-tree']).toString('utf8').trim();
     if (indexTree !== tree) throw new Error('初始 Git index tree 与目标提交不一致');
     process.stdout.write(JSON.stringify({
       ok: true, tree, objectFormat, control: controlIdentity(),
+    }));
+    process.exit(0);
+  }
+  if (request.mode === 'manifest') {
+    const ancestor = runWithStatus(
+      ['merge-base', '--is-ancestor', request.storyBaseGitHead, request.head],
+      [0, 1],
+    );
+    if (ancestor.status !== 0) {
+      process.stdout.write(JSON.stringify({
+        ok: false,
+        code: 'history-unverifiable',
+        diagnostic: 'Story 固定起点不是验收 HEAD 的祖先',
+      }));
+      process.exit(0);
+    }
+    const raw = run([
+      'diff-tree', '--no-commit-id', '--raw', '-r', '-z', '--no-renames',
+      '--no-ext-diff', request.storyBaseGitHead, request.head, '--',
+    ]);
+    let nulCount = 0;
+    for (const byte of raw) if (byte === 0) nulCount += 1;
+    if (nulCount % 2 !== 0) throw new Error('Story 变化清单无法安全计数');
+    const version = ${JSON.stringify(STORY_CHANGE_MANIFEST_VERSION)};
+    const digest = 'sha256:' + createHash('sha256')
+      .update(version + '\0' + request.storyBaseGitHead + '\0' + request.head + '\0', 'utf8')
+      .update(raw)
+      .digest('hex');
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      storyBaseGitHead: request.storyBaseGitHead,
+      head: request.head,
+      manifestDigest: digest,
+      changedPathCount: nulCount / 2,
     }));
     process.exit(0);
   }
@@ -963,6 +1037,9 @@ interface GitHelperResult {
   readonly status?: string;
   readonly trackedMismatches?: string[];
   readonly untrackedDirectories?: string[];
+  readonly storyBaseGitHead?: string;
+  readonly manifestDigest?: string;
+  readonly changedPathCount?: number;
 }
 
 async function runGitHelper(options: {
@@ -1389,7 +1466,19 @@ export async function createCleanValidationCheckout(
   ]);
   const sourceInputRoot = resolve(options.sourceRoot);
   const sourceRoot = realpathSync.native(sourceInputRoot);
-  const additionalRefs = normalizeValidationAdditionalRefs(options.head, options.additionalRefs);
+  let referenceAliases: ValidationGitReferenceAlias[];
+  try {
+    referenceAliases = normalizeValidationReferenceAliases(options.referenceAliases);
+  } catch (error) {
+    throw new CleanValidationCheckoutError(
+      'invalid-source',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  const additionalRefs = normalizeValidationAdditionalRefs(options.head, [
+    ...(options.additionalRefs ?? []),
+    ...referenceAliases.map((alias) => alias.target),
+  ]);
   if (additionalRefs.some((ref) => !isGitHead(ref))) {
     throw new CleanValidationCheckoutError(
       'invalid-source',
@@ -1565,6 +1654,7 @@ export async function createCleanValidationCheckout(
         root: checkoutRoot,
         head: options.head,
         objectFormat: history.objectFormat,
+        referenceAliases,
       },
       cwd: checkoutRoot,
       environment,
@@ -1590,6 +1680,7 @@ export async function createCleanValidationCheckout(
       contract,
       head: options.head,
       additionalRefs,
+      referenceAliases,
       ...(additionalPolicy === undefined ? {} : { additionalPolicy }),
     });
     let permittedExternalLinks = new Map<string, ExternalFileLinkIdentity>();
@@ -1682,6 +1773,51 @@ export async function createCleanValidationCheckout(
       if (capturePreparedExternalLinks) permittedExternalLinks = captured;
     };
 
+    const storyChangeManifest = async (
+      storyBaseGitHead: string,
+      context: string,
+    ): Promise<StoryChangeManifest> => {
+      if (!isGitHead(storyBaseGitHead)) {
+        throw new CleanValidationCheckoutError(
+          'history-unverifiable',
+          `${context}Story 固定起点不是完整 Git commit id`,
+        );
+      }
+      await assertCurrent(`${context}变化摘要前`);
+      const observed = await runGitHelper({
+        request: {
+          mode: 'manifest',
+          git,
+          root: checkoutRoot,
+          head: options.head,
+          storyBaseGitHead,
+        },
+        cwd: checkoutRoot,
+        environment,
+        managed: options.managed,
+      });
+      if (
+        !observed.ok ||
+        observed.storyBaseGitHead !== storyBaseGitHead ||
+        observed.head !== options.head ||
+        !isSha256Digest(observed.manifestDigest) ||
+        !isChangedPathCount(observed.changedPathCount)
+      ) {
+        throw new CleanValidationCheckoutError(
+          observed.code ?? 'history-unverifiable',
+          observed.diagnostic ?? `${context}无法生成绑定固定起点的 Story 变化摘要`,
+        );
+      }
+      await assertCurrent(`${context}变化摘要后`);
+      return {
+        version: STORY_CHANGE_MANIFEST_VERSION,
+        storyBaseGitHead,
+        gitHead: options.head,
+        digest: observed.manifestDigest,
+        changedPathCount: observed.changedPathCount,
+      };
+    };
+
     const prepare = async (context: string): Promise<void> => {
       const prepared = await runContractPrepareCommands(
         contract.localValidation.prepare,
@@ -1718,6 +1854,8 @@ export async function createCleanValidationCheckout(
       processEnvironment,
       gitExecutable: git,
       additionalRefs,
+      referenceAliases,
+      storyChangeManifest,
       assertCurrent: async (context) => await assertCurrent(context),
       cleanup,
     };
@@ -1756,14 +1894,20 @@ export class CleanValidationCheckoutManager {
     head: string,
     additionalRefs: readonly string[] = [],
     additionalPolicy?: unknown,
+    referenceAliases: readonly ValidationGitReferenceAlias[] = [],
   ): Promise<CleanValidationCheckout> {
-    const normalizedRefs = normalizeValidationAdditionalRefs(head, additionalRefs);
+    const normalizedAliases = normalizeValidationReferenceAliases(referenceAliases);
+    const normalizedRefs = normalizeValidationAdditionalRefs(head, [
+      ...additionalRefs,
+      ...normalizedAliases.map((alias) => alias.target),
+    ]);
     const policySnapshot =
       additionalPolicy === undefined ? undefined : structuredClone(additionalPolicy);
     const expectedDigest = validationEnvironmentDigest({
       contract: this.#contract,
       head,
       additionalRefs: normalizedRefs,
+      referenceAliases: normalizedAliases,
       ...(policySnapshot === undefined ? {} : { additionalPolicy: policySnapshot }),
     });
     const previousCleanup = this.dispose();
@@ -1778,6 +1922,7 @@ export class CleanValidationCheckoutManager {
       head,
       contract: this.#contract,
       additionalRefs: normalizedRefs,
+      referenceAliases: normalizedAliases,
       ...(policySnapshot === undefined ? {} : { additionalPolicy: policySnapshot }),
       managed: this.managed,
     });

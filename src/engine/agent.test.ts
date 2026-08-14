@@ -694,7 +694,12 @@ describe('runAgent', () => {
                   ),
                 },
                 join(cwd, '.workspace'),
-                'a'.repeat(40),
+                {
+                  gitHead: 'a'.repeat(40),
+                  storyBaseGitHead: 'b'.repeat(40),
+                  changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+                  changedPathCount: 9,
+                },
                 '11111111-1111-4111-8111-111111111111',
               ),
             )

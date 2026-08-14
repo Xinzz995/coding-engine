@@ -145,11 +145,14 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
       appendFileSync(${JSON.stringify(calls)}, 'validator:' + request.storyId + ':' + request.gitHead + '\n');
       writeFileSync(request.resultPath, JSON.stringify({
-        version: 1,
+        version: 2,
         requestId: request.requestId,
         storyId: request.storyId,
         acceptanceHash: request.acceptanceHash,
         gitHead: request.gitHead,
+        storyBaseGitHead: request.storyBaseGitHead,
+        changeManifestDigest: request.changeManifestDigest,
+        changedPathCount: request.changedPathCount,
         verdict: 'passed',
         checks: request.acceptanceCriteria.map((_, index) => ({
           acIndex: index + 1,
@@ -297,13 +300,14 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
   );
 
   it('keeps a cross-run candidate and revalidates it without calling Developer again', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { workspace, instructionsDir, head } = setup([story()]);
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
         'US-001': {
           passes: true,
           validated: false,
+          storyBaseGitHead: head(),
           notes: 'builder done',
           retryCount: 0,
           blocked: false,
@@ -338,7 +342,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
         validated: true,
         notes: 'builder done',
         validationReceipt: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           validationEnvironmentDigest: TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST,
         },
       });
@@ -489,7 +493,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
     }
   });
 
-  it('materializes legacy in-PRD state only inside an already initialized new workspace', async () => {
+  it('materializes legacy in-PRD state but refuses to invent its missing Story base', async () => {
     // setup 已先建立新版 workspace marker 与永久协议根；这里仅覆盖新 workspace 中收到
     // legacy PRD 数据时的字段抽取，不代表 coding-x 会接管或迁移旧的非空 workspace。
     const { workspace, instructionsDir } = setup([
@@ -516,9 +520,11 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
         port: 0,
         openBrowser: false,
       });
-      expect(code).toBe(0);
+      expect(code).toBe(5);
       const migrated = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
       expect(migrated['US-001'].passes).toBe(true);
+      expect(migrated['US-001'].storyBaseGitHead).toBeNull();
+      expect(migrated['US-001'].validated).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
@@ -731,6 +737,7 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: project.head(),
           validationReceipt: validationReceiptFor(target, project.head()),
           notes: '',
           retryCount: 0,

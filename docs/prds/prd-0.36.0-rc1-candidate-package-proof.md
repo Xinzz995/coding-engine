@@ -1,11 +1,15 @@
 ---
 title: '0.36.0 RC1 候选包与三仓 Shadow 证明'
-status: active
+status: superseded
 updated: 2026-08-14
 scope: root
+supersededBy: docs/plans/2026-08-14-story-base-and-validation-ref-closeout.md
 ---
 
 # 0.36.0 RC1 候选包与三仓 Shadow 证明
+
+> 本文只保留 RC1 的历史证据。RC1 已因逐 Story 验收范围假绿与验证检出缺少默认分支引用而废弃，
+> 不得提升、暂存或作为 0.36.0 正式发布证据；后续收口以 ADR-026 和替代计划为准。
 
 ## Context
 

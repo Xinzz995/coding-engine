@@ -785,6 +785,9 @@ async function prepareWorkspaceOperation(
     options.acceptanceHash,
     options.checkCount,
     options.gitHead,
+    options.storyBaseGitHead,
+    options.changeManifestDigest,
+    options.changedPathCount,
   );
   const operationId = options.operationId ?? scope.requestId ?? randomUUID();
   uuid(operationId, 'operationId');

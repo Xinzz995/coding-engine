@@ -111,11 +111,20 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
 
   it('启动时已全部 resolved：完成判定优先于 stall 计数，直接 exit 0', async () => {
     // 断点续跑接手已完工 workspace 时，bootstrap 直接收敛，不需要制造 no-op 轮。
-    const { workspace, instructionsDir } = setup([story()]);
+    const target = story();
+    const { workspace, instructionsDir, head } = setup([target]);
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
-        'US-001': { passes: true, notes: '', retryCount: 0, blocked: false },
+        'US-001': {
+          passes: true,
+          validated: true,
+          storyBaseGitHead: head(),
+          validationReceipt: validationReceiptFor(target, head()),
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+        },
       }),
     );
     const fake = join(workspace, 'fake.mjs');
@@ -145,6 +154,7 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: head(),
           validationReceipt: validationReceiptFor(target, head()),
           notes: '',
           retryCount: 0,
@@ -188,6 +198,7 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: head(),
           validationReceipt: validationReceiptFor(passed, head()),
           notes: '',
           retryCount: 0,

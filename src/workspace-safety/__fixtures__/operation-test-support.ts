@@ -27,6 +27,8 @@ export const OPERATION_ID = '00000000-0000-4000-8000-000000000020';
 export const STORY_ID = 'US-001';
 export const ACCEPTANCE_HASH = `sha256:${'c'.repeat(64)}`;
 export const GIT_HEAD = 'd'.repeat(40);
+export const STORY_BASE_GIT_HEAD = 'e'.repeat(40);
+export const CHANGE_MANIFEST_DIGEST = `sha256:${'f'.repeat(64)}`;
 export const HELPER_BYTES = Buffer.from('fixed-supervisor-helper-v1');
 
 function identity(pid: number): ProcessIdentitySnapshot {
@@ -122,6 +124,9 @@ export function validatorOptions(hooks?: OperationHooks) {
     acceptanceHash: ACCEPTANCE_HASH,
     checkCount: 1,
     gitHead: GIT_HEAD,
+    storyBaseGitHead: STORY_BASE_GIT_HEAD,
+    changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+    changedPathCount: 1,
     platform: 'posix-process-group-v1' as const,
     helperBytes: HELPER_BYTES,
     now: () => new Date('2026-07-30T00:00:01.000Z'),

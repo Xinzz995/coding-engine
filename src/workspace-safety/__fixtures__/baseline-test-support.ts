@@ -12,6 +12,8 @@ export const REQUEST_ID = '323e4567-e89b-42d3-a456-426614174000';
 export const STORY_ID = 'US-001';
 export const ACCEPTANCE_HASH = `sha256:${'a'.repeat(64)}`;
 export const GIT_HEAD = 'b'.repeat(40);
+export const STORY_BASE_GIT_HEAD = 'c'.repeat(40);
+export const CHANGE_MANIFEST_DIGEST = `sha256:${'d'.repeat(64)}`;
 
 export function cleanupBaselineWorkspaces(): void {
   for (const path of cleanup.splice(0)) rmSync(path, { recursive: true, force: true });
@@ -46,6 +48,9 @@ export function validatorContract(): DelegationContract {
     acceptanceHash: ACCEPTANCE_HASH,
     checkCount: 1,
     gitHead: GIT_HEAD,
+    storyBaseGitHead: STORY_BASE_GIT_HEAD,
+    changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+    changedPathCount: 1,
   });
 }
 
@@ -70,11 +75,14 @@ export function writeValidState(root: string, overrides: Record<string, unknown>
 
 export function validationResult(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
-    version: 1,
+    version: 2,
     requestId: REQUEST_ID,
     storyId: STORY_ID,
     acceptanceHash: ACCEPTANCE_HASH,
     gitHead: GIT_HEAD,
+    storyBaseGitHead: STORY_BASE_GIT_HEAD,
+    changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+    changedPathCount: 1,
     verdict: 'passed',
     checks: [{ acIndex: 1, passed: true, evidence: 'verified' }],
     summary: 'verified',

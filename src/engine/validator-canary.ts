@@ -54,6 +54,9 @@ export interface ValidatorCanaryContext {
     readonly acceptanceHash: string;
     readonly checkCount: number;
     readonly gitHead: string;
+    readonly storyBaseGitHead: string;
+    readonly changeManifestDigest: string;
+    readonly changedPathCount: number;
   };
   readonly timeoutMs: number;
   readonly termination?: {
@@ -289,6 +292,9 @@ export async function runValidatorCanary(
           acceptanceHash: context.story.acceptanceHash,
           checkCount: context.story.checkCount,
           gitHead: context.story.gitHead,
+          storyBaseGitHead: context.story.storyBaseGitHead,
+          changeManifestDigest: context.story.changeManifestDigest,
+          changedPathCount: context.story.changedPathCount,
         },
       },
     });
