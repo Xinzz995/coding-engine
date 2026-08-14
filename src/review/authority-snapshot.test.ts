@@ -427,12 +427,18 @@ async function realManagedFixture(
     ['remote', 'add', 'origin', `https://github.com/${ctx.baseContract.repository.fullName}.git`],
     { cwd: projectRoot },
   );
+  execFileSync(
+    'git',
+    ['update-ref', `refs/remotes/origin/${ctx.baseContract.repository.defaultBranch}`, head],
+    { cwd: projectRoot },
+  );
   const managed = await createManagedProcessTestSession();
   writeFileSync(join(managed.workspacePath, 'prd.json'), `${JSON.stringify(prdValue)}\n`);
   writeFileSync(join(managed.workspacePath, 'state.json'), '{}\n');
   const identity = {
     workspacePath: realpathSync.native(managed.workspacePath),
     head,
+    defaultBranchGitHead: head,
     prd: `ready:${sha256(readFileSync(join(managed.workspacePath, 'prd.json')))}`,
     state: `ready:${sha256(readFileSync(join(managed.workspacePath, 'state.json')))}`,
     workingContract: sha256(readFileSync(join(projectRoot, '.coding-x', 'quality.json'))),
@@ -1500,6 +1506,55 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
     }
   });
 
+  it('binds the local origin default-branch commit into Story authority', async () => {
+    const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
+    try {
+      const tree = execFileSync('git', ['rev-parse', `${fixture.ctx.headSha}^{tree}`], {
+        cwd: fixture.projectRoot,
+        encoding: 'utf8',
+      }).trim();
+      const changedDefaultBranchHead = execFileSync(
+        'git',
+        ['commit-tree', tree, '-p', fixture.ctx.headSha],
+        {
+          cwd: fixture.projectRoot,
+          encoding: 'utf8',
+          input: 'move default branch authority\n',
+        },
+      ).trim();
+      execFileSync(
+        'git',
+        [
+          'update-ref',
+          `refs/remotes/origin/${fixture.ctx.baseContract.repository.defaultBranch}`,
+          changedDefaultBranchHead,
+        ],
+        { cwd: fixture.projectRoot },
+      );
+
+      await expect(
+        verifyReviewAuthoritySnapshot({
+          session: fixture.managed.session,
+          context: fixture.ctx,
+          workspace: fixture.managed.workspacePath,
+          runner: 'codex',
+          expectedRunnerVersion: 'codex 1.2.3',
+          expectedStoryAuthorityInputDigest: fixture.expectedStoryDigest,
+          expectedDecisionsDigest: DECISIONS_DIGEST,
+          includeDecisions: false,
+          phase: 'default branch authority checkpoint',
+          executablesForTests: {
+            git: fixture.git,
+            gh: fixture.gh,
+            runner: fixture.runner,
+          },
+        }),
+      ).resolves.toContain('Story 验收权威输入发生变化');
+    } finally {
+      await fixture.managed.close();
+    }
+  });
+
   it('binds the TDD authority and local origin repository at every snapshot', async () => {
     const tddFixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
     try {
@@ -1615,7 +1670,7 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
 const { existsSync, writeFileSync } = require('node:fs');
 const args = process.argv.slice(2);
 if (args.includes('status')) writeFileSync(${JSON.stringify(marker)}, 'seen');
-else if (existsSync(${JSON.stringify(marker)}) && args.includes('cat-file') && !existsSync(${JSON.stringify(lateSource)})) writeFileSync(${JSON.stringify(lateSource)}, 'late mutation');
+else if (existsSync(${JSON.stringify(marker)}) && args.includes('show') && !existsSync(${JSON.stringify(lateSource)})) writeFileSync(${JSON.stringify(lateSource)}, 'late mutation');
 const result = spawnSync(${JSON.stringify(fixture.git)}, args, { encoding: 'buffer' });
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
@@ -1653,7 +1708,7 @@ process.exit(result.status ?? 1);`,
 const { existsSync, writeFileSync } = require('node:fs');
 const args = process.argv.slice(2);
 if (args.includes('status')) writeFileSync(${JSON.stringify(marker)}, 'seen');
-else if (existsSync(${JSON.stringify(marker)}) && args.includes('cat-file') && !existsSync(${JSON.stringify(generatedFile)})) writeFileSync(${JSON.stringify(generatedFile)}, 'late generated mutation');
+else if (existsSync(${JSON.stringify(marker)}) && args.includes('show') && !existsSync(${JSON.stringify(generatedFile)})) writeFileSync(${JSON.stringify(generatedFile)}, 'late generated mutation');
 const result = spawnSync(${JSON.stringify(fixture.git)}, args, { encoding: 'buffer' });
 if (result.stdout) process.stdout.write(result.stdout);
 if (result.stderr) process.stderr.write(result.stderr);
