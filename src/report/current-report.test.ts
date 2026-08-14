@@ -31,6 +31,9 @@ const FORMAL_RUNTIME = {
   mode: 'formal',
   actualCodingXVersion: CODING_X_VERSION,
 } as const;
+const DEFAULT_BRANCH_HEAD = 'a'.repeat(40);
+const STORY_BASE_HEAD = 'a'.repeat(40);
+const CHANGE_MANIFEST_DIGEST = `sha256:${'f'.repeat(64)}`;
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -67,19 +70,24 @@ function workspace(): string {
         passes: true,
         validated: true,
         validationReceipt: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           requestId: 'report-test-request',
           gitHead: head,
           acceptanceHash: acceptanceHash('US-001', ['report is current']),
           validationEnvironmentDigest: digestCandidateStoryValidationEnvironment({
             contract: currentQuality.contract,
             headSha: head,
+            defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
             tddConfig: null,
             runtimeIdentity: FORMAL_RUNTIME,
           }),
           runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
           canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
+          storyBaseGitHead: STORY_BASE_HEAD,
+          changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+          changedPathCount: 1,
         },
+        storyBaseGitHead: STORY_BASE_HEAD,
         notes: '',
         retryCount: 0,
         blocked: false,
@@ -185,6 +193,7 @@ function reviewState(
   const expectedStoryEnvironment = digestCandidateStoryValidationEnvironment({
     contract: reviewContext.baseContract,
     headSha: reviewContext.headSha,
+    defaultBranchGitHead: reviewContext.baseSha,
     tddConfig: null,
     runtimeIdentity: FORMAL_RUNTIME,
   });
@@ -210,6 +219,7 @@ function reviewState(
     validationEnvironmentDigest: digestFinalReviewMechanicalEnvironment({
       contract: reviewContext.baseContract,
       headSha: reviewContext.headSha,
+      defaultBranchGitHead: reviewContext.baseSha,
     }),
   });
   if (headOverride !== undefined) binding.headSha = headOverride;
@@ -336,6 +346,7 @@ function currentStoryObservation(
     state: state ?? {},
     stateStatus: state === null ? 'invalid' : 'ready',
     headSha,
+    defaultBranchGitHead: reviewContext.baseSha,
     workingContract: contractRead,
     trackedContract: contractRead,
     runtimeIdentity: FORMAL_RUNTIME,

@@ -414,24 +414,21 @@ export async function collectStatusWithWorkspaceSafety(
 ): Promise<StatusReportWithWorkspaceSafety> {
   return await collectStatusWithWorkspaceSafetyControlled({
     collect: async () => {
-      let qualityObservation: StatusQualityObservation | undefined;
-      if (options.projectRoot) {
-        qualityObservation = await (options.statusQualityObserver ?? observeStatusQuality)({
-          workspace,
-          projectRoot: options.projectRoot,
-          refreshRemote: options.refreshRemote ?? false,
-        });
-      }
-      const runnerVersionObservation = qualityObservation?.runnerVersionObservation;
+      const preliminary = collectStatusControlled(workspace, options);
+      if (!options.projectRoot || preliminary.status !== 'ok') return preliminary;
+      const qualityObservation: StatusQualityObservation = await (
+        options.statusQualityObserver ?? observeStatusQuality
+      )({
+        workspace,
+        projectRoot: options.projectRoot,
+        refreshRemote: options.refreshRemote ?? false,
+      });
+      const runnerVersionObservation = qualityObservation.runnerVersionObservation;
       return collectStatusControlled(workspace, {
         ...options,
-        ...(qualityObservation === undefined
-          ? {}
-          : {
-              storyValidationObservation: qualityObservation.storyValidation,
-              storyValidationObservationError: qualityObservation.error,
-              finalReviewObservation: qualityObservation.finalReview,
-            }),
+        storyValidationObservation: qualityObservation.storyValidation,
+        storyValidationObservationError: qualityObservation.error,
+        finalReviewObservation: qualityObservation.finalReview,
         ...(runnerVersionObservation === undefined ? {} : { runnerVersionObservation }),
       });
     },

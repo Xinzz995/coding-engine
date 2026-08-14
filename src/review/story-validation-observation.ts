@@ -19,7 +19,10 @@ import {
   type QualityContractReadResult,
   type QualityPlatform,
 } from '../quality/contract.js';
-import { readTrackedQualityContractAtHead } from '../quality/tracked-contract.js';
+import {
+  readStoryValidationGitAuthority,
+  type StoryValidationGitAuthorityRead,
+} from '../quality/tracked-contract.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import {
   readStableFile,
@@ -45,6 +48,8 @@ export interface StoryValidationObservationOptions {
   qualityContractReader?: (projectRoot: string) => QualityContractReadResult;
   /** @internal Loop 机械环境摘要夹具兼容；实际版本与模式仍会在其后强制绑定。 */
   validationEnvironmentDigestForTests?: string;
+  /** @internal Loop 测试固定 origin 默认分支提交；生产由受管 Git 双快照读取。 */
+  defaultBranchGitHeadForTests?: string;
 }
 
 export interface StoryValidationObservationReaders {
@@ -52,12 +57,13 @@ export interface StoryValidationObservationReaders {
   readPrd: (path: string) => StoryValidationFileSnapshot<Prd>;
   readState: (path: string) => StoryValidationFileSnapshot<RunState>;
   readWorkingContract: (projectRoot: string) => QualityContractReadResult;
-  readTrackedContract: (options: {
+  readGitAuthority: (options: {
     projectRoot: string;
     head: string;
+    defaultBranch: string;
     session: WorkspaceSession;
     termination?: ManagedGateContext['termination'];
-  }) => Promise<QualityContractReadResult>;
+  }) => Promise<StoryValidationGitAuthorityRead>;
   readTdd: (prd: Prd | null) => TddConfigReadResult;
 }
 
@@ -75,6 +81,7 @@ export type StoryValidationObservation =
 
 interface ObservationSnapshot {
   headSha: string | null;
+  defaultBranchGitHead: string | null;
   prd: StoryValidationFileSnapshot<Prd>;
   state: StoryValidationFileSnapshot<RunState>;
   workingContract: QualityContractReadResult;
@@ -205,6 +212,7 @@ function tddFingerprint(result: TddConfigReadResult): string {
 function snapshotIdentity(snapshot: ObservationSnapshot): Record<string, string | null> {
   return {
     head: snapshot.headSha,
+    defaultBranchGitHead: snapshot.defaultBranchGitHead,
     prd: `${snapshot.prd.status}:${snapshot.prd.fingerprint}`,
     state: `${snapshot.state.status}:${snapshot.state.fingerprint}`,
     workingContract: contractFingerprint(snapshot.workingContract),
@@ -222,6 +230,7 @@ function authorityInputIdentity(
   return {
     workspacePath,
     head: snapshot.headSha,
+    defaultBranchGitHead: snapshot.defaultBranchGitHead,
     prd: `${snapshot.prd.status}:${snapshot.prd.fingerprint}`,
     state: `${snapshot.state.status}:${snapshot.state.fingerprint}`,
     workingContract: sourceFingerprint(snapshot.workingContract),
@@ -247,6 +256,7 @@ function currentnessInput(
     state: snapshot.state.status === 'ready' ? snapshot.state.value : {},
     stateStatus: snapshot.state.status,
     headSha: snapshot.headSha,
+    defaultBranchGitHead: snapshot.defaultBranchGitHead,
     workingContract: snapshot.workingContract,
     trackedContract: snapshot.trackedContract,
     platform,
@@ -267,16 +277,38 @@ async function collectSnapshot(
   const prd = readers.readPrd(join(workspace, 'prd.json'));
   const state = readers.readState(join(workspace, 'state.json'));
   const workingContract = readers.readWorkingContract(options.projectRoot);
-  const trackedContract = headSha
-    ? await readers.readTrackedContract({
+  const defaultBranch =
+    workingContract.status === 'ready' ? workingContract.contract.repository.defaultBranch : null;
+  const requiresGitAuthority =
+    headSha !== null &&
+    defaultBranch !== null &&
+    prd.status === 'ready' &&
+    state.status === 'ready';
+  const gitAuthority = requiresGitAuthority
+    ? await readers.readGitAuthority({
         projectRoot: options.projectRoot,
         head: headSha,
+        defaultBranch,
         session: options.session,
         ...(options.termination ? { termination: options.termination } : {}),
       })
-    : unavailableTrackedContract(headSha);
+    : {
+        defaultBranchGitHead: null,
+        trackedContract: unavailableTrackedContract(headSha),
+      };
+  const defaultBranchGitHead =
+    options.defaultBranchGitHeadForTests ?? gitAuthority.defaultBranchGitHead;
+  const trackedContract = gitAuthority.trackedContract;
   const tddRead = readers.readTdd(prd.status === 'ready' ? prd.value : null);
-  return { headSha, prd, state, workingContract, trackedContract, tddRead };
+  return {
+    headSha,
+    defaultBranchGitHead,
+    prd,
+    state,
+    workingContract,
+    trackedContract,
+    tddRead,
+  };
 }
 
 function defaultReaders(
@@ -288,9 +320,13 @@ function defaultReaders(
     readPrd: readPrdFile,
     readState: readStateFile,
     readWorkingContract: injected ?? readWorkingQualityContractAuthority,
-    readTrackedContract: injected
-      ? ({ projectRoot }) => Promise.resolve(injected(projectRoot))
-      : readTrackedQualityContractAtHead,
+    readGitAuthority: injected
+      ? ({ projectRoot, head }) =>
+          Promise.resolve({
+            defaultBranchGitHead: head,
+            trackedContract: injected(projectRoot),
+          })
+      : readStoryValidationGitAuthority,
     readTdd: readTddConfig,
   };
 }

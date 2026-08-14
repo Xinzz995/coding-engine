@@ -18,6 +18,8 @@ export interface ValidatorUnverifiableMarker {
 export interface StoryState {
   passes: boolean;
   validated: boolean;
+  /** 引擎在 Story 首次实现前冻结的 Git HEAD；旧 workspace 缺省为 null 且不得反推。 */
+  storyBaseGitHead?: string | null;
   validationReceipt?: ValidationReceipt | null;
   /** 引擎持有、绑定当前候选的最近一次 Validator 不可验证状态。 */
   validatorUnverifiable?: ValidatorUnverifiableMarker | null;
@@ -67,7 +69,10 @@ function normalizeStoryState(value: unknown): StoryState | null {
     typeof story.retryCount !== 'number' ||
     typeof story.blocked !== 'boolean' ||
     (story.validated !== undefined && typeof story.validated !== 'boolean') ||
-    (story.escalated !== undefined && typeof story.escalated !== 'boolean')
+    (story.escalated !== undefined && typeof story.escalated !== 'boolean') ||
+    (story.storyBaseGitHead !== undefined &&
+      story.storyBaseGitHead !== null &&
+      !isGitHead(story.storyBaseGitHead))
   ) {
     return null;
   }
@@ -85,10 +90,13 @@ function normalizeStoryState(value: unknown): StoryState | null {
     !story.blocked &&
     story.passes &&
     story.validated === true &&
-    validationReceipt?.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION;
+    validationReceipt?.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION &&
+    isGitHead(story.storyBaseGitHead) &&
+    validationReceipt.storyBaseGitHead === story.storyBaseGitHead;
   return {
     passes: story.passes,
     validated: hasCurrentReceipt,
+    storyBaseGitHead: story.storyBaseGitHead ?? null,
     validationReceipt: hasCurrentReceipt ? validationReceipt : null,
     validatorUnverifiable:
       story.passes && !story.blocked && !hasCurrentReceipt ? validatorUnverifiable : null,

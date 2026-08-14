@@ -402,7 +402,9 @@ describe('异常轮回写（validator 侧）', () => {
         kind: 'claude',
         maxIterations: 1,
         devTimeoutMs: 5000,
-        valTimeoutMs: 400,
+        // This case must time out the running Validator, not race the managed
+        // supervisor and Node startup on a loaded CI host.
+        valTimeoutMs: 10_000,
         workspace,
         instructionsDir,
         port: 0,

@@ -159,11 +159,14 @@ describe('runLoop evidence records', () => {
         const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
         const passed = count === 4;
         writeFileSync(request.resultPath, JSON.stringify({
-          version: 1,
+          version: 2,
           requestId: request.requestId,
           storyId: request.storyId,
           acceptanceHash: request.acceptanceHash,
           gitHead: request.gitHead,
+          storyBaseGitHead: request.storyBaseGitHead,
+          changeManifestDigest: request.changeManifestDigest,
+          changedPathCount: request.changedPathCount,
           verdict: passed ? 'passed' : 'failed',
           checks: request.acceptanceCriteria.map((_, index) => ({
             acIndex: index + 1,

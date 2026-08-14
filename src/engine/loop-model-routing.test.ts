@@ -545,11 +545,14 @@ describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: 
         if (markerAt < 0 || jsonAt < 0 || fenceAt < 0) process.exit(9);
         const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
         writeFileSync(request.resultPath, JSON.stringify({
-          version: 1,
+          version: 2,
           requestId: request.requestId,
           storyId: request.storyId,
           acceptanceHash: request.acceptanceHash,
           gitHead: request.gitHead,
+          storyBaseGitHead: request.storyBaseGitHead,
+          changeManifestDigest: request.changeManifestDigest,
+          changedPathCount: request.changedPathCount,
           verdict: 'failed',
           checks: request.acceptanceCriteria.map((_, index) => ({
             acIndex: index + 1,

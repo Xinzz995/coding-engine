@@ -77,6 +77,7 @@ function committedStatusProject(codingXVersion?: string): string {
   execFileSync('git', ['config', 'user.email', 'status@example.invalid'], { cwd: root });
   execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: root });
   execFileSync('git', ['commit', '-q', '-m', 'status fixture'], { cwd: root });
+  execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], { cwd: root });
   return root;
 }
 

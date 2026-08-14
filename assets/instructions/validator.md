@@ -6,7 +6,7 @@
 
 - 唯一目标是引擎注入的 validation request；不得从 `{{WORKSPACE}}/progress.md`、最近提交说明或其他 agent 输出猜测 story。
 - `request.storyId` 指定 story；`request.acceptanceCriteria` 是本轮唯一验收标准，数组顺序就是 `acIndex` 的 1 基序号。
-- `request.acceptanceHash`、`request.requestId`、`request.gitHead` 必须原样回显，不能自行重算或替换。
+- `request.acceptanceHash`、`request.requestId`、`request.storyBaseGitHead`、`request.gitHead`、`request.changeManifestDigest` 与 `request.changedPathCount` 必须原样回显，不能自行重算或替换。
 - 可读取 `{{WORKSPACE}}/prd.json` 中同一 story 的标题/描述作为背景，但不得从中增删、替换 request 内的 AC。
 - 若 prompt 中没有合法 request、resultPath 不可写或无法完成验证，明确报错并退出；引擎会 fail closed，不得改写 state 来代替结果。
 
@@ -16,8 +16,8 @@
 
 ## 验证步骤
 
-1. 解析 prompt 末尾的 validation request，确认 `version=1`，记住唯一的 `resultPath`。
-2. 只读检查 request 指定的 Git HEAD/当前代码，逐条验证 `acceptanceCriteria`：
+1. 解析 prompt 末尾的 validation request，确认 `version=2`，记住唯一的 `resultPath`。
+2. 先核对并只读检查 `request.storyBaseGitHead..request.gitHead` 的完整变化，再逐条验证 `acceptanceCriteria`。不得改用 `HEAD^`、当前父提交、最近一次提交或自行选择的基线缩窄范围；`changeManifestDigest` 是引擎对该完整范围的机械绑定，不是让你跳过实际 diff 检查的替代证据：
    - 对 typecheck/test 类 AC，执行项目已有命令并核对真实退出结果。
    - 对浏览器类 AC，按下方浏览器流程实际操作和观察。
    - 对描述性 AC，结合代码检查、现有测试和必要的运行时验证；不能用“大概率正确”代替证据。
@@ -29,15 +29,18 @@
 5. 写结果前只清理本轮明确创建、且质量契约未声明允许的目录和文件；被 Git 忽略也不构成保留理由。需要自查时最多使用有超时与输出上限的 `git status --short --untracked-files=normal --ignored=matching`，不得切换到逐文件的 `--untracked-files=all`，也不得递归展开其中的目录。精确 HEAD、跟踪文件和允许产物的最终全树核对由引擎在 Validator 返回后机械完成。无法清理或无法确认本轮创建项时，不得写入 `verdict="passed"` 的结果；明确报错并退出，让引擎按不可验证处理。不得为获得干净状态而删除或还原项目原有的跟踪文件。
 6. 按下方 schema 生成单个 JSON 对象；先写同目录临时文件，再 rename 到 request.resultPath，避免半截 JSON。写入成功后正常退出。
 
-## Validation result v1（字段必须恰好匹配）
+## Validation result v2（字段必须恰好匹配）
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "requestId": "原样回显 request.requestId",
   "storyId": "原样回显 request.storyId",
   "acceptanceHash": "原样回显 request.acceptanceHash",
   "gitHead": "原样回显 request.gitHead；null 仍为 null",
+  "storyBaseGitHead": "原样回显 request.storyBaseGitHead；null 仍为 null",
+  "changeManifestDigest": "原样回显 request.changeManifestDigest",
+  "changedPathCount": 1,
   "verdict": "passed 或 failed",
   "checks": [
     {

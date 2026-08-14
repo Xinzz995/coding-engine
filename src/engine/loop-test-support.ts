@@ -86,6 +86,7 @@ export const TEST_QUALITY_CONTRACT = {
   },
   generatedPaths: [],
   localValidation: { prepare: [], allowedPaths: [] },
+  repository: { provider: 'github', fullName: 'fixture/coding-x', defaultBranch: 'main' },
 } as unknown as QualityContract;
 
 export const readyQualityContract = (
@@ -143,6 +144,7 @@ export function setupGitProject(
   writeFileSync(join(projectRoot, 'source.txt'), 'H1\n');
   execFileSync('git', ['add', '.gitignore', 'source.txt'], { cwd: projectRoot });
   execFileSync('git', ['commit', '-q', '-m', 'test: H1'], { cwd: projectRoot });
+  execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], { cwd: projectRoot });
   initializeReadyWorkspaceFixture(workspace);
   mkdirSync(join(workspace, 'screenshots'));
   writeFileSync(
@@ -239,7 +241,7 @@ export function validationReceiptFor(
   },
 ): ValidationReceipt {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     requestId,
     gitHead,
     acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
@@ -249,6 +251,9 @@ export function validationReceiptFor(
     ),
     runnerProfileDigest: TEST_VALIDATOR_PROFILE_DIGEST,
     canaryEvidenceDigest: TEST_VALIDATOR_CANARY_DIGEST,
+    storyBaseGitHead: gitHead,
+    changeManifestDigest: `sha256:${'f'.repeat(64)}`,
+    changedPathCount: 1,
   };
 }
 
@@ -360,6 +365,9 @@ export const runLoop = (cfg: LoopConfig): Promise<number> =>
     legacyValidatorProtocolForTests: true,
     unsafeUseProjectRootForValidationTests: true,
     validationEnvironmentDigestForTests: TEST_VALIDATION_ENVIRONMENT_DIGEST,
+    storyChangeManifestForTests:
+      cfg.storyChangeManifestForTests ??
+      (() => ({ digest: `sha256:${'f'.repeat(64)}`, changedPathCount: 1 })),
     validatorRunnerBindingForTests: cfg.validatorRunnerBindingForTests ?? TEST_VALIDATOR_RUNNER_BINDING,
     finalReviewRunner: cfg.finalReviewRunner ?? finalReviewPass,
   });
@@ -527,11 +535,14 @@ export function fakeBoundValidator(
       evidence: mode === 'failed' && index === 0 ? 'expected 401, received 200' : 'fixture verified AC',
     }));
     const result = {
-      version: 1,
+      version: 2,
       requestId: request.requestId,
       storyId: mode === 'wrong-story' ? 'US-999' : request.storyId,
       acceptanceHash: request.acceptanceHash,
       gitHead: request.gitHead,
+      storyBaseGitHead: request.storyBaseGitHead,
+      changeManifestDigest: request.changeManifestDigest,
+      changedPathCount: request.changedPathCount,
       verdict: mode === 'failed' ? 'failed' : 'passed',
       checks,
       summary: mode === 'failed' ? 'AC 1 未通过' : '全部 AC 通过',
@@ -564,6 +575,10 @@ export function strictConfig(workspace: string, instructionsDir: string): LoopCo
     finalReviewRunner: finalReviewPass,
     unsafeUseProjectRootForValidationTests: true,
     validationEnvironmentDigestForTests: TEST_VALIDATION_ENVIRONMENT_DIGEST,
+    storyChangeManifestForTests: () => ({
+      digest: `sha256:${'f'.repeat(64)}`,
+      changedPathCount: 1,
+    }),
     validatorRunnerBindingForTests: TEST_VALIDATOR_RUNNER_BINDING,
   };
 }

@@ -177,6 +177,9 @@ export type OperationDelegationScope =
       readonly checkCount: number;
       readonly requestId?: never;
       readonly gitHead?: never;
+      readonly storyBaseGitHead?: never;
+      readonly changeManifestDigest?: never;
+      readonly changedPathCount?: never;
     }
   | {
       readonly kind: 'validator';
@@ -186,6 +189,9 @@ export type OperationDelegationScope =
       readonly acceptanceHash: string;
       readonly checkCount: number;
       readonly gitHead: string;
+      readonly storyBaseGitHead: string;
+      readonly changeManifestDigest: string;
+      readonly changedPathCount: number;
     }
   | {
       readonly kind: 'quality-check' | 'tdd-check' | 'final-review';
@@ -195,6 +201,9 @@ export type OperationDelegationScope =
       readonly acceptanceHash?: never;
       readonly checkCount?: never;
       readonly gitHead?: never;
+      readonly storyBaseGitHead?: never;
+      readonly changeManifestDigest?: never;
+      readonly changedPathCount?: never;
     };
 
 export type PrepareWorkspaceOperationOptionsControlled =
@@ -327,12 +336,22 @@ export function delegationScope(
   acceptanceHashValue: unknown,
   checkCountValue: unknown,
   gitHeadValue: unknown,
+  storyBaseGitHeadValue?: unknown,
+  changeManifestDigestValue?: unknown,
+  changedPathCountValue?: unknown,
 ): { contract: DelegationContract; requestId?: string } {
   if (expectedDelegation(kind) !== delegation) invalid('operation kind and delegation mismatch');
   if (kind === 'builder') {
     const storyId = boundedString(storyIdValue, 'builder.storyId');
     if (requestIdValue !== undefined) invalid('builder must not declare requestId');
     if (gitHeadValue !== undefined) invalid('builder must not declare gitHead');
+    if (
+      storyBaseGitHeadValue !== undefined ||
+      changeManifestDigestValue !== undefined ||
+      changedPathCountValue !== undefined
+    ) {
+      invalid('builder must not declare Validator artifact identity');
+    }
     const semantic = semanticContract({
       version: 'builder-state-v1',
       storyId,
@@ -382,12 +401,15 @@ export function delegationScope(
     const storyId = boundedString(storyIdValue, 'validator.storyId');
     const requestId = uuid(requestIdValue, 'validator.requestId');
     const semantic = semanticContract({
-      version: 'validator-result-v1',
+      version: 'validator-result-v2',
       requestId,
       storyId,
       acceptanceHash: acceptanceHashValue,
       checkCount: checkCountValue,
       gitHead: gitHeadValue,
+      storyBaseGitHead: storyBaseGitHeadValue,
+      changeManifestDigest: changeManifestDigestValue,
+      changedPathCount: changedPathCountValue,
     });
     return {
       requestId,
@@ -415,7 +437,10 @@ export function delegationScope(
     requestIdValue !== undefined ||
     acceptanceHashValue !== undefined ||
     checkCountValue !== undefined ||
-    gitHeadValue !== undefined
+    gitHeadValue !== undefined ||
+    storyBaseGitHeadValue !== undefined ||
+    changeManifestDigestValue !== undefined ||
+    changedPathCountValue !== undefined
   ) {
     invalid('read-only operation must not declare business semantic identity');
   }
@@ -447,6 +472,9 @@ export function delegationContractForOperation(
     options.acceptanceHash,
     options.checkCount,
     options.gitHead,
+    options.storyBaseGitHead,
+    options.changeManifestDigest,
+    options.changedPathCount,
   ).contract;
 }
 

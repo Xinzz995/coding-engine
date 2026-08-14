@@ -1,7 +1,9 @@
 import { parseRunStateBytes, type RunState } from './run-state-contract.js';
 import {
+  isChangedPathCount,
   isAcceptanceHash,
   isGitHead,
+  isSha256Digest,
   parseValidationResultBytes,
   type ContractParseResult,
   type ValidationResult,
@@ -17,7 +19,7 @@ export interface BuilderStateSemanticContract {
   readonly checkCount: number;
 }
 
-export interface ValidatorResultSemanticContract {
+export interface LegacyValidatorResultSemanticContract {
   readonly version: 'validator-result-v1';
   readonly requestId: string;
   readonly storyId: string;
@@ -26,12 +28,27 @@ export interface ValidatorResultSemanticContract {
   readonly gitHead: string;
 }
 
+export interface ValidatorResultSemanticContract {
+  readonly version: 'validator-result-v2';
+  readonly requestId: string;
+  readonly storyId: string;
+  readonly acceptanceHash: string;
+  readonly checkCount: number;
+  readonly gitHead: string;
+  readonly storyBaseGitHead: string;
+  readonly changeManifestDigest: string;
+  readonly changedPathCount: number;
+}
+
 export interface ReadOnlySemanticContract {
   readonly version: 'read-only-v1';
 }
 
 export type DelegatedSemanticContract =
-  BuilderStateSemanticContract | ValidatorResultSemanticContract | ReadOnlySemanticContract;
+  | BuilderStateSemanticContract
+  | LegacyValidatorResultSemanticContract
+  | ValidatorResultSemanticContract
+  | ReadOnlySemanticContract;
 
 export type DelegatedSemanticCandidate =
   | {
@@ -39,7 +56,7 @@ export type DelegatedSemanticCandidate =
       readonly state: RunState;
     }
   | {
-      readonly version: 'validator-result-v1';
+      readonly version: 'validator-result-v2';
       readonly result: ValidationResult;
     };
 
@@ -149,6 +166,50 @@ export function parseDelegatedSemanticContract(
       },
     };
   }
+  if (semantic.version === 'validator-result-v2') {
+    if (
+      !exactKeys(semantic, [
+        'version',
+        'requestId',
+        'storyId',
+        'acceptanceHash',
+        'checkCount',
+        'gitHead',
+        'storyBaseGitHead',
+        'changeManifestDigest',
+        'changedPathCount',
+      ])
+    ) {
+      return failure('validator semantic contract 含 unknown 或缺失字段');
+    }
+    if (
+      typeof semantic.requestId !== 'string' ||
+      !UUID_PATTERN.test(semantic.requestId) ||
+      !storyId(semantic.storyId) ||
+      !isAcceptanceHash(semantic.acceptanceHash) ||
+      !checkCount(semantic.checkCount) ||
+      !isGitHead(semantic.gitHead) ||
+      !isGitHead(semantic.storyBaseGitHead) ||
+      !isSha256Digest(semantic.changeManifestDigest) ||
+      !isChangedPathCount(semantic.changedPathCount)
+    ) {
+      return failure('validator semantic contract identity 非法');
+    }
+    return {
+      ok: true,
+      value: {
+        version: 'validator-result-v2',
+        requestId: semantic.requestId,
+        storyId: semantic.storyId,
+        acceptanceHash: semantic.acceptanceHash,
+        checkCount: semantic.checkCount,
+        gitHead: semantic.gitHead,
+        storyBaseGitHead: semantic.storyBaseGitHead,
+        changeManifestDigest: semantic.changeManifestDigest,
+        changedPathCount: semantic.changedPathCount,
+      },
+    };
+  }
   return failure(`不支持的 delegated semantic version: ${semantic.version}`);
 }
 
@@ -157,7 +218,9 @@ export const VALIDATION_RESULT_PATH = 'validation-result.json';
 
 export function delegatedSemanticFilePaths(semantic: DelegatedSemanticContract): readonly string[] {
   if (semantic.version === 'builder-state-v1') return [RUN_STATE_PATH];
-  if (semantic.version === 'validator-result-v1') return [VALIDATION_RESULT_PATH];
+  if (semantic.version === 'validator-result-v1' || semantic.version === 'validator-result-v2') {
+    return [VALIDATION_RESULT_PATH];
+  }
   return [];
 }
 
@@ -194,6 +257,9 @@ export function evaluateDelegatedSemantic(input: {
       : { accepted: true };
   }
   if (!bytes) return { accepted: true };
+  // 旧 semantic 只为升级后的遗留 operation 安全收口；它没有完整变化身份，不能再
+  // 产出当前协议 candidate，但普通结果内容也不应被误判成 workspace 越权。
+  if (semantic.version === 'validator-result-v1') return { accepted: true };
   const parsed = parseValidationResultBytes(bytes, semantic);
   if (!parsed.ok) {
     // workspace 安全层只裁决 Validator 是否把有界结果写在唯一允许路径；内容是否
@@ -203,6 +269,6 @@ export function evaluateDelegatedSemantic(input: {
   }
   return {
     accepted: true,
-    candidate: { version: 'validator-result-v1', result: parsed.result },
+    candidate: { version: 'validator-result-v2', result: parsed.result },
   };
 }

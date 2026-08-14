@@ -569,23 +569,25 @@ export function validateSemanticContract(semantic) {
     boundedInteger(semantic.checkCount, 'builder semantic checkCount', 0, Number.MAX_SAFE_INTEGER);
     return semantic;
   }
-  if (semantic?.version === 'validator-result-v1') {
-    requireExactKeys(
-      semantic,
-      ['version', 'requestId', 'storyId', 'acceptanceHash', 'checkCount', 'gitHead'],
-      'validator semantic contract',
-    );
+  if (
+    semantic?.version === 'validator-result-v1' ||
+    semantic?.version === 'validator-result-v2'
+  ) {
+    const current = semantic.version === 'validator-result-v2';
+    const keys = ['version', 'requestId', 'storyId', 'acceptanceHash', 'checkCount', 'gitHead'];
+    if (current) keys.push('storyBaseGitHead', 'changeManifestDigest', 'changedPathCount');
+    requireExactKeys(semantic, keys, 'validator semantic contract');
     requirePattern(semantic.requestId, UUID_PATTERN, 'validator semantic requestId');
     const storyId = boundedString(semantic.storyId, 'validator semantic storyId');
     if (storyId.length > 4096) throw new Error('validator semantic storyId is too large');
     requirePattern(semantic.acceptanceHash, DIGEST_PATTERN, 'validator semantic acceptanceHash');
-    boundedInteger(
-      semantic.checkCount,
-      'validator semantic checkCount',
-      0,
-      Number.MAX_SAFE_INTEGER,
-    );
+    boundedInteger(semantic.checkCount, 'validator semantic checkCount', 0, Number.MAX_SAFE_INTEGER);
     requirePattern(semantic.gitHead, GIT_HEAD_PATTERN, 'validator semantic gitHead');
+    if (current) {
+      requirePattern(semantic.storyBaseGitHead, GIT_HEAD_PATTERN, 'validator semantic storyBaseGitHead');
+      requirePattern(semantic.changeManifestDigest, DIGEST_PATTERN, 'validator semantic changeManifestDigest');
+      boundedInteger(semantic.changedPathCount, 'validator semantic changedPathCount', 0, Number.MAX_SAFE_INTEGER);
+    }
     return semantic;
   }
   throw new Error('delegation semantic contract version is invalid');

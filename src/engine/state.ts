@@ -13,6 +13,7 @@ import {
 } from '../contracts/run-state-contract.js';
 import {
   acceptanceHash,
+  isChangedPathCount,
   isGitHead,
   isSha256Digest,
   parseValidationReceipt,
@@ -37,6 +38,7 @@ export type StoryView = Story & StoryState;
 export const INITIAL_STORY_STATE: Readonly<StoryState> = Object.freeze({
   passes: false,
   validated: false,
+  storyBaseGitHead: null,
   validationReceipt: null,
   validatorUnverifiable: null,
   notes: '',
@@ -72,6 +74,7 @@ export function tryReadState(path: string): RunState | null {
 
 export interface EngineOwnedFields {
   validated: boolean | 'missing';
+  storyBaseGitHead: string | null | undefined;
   validationReceipt: ValidationReceipt | null | 'missing';
   validatorUnverifiable: ValidatorUnverifiableMarker | null | 'missing';
   escalated: boolean | 'missing';
@@ -91,6 +94,7 @@ export function tryReadEngineOwnedFields(path: string, storyId: string): EngineO
     if (raw === undefined) {
       return {
         validated: 'missing',
+        storyBaseGitHead: undefined,
         validationReceipt: 'missing',
         validatorUnverifiable: 'missing',
         escalated: 'missing',
@@ -99,12 +103,14 @@ export function tryReadEngineOwnedFields(path: string, storyId: string): EngineO
     if (!isRecord(raw)) return null;
     const story = raw;
     const validated = story.validated === undefined ? 'missing' : story.validated;
+    const rawStoryBase = story.storyBaseGitHead;
     const rawReceipt = story.validationReceipt === undefined ? 'missing' : story.validationReceipt;
     const rawUnverifiable =
       story.validatorUnverifiable === undefined ? 'missing' : story.validatorUnverifiable;
     const escalated = story.escalated === undefined ? 'missing' : story.escalated;
     if (
       (validated !== 'missing' && typeof validated !== 'boolean') ||
+      (rawStoryBase !== undefined && rawStoryBase !== null && !isGitHead(rawStoryBase)) ||
       (escalated !== 'missing' && typeof escalated !== 'boolean')
     )
       return null;
@@ -122,7 +128,13 @@ export function tryReadEngineOwnedFields(path: string, storyId: string): EngineO
       validatorUnverifiable = parseValidatorUnverifiableMarker(rawUnverifiable);
       if (!validatorUnverifiable) return null;
     }
-    return { validated, validationReceipt, validatorUnverifiable, escalated };
+    return {
+      validated,
+      storyBaseGitHead: rawStoryBase,
+      validationReceipt,
+      validatorUnverifiable,
+      escalated,
+    };
   } catch {
     return null;
   }
@@ -137,6 +149,7 @@ function legacyStateOf(story: Story): StoryState {
     passes,
     // legacy 内嵌 passes 只能迁移为实现候选，不能补造结构化 Validator 凭证。
     validated: false,
+    storyBaseGitHead: null,
     validationReceipt: null,
     validatorUnverifiable: null,
     notes: s.notes ?? '',
@@ -235,11 +248,13 @@ export type StoryValidationInvalidReason =
   | 'blocked'
   | 'invalid-expected-environment'
   | 'missing-candidate'
+  | 'missing-story-base'
   | 'not-validated'
   | 'missing-receipt'
   | 'invalid-receipt'
   | 'invalid-current-head'
   | 'head-mismatch'
+  | 'story-base-mismatch'
   | 'acceptance-mismatch'
   | 'missing-environment-binding'
   | 'missing-runner-binding'
@@ -278,6 +293,9 @@ export function evaluateStoryValidation(
   if (!state.passes) {
     return { valid: false, reason: 'missing-candidate', receipt, acceptanceHash: expectedHash };
   }
+  if (!isGitHead(state.storyBaseGitHead)) {
+    return { valid: false, reason: 'missing-story-base', receipt, acceptanceHash: expectedHash };
+  }
   if (!state.validated) {
     return { valid: false, reason: 'not-validated', receipt, acceptanceHash: expectedHash };
   }
@@ -304,9 +322,9 @@ export function evaluateStoryValidation(
       acceptanceHash: expectedHash,
     };
   }
-  // v2 凭证缺少 Runner 宿主隔离绑定（ADR-025）：沿 v1 先例安全失效，保留候选待重验。
+  // v2 凭证缺少 Runner 宿主隔离绑定；v3 缺少 Story 起点与变化摘要。
   if (
-    receipt.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
+    receipt.schemaVersion === 2 ||
     !isSha256Digest(receipt.runnerProfileDigest) ||
     !isSha256Digest(receipt.canaryEvidenceDigest)
   ) {
@@ -316,6 +334,12 @@ export function evaluateStoryValidation(
       receipt,
       acceptanceHash: expectedHash,
     };
+  }
+  if (
+    receipt.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION ||
+    receipt.storyBaseGitHead !== state.storyBaseGitHead
+  ) {
+    return { valid: false, reason: 'story-base-mismatch', receipt, acceptanceHash: expectedHash };
   }
   if (receipt.validationEnvironmentDigest !== expectedValidationEnvironmentDigest) {
     return {
@@ -538,12 +562,14 @@ export interface ValidatedTamper {
 
 export interface ValidationOwnership {
   validated: boolean;
+  storyBaseGitHead: string | null;
   validationReceipt: ValidationReceipt | null;
   validatorUnverifiable: ValidatorUnverifiableMarker | null;
 }
 
 export interface ObservedValidationOwnership {
   validated: boolean | 'missing';
+  storyBaseGitHead: string | null | undefined;
   validationReceipt: ValidationReceipt | null | 'missing';
   validatorUnverifiable: ValidatorUnverifiableMarker | null | 'missing';
 }
@@ -560,15 +586,39 @@ function sameValidationReceipt(
   if (left === null || left === 'missing' || right === null || right === 'missing') {
     return left === right;
   }
-  return (
-    left.schemaVersion === right.schemaVersion &&
-    left.requestId === right.requestId &&
-    left.gitHead === right.gitHead &&
-    left.acceptanceHash === right.acceptanceHash &&
-    left.validationEnvironmentDigest === right.validationEnvironmentDigest &&
-    left.runnerProfileDigest === right.runnerProfileDigest &&
-    left.canaryEvidenceDigest === right.canaryEvidenceDigest
-  );
+  if (
+    left.schemaVersion !== right.schemaVersion ||
+    left.requestId !== right.requestId ||
+    left.gitHead !== right.gitHead ||
+    left.acceptanceHash !== right.acceptanceHash
+  ) {
+    return false;
+  }
+  if (left.schemaVersion === 1 && right.schemaVersion === 1) return true;
+  if (left.schemaVersion === 2 && right.schemaVersion === 2) {
+    return left.validationEnvironmentDigest === right.validationEnvironmentDigest;
+  }
+  if (left.schemaVersion === 3 && right.schemaVersion === 3) {
+    return (
+      left.validationEnvironmentDigest === right.validationEnvironmentDigest &&
+      left.runnerProfileDigest === right.runnerProfileDigest &&
+      left.canaryEvidenceDigest === right.canaryEvidenceDigest
+    );
+  }
+  if (
+    left.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION &&
+    right.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION
+  ) {
+    return (
+      left.validationEnvironmentDigest === right.validationEnvironmentDigest &&
+      left.runnerProfileDigest === right.runnerProfileDigest &&
+      left.canaryEvidenceDigest === right.canaryEvidenceDigest &&
+      left.storyBaseGitHead === right.storyBaseGitHead &&
+      left.changeManifestDigest === right.changeManifestDigest &&
+      left.changedPathCount === right.changedPathCount
+    );
+  }
+  return false;
 }
 
 function sameValidatorUnverifiable(
@@ -588,8 +638,28 @@ function sameValidatorUnverifiable(
 export function validationOwnershipOf(state: StoryState): ValidationOwnership {
   return {
     validated: state.validated,
+    storyBaseGitHead: state.storyBaseGitHead ?? null,
     validationReceipt: state.validationReceipt ?? null,
     validatorUnverifiable: state.validatorUnverifiable ?? null,
+  };
+}
+
+/** Story 首次实现前固定起点；已有起点永不随重试或后续提交漂移。 */
+export function bindStoryValidationBase(
+  state: RunState,
+  storyId: string,
+  gitHead: string,
+): { state: RunState; changed: boolean } {
+  const current = state[storyId];
+  if (!current || !isGitHead(gitHead) || current.storyBaseGitHead !== null) {
+    return { state, changed: false };
+  }
+  return {
+    state: {
+      ...state,
+      [storyId]: { ...current, storyBaseGitHead: gitHead },
+    },
+    changed: true,
   };
 }
 
@@ -610,6 +680,7 @@ export function restoreValidationOwnership(
         [storyId]: {
           ...fallback,
           validated: expected.validated,
+          storyBaseGitHead: expected.storyBaseGitHead,
           validationReceipt: expected.validationReceipt,
           validatorUnverifiable: expected.validatorUnverifiable,
         },
@@ -618,6 +689,7 @@ export function restoreValidationOwnership(
         expected,
         received: observed ?? {
           validated: 'missing',
+          storyBaseGitHead: undefined,
           validationReceipt: 'missing',
           validatorUnverifiable: 'missing',
         },
@@ -626,6 +698,7 @@ export function restoreValidationOwnership(
   }
   const received: ObservedValidationOwnership = observed ?? {
     validated: current.validated,
+    storyBaseGitHead: current.storyBaseGitHead,
     validationReceipt:
       current.validationReceipt === undefined ? 'missing' : current.validationReceipt,
     validatorUnverifiable:
@@ -633,6 +706,7 @@ export function restoreValidationOwnership(
   };
   if (
     received.validated === expected.validated &&
+    received.storyBaseGitHead === expected.storyBaseGitHead &&
     sameValidationReceipt(received.validationReceipt, expected.validationReceipt) &&
     sameValidatorUnverifiable(
       received.validatorUnverifiable,
@@ -647,6 +721,7 @@ export function restoreValidationOwnership(
       [storyId]: {
         ...current,
         validated: expected.validated,
+        storyBaseGitHead: expected.storyBaseGitHead,
         validationReceipt: expected.validationReceipt,
         validatorUnverifiable: expected.validatorUnverifiable,
       },
@@ -766,7 +841,10 @@ export function issueValidationReceipt(
     !Array.isArray(request.acceptanceCriteria) ||
     !request.acceptanceCriteria.every((criterion) => typeof criterion === 'string') ||
     typeof request.acceptanceHash !== 'string' ||
-    !isGitHead(request.gitHead)
+    !isGitHead(request.gitHead) ||
+    !isGitHead(request.storyBaseGitHead) ||
+    !isSha256Digest(request.changeManifestDigest) ||
+    !isChangedPathCount(request.changedPathCount)
   ) {
     return { state, changed: false };
   }
@@ -784,7 +862,13 @@ export function issueValidationReceipt(
     return { state, changed: false };
   }
   const current = state[story.id];
-  if (!current || !current.passes || current.blocked) {
+  if (
+    !current ||
+    !current.passes ||
+    current.blocked ||
+    !isGitHead(current.storyBaseGitHead) ||
+    request.storyBaseGitHead !== current.storyBaseGitHead
+  ) {
     return { state, changed: false };
   }
   const receipt: ValidationReceipt = {
@@ -795,6 +879,9 @@ export function issueValidationReceipt(
     validationEnvironmentDigest,
     runnerProfileDigest: runnerBinding.profileDigest,
     canaryEvidenceDigest: runnerBinding.canaryDigest,
+    storyBaseGitHead: request.storyBaseGitHead,
+    changeManifestDigest: request.changeManifestDigest,
+    changedPathCount: request.changedPathCount,
   };
   if (current.validated && sameValidationReceipt(current.validationReceipt ?? null, receipt)) {
     return { state, changed: false };

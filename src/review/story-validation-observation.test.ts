@@ -24,6 +24,8 @@ import {
 
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
+const DEFAULT_BRANCH_HEAD = 'e'.repeat(40);
+const STORY_BASE_HEAD = 'f'.repeat(40);
 const QUALITY_A = `sha256:${'c'.repeat(64)}`;
 const QUALITY_B = `sha256:${'d'.repeat(64)}`;
 const FORMAL_RUNTIME = {
@@ -51,6 +53,7 @@ const contract = {
   },
   generatedPaths: [],
   localValidation: { prepare: [], allowedPaths: [] },
+  repository: { defaultBranch: 'main' },
 } as unknown as QualityContract;
 
 function contractRead(digest = QUALITY_A): QualityContractReadResult {
@@ -86,6 +89,7 @@ function state(
   environment = digestCandidateStoryValidationEnvironment({
     contract,
     headSha: HEAD_A,
+    defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
     tddConfig: null,
     runtimeIdentity: FORMAL_RUNTIME,
     platform: 'linux',
@@ -96,14 +100,18 @@ function state(
       passes: true,
       validated: true,
       validationReceipt: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         requestId: 'request-1',
         gitHead: HEAD_A,
         acceptanceHash: acceptanceHash('US-001', ['works']),
         validationEnvironmentDigest: environment,
         runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
         canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
+        storyBaseGitHead: STORY_BASE_HEAD,
+        changeManifestDigest: `sha256:${'f'.repeat(64)}`,
+        changedPathCount: 1,
       },
+      storyBaseGitHead: STORY_BASE_HEAD,
       notes,
       retryCount: 0,
       blocked: false,
@@ -139,6 +147,7 @@ function fakeSession(): WorkspaceSession {
 
 interface ReaderChanges {
   head?: [string | null, string | null];
+  defaultBranchHead?: [string | null, string | null];
   prd?: [StoryValidationFileSnapshot<Prd>, StoryValidationFileSnapshot<Prd>];
   state?: [StoryValidationFileSnapshot<RunState>, StoryValidationFileSnapshot<RunState>];
   working?: [QualityContractReadResult, QualityContractReadResult];
@@ -148,6 +157,9 @@ interface ReaderChanges {
 
 function readers(changes: ReaderChanges = {}): StoryValidationObservationReaders {
   const readHead = sequence(...(changes.head ?? [HEAD_A, HEAD_A]));
+  const readDefaultBranchHead = sequence(
+    ...(changes.defaultBranchHead ?? [DEFAULT_BRANCH_HEAD, DEFAULT_BRANCH_HEAD]),
+  );
   const readPrd = sequence(...(changes.prd ?? [file(prd(), 'prd-a'), file(prd(), 'prd-a')]));
   const readState = sequence(
     ...(changes.state ?? [file(state(), 'state-a'), file(state(), 'state-a')]),
@@ -160,7 +172,10 @@ function readers(changes: ReaderChanges = {}): StoryValidationObservationReaders
     readPrd: vi.fn(readPrd),
     readState: vi.fn(readState),
     readWorkingContract: vi.fn(readWorking),
-    readTrackedContract: vi.fn(async () => readTracked()),
+    readGitAuthority: vi.fn(async () => ({
+      defaultBranchGitHead: readDefaultBranchHead(),
+      trackedContract: readTracked(),
+    })),
     readTdd: vi.fn(readTdd),
   };
 }
@@ -187,8 +202,26 @@ describe('observeStoryValidationCurrentnessControlled', () => {
     expect(source.readPrd).toHaveBeenCalledTimes(2);
     expect(source.readState).toHaveBeenCalledTimes(2);
     expect(source.readWorkingContract).toHaveBeenCalledTimes(2);
-    expect(source.readTrackedContract).toHaveBeenCalledTimes(2);
+    expect(source.readGitAuthority).toHaveBeenCalledTimes(2);
     expect(source.readTdd).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not launch managed Git when PRD or state authority already fails closed', async () => {
+    const invalidState = {
+      status: 'invalid' as const,
+      fingerprint: 'state-invalid',
+      diagnostic: 'broken state',
+    };
+    const source = readers({ state: [invalidState, invalidState] });
+
+    const result = await observeStoryValidationCurrentnessControlled(options(), source);
+
+    expect(result).toMatchObject({
+      status: 'unverifiable',
+      reason: 'state-invalid',
+      observationToken: null,
+    });
+    expect(source.readGitAuthority).not.toHaveBeenCalled();
   });
 
   it('keeps the existing Loop fixed-digest test seam without weakening production reads', async () => {
@@ -209,6 +242,7 @@ describe('observeStoryValidationCurrentnessControlled', () => {
 
   it.each([
     ['HEAD', { head: [HEAD_A, HEAD_B] }],
+    ['default branch HEAD', { defaultBranchHead: [DEFAULT_BRANCH_HEAD, HEAD_B] }],
     ['PRD', { prd: [file(prd(), 'prd-a'), file(prd('Changed title'), 'prd-b')] }],
     ['state', { state: [file(state(), 'state-a'), file(state('changed'), 'state-b')] }],
     ['working contract', { working: [contractRead(), contractRead(QUALITY_B)] }],

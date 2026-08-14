@@ -12,6 +12,8 @@ import {
 } from './story-validation-currentness.js';
 
 const HEAD = 'a'.repeat(40);
+const DEFAULT_BRANCH_HEAD = 'd'.repeat(40);
+const STORY_BASE_HEAD = 'e'.repeat(40);
 const QUALITY_DIGEST = `sha256:${'b'.repeat(64)}`;
 const OTHER_QUALITY_DIGEST = `sha256:${'c'.repeat(64)}`;
 const FORMAL_RUNTIME = {
@@ -28,6 +30,7 @@ const contract = {
   },
   generatedPaths: [],
   localValidation: { prepare: [], allowedPaths: [] },
+  repository: { defaultBranch: 'main' },
 } as unknown as QualityContract;
 
 function readyContract(
@@ -67,14 +70,18 @@ function state(environmentDigest: string): RunState {
       passes: true,
       validated: true,
       validationReceipt: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         requestId: 'request-1',
         gitHead: HEAD,
         acceptanceHash: acceptanceHash('US-001', ['works']),
         validationEnvironmentDigest: environmentDigest,
         runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
         canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
+        storyBaseGitHead: STORY_BASE_HEAD,
+        changeManifestDigest: `sha256:${'f'.repeat(64)}`,
+        changedPathCount: 1,
       },
+      storyBaseGitHead: STORY_BASE_HEAD,
       notes: 'keep',
       retryCount: 2,
       blocked: false,
@@ -87,6 +94,7 @@ function input(overrides: Partial<Parameters<typeof evaluateStoryValidationCurre
   const environmentDigest = digestCandidateStoryValidationEnvironment({
     contract,
     headSha: HEAD,
+    defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
     tddConfig: null,
     runtimeIdentity: FORMAL_RUNTIME,
     platform: 'linux',
@@ -96,6 +104,7 @@ function input(overrides: Partial<Parameters<typeof evaluateStoryValidationCurre
     state: state(environmentDigest),
     stateStatus: 'ready' as const,
     headSha: HEAD,
+    defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
     workingContract: readyContract(),
     trackedContract: readyContract(),
     platform: 'linux' as const,
@@ -123,6 +132,7 @@ describe('evaluateStoryValidationCurrentness', () => {
     const candidate = digestCandidateStoryValidationEnvironment({
       contract,
       headSha: HEAD,
+      defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
       tddConfig: null,
       runtimeIdentity: FORMAL_RUNTIME,
       platform: 'linux',
@@ -130,12 +140,16 @@ describe('evaluateStoryValidationCurrentness', () => {
     const mechanical = digestFinalReviewMechanicalEnvironment({
       contract,
       headSha: HEAD,
+      defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
       platform: 'linux',
     });
 
     expect(candidate).not.toBe(mechanical);
-    expect(candidateStoryValidationEnvironmentPolicy(null)).toEqual({
-      additionalRefs: [],
+    expect(candidateStoryValidationEnvironmentPolicy(null, contract, DEFAULT_BRANCH_HEAD)).toEqual({
+      additionalRefs: [DEFAULT_BRANCH_HEAD],
+      referenceAliases: [
+        { ref: 'refs/remotes/origin/main', target: DEFAULT_BRANCH_HEAD },
+      ],
       additionalPolicy: { domain: 'story-validation-v2', tdd: null },
     });
   });
@@ -145,6 +159,7 @@ describe('evaluateStoryValidationCurrentness', () => {
       digestCandidateStoryValidationEnvironment({
         contract,
         headSha: HEAD,
+        defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
         tddConfig: null,
         platform: 'linux',
         runtimeIdentity: { mode, actualCodingXVersion },
@@ -163,6 +178,7 @@ describe('evaluateStoryValidationCurrentness', () => {
     const shadowDigest = digestCandidateStoryValidationEnvironment({
       contract,
       headSha: HEAD,
+      defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
       tddConfig: null,
       platform: 'linux',
       runtimeIdentity: shadowRuntime,

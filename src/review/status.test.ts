@@ -232,6 +232,7 @@ function writeBoundReview(
       validationEnvironmentDigest: digestFinalReviewMechanicalEnvironment({
         contract: context.baseContract,
         headSha: context.headSha,
+        defaultBranchGitHead: context.baseSha,
       }),
     }),
     risk,

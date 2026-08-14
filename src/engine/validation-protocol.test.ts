@@ -43,16 +43,29 @@ const story: Story = {
 };
 
 function request(dir: string): ValidationRequest {
-  return createValidationRequest(story, dir, 'a'.repeat(40), 'request-123');
+  return createValidationRequest(
+    story,
+    dir,
+    {
+      gitHead: 'a'.repeat(40),
+      storyBaseGitHead: 'b'.repeat(40),
+      changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+      changedPathCount: 2,
+    },
+    'request-123',
+  );
 }
 
 function resultFor(req: ValidationRequest, overrides: Partial<ValidationResult> = {}): ValidationResult {
   return {
-    version: 1,
+    version: 2,
     requestId: req.requestId,
     storyId: req.storyId,
     acceptanceHash: req.acceptanceHash,
     gitHead: req.gitHead,
+    storyBaseGitHead: req.storyBaseGitHead,
+    changeManifestDigest: req.changeManifestDigest,
+    changedPathCount: req.changedPathCount,
     verdict: 'passed',
     checks: [
       { acIndex: 1, passed: true, evidence: 'integration test returned 401' },
@@ -123,12 +136,15 @@ describe('validation request', () => {
     const req = request(dir);
 
     expect(req).toEqual({
-      version: 1,
+      version: 2,
       requestId: 'request-123',
       storyId: 'US-007',
       acceptanceHash: acceptanceHash('US-007', story.acceptanceCriteria),
       acceptanceCriteria: story.acceptanceCriteria,
       gitHead: 'a'.repeat(40),
+      storyBaseGitHead: 'b'.repeat(40),
+      changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+      changedPathCount: 2,
       resultPath: join(dir, 'validation-result.json'),
     });
     expect(req.acceptanceCriteria).not.toBe(story.acceptanceCriteria);
@@ -220,6 +236,9 @@ describe('readValidationResult', () => {
     ['story ID', { storyId: 'US-999' }],
     ['AC hash', { acceptanceHash: `sha256:${'b'.repeat(64)}` }],
     ['Git HEAD', { gitHead: 'c'.repeat(40) }],
+    ['Story base', { storyBaseGitHead: 'd'.repeat(40) }],
+    ['change manifest', { changeManifestDigest: `sha256:${'d'.repeat(64)}` }],
+    ['changed path count', { changedPathCount: 3 }],
   ] as const)('rejects a mismatched %s binding', (_label, overrides) => {
     const dir = tempDir();
     const req = request(dir);
@@ -286,7 +305,17 @@ describe('readValidationResult', () => {
 
   it('supports an explicit unavailable Git identity without inventing one', () => {
     const dir = tempDir();
-    const req = createValidationRequest(story, dir, null, 'request-no-git');
+    const req = createValidationRequest(
+      story,
+      dir,
+      {
+        gitHead: null,
+        storyBaseGitHead: null,
+        changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+        changedPathCount: 0,
+      },
+      'request-no-git',
+    );
     const result = resultFor(req, { gitHead: null });
     writeResult(req, result);
 

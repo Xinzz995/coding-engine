@@ -77,6 +77,7 @@ export function evaluateCurrentReviewStatus(options: {
       digestFinalReviewMechanicalEnvironment({
         contract: context.baseContract,
         headSha: context.headSha,
+        defaultBranchGitHead: context.baseSha,
       }),
     );
     if (options.storyValidationDigest === undefined) {

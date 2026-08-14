@@ -157,6 +157,28 @@ namespace CodingX.WorkspaceSafety
                 StrictJson.String(semantic, "storyId", "validator semantic storyId", false);
                 return;
             }
+            if (version == "validator-result-v2")
+            {
+                StrictJson.ExactKeys(semantic, "validator semantic contract", "version", "requestId",
+                    "storyId", "acceptanceHash", "checkCount", "gitHead", "storyBaseGitHead",
+                    "changeManifestDigest", "changedPathCount");
+                if (!Patterns.Uuid.IsMatch(StrictJson.String(semantic, "requestId",
+                        "validator semantic requestId", false)) ||
+                    !Patterns.Digest.IsMatch(StrictJson.String(semantic, "acceptanceHash",
+                        "validator semantic acceptanceHash", false)) ||
+                    !Patterns.GitHead.IsMatch(StrictJson.String(semantic, "gitHead",
+                        "validator semantic gitHead", false)) ||
+                    !Patterns.GitHead.IsMatch(StrictJson.String(semantic, "storyBaseGitHead",
+                        "validator semantic storyBaseGitHead", false)) ||
+                    !Patterns.Digest.IsMatch(StrictJson.String(semantic, "changeManifestDigest",
+                        "validator semantic changeManifestDigest", false)) ||
+                    StrictJson.SafeInteger(semantic, "checkCount", "validator semantic checkCount") < 0 ||
+                    StrictJson.SafeInteger(semantic, "changedPathCount",
+                        "validator semantic changedPathCount") < 0)
+                    throw new SafetyException("validator semantic contract is invalid");
+                StrictJson.String(semantic, "storyId", "validator semantic storyId", false);
+                return;
+            }
             throw new SafetyException("delegation semantic contract version is invalid");
         }
 

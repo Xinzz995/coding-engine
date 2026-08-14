@@ -38,6 +38,13 @@ export type {
   ValidationResult,
 } from '../contracts/validation-contract.js';
 
+export interface ValidationArtifactTarget {
+  readonly gitHead: string | null;
+  readonly storyBaseGitHead: string | null;
+  readonly changeManifestDigest: string;
+  readonly changedPathCount: number;
+}
+
 /**
  * 读取当前提交身份。无法读取时返回 null，由协议显式标记降级；绝不把错误文案
  * 或空字符串伪装成 artifact identity。
@@ -157,7 +164,7 @@ export function readGitHead(cwd: string): string | null {
 export function createValidationRequest(
   story: Pick<Story, 'id' | 'acceptanceCriteria'>,
   workspace: string,
-  gitHead: string | null,
+  target: ValidationArtifactTarget,
   requestId: string = randomUUID(),
   /** 宿主隔离 profile 提供的临时域固定 claim 路径；缺省保持 workspace 内旧位置。 */
   resultPathOverride?: string,
@@ -169,7 +176,10 @@ export function createValidationRequest(
     storyId: story.id,
     acceptanceHash: acceptanceHash(story.id, criteria),
     acceptanceCriteria: criteria,
-    gitHead,
+    gitHead: target.gitHead,
+    storyBaseGitHead: target.storyBaseGitHead,
+    changeManifestDigest: target.changeManifestDigest,
+    changedPathCount: target.changedPathCount,
     resultPath: resultPathOverride ?? join(workspace, VALIDATION_RESULT_FILE),
   };
 }
@@ -184,7 +194,8 @@ export function renderValidatorInstruction(base: string, request: ValidationRequ
 <!-- ENGINE-BOUND VALIDATION REQUEST: do not infer another target -->
 ## 引擎绑定的验收请求（最高优先级运行时合同）
 
-- 只验证下面 JSON 指定的 story、AC 快照与 Git HEAD；不得从 progress.md 猜测目标。
+- 只验证下面 JSON 指定的 story、AC 快照、固定 Story 起点、变化摘要与 Git HEAD；不得从 progress.md 猜测目标。
+- 必须检查 request.storyBaseGitHead..request.gitHead 的完整变化；不得用 HEAD^、当前父提交或自行选择的基线缩窄范围。
 - 不得修改 state.json、prd.json 或项目源码。你只提交 Validator claim，最终状态由引擎写入。
 - 按 request.acceptanceCriteria 的顺序逐条验证；结果 checks 必须以 1..N 精确覆盖全部 AC。
 - 将单个 JSON 对象原子写入 request.resultPath；schema 必须匹配项目 validator 指令。
@@ -266,6 +277,9 @@ export function readValidationResult(
     acceptanceHash: expected.acceptanceHash,
     checkCount: expected.acceptanceCriteria.length,
     gitHead: expected.gitHead,
+    storyBaseGitHead: expected.storyBaseGitHead,
+    changeManifestDigest: expected.changeManifestDigest,
+    changedPathCount: expected.changedPathCount,
   });
   if (!shaped.ok) return shaped;
   if (actualGitHead !== expected.gitHead) {

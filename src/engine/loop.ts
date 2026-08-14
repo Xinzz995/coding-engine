@@ -9,6 +9,7 @@ import {
   tryReadState,
   selectNextStory,
   allStoriesResolvedAt,
+  bindStoryValidationBase,
   enableEscalation,
   restoreEscalated,
   restoreValidationOwnership,
@@ -92,9 +93,11 @@ import type { SupervisorTerminationReason } from '../workspace-safety/supervisor
 import {
   CleanValidationCheckoutError,
   CleanValidationCheckoutManager,
+  STORY_CHANGE_MANIFEST_VERSION,
   describeCleanValidationCheckoutCleanup,
   valueReferencesProjectPath,
   type CleanValidationCheckout,
+  type StoryChangeManifest,
 } from './clean-validation-checkout.js';
 import {
   bindStoryValidationRuntimeIdentity,
@@ -144,6 +147,13 @@ export interface LoopConfig {
   projectRoot?: string;
   /** 只供隔离测试注入；生产始终读取项目根 .coding-x/quality.json。 */
   qualityContractReader?: (projectRoot: string) => QualityContractReadResult;
+  /** @internal 只供测试固定本地 origin 默认分支提交；生产由受管 Git 读取。 */
+  defaultBranchGitHeadForTests?: string;
+  /** @internal 跳过真实干净检出的测试必须显式提供等价变化摘要。 */
+  storyChangeManifestForTests?: (
+    storyBaseGitHead: string,
+    gitHead: string,
+  ) => Pick<StoryChangeManifest, 'digest' | 'changedPathCount'>;
   /** 测试/嵌入注入；生产缺省执行真实本地三层 Review。 */
   finalReviewRunner?: (options: {
     root: string;
@@ -300,6 +310,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       bootResolved,
       validationEnvironmentDigest: bootValidationEnvironmentDigest,
       validationRuntimeIdentity,
+      defaultBranchGitHead,
     } = startup;
     const agentCwd = projectRoot;
     const storyValidationEnvironmentAt = (headSha: string): string =>
@@ -309,9 +320,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             validationRuntimeIdentity,
           )
         : digestCandidateStoryValidationEnvironment({
-            contract: qualityRead.contract,
-            headSha,
-            tddConfig,
+          contract: qualityRead.contract,
+          headSha,
+          defaultBranchGitHead,
+          tddConfig,
             runtimeIdentity: validationRuntimeIdentity,
           });
     const runId = randomUUID();
@@ -553,6 +565,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         ...(cfg.validationEnvironmentDigestForTests !== undefined
           ? { validationEnvironmentDigestForTests: cfg.validationEnvironmentDigestForTests }
           : {}),
+        ...(cfg.defaultBranchGitHeadForTests !== undefined
+          ? { defaultBranchGitHeadForTests: cfg.defaultBranchGitHeadForTests }
+          : {}),
       });
     const completeResolvedRun = async (): Promise<number> => {
       const initialStoryValidation = await observeCurrentStoryValidation();
@@ -762,6 +777,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             expected,
             {
               validated: owned.validated,
+              storyBaseGitHead: owned.storyBaseGitHead,
               validationReceipt: owned.validationReceipt,
               validatorUnverifiable: owned.validatorUnverifiable,
             },
@@ -772,6 +788,25 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         if (materializedChanged) {
           await session.writer.writeFile('state.json', JSON.stringify(materialized, null, 2));
           stateRawBefore = rawOf(statePath);
+        }
+        beforeState = materialized;
+      }
+      // readRunState 会为损坏文件提供只用于失败关闭的内存回退；冻结 Story 起点前必须
+      // 再证明磁盘 state 本身可解析，绝不能用回退值覆盖并“洗白”损坏权威文件。
+      const persistedStateBeforeBaseBinding = beforeState ? tryReadState(statePath) : null;
+      if (
+        beforeState &&
+        persistedStateBeforeBaseBinding &&
+        currentStory &&
+        currentGitHead &&
+        !validationOnly
+      ) {
+        const bound = bindStoryValidationBase(beforeState, currentStory, currentGitHead);
+        if (bound.changed) {
+          await session.writer.writeFile('state.json', JSON.stringify(bound.state, null, 2));
+          stateRawBefore = rawOf(statePath);
+          beforeState = bound.state;
+          console.log(`📍 ${currentStory} 已固定本轮 Story 起点 ${currentGitHead}`);
         }
       }
       const routeTampers: Array<{
@@ -815,6 +850,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             observed
               ? {
                   validated: observed.validated,
+                  storyBaseGitHead: observed.storyBaseGitHead,
                   validationReceipt: observed.validationReceipt,
                   validatorUnverifiable: observed.validatorUnverifiable,
                 }
@@ -1317,6 +1353,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
 
       const verificationHead = currentGitHead;
       let validationCheckout: CleanValidationCheckout | null = null;
+      let storyChangeManifest: StoryChangeManifest | null = null;
       let validationRoot = agentCwd;
       const roundValidationEnvironmentDigest = currentValidationEnvironmentDigest;
 
@@ -1357,11 +1394,16 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         // 越界路径“不得生成报告”的既有边界。
         await writePendingCloseoutReport(gateRead.prd);
         try {
-          const validationPolicy = candidateStoryValidationEnvironmentPolicy(tddConfig);
+          const validationPolicy = candidateStoryValidationEnvironmentPolicy(
+            tddConfig,
+            qualityRead.contract,
+            defaultBranchGitHead,
+          );
           validationCheckout = await cleanValidationManager.acquire(
             verificationHead,
             validationPolicy.additionalRefs,
             validationPolicy.additionalPolicy,
+            validationPolicy.referenceAliases,
           );
           const receivedDigest = bindStoryValidationRuntimeIdentity(
             validationCheckout.environmentDigest,
@@ -1380,10 +1422,43 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             );
           }
           validationRoot = validationCheckout.root;
+          const storyBaseGitHead = tryReadState(statePath)?.[currentStory]?.storyBaseGitHead;
+          if (!storyBaseGitHead) {
+            throw new CleanValidationCheckoutError(
+              'history-unverifiable',
+              `${currentStory} 缺少引擎在首次实现前固定的 Story 起点；旧候选不得从当前历史反推起点`,
+            );
+          }
+          storyChangeManifest = await validationCheckout.storyChangeManifest(
+            storyBaseGitHead,
+            `${currentStory} `,
+          );
         } catch (error) {
           await stopForValidationEnvironmentFailure(error, builderOutcome);
           break;
         }
+      } else if (!agentBlocked && currentStory && verificationHead) {
+        const storyBaseGitHead = tryReadState(statePath)?.[currentStory]?.storyBaseGitHead;
+        const injected =
+          storyBaseGitHead && cfg.storyChangeManifestForTests
+            ? cfg.storyChangeManifestForTests(storyBaseGitHead, verificationHead)
+            : null;
+        if (!storyBaseGitHead || !injected) {
+          await stopForValidationEnvironmentFailure(
+            new Error(
+              `${currentStory} 无法建立固定 Story 起点与变化摘要；跳过干净检出的测试必须显式提供摘要`,
+            ),
+            builderOutcome,
+          );
+          break;
+        }
+        storyChangeManifest = {
+          version: STORY_CHANGE_MANIFEST_VERSION,
+          storyBaseGitHead,
+          gitHead: verificationHead,
+          digest: injected.digest,
+          changedPathCount: injected.changedPathCount,
+        };
       }
       const legacyChecks =
         cfg.legacyValidatorProtocolForTests && Array.isArray(gateRead.prd?.qualityChecks)
@@ -2033,6 +2108,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                   ),
                   checkCount: currentStoryObj.acceptanceCriteria.length,
                   gitHead: validatorHead!,
+                  storyBaseGitHead: storyChangeManifest!.storyBaseGitHead,
+                  changeManifestDigest: storyChangeManifest!.digest,
+                  changedPathCount: storyChangeManifest!.changedPathCount,
                 },
                 timeoutMs: Math.min(cfg.valTimeoutMs, 180_000),
                 termination: commandSignals.termination,
@@ -2088,11 +2166,24 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               roundValidatorRunnerBinding = validatorIsolation.binding;
             }
           }
+          if (canStartValidator && storyChangeManifest === null) {
+            canStartValidator = false;
+            validatorOutcome = 'skipped';
+            rejectProtocol(
+              'environment-unverifiable',
+              '引擎未生成绑定固定 Story 起点的变化摘要，不能启动 Validator',
+            );
+          }
           if (canStartValidator) {
             validationRequest = createValidationRequest(
               currentStoryObj,
               workspace,
-              validatorHead,
+              {
+                gitHead: validatorHead,
+                storyBaseGitHead: storyChangeManifest!.storyBaseGitHead,
+                changeManifestDigest: storyChangeManifest!.digest,
+                changedPathCount: storyChangeManifest!.changedPathCount,
+              },
               undefined,
               validatorIsolation?.status === 'ready' ? validatorIsolation.resultPath : undefined,
             );
@@ -2102,6 +2193,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 storyId: validationRequest.storyId,
                 acceptanceHash: validationRequest.acceptanceHash,
                 gitHead: validationRequest.gitHead,
+                storyBaseGitHead: validationRequest.storyBaseGitHead,
+                changeManifestDigest: validationRequest.changeManifestDigest,
+                changedPathCount: validationRequest.changedPathCount,
               };
               validatorPrompt = renderValidatorInstruction(validatorBase, validationRequest);
               try {
@@ -2168,6 +2262,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                   acceptanceHash: validationRequest!.acceptanceHash,
                   checkCount: validationRequest!.acceptanceCriteria.length,
                   gitHead: validationRequest!.gitHead!,
+                  storyBaseGitHead: validationRequest!.storyBaseGitHead!,
+                  changeManifestDigest: validationRequest!.changeManifestDigest,
+                  changedPathCount: validationRequest!.changedPathCount,
                 },
               },
             });
@@ -2332,6 +2429,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 storyId: protocol.result.storyId,
                 acceptanceHash: protocol.result.acceptanceHash,
                 gitHead: protocol.result.gitHead,
+                storyBaseGitHead: protocol.result.storyBaseGitHead,
+                changeManifestDigest: protocol.result.changeManifestDigest,
+                changedPathCount: protocol.result.changedPathCount,
                 verdict: protocol.result.verdict,
                 checks: protocol.result.checks,
                 summary: protocol.result.summary,

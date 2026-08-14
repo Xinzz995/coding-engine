@@ -130,7 +130,7 @@ describe('delegated business semantics', () => {
       accepted: true,
       changes: ['validation-result.json'],
       candidate: {
-        version: 'validator-result-v1',
+        version: 'validator-result-v2',
         result: { verdict: _label },
       },
     });

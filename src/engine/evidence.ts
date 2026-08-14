@@ -12,6 +12,10 @@ export interface ValidationTargetEvidence {
   storyId: string;
   acceptanceHash: string;
   gitHead: string | null;
+  /** v0.36 起存在；旧 evidence 缺省时只可离线展示，不能签发当前凭证。 */
+  storyBaseGitHead?: string | null;
+  changeManifestDigest?: string;
+  changedPathCount?: number;
 }
 
 /** 引擎对一次真实 runner 子进程调用的观察；diagnosticTail 只在异常结局持久化。 */
@@ -219,6 +223,9 @@ export type EvidenceRecord =
       storyId: string;
       acceptanceHash: string;
       gitHead: string | null;
+      storyBaseGitHead?: string | null;
+      changeManifestDigest?: string;
+      changedPathCount?: number;
       verdict: 'passed' | 'failed';
       checks: ValidationCheck[];
       summary: string;
@@ -385,6 +392,19 @@ function isAcceptanceHash(v: unknown): v is string {
   return typeof v === 'string' && /^sha256:[a-f0-9]{64}$/.test(v);
 }
 
+function hasValidOptionalChangeBinding(v: Record<string, unknown>): boolean {
+  const values = [v.storyBaseGitHead, v.changeManifestDigest, v.changedPathCount];
+  if (values.every((value) => value === undefined)) return true;
+  return (
+    isGitHead(v.storyBaseGitHead) &&
+    v.storyBaseGitHead !== null &&
+    typeof v.changeManifestDigest === 'string' &&
+    /^sha256:[a-f0-9]{64}$/u.test(v.changeManifestDigest) &&
+    Number.isSafeInteger(v.changedPathCount) &&
+    (v.changedPathCount as number) >= 0
+  );
+}
+
 function isValidationTarget(v: unknown): v is ValidationTargetEvidence {
   return (
     isRec(v) &&
@@ -393,7 +413,8 @@ function isValidationTarget(v: unknown): v is ValidationTargetEvidence {
     typeof v.storyId === 'string' &&
     v.storyId.length > 0 &&
     isAcceptanceHash(v.acceptanceHash) &&
-    isGitHead(v.gitHead)
+    isGitHead(v.gitHead) &&
+    hasValidOptionalChangeBinding(v)
   );
 }
 
@@ -670,6 +691,7 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         v.storyId.length === 0 ||
         !isAcceptanceHash(v.acceptanceHash) ||
         !isGitHead(v.gitHead) ||
+        !hasValidOptionalChangeBinding(v) ||
         (v.verdict !== 'passed' && v.verdict !== 'failed') ||
         !isValidationChecks(v.checks) ||
         !isBoundedClaimText(v.summary)

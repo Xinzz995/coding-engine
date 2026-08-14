@@ -128,6 +128,36 @@ describe('quality contract preflight and shadow mode', () => {
     expect(existsSync(fake.calls)).toBe(false);
   });
 
+  it('stops before state creation or any agent when the origin default branch ref is missing', async () => {
+    const project = setupGitProject([story()]);
+    const contractDirectory = join(project.projectRoot, '.coding-x');
+    mkdirSync(contractDirectory);
+    writeFileSync(join(contractDirectory, 'quality.json'), currentVersionContractFixture());
+    execFileSync('git', ['add', '.coding-x/quality.json'], { cwd: project.projectRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'test: tracked quality contract'], {
+      cwd: project.projectRoot,
+    });
+    const ready = readQualityContract(project.projectRoot);
+    expect(ready.status).toBe('ready');
+    if (ready.status !== 'ready') return;
+    const prdPath = join(project.workspace, 'prd.json');
+    const prd = JSON.parse(readFileSync(prdPath, 'utf8')) as Record<string, unknown>;
+    prd.qualityContractDigest = ready.digest;
+    prd.qualityChecks = ready.contract.checks;
+    writeFileSync(prdPath, JSON.stringify(prd));
+    execFileSync('git', ['update-ref', '-d', 'refs/remotes/origin/main'], {
+      cwd: project.projectRoot,
+    });
+    const fake = fakeCounting(project.workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake.fake}`;
+    const config = strictConfig(project.workspace, project.instructionsDir);
+    delete config.qualityContractReader;
+
+    expect(await runProductionLoop(config)).toBe(2);
+    expect(existsSync(join(project.workspace, 'state.json'))).toBe(false);
+    expect(existsSync(fake.calls)).toBe(false);
+  }, 60_000);
+
   it('invalidates a stale Story receipt without any Final Review file and revalidates without Developer', async () => {
     const target = story({ acceptanceCriteria: ['still works'] });
     const project = setupGitProject([target]);
@@ -138,6 +168,7 @@ describe('quality contract preflight and shadow mode', () => {
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: oldHead,
           validationReceipt: validationReceiptFor(target, oldHead),
           notes: 'candidate stays',
           retryCount: 0,
@@ -178,12 +209,14 @@ describe('quality contract preflight and shadow mode', () => {
     const oldEnvironment = digestCandidateStoryValidationEnvironment({
       contract: TEST_QUALITY_CONTRACT,
       headSha: head,
+      defaultBranchGitHead: head,
       tddConfig: oldTdd as unknown as TddConfig,
       runtimeIdentity: { mode: 'formal', actualCodingXVersion: CODING_X_VERSION },
     });
     const newEnvironment = digestCandidateStoryValidationEnvironment({
       contract: TEST_QUALITY_CONTRACT,
       headSha: head,
+      defaultBranchGitHead: head,
       tddConfig: newTdd as unknown as TddConfig,
       runtimeIdentity: { mode: 'formal', actualCodingXVersion: CODING_X_VERSION },
     });
@@ -196,6 +229,7 @@ describe('quality contract preflight and shadow mode', () => {
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: head,
           validationReceipt: receipt,
           notes: '',
           retryCount: 0,
@@ -273,13 +307,14 @@ describe('quality contract preflight and shadow mode', () => {
   });
 
   it('reruns Story validation when a commit appears after the previous final Review', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { workspace, instructionsDir, head } = setup([story()]);
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: head(),
           notes: '',
           retryCount: 0,
           blocked: false,
@@ -302,13 +337,14 @@ describe('quality contract preflight and shadow mode', () => {
   }, 60_000);
 
   it('does not repeat Story validation after the new head only waits for the remote PR', async () => {
-    const { workspace, instructionsDir } = setup([story()]);
+    const { workspace, instructionsDir, head } = setup([story()]);
     writeFileSync(
       join(workspace, 'state.json'),
       JSON.stringify({
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: head(),
           notes: '',
           retryCount: 0,
           blocked: false,
@@ -439,6 +475,7 @@ describe('quality contract preflight and shadow mode', () => {
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: head(),
           notes: '',
           retryCount: 0,
           blocked: false,
@@ -484,6 +521,7 @@ describe('quality contract preflight and shadow mode', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: head,
         validationReceipt: oldReceipt,
         notes: 'candidate stays',
         retryCount: 0,

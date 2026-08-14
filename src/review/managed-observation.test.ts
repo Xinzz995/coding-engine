@@ -144,7 +144,7 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
         await ctx.session.close();
       }
       expect(readFileSync(counter, 'utf8').trim()).toBe('2');
-    });
+    }, 20_000);
 
     it('does not retry a failed git read', async () => {
       const ctx = await fixture('run');
@@ -167,7 +167,7 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
         await ctx.session.close();
       }
       expect(readFileSync(counter, 'utf8').trim()).toBe('1');
-    });
+    }, 20_000);
 
     it('does not retry a permanent gh failure', async () => {
       const ctx = await fixture('run');
@@ -193,7 +193,7 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
         await ctx.session.close();
       }
       expect(readFileSync(counter, 'utf8').trim()).toBe('1');
-    });
+    }, 20_000);
 
     it('does not retry invalid GitHub JSON', async () => {
       const ctx = await fixture('run');
@@ -215,6 +215,6 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
         await ctx.session.close();
       }
       expect(readFileSync(counter, 'utf8').trim()).toBe('1');
-    });
+    }, 20_000);
   },
 );

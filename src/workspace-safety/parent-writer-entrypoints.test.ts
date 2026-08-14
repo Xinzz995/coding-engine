@@ -142,6 +142,7 @@ describe('parent WorkspaceWriter entrypoints', () => {
       'US-001': {
         passes: false,
         validated: false,
+        storyBaseGitHead: null,
         validationReceipt: null,
         validatorUnverifiable: null,
         notes: '',

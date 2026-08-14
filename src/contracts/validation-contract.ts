@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
-export const VALIDATION_PROTOCOL_VERSION = 1 as const;
-export const VALIDATION_RECEIPT_SCHEMA_VERSION = 3 as const;
+export const VALIDATION_PROTOCOL_VERSION = 2 as const;
+export const VALIDATION_RECEIPT_SCHEMA_VERSION = 4 as const;
 export const VALIDATION_RESULT_FILE = 'validation-result.json';
 export const VALIDATION_RESULT_MAX_BYTES = 64 * 1024;
 export const VALIDATION_TEXT_MAX_CHARS = 2000;
@@ -17,6 +17,12 @@ export interface ValidationRequest {
   acceptanceCriteria: string[];
   /** 调用 Validator 前的 Git HEAD；非 Git 历史诊断显式为 null。 */
   gitHead: string | null;
+  /** Story 第一次进入实现轮前由引擎冻结的 Git HEAD。 */
+  storyBaseGitHead: string | null;
+  /** 引擎对 storyBaseGitHead..gitHead 完整 raw diff 计算的摘要。 */
+  changeManifestDigest: string;
+  /** 同一 raw diff 中的路径记录数量；重命名关闭后每条记录只有一个路径。 */
+  changedPathCount: number;
   resultPath: string;
 }
 
@@ -34,6 +40,9 @@ export interface ValidationResult {
   storyId: string;
   acceptanceHash: string;
   gitHead: string | null;
+  storyBaseGitHead: string | null;
+  changeManifestDigest: string;
+  changedPathCount: number;
   verdict: 'passed' | 'failed';
   checks: ValidationCheck[];
   summary: string;
@@ -43,6 +52,15 @@ interface ValidationReceiptBase {
   requestId: string;
   gitHead: string;
   acceptanceHash: string;
+}
+
+interface HostBoundValidationReceipt extends ValidationReceiptBase {
+  /** Engine-owned digest of the clean-checkout execution contract. */
+  validationEnvironmentDigest: string;
+  /** Digest of the resolved Validator runner host-isolation profile (ADR-025). */
+  runnerProfileDigest: string;
+  /** Digest of the engine-observed canary evidence bound to that profile. */
+  canaryEvidenceDigest: string;
 }
 
 export type ValidationReceipt =
@@ -60,14 +78,18 @@ export type ValidationReceipt =
       runnerProfileDigest?: never;
       canaryEvidenceDigest?: never;
     })
-  | (ValidationReceiptBase & {
+  | (HostBoundValidationReceipt & {
+      /** v3 lacks the fixed Story base and change manifest; readable only for safe invalidation. */
+      schemaVersion: 3;
+      storyBaseGitHead?: never;
+      changeManifestDigest?: never;
+      changedPathCount?: never;
+    })
+  | (HostBoundValidationReceipt & {
       schemaVersion: typeof VALIDATION_RECEIPT_SCHEMA_VERSION;
-      /** Engine-owned digest of the clean-checkout execution contract. */
-      validationEnvironmentDigest: string;
-      /** Digest of the resolved Validator runner host-isolation profile (ADR-025). */
-      runnerProfileDigest: string;
-      /** Digest of the engine-observed canary evidence bound to that profile. */
-      canaryEvidenceDigest: string;
+      storyBaseGitHead: string;
+      changeManifestDigest: string;
+      changedPathCount: number;
     });
 
 export interface ValidationResultBinding {
@@ -76,6 +98,9 @@ export interface ValidationResultBinding {
   readonly acceptanceHash: string;
   readonly checkCount: number;
   readonly gitHead: string | null;
+  readonly storyBaseGitHead: string | null;
+  readonly changeManifestDigest: string;
+  readonly changedPathCount: number;
 }
 
 export type ValidationProtocolErrorCode =
@@ -125,13 +150,17 @@ function isBoundedText(value: unknown): value is string {
   );
 }
 
+export function isChangedPathCount(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
 /** AC 快照身份：只编码 story ID 与有序 AC 数组。 */
 export function acceptanceHash(storyId: string, acceptanceCriteria: readonly string[]): string {
   const canonical = JSON.stringify({ storyId, acceptanceCriteria });
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
 
-/** 严格读取 v1/v2/v3 凭证；v1、v2 只为安全失效迁移，不再是当前通过。 */
+/** 严格读取 v1-v4 凭证；v1-v3 只为安全失效迁移，不再是当前通过。 */
 export function parseValidationReceipt(value: unknown): ValidationReceipt | null {
   if (!isRecord(value)) return null;
   const expectedKeys =
@@ -139,27 +168,46 @@ export function parseValidationReceipt(value: unknown): ValidationReceipt | null
       ? ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash']
       : value.schemaVersion === 2
         ? ['schemaVersion', 'requestId', 'gitHead', 'acceptanceHash', 'validationEnvironmentDigest']
-        : [
-            'schemaVersion',
-            'requestId',
-            'gitHead',
-            'acceptanceHash',
-            'validationEnvironmentDigest',
-            'runnerProfileDigest',
-            'canaryEvidenceDigest',
-          ];
+        : value.schemaVersion === 3
+          ? [
+              'schemaVersion',
+              'requestId',
+              'gitHead',
+              'acceptanceHash',
+              'validationEnvironmentDigest',
+              'runnerProfileDigest',
+              'canaryEvidenceDigest',
+            ]
+          : [
+              'schemaVersion',
+              'requestId',
+              'gitHead',
+              'acceptanceHash',
+              'validationEnvironmentDigest',
+              'runnerProfileDigest',
+              'canaryEvidenceDigest',
+              'storyBaseGitHead',
+              'changeManifestDigest',
+              'changedPathCount',
+            ];
   if (!hasExactKeys(value, expectedKeys)) return null;
   if (
     (value.schemaVersion !== 1 &&
       value.schemaVersion !== 2 &&
+      value.schemaVersion !== 3 &&
       value.schemaVersion !== VALIDATION_RECEIPT_SCHEMA_VERSION) ||
     typeof value.requestId !== 'string' ||
     value.requestId.trim().length === 0 ||
     !isGitHead(value.gitHead) ||
     !isAcceptanceHash(value.acceptanceHash) ||
     (value.schemaVersion !== 1 && !isSha256Digest(value.validationEnvironmentDigest)) ||
+    ((value.schemaVersion === 3 || value.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION) &&
+      (!isSha256Digest(value.runnerProfileDigest) ||
+        !isSha256Digest(value.canaryEvidenceDigest))) ||
     (value.schemaVersion === VALIDATION_RECEIPT_SCHEMA_VERSION &&
-      (!isSha256Digest(value.runnerProfileDigest) || !isSha256Digest(value.canaryEvidenceDigest)))
+      (!isGitHead(value.storyBaseGitHead) ||
+        !isSha256Digest(value.changeManifestDigest) ||
+        !isChangedPathCount(value.changedPathCount)))
   ) {
     return null;
   }
@@ -176,12 +224,24 @@ export function parseValidationReceipt(value: unknown): ValidationReceipt | null
       validationEnvironmentDigest: value.validationEnvironmentDigest as string,
     };
   }
+  if (value.schemaVersion === 3) {
+    return {
+      schemaVersion: 3,
+      ...base,
+      validationEnvironmentDigest: value.validationEnvironmentDigest as string,
+      runnerProfileDigest: value.runnerProfileDigest as string,
+      canaryEvidenceDigest: value.canaryEvidenceDigest as string,
+    };
+  }
   return {
     schemaVersion: VALIDATION_RECEIPT_SCHEMA_VERSION,
     ...base,
     validationEnvironmentDigest: value.validationEnvironmentDigest as string,
     runnerProfileDigest: value.runnerProfileDigest as string,
     canaryEvidenceDigest: value.canaryEvidenceDigest as string,
+    storyBaseGitHead: value.storyBaseGitHead as string,
+    changeManifestDigest: value.changeManifestDigest as string,
+    changedPathCount: value.changedPathCount as number,
   };
 }
 
@@ -202,12 +262,15 @@ export function parseValidationResultValue(
       'storyId',
       'acceptanceHash',
       'gitHead',
+      'storyBaseGitHead',
+      'changeManifestDigest',
+      'changedPathCount',
       'verdict',
       'checks',
       'summary',
     ])
   ) {
-    return invalidSchema('result 必须是且只能包含 v1 schema 字段的对象');
+    return invalidSchema('result 必须是且只能包含 v2 schema 字段的对象');
   }
 
   if (value.version !== VALIDATION_PROTOCOL_VERSION) {
@@ -220,6 +283,9 @@ export function parseValidationResultValue(
     value.storyId.length === 0 ||
     !isAcceptanceHash(value.acceptanceHash) ||
     !isNullableGitHead(value.gitHead) ||
+    !isNullableGitHead(value.storyBaseGitHead) ||
+    !isSha256Digest(value.changeManifestDigest) ||
+    !isChangedPathCount(value.changedPathCount) ||
     (value.verdict !== 'passed' && value.verdict !== 'failed') ||
     !Array.isArray(value.checks) ||
     !isBoundedText(value.summary)
@@ -258,6 +324,9 @@ export function parseValidationResultValue(
       storyId: value.storyId,
       acceptanceHash: value.acceptanceHash,
       gitHead: value.gitHead,
+      storyBaseGitHead: value.storyBaseGitHead,
+      changeManifestDigest: value.changeManifestDigest,
+      changedPathCount: value.changedPathCount,
       verdict: value.verdict,
       checks,
       summary: value.summary,
@@ -293,12 +362,16 @@ export function parseValidationResultBytes(
     result.requestId !== binding.requestId ||
     result.storyId !== binding.storyId ||
     result.acceptanceHash !== binding.acceptanceHash ||
-    result.gitHead !== binding.gitHead
+    result.gitHead !== binding.gitHead ||
+    result.storyBaseGitHead !== binding.storyBaseGitHead ||
+    result.changeManifestDigest !== binding.changeManifestDigest ||
+    result.changedPathCount !== binding.changedPathCount
   ) {
     return {
       ok: false,
       code: 'binding-mismatch',
-      diagnostic: 'validation result 与本轮 request ID、story、AC hash 或 Git HEAD 不匹配',
+      diagnostic:
+        'validation result 与本轮 request ID、story、AC、Story 起点、Git HEAD 或变化摘要不匹配',
     };
   }
   return shaped;

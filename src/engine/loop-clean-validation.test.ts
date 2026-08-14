@@ -420,7 +420,7 @@ describe('runLoop clean validation checkout', () => {
       expect(state['US-001']).toMatchObject({
         validated: true,
         validationReceipt: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           gitHead: fixture.head(),
           validationEnvironmentDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
           runnerProfileDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),

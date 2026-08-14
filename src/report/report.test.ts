@@ -48,6 +48,8 @@ function writePrd(dir: string, stories: unknown[], extra: Record<string, unknown
 }
 
 const TEST_STORY_ENVIRONMENT = `sha256:${'1'.repeat(64)}`;
+const STORY_BASE_HEAD = 'e'.repeat(40);
+const CHANGE_MANIFEST_DIGEST = `sha256:${'f'.repeat(64)}`;
 
 function observedStoryValidation(
   workspace: string,
@@ -113,14 +115,18 @@ describe('collectReport ok 收集', () => {
         'US-001': {
           passes: true,
           validated: true,
+          storyBaseGitHead: STORY_BASE_HEAD,
           validationReceipt: {
-            schemaVersion: 3,
+            schemaVersion: 4,
             requestId: 'report-observation',
             gitHead: head,
             acceptanceHash: acceptanceHash('US-001', ['ac of US-001']),
             validationEnvironmentDigest: TEST_STORY_ENVIRONMENT,
             runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
             canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
+            storyBaseGitHead: STORY_BASE_HEAD,
+            changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+            changedPathCount: 1,
           },
           notes: '',
           retryCount: 0,
@@ -289,14 +295,18 @@ describe('collectReport ok 收集', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: STORY_BASE_HEAD,
         validationReceipt: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           requestId: 'stale-report-receipt',
           gitHead: oldHead,
           acceptanceHash: acceptanceHash(target.id, target.acceptanceCriteria),
           validationEnvironmentDigest: TEST_STORY_ENVIRONMENT,
           runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
           canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
+          storyBaseGitHead: STORY_BASE_HEAD,
+          changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+          changedPathCount: 1,
         },
         notes: '',
         retryCount: 0,
@@ -331,14 +341,18 @@ describe('collectReport ok 收集', () => {
       'US-001': {
         passes: true,
         validated: true,
+        storyBaseGitHead: STORY_BASE_HEAD,
         validationReceipt: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           requestId: 'stale-report-receipt',
           gitHead: oldHead,
           acceptanceHash: acceptanceHash('US-001', ['ac of US-001']),
           validationEnvironmentDigest: TEST_STORY_ENVIRONMENT,
           runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
           canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
+          storyBaseGitHead: STORY_BASE_HEAD,
+          changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+          changedPathCount: 1,
         },
         notes: '',
         retryCount: 0,
@@ -348,14 +362,18 @@ describe('collectReport ok 收集', () => {
       'US-002': {
         passes: true,
         validated: true,
+        storyBaseGitHead: STORY_BASE_HEAD,
         validationReceipt: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           requestId: 'current-report-receipt',
           gitHead: currentHead,
           acceptanceHash: acceptanceHash('US-002', ['ac of US-002']),
           validationEnvironmentDigest: TEST_STORY_ENVIRONMENT,
           runnerProfileDigest: `sha256:${'d'.repeat(64)}`,
           canaryEvidenceDigest: `sha256:${'c'.repeat(64)}`,
+          storyBaseGitHead: STORY_BASE_HEAD,
+          changeManifestDigest: CHANGE_MANIFEST_DIGEST,
+          changedPathCount: 1,
         },
         notes: '',
         retryCount: 0,

@@ -25,6 +25,7 @@ import { checkTddPolicyManaged, readTddConfig, type TddConfig } from './tdd-gate
 import { readGitHead } from './validation-protocol.js';
 import {
   bindStoryValidationRuntimeIdentity,
+  candidateStoryValidationEnvironmentPolicy,
   digestCandidateStoryValidationEnvironment,
   type StoryValidationRuntimeIdentity,
 } from './story-validation-currentness.js';
@@ -35,7 +36,10 @@ import {
   type FrozenQualityChecks,
   type QualityContractReadResult,
 } from '../quality/contract.js';
-import { readTrackedQualityContractAtHead } from '../quality/tracked-contract.js';
+import {
+  readDefaultBranchGitHead,
+  readTrackedQualityContractAtHead,
+} from '../quality/tracked-contract.js';
 import { invalidateFinalReviewState, readFinalReviewState } from '../review/state.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
@@ -66,6 +70,8 @@ export type LoopPreflightResult =
       validationEnvironmentDigest: string;
       validationRuntimeIdentity: StoryValidationRuntimeIdentity;
       validationAdditionalRefs: string[];
+      validationReferenceAliases: Array<{ ref: string; target: string }>;
+      defaultBranchGitHead: string;
       bootResolved: boolean;
     };
 
@@ -154,8 +160,33 @@ export async function runLoopPreflight(
     }
   }
 
+  const defaultBranchRead = cfg.qualityContractReader
+    ? {
+        status: 'ready' as const,
+        gitHead: cfg.defaultBranchGitHeadForTests ?? bootGitHead,
+      }
+    : await readDefaultBranchGitHead({
+        projectRoot,
+        defaultBranch: qualityRead.contract.repository.defaultBranch,
+        session,
+        ...(termination ? { termination } : {}),
+      });
+  if (defaultBranchRead.status !== 'ready') {
+    console.error(
+      `❌ 无法固定 origin/${qualityRead.contract.repository.defaultBranch} 验证基线：` +
+        `${defaultBranchRead.message}。请先执行 git fetch origin ${qualityRead.contract.repository.defaultBranch} 后重试。`,
+    );
+    return { status: 'failed', exitCode: 2 };
+  }
+  const defaultBranchGitHead = defaultBranchRead.gitHead;
   const tddRead = readTddConfig(bootPrd);
-  const validationAdditionalRefs = tddRead.status === 'enabled' ? [tddRead.config.baselineRef] : [];
+  const validationPolicy = candidateStoryValidationEnvironmentPolicy(
+    tddRead.status === 'enabled' ? tddRead.config : null,
+    qualityRead.contract,
+    defaultBranchGitHead,
+  );
+  const validationAdditionalRefs = validationPolicy.additionalRefs;
+  const validationReferenceAliases = validationPolicy.referenceAliases;
   const validationRuntimeIdentity: StoryValidationRuntimeIdentity = {
     mode: runtime.mode,
     actualCodingXVersion,
@@ -169,6 +200,7 @@ export async function runLoopPreflight(
       : digestCandidateStoryValidationEnvironment({
           contract: qualityRead.contract,
           headSha: bootGitHead,
+          defaultBranchGitHead,
           tddConfig: tddRead.status === 'enabled' ? tddRead.config : null,
           runtimeIdentity: validationRuntimeIdentity,
         });
@@ -386,6 +418,8 @@ export async function runLoopPreflight(
     validationEnvironmentDigest: currentValidationEnvironmentDigest,
     validationRuntimeIdentity,
     validationAdditionalRefs,
+    validationReferenceAliases,
+    defaultBranchGitHead,
     bootResolved,
   };
 }
