@@ -20,8 +20,8 @@ import {
   type QualityPlatform,
 } from '../quality/contract.js';
 import {
-  readDefaultBranchGitHead,
-  readTrackedQualityContractAtHead,
+  readStoryValidationGitAuthority,
+  type StoryValidationGitAuthorityRead,
 } from '../quality/tracked-contract.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import {
@@ -57,18 +57,13 @@ export interface StoryValidationObservationReaders {
   readPrd: (path: string) => StoryValidationFileSnapshot<Prd>;
   readState: (path: string) => StoryValidationFileSnapshot<RunState>;
   readWorkingContract: (projectRoot: string) => QualityContractReadResult;
-  readTrackedContract: (options: {
+  readGitAuthority: (options: {
     projectRoot: string;
     head: string;
-    session: WorkspaceSession;
-    termination?: ManagedGateContext['termination'];
-  }) => Promise<QualityContractReadResult>;
-  readDefaultBranchHead: (options: {
-    projectRoot: string;
     defaultBranch: string;
     session: WorkspaceSession;
     termination?: ManagedGateContext['termination'];
-  }) => Promise<string | null>;
+  }) => Promise<StoryValidationGitAuthorityRead>;
   readTdd: (prd: Prd | null) => TddConfigReadResult;
 }
 
@@ -284,26 +279,26 @@ async function collectSnapshot(
   const workingContract = readers.readWorkingContract(options.projectRoot);
   const defaultBranch =
     workingContract.status === 'ready' ? workingContract.contract.repository.defaultBranch : null;
-  const defaultBranchGitHead =
-    options.defaultBranchGitHeadForTests ??
-    (options.qualityContractReader
-      ? headSha
-      : defaultBranch === null
-        ? null
-        : await readers.readDefaultBranchHead({
-            projectRoot: options.projectRoot,
-            defaultBranch,
-            session: options.session,
-            ...(options.termination ? { termination: options.termination } : {}),
-          }));
-  const trackedContract = headSha
-    ? await readers.readTrackedContract({
+  const requiresGitAuthority =
+    headSha !== null &&
+    defaultBranch !== null &&
+    prd.status === 'ready' &&
+    state.status === 'ready';
+  const gitAuthority = requiresGitAuthority
+    ? await readers.readGitAuthority({
         projectRoot: options.projectRoot,
         head: headSha,
+        defaultBranch,
         session: options.session,
         ...(options.termination ? { termination: options.termination } : {}),
       })
-    : unavailableTrackedContract(headSha);
+    : {
+        defaultBranchGitHead: null,
+        trackedContract: unavailableTrackedContract(headSha),
+      };
+  const defaultBranchGitHead =
+    options.defaultBranchGitHeadForTests ?? gitAuthority.defaultBranchGitHead;
+  const trackedContract = gitAuthority.trackedContract;
   const tddRead = readers.readTdd(prd.status === 'ready' ? prd.value : null);
   return {
     headSha,
@@ -325,13 +320,13 @@ function defaultReaders(
     readPrd: readPrdFile,
     readState: readStateFile,
     readWorkingContract: injected ?? readWorkingQualityContractAuthority,
-    readTrackedContract: injected
-      ? ({ projectRoot }) => Promise.resolve(injected(projectRoot))
-      : readTrackedQualityContractAtHead,
-    readDefaultBranchHead: async (request) => {
-      const result = await readDefaultBranchGitHead(request);
-      return result.status === 'ready' ? result.gitHead : null;
-    },
+    readGitAuthority: injected
+      ? ({ projectRoot, head }) =>
+          Promise.resolve({
+            defaultBranchGitHead: head,
+            trackedContract: injected(projectRoot),
+          })
+      : readStoryValidationGitAuthority,
     readTdd: readTddConfig,
   };
 }

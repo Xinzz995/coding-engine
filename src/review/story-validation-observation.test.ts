@@ -169,11 +169,13 @@ function readers(changes: ReaderChanges = {}): StoryValidationObservationReaders
   const readTdd = sequence(...(changes.tdd ?? [disabledTdd, disabledTdd]));
   return {
     readHead: vi.fn(readHead),
-    readDefaultBranchHead: vi.fn(async () => readDefaultBranchHead()),
     readPrd: vi.fn(readPrd),
     readState: vi.fn(readState),
     readWorkingContract: vi.fn(readWorking),
-    readTrackedContract: vi.fn(async () => readTracked()),
+    readGitAuthority: vi.fn(async () => ({
+      defaultBranchGitHead: readDefaultBranchHead(),
+      trackedContract: readTracked(),
+    })),
     readTdd: vi.fn(readTdd),
   };
 }
@@ -200,8 +202,26 @@ describe('observeStoryValidationCurrentnessControlled', () => {
     expect(source.readPrd).toHaveBeenCalledTimes(2);
     expect(source.readState).toHaveBeenCalledTimes(2);
     expect(source.readWorkingContract).toHaveBeenCalledTimes(2);
-    expect(source.readTrackedContract).toHaveBeenCalledTimes(2);
+    expect(source.readGitAuthority).toHaveBeenCalledTimes(2);
     expect(source.readTdd).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not launch managed Git when PRD or state authority already fails closed', async () => {
+    const invalidState = {
+      status: 'invalid' as const,
+      fingerprint: 'state-invalid',
+      diagnostic: 'broken state',
+    };
+    const source = readers({ state: [invalidState, invalidState] });
+
+    const result = await observeStoryValidationCurrentnessControlled(options(), source);
+
+    expect(result).toMatchObject({
+      status: 'unverifiable',
+      reason: 'state-invalid',
+      observationToken: null,
+    });
+    expect(source.readGitAuthority).not.toHaveBeenCalled();
   });
 
   it('keeps the existing Loop fixed-digest test seam without weakening production reads', async () => {
@@ -222,6 +242,7 @@ describe('observeStoryValidationCurrentnessControlled', () => {
 
   it.each([
     ['HEAD', { head: [HEAD_A, HEAD_B] }],
+    ['default branch HEAD', { defaultBranchHead: [DEFAULT_BRANCH_HEAD, HEAD_B] }],
     ['PRD', { prd: [file(prd(), 'prd-a'), file(prd('Changed title'), 'prd-b')] }],
     ['state', { state: [file(state(), 'state-a'), file(state('changed'), 'state-b')] }],
     ['working contract', { working: [contractRead(), contractRead(QUALITY_B)] }],
