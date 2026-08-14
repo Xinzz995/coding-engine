@@ -245,17 +245,41 @@ const tddFingerprint = (prdBytes) => {
   const result = { status: 'enabled', config: { coverageCheck: raw.coverageCheck, sourcePathspecs: raw.sourcePathspecs, policyFiles, baselineRef: raw.baselineRef, forbiddenAddedPatterns: raw.forbiddenAddedPatterns } };
   return sha256(JSON.stringify(result));
 };
+const gitAuthority = (head) => {
+  const output = git([
+    'show',
+    '--no-color',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--format=tformat:CODING_X_DEFAULT_BRANCH=%H',
+    '--no-patch',
+    '--end-of-options',
+    'refs/remotes/origin/' + request.defaultBranch + '^{commit}',
+    head + ':.coding-x/quality.json',
+  ], ${TRACKED_CONTRACT_MAX_BYTES + 4096});
+  const lineEnd = output.indexOf(0x0a);
+  const prefix = 'CODING_X_DEFAULT_BRANCH=';
+  const header = lineEnd < 0 ? '' : output.subarray(0, lineEnd).toString('ascii').replace(/\r$/u, '');
+  const defaultBranchGitHead = header.startsWith(prefix) ? header.slice(prefix.length).toLowerCase() : '';
+  if (!/^[0-9a-f]{40}$/u.test(defaultBranchGitHead)) throw new Error('local default branch authority is invalid');
+  return {
+    defaultBranchGitHead,
+    trackedContract: sha256(output.subarray(lineEnd + 1)),
+  };
+};
 const story = () => {
   const head = git(['rev-parse','HEAD'], 4096).toString('utf8').trim();
   const prd = stableRead(join(request.workspace, 'prd.json'), ${AUTHORITY_FILE_MAX_BYTES});
   if (prd.status !== 'ready') throw new Error('prd authority is missing');
+  const authority = gitAuthority(head);
   const identity = {
     workspacePath: request.workspace,
     head,
+    defaultBranchGitHead: authority.defaultBranchGitHead,
     prd: 'ready:' + prd.fingerprint,
     state: 'ready:' + stableFingerprint(join(request.workspace, 'state.json'), ${AUTHORITY_FILE_MAX_BYTES}),
     workingContract: stableFingerprint(join(request.projectRoot, '.coding-x', 'quality.json'), ${AUTHORITY_FILE_MAX_BYTES}),
-    trackedContract: sha256(git(['cat-file','blob', head + ':.coding-x/quality.json'], ${TRACKED_CONTRACT_MAX_BYTES})),
+    trackedContract: authority.trackedContract,
     tdd: tddFingerprint(prd.bytes),
   };
   return sha256(JSON.stringify(identity));
