@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   applyPrdV1CandidateDigest,
@@ -12,6 +12,7 @@ import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession } from '../workspace-safety/session.js';
 import { digestBytes } from '../workspace-safety/filesystem.js';
+import { readStableFile } from '../workspace-safety/stable-file.js';
 import {
   deriveQualityChecks,
   readQualityContract,
@@ -25,6 +26,7 @@ export const ISSUE_RUN_COMMENT_MARKER = '<!-- coding-x-issue-run-v1 -->' as cons
 export const ISSUE_RUN_BOOTSTRAP_COMMENT_MARKER =
   '<!-- coding-x-issue-run-bootstrap-v1 -->' as const;
 export const ISSUE_RUN_SCHEMA_VERSION = 1 as const;
+const MAX_ISSUE_SOURCE_BYTES = 2 * 1024 * 1024;
 
 export interface IssueRunCommandInvocation {
   readonly command: 'git' | 'gh';
@@ -217,7 +219,25 @@ function flattenUnknownPages(value: unknown, label: string): unknown[] {
 }
 
 function visibleSection(value: string): string {
-  return value.replace(/<!--([\s\S]*?)-->/gu, '').trim();
+  let cursor = 0;
+  let visible = '';
+  while (cursor < value.length) {
+    const start = value.indexOf('<!--', cursor);
+    if (start === -1) {
+      visible += value.slice(cursor);
+      break;
+    }
+    visible += value.slice(cursor, start);
+    const end = value.indexOf('-->', start + 4);
+    if (end === -1 || value.slice(start + 4, end).includes('<!--')) {
+      throw new Error('ready Issue 包含畸形 HTML 注释');
+    }
+    cursor = end + 3;
+  }
+  if (visible.includes('<!--') || visible.includes('-->')) {
+    throw new Error('ready Issue 包含畸形 HTML 注释');
+  }
+  return visible.trim();
 }
 
 function issueSections(body: string): Map<string, string> {
@@ -633,6 +653,17 @@ function sourceBindings(source: string): { runId: string; bodyDigest: string } {
   return { runId, bodyDigest };
 }
 
+function readIssueSource(path: string): Buffer {
+  const source = readStableFile(path, {
+    label: 'Issue 源 PRD',
+    maxBytes: MAX_ISSUE_SOURCE_BYTES,
+  });
+  if (source.status === 'missing') throw new Error('Issue 源 PRD 不存在');
+  if (source.status === 'invalid')
+    throw new Error(`Issue 源 PRD 不可稳定读取：${source.diagnostic}`);
+  return source.bytes;
+}
+
 function workspaceInsideRoot(root: string, workspace: string): string {
   const absolute = resolve(root, workspace);
   const rel = relative(resolve(root), absolute);
@@ -665,7 +696,7 @@ async function initializeIssueWorkspace(options: {
   }
   const quality = readQualityContract(options.root);
   if (quality.status !== 'ready') throw new Error(`质量契约不可用：${quality.status}`);
-  const source = readFileSync(join(options.root, options.sourcePath));
+  const source = readIssueSource(join(options.root, options.sourcePath));
   const head = execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: options.root,
     encoding: 'utf8',
@@ -1008,8 +1039,15 @@ export async function runReadyIssue(options: {
     }
 
     if (!pullRequest) {
-      if (existsSync(sourceAbsolute)) {
-        const existingBindings = sourceBindings(readFileSync(sourceAbsolute, 'utf8'));
+      const existingSource = readStableFile(sourceAbsolute, {
+        label: 'Issue 源 PRD',
+        maxBytes: MAX_ISSUE_SOURCE_BYTES,
+      });
+      if (existingSource.status === 'invalid') {
+        throw new Error(`Issue 源 PRD 不可稳定读取：${existingSource.diagnostic}`);
+      }
+      if (existingSource.status === 'ready') {
+        const existingBindings = sourceBindings(existingSource.bytes.toString('utf8'));
         if (existingBindings.runId !== runId || existingBindings.bodyDigest !== issue.bodyDigest) {
           throw new Error('同名 Issue 分支已有不同运行身份的源 PRD');
         }
@@ -1117,7 +1155,7 @@ export async function runReadyIssue(options: {
   });
 
   try {
-    const source = readFileSync(sourceAbsolute, 'utf8');
+    const source = readIssueSource(sourceAbsolute).toString('utf8');
     const bindings = sourceBindings(source);
     if (bindings.runId !== runId || bindings.bodyDigest !== issue.bodyDigest) {
       throw new Error('ready Issue 内容或标签事件已变化；旧分支不能冒充新运行');

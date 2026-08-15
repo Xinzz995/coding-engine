@@ -344,6 +344,20 @@ describe('candidate install smoke identity', () => {
     },
   );
 
+  it('reads an explicitly allowed zero-byte runtime file', () => {
+    const root = temporaryRoot();
+    const target = join(root, 'empty-runtime-file');
+    writeFileSync(target, '');
+
+    expect(
+      readStableCandidateFile(target, {
+        label: 'empty runtime file',
+        minBytes: 0,
+        maxBytes: 0,
+      }),
+    ).toEqual(Buffer.alloc(0));
+  });
+
   it('builds a fixed Windows command boundary and rejects command metacharacters', () => {
     const invocation = buildWindowsCommandInvocation('C:\\Users\\RUNNER~1\\coding-x.cmd', [
       'doctor',

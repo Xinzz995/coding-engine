@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readStableCandidateFile } from './candidate-install-smoke.mjs';
 import { PLUGIN_MANIFESTS, RUNTIME_VERSION_SOURCE } from './sync-plugin-versions.mjs';
 
 const SCHEMA_VERSION = 3;
@@ -217,12 +218,14 @@ function runtimeTreeFromPack(root, pack) {
       ) {
         fail(`npm pack 文件解析到项目根之外：${path}`);
       }
-      const info = lstatSync(target);
-      if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1) {
-        fail(`npm pack 文件不是独立普通文件：${path}`);
-      }
-      if (realpathSync(target) !== target) fail(`npm pack 文件经过链接目录：${path}`);
-      const bytes = readFileSync(target);
+      const bytes = readStableCandidateFile(target, {
+        label: `npm pack 文件 ${path}`,
+        minBytes: 0,
+        maxBytes: MAX_RUNTIME_FILE_BYTES,
+        afterOpen: () => {
+          if (realpathSync(target) !== target) fail(`npm pack 文件经过链接目录：${path}`);
+        },
+      });
       if (
         !Number.isSafeInteger(entry.size) ||
         entry.size < 0 ||

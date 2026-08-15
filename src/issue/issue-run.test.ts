@@ -58,6 +58,15 @@ describe('ready Issue contract', () => {
     const missing = issue();
     missing.body = '## 本次目标\nonly';
     expect(() => parseReadyIssue(missing, events())).toThrow('缺少可执行内容');
+
+    const hidden = issue();
+    hidden.body = hidden.body.replace('完成一个可恢复入口。', '<!-- 只有模板说明 -->');
+    expect(() => parseReadyIssue(hidden, events())).toThrow('缺少可执行内容');
+
+    const malformed = issue();
+    malformed.body = malformed.body.replace('完成一个可恢复入口。', '<!--<!-->伪内容-->');
+    expect(() => parseReadyIssue(malformed, events())).toThrow('畸形 HTML 注释');
+
     expect(() =>
       parseReadyIssue(issue(), [
         [

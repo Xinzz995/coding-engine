@@ -239,6 +239,63 @@ describe('release evidence script', () => {
     expect(readFileSync(join(second, 'coding-x-1.2.3.tgz'))).toEqual(readFileSync(firstTarball));
   });
 
+  it('records an empty runtime file through the stable candidate reader', () => {
+    const root = rootFixture();
+    const emptyPath = 'dist/empty-runtime.txt';
+    writeFileSync(join(root, emptyPath), '');
+    const bytes = Buffer.from('candidate with empty runtime file');
+    const sums = digest(bytes);
+    const tarball = join(root, 'coding-x-1.2.3.tgz');
+    const packJson = join(root, 'pack.json');
+    const evidencePath = join(root, 'packed.json');
+    writeFileSync(tarball, bytes);
+    json(packJson, [
+      {
+        name: 'coding-x',
+        version: '1.2.3',
+        filename: 'coding-x-1.2.3.tgz',
+        shasum: sums.shasum,
+        integrity: sums.integrity,
+        files: [
+          ...runtimeFor(root).files.map(({ path, size }) => ({ path, size, mode: 0o644 })),
+          { path: emptyPath, size: 0, mode: 0o644 },
+        ],
+      },
+    ]);
+
+    const packed = run(
+      [
+        'record-pack',
+        '--root',
+        root,
+        '--expected-version',
+        '1.2.3',
+        '--commit',
+        'a'.repeat(40),
+        '--candidate-workflow-run-id',
+        '123',
+        '--min-npm',
+        '0.0.0',
+        '--pack-json',
+        packJson,
+        '--tarball',
+        tarball,
+        '--output',
+        evidencePath,
+      ],
+      root,
+    );
+    expect(packed.status, packed.stderr).toBe(0);
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as {
+      runtime: { files: Array<{ path: string; size: number; sha256: string }> };
+    };
+    expect(evidence.runtime.files.find((file) => file.path === emptyPath)).toEqual({
+      path: emptyPath,
+      size: 0,
+      sha256: `sha256:${createHash('sha256').update('').digest('hex')}`,
+    });
+  });
+
   it('fails closed on stale main but accepts an exact main commit and annotated tag', () => {
     const root = rootFixture();
     execFileSync('git', ['init', '-b', 'main'], { cwd: root });

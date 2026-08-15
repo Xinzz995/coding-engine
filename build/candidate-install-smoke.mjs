@@ -66,9 +66,20 @@ function sameFileSnapshot(left, right) {
 
 export function readStableCandidateFile(
   path,
-  { label = 'candidate file', maxBytes = MAX_CANDIDATE_FILE_BYTES, afterOpen } = {},
+  {
+    label = 'candidate file',
+    minBytes = 1,
+    maxBytes = MAX_CANDIDATE_FILE_BYTES,
+    afterOpen,
+  } = {},
 ) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) fail(`${label} size limit is invalid`);
+  if (
+    !Number.isSafeInteger(minBytes) ||
+    minBytes < 0 ||
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < minBytes
+  )
+    fail(`${label} size limit is invalid`);
   let descriptor;
   try {
     const noFollow = process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
@@ -78,10 +89,10 @@ export function readStableCandidateFile(
     if (
       !opened.isFile() ||
       opened.nlink !== 1n ||
-      opened.size < 1n ||
+      opened.size < BigInt(minBytes) ||
       opened.size > BigInt(maxBytes)
     ) {
-      fail(`${label} must be a non-empty bounded single-link regular file`);
+      fail(`${label} must be a bounded single-link regular file`);
     }
     afterOpen?.();
     const openedPath = lstatSync(path, { bigint: true });
@@ -420,6 +431,7 @@ export function assertInstalledRuntimeTree(packageRoot, runtimeFiles, expectedTr
     }
     const bytes = readStableCandidateFile(target, {
       label: `installed runtime file ${expected.path}`,
+      minBytes: 0,
       maxBytes: expected.size,
     });
     if (bytes.byteLength !== expected.size) {
