@@ -405,6 +405,19 @@ describe('runFinalReview', () => {
 
   it('reuses a full gate only when the final review input is exactly identical', async () => {
     const exact = context();
+    const testPolicy = exact.baseContract.checks.test;
+    if (!('checks' in testPolicy) || testPolicy.checks.length === 0) {
+      throw new Error('fixture requires one test check');
+    }
+    exact.baseContract = {
+      ...exact.baseContract,
+      checks: {
+        test: { checks: [testPolicy.checks[0]] },
+        build: { notApplicable: 'fixture' },
+        static: { notApplicable: 'fixture' },
+        security: { notApplicable: 'fixture' },
+      },
+    };
     exact.baseContractDigest = digestQualityContract(exact.baseContract);
     const policy = finalReviewMechanicalEnvironmentPolicy(exact.baseContract, exact.baseSha);
     const proof = createFullGateProof(

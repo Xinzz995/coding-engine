@@ -88,6 +88,13 @@ describe('prd-to-json 模型路由 prompt 合同', () => {
     ]) expect(skill).toContain(anchor);
   });
 
+  it('把项目机械门禁留在 qualityChecks，不再复制进每个 Story', () => {
+    expect(skill).toContain('机械质量检查与 Story AC 分层');
+    expect(skill).toContain('不得自动向每个 story 追加 `Typecheck passes`');
+    expect(skill).not.toContain('始终添加**："Typecheck passes"');
+    expect(skill).not.toContain('每个 story 都有 "Typecheck passes" 作为标准');
+  });
+
   it('把 TDD 政策变化留给用户重新批准', () => {
     for (const anchor of [
       '行覆盖率与分支覆盖率都不低于 90%',

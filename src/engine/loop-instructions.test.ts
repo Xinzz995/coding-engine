@@ -96,6 +96,14 @@ describe('instruction assets structured validation contract', () => {
     expect(content).toContain('字段必须恰好匹配');
     expect(content).toContain('source=validator');
   });
+
+  it('reuses only engine-listed mechanical checks and keeps semantic AC independent', () => {
+    const content = read('validator.md');
+    expect(content).toContain('request.engineQualityGate');
+    expect(content).toContain('禁止重复执行相同命令');
+    expect(content).toContain('不能声称独立 typecheck 已通过');
+    expect(content).toContain('代码语义、改动范围');
+  });
 });
 
 describe('instruction assets workspace commit isolation contract', () => {

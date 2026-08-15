@@ -235,6 +235,47 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
     }
   });
 
+  it('injects the exact passed full gate into the structured Validator request', async () => {
+    const contract = qualityContractWithNodeScript('process.exit(0)', 'passing-check');
+    const contractDigest = digest(contract);
+    const { workspace, instructionsDir } = setup(
+      [story({ acceptanceCriteria: ['Tests pass'] })],
+      {
+        qualityContractDigest: contractDigest,
+        qualityChecks: contract.checks,
+      },
+    );
+    const promptMarker = join(resolve(workspace, '..'), 'validator-prompt.txt');
+    const fake = fakeBoundValidator(workspace, 'passed', {
+      validatorPromptMarker: promptMarker,
+    });
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
+          qualityContractReader: () => readyQualityContract(contract, contractDigest),
+        }),
+      ).toBe(0);
+      const prompt = readFileSync(promptMarker, 'utf8');
+      expect(prompt).toContain('禁止重复执行相同命令');
+      const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+      const jsonAt = prompt.indexOf('{', markerAt);
+      const fenceAt = prompt.indexOf('\n```', jsonAt);
+      const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+      expect(request.engineQualityGate).toMatchObject({
+        source: 'engine-full-gate',
+        status: 'passed',
+        gitHead: request.gitHead,
+        total: 1,
+        ran: 1,
+        checks: [{ category: 'test', id: 'passing-check', module: 'root' }],
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('warns and disables the gate on malformed qualityChecks without touching state', async () => {
     const { workspace, instructionsDir } = setup([story()], { qualityChecks: 'npm test' });
     const { fake, calls } = fakeCounting(workspace);
