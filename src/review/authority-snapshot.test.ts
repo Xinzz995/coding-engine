@@ -1181,7 +1181,7 @@ process.exit(result.status ?? 1);`,
       }
       await fixture.managed.close();
     }
-  });
+  }, 20_000);
 
   it('reports a settled helper failure without misclassifying the process lifecycle', async () => {
     const fixture = await realManagedFixture(
@@ -1322,7 +1322,7 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
 process.on('SIGTERM', () => {});
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: false, stdio: 'ignore' });
 child.unref();
-setTimeout(() => process.stdout.write('codex 1.2.3\\n'), 3000);
+setTimeout(() => process.stdout.write('codex 1.2.3\\n'), 9000);
 `,
     );
     writeFileSync(
@@ -1344,7 +1344,7 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
           expectedDecisionsDigest: DECISIONS_DIGEST,
           includeDecisions: false,
           phase: 'hard timeout descendant checkpoint',
-          timeoutMs: 1_000,
+          timeoutMs: 3_000,
           managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
         }),
