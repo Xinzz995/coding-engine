@@ -17,6 +17,7 @@ import {
   VALIDATION_PROTOCOL_VERSION,
   VALIDATION_RESULT_FILE,
   VALIDATION_RESULT_MAX_BYTES,
+  type EngineQualityGateEvidence,
   type ValidationProtocolOutcome,
   type ValidationRequest,
 } from '../contracts/validation-contract.js';
@@ -31,6 +32,8 @@ export {
   VALIDATION_TEXT_MAX_CHARS,
 } from '../contracts/validation-contract.js';
 export type {
+  EngineQualityGateCheckEvidence,
+  EngineQualityGateEvidence,
   ValidationCheck,
   ValidationProtocolErrorCode,
   ValidationProtocolOutcome,
@@ -168,8 +171,20 @@ export function createValidationRequest(
   requestId: string = randomUUID(),
   /** 宿主隔离 profile 提供的临时域固定 claim 路径；缺省保持 workspace 内旧位置。 */
   resultPathOverride?: string,
+  engineQualityGate?: EngineQualityGateEvidence,
 ): ValidationRequest {
   const criteria = [...story.acceptanceCriteria];
+  if (engineQualityGate !== undefined) {
+    if (
+      target.gitHead === null ||
+      engineQualityGate.gitHead !== target.gitHead ||
+      engineQualityGate.status !== 'passed' ||
+      engineQualityGate.ran !== engineQualityGate.total ||
+      engineQualityGate.checks.length !== engineQualityGate.total
+    ) {
+      throw new Error('Validator 机械检查证明未绑定当前完整通过的目标');
+    }
+  }
   return {
     version: VALIDATION_PROTOCOL_VERSION,
     requestId,
@@ -180,6 +195,15 @@ export function createValidationRequest(
     storyBaseGitHead: target.storyBaseGitHead,
     changeManifestDigest: target.changeManifestDigest,
     changedPathCount: target.changedPathCount,
+    ...(engineQualityGate
+      ? {
+          engineQualityGate: {
+            ...engineQualityGate,
+            checks: engineQualityGate.checks.map((check) => ({ ...check })),
+            skippedCheckIds: [...engineQualityGate.skippedCheckIds],
+          },
+        }
+      : {}),
     resultPath: resultPathOverride ?? join(workspace, VALIDATION_RESULT_FILE),
   };
 }
@@ -198,6 +222,7 @@ export function renderValidatorInstruction(base: string, request: ValidationRequ
 - 必须检查 request.storyBaseGitHead..request.gitHead 的完整变化；不得用 HEAD^、当前父提交或自行选择的基线缩窄范围。
 - 不得修改 state.json、prd.json 或项目源码。你只提交 Validator claim，最终状态由引擎写入。
 - 按 request.acceptanceCriteria 的顺序逐条验证；结果 checks 必须以 1..N 精确覆盖全部 AC。
+- request.engineQualityGate 若存在，是引擎在同一提交与冻结质量契约上刚完成的全量检查证明。只对其 checks 明确覆盖的机械 AC 直接引用该证明，禁止重复执行相同命令；代码语义、范围和未覆盖能力仍须独立验证。
 - 将单个 JSON 对象原子写入 request.resultPath；schema 必须匹配项目 validator 指令。
 - 即使验收失败也正常写入 verdict=failed 的结果；不要用进程退出码代替结构化结论。
 

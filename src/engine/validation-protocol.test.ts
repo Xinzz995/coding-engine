@@ -18,6 +18,7 @@ import {
   readGitHead,
   readValidationResult,
   renderValidatorInstruction,
+  type EngineQualityGateEvidence,
   type ValidationRequest,
   type ValidationResult,
 } from './validation-protocol.js';
@@ -41,6 +42,26 @@ const story: Story = {
   acceptanceCriteria: ['返回 401', '审计日志包含 request id'],
   priority: 1,
 };
+
+function gateEvidence(): EngineQualityGateEvidence {
+  return {
+    schemaVersion: 1,
+    source: 'engine-full-gate',
+    status: 'passed',
+    inputDigest: `sha256:${'d'.repeat(64)}`,
+    gitHead: 'a'.repeat(40),
+    defaultBranchGitHead: 'e'.repeat(40),
+    qualityContractDigest: `sha256:${'f'.repeat(64)}`,
+    platform: 'linux',
+    total: 2,
+    ran: 2,
+    checks: [
+      { category: 'test', id: 'tests', module: 'root' },
+      { category: 'static', id: 'typecheck', module: 'root' },
+    ],
+    skippedCheckIds: ['windows-native'],
+  };
+}
 
 function request(dir: string): ValidationRequest {
   return createValidationRequest(
@@ -160,6 +181,43 @@ describe('validation request', () => {
     expect(prompt).toContain('ENGINE-BOUND VALIDATION REQUEST');
     expect(prompt).toContain('不得修改 state.json');
     expect(prompt).toContain(JSON.stringify(req, null, 2));
+  });
+
+  it('attaches a cloned exact-head full gate proof and tells Validator not to rerun it', () => {
+    const dir = tempDir();
+    const evidence = gateEvidence();
+    const req = createValidationRequest(
+      story,
+      dir,
+      {
+        gitHead: 'a'.repeat(40),
+        storyBaseGitHead: 'b'.repeat(40),
+        changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+        changedPathCount: 2,
+      },
+      'request-gate',
+      undefined,
+      evidence,
+    );
+
+    evidence.checks[0].id = 'mutated';
+    expect(req.engineQualityGate?.checks[0]?.id).toBe('tests');
+    expect(renderValidatorInstruction('base', req)).toContain('禁止重复执行相同命令');
+    expect(() =>
+      createValidationRequest(
+        story,
+        dir,
+        {
+          gitHead: '9'.repeat(40),
+          storyBaseGitHead: 'b'.repeat(40),
+          changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+          changedPathCount: 2,
+        },
+        'request-mismatch',
+        undefined,
+        gateEvidence(),
+      ),
+    ).toThrow('未绑定当前完整通过的目标');
   });
 
   it('removes only the fixed stale result and tolerates absence', () => {

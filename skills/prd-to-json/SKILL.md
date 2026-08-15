@@ -104,8 +104,7 @@ skill 不预检、删除、修复或接管 workspace 租约。能否写入只由
       "description": "As a [user], I want [feature] so that [benefit]",
       "acceptanceCriteria": [
         "Criterion 1",
-        "Criterion 2",
-        "Typecheck passes"
+        "Criterion 2"
       ],
       "priority": 1,
       "difficulty": "medium",
@@ -358,15 +357,12 @@ Stories 按 priority 顺序执行。较早的 stories 不能依赖于较晚的�
 - "良好的 UX"
 - "处理边缘情况"
 
-### 始终作为最终标准包含：
-```
-"Typecheck passes"
-```
+### 机械质量检查与 Story AC 分层
 
-对于具有可测试逻辑的 stories，还应包含：
-```
-"Tests pass"
-```
+测试、构建、静态检查和安全检查由顶层 `qualityChecks` 从质量契约派生，并由引擎在 Validator 前
+完整执行。不要把 `Typecheck passes`、`Tests pass` 或同义的通用门禁自动复制到每个 story。
+源 PRD 若明确把某项机械结果作为业务验收，保留并具体写出对应项目检查；不得把不存在的工具或
+其他语言生态的惯例补进 AC。
 
 ### 对于更改 UI 的 stories，还应包含：
 
@@ -449,7 +445,7 @@ Frontend stories 在视觉验证之前不算完成。Ralph 将使用 agent-brows
 3. **Priority**：基于依赖顺序，然后是文档顺序
 4. **不写状态字段**：passes/validated/notes/retryCount/blocked/escalated 一律不出现在 prd.json——执行状态由引擎在同目录 `state.json` 初始化与维护
 5. **branchName**：从功能名称派生，kebab-case，前缀为 `ralph/`
-6. **始终添加**："Typecheck passes" 到每个 story 的 acceptance criteria
+6. **机械门禁不重复**：不得自动向每个 story 追加 `Typecheck passes`、`Tests pass` 或其他通用质量检查；这些由顶层 `qualityChecks` 承担。源 PRD 明确要求的项目检查原样保留，但不能编造契约中不存在的能力
 7. **sourcePrd 溯源**：源是仓库内 markdown 文件时，顶层写入 `sourcePrd`（仓库相对路径）；粘贴文本或仓库外来源省略
 8. **【溯源】仲裁段**：`description` 末尾固定追加【溯源】段（见上方输出格式），保证 builder/validator 拿到统一的冲突处理规则
 9. **质量契约绑定**：正式路径的 doctor 必须确认契约有效且版本匹配；固定候选 Shadow 分支必须
@@ -732,7 +728,7 @@ npx coding-x workspace apply-prd --input <request-file> --workspace <workspace-d
 - [ ] 候选和请求都在 workspace 与项目之外的系统临时目录；skill 没有归档、覆盖或删除 workspace 文件
 - [ ] 每个 story 可以在一次迭代中完成（足够小）
 - [ ] Stories 按依赖顺序排序（schema 到 backend 到 UI）
-- [ ] 每个 story 都有 "Typecheck passes" 作为标准
+- [ ] 没有把 `Typecheck passes`、`Tests pass` 或其他通用门禁自动复制进每个 story；源 PRD 的显式机械 AC 能对应项目真实能力
 - [ ] UI stories 的浏览器标准已经展开为页面、操作、期望结果，而不是一句泛化短语
 - [ ] 认证/支付/上传/多步流程 stories 有真实闭环标准
 - [ ] 前后端集成 stories 包含运行时可达验证

@@ -114,7 +114,11 @@ import {
   CANDIDATE_PROOF_FILE,
   createCandidateDogfoodProof,
 } from '../release/candidate-proof.js';
-import { createFullGateProof, type FullGateProof } from './full-gate-proof.js';
+import {
+  createFullGateProof,
+  engineQualityGateEvidence,
+  type FullGateProof,
+} from './full-gate-proof.js';
 
 export { renderInstruction } from './loop-instructions.js';
 
@@ -2251,6 +2255,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               },
               undefined,
               validatorIsolation?.status === 'ready' ? validatorIsolation.resultPath : undefined,
+              reusableFullGate ? engineQualityGateEvidence(reusableFullGate) : undefined,
             );
             if (structuredValidation) {
               validationTarget = {
