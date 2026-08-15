@@ -56,6 +56,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .release/dogfood-policy.json
+            build/candidate-install-smoke.mjs
             build/release-evidence.mjs
             build/sync-plugin-versions.mjs
           sparse-checkout-cone-mode: false
@@ -197,6 +198,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .release/dogfood-policy.json
+            build/candidate-install-smoke.mjs
             build/release-evidence.mjs
             build/sync-plugin-versions.mjs
           sparse-checkout-cone-mode: false
