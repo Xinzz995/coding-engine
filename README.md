@@ -75,7 +75,8 @@ coding-x 同时包含两部分：
 
 coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须遵守
 [候选发布与恢复手册](docs/release.md)，GitHub 只能暂存候选，2FA 批准、三仓验证、移动
-`latest` 和创建发布标签都由人分阶段完成。
+`latest` 和创建发布标签都由人分阶段完成。候选发布许可要求三仓各自发布绑定候选身份和当前 PR
+提交的机器证明，暂存流程在显示人工批准前自动读取并核对三份证明。
 
 `init` 本来就是分阶段完成的：第一次只在远端最小规则回读成功后生成文件；你提交、推送并
 打开 Bootstrap PR 后再次运行，它才会把该 PR 最新提交上真实出现的 `quality-gate` 设为必需
@@ -84,6 +85,14 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 表示“尚未就绪”，不是执行失败。
 
 最短可用路线是：**`coding-x init` → 已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `status` 返回 0 → 人工合并**。只有最终 Review 返回待人工处理的 finding 时，才运行 `/review-loop`，处理后重新运行 `coding-x`。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
+
+已经用 GitHub Issue 管理清楚任务时，可以走更短的显式入口：用仓库的“Agent 执行任务”模板填写
+目标、非目标、列表式验收标准和风险，人工确认后添加 `ready-for-agent` 标签，再运行
+`npx coding-x issue run <编号> codex --validator-model <模型 ID>`。它只创建并继续该 Issue 唯一的
+`codex/issue-<编号>` 分支、workspace、草稿 PR 和状态评论；推送最新提交后停止等待远端，不轮询、
+不排队、不自动合并。分支和 PR 建立前就先写预备状态，因此首次推送、建 PR 或工作区准备失败也会
+写回同一评论；引擎结束后会再次确认 PR 仍开放且提交未变。稍后重复同一命令继续，最终 Issue 评论
+会给出 ready 到可信 PR 的总时间、实际运行时间和等待时间。
 
 ### 首次运行前的安全红线
 
@@ -162,7 +171,7 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
         http://localhost:7331  实时查看进度
 ```
 
-- **实现收敛不等于可交付**：全部 story 同时满足 `passes && validated` 且无 blocked 后，引擎还会重跑完整机械检查、执行本地最终 Review 并查询 GitHub 交付状态；三者均就绪才返回 0。存在 blocked 返回 3；后续检查、Review 或远端未就绪时返回对应的非零代码；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断，返回 1（完整对照见「命令行参数」后的「退出码」表）。
+- **实现收敛不等于可交付**：全部 story 同时满足 `passes && validated` 且无 blocked 后，引擎还会确认完整机械检查、执行本地最终 Review 并查询 GitHub 交付状态；三者均就绪才返回 0。同一进程刚完成的全量检查，只有提交、默认分支基线、完整契约、平台和可见 Git 引用全部相同才复用，任一变化都会重跑。存在 blocked 返回 3；后续检查、Review 或远端未就绪时返回对应的非零代码；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断，返回 1（完整对照见「命令行参数」后的「退出码」表）。
 - **工作区写租约**：初始化后永久保留 `engine.lock/` 协议根，活动 owner 位于其中的 `lease/`。run、repair、report、PRD 应用和 Review 裁决都进入同一写域；第二个写入口会被拒绝，不能靠 PID 看似已死就自动接管，也不能手删租约继续。
 - **异常恢复**：Builder、Validator、项目检查和最终 Review 都在受管范围内运行，返回前必须取得与调用类型相符的收口证明。异常中断留下的活动状态由 `doctor` / `status` 分类，再通过明确的 `workspace recover` 或 `workspace resume-mutation` 恢复；永久隔离状态不能恢复。继续前还要独立确认旧进程不会再影响原项目目录；无法确认时应改用新的隔离项目检出或重启主机，再配新的空 workspace。无法证明安全时不会伪装成已结束。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态。普通项目命令在进程组收口证明成立后沿用既有重试规则；POSIX 上已经启动的 AI runner 被超时、用户中断、父进程关闭或输出通道故障从外部终止时，不再自动启动下一轮，而是永久隔离当前 workspace。只有已随普通 iteration 写入的调用，才在存档中保留完整收口耗时、退出码和最近 2000 字符异常诊断；proof-missing 只保留安全协议、隔离状态、终端已显示内容和受保护现场。
@@ -647,6 +656,10 @@ npx coding-x workspace recover --workspace ./run
                                 # 恢复已证明安全的中断运行
 npx coding-x workspace resume-mutation --workspace ./run
                                 # 继续已验证的 apply-prd / repair 操作
+npx coding-x issue run 42 codex --validator-model model-d
+                                # 显式继续一个 ready Issue 的唯一分支、草稿 PR 和状态评论
+npx coding-x candidate publish-proof --workspace ./run
+                                # 候选三仓专用：核对 owner、仓库、PR 与 head 后发布机器证明
 npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x cursor             # 改用 Cursor Agent 后端
@@ -664,6 +677,8 @@ npx coding-x dashboard --no-open # 离线仪表盘不自动打开浏览器
 npx coding-x --workspace ./run  # 指定 prd.json / state.json / progress.md 所在目录
 npx coding-x --keep-open        # 跑完后保留仪表盘，按 Ctrl+C 退出（退出码不变）
 npx coding-x --shadow           # 候选版本真实 Dogfood；成功也固定返回 7，不表示可交付
+npx coding-x --shadow --candidate-evidence /path/to/packed.json
+                                # 逐文件核对实际 CLI，并把同一候选身份绑定进 Shadow 凭证
 npx coding-x --stall-limit 5    # 已权威结算的 Developer 空转/超时/异常退出连续达 5 次才熔断（缺省 3）
 npx coding-x repair             # 在短租约内修复 workspace 的 prd.json 与 state.json（不跑循环）
 npx coding-x dashboard          # 不跑循环，随时离线回看仪表盘
@@ -730,6 +745,8 @@ GitHub 状态给出。
 | 位置参数 `config path\|init\|validate`          | —            | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁                                                                                                                                                                                       |
 | 位置参数 `models [claude\|codex\|cursor]`       | —            | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json`                                                                                                                                                                                                 |
 | 位置参数 `hooks cursor install\|status\|remove` | —            | 在当前 Git 项目安全安装、只读检查或卸载 Cursor TDD 提交前检查；只管理 `.cursor/` 中 coding-x 拥有的内容，不改 Git hooks、索引或提交。install/remove 成功与 status 健康返回 0；缺失、冲突或过期返回 1                                                                       |
+| 位置参数 `issue run <编号> [runner]`            | —            | 只接受当前带 `ready-for-agent` 的受管 Issue；首次建立唯一 `codex/issue-<编号>` 分支、源 PRD、隔离 workspace、草稿 PR 和 owner 状态评论，后续只继续同一运行。可以推送当前分支并把可信草稿标为 ready，但不轮询、不排队、不合并、不发布                                         |
+| 位置参数 `candidate publish-proof`              | —            | 候选 Dogfood 专用；从 workspace 读取引擎生成的证明，重新核对当前 owner、仓库、默认分支、PR 和 head 后创建或更新唯一 PR 证明评论，不产生新的通过结论                                                                                                                        |
 | 位置参数 `repair`                               | —            | 获取短租约，修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；活动租约或未完成恢复会拒绝                                                                                                                                                                             |
 | 位置参数 `dashboard`                            | —            | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告                                                                                                                                                                |
 | 位置参数 `doctor`                               | —            | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库；普通错误退出 1，显式 shadow 且其余健康时退出 7         |
@@ -741,7 +758,7 @@ GitHub 状态给出。
 | `--builder-model <id>`                          | —            | 本次运行的初始 builder 覆盖；优先于 `models.builder[story.difficulty]`，但不压过已触发的专用 escalation 路由                                                                                                                                                               |
 | `--validator-model <id>`                        | —            | 本次运行的 validator 覆盖；优先于 `models.validator`                                                                                                                                                                                                                       |
 | `--escalation-model <id>`                       | —            | 本次运行的升级 builder 覆盖；仅在 `state.escalated=true` 时生效，优先于 `models.escalation`                                                                                                                                                                                |
-| `--workspace <dir>`                             | `.workspace` | 所有 workspace 命令共享的唯一路径输入，可放在嵌套子命令前后但只能出现一次；相对路径、绝对路径和同目录别名会解析到同一身份                                                                                                                                                  |
+| `--workspace <dir>`                             | `.workspace` | 所有 workspace 命令共享的唯一路径输入，可放在嵌套子命令前后但只能出现一次；Issue 入口把它作为各 Issue 隔离 workspace 的父目录。普通命令支持相对路径、绝对路径和同目录别名；Issue 父目录必须位于项目内                                                                       |
 | `--no-open`                                     | 关闭         | 仅对独立 `dashboard` 生效；不自动打开浏览器。正式 run 始终只打印地址                                                                                                                                                                                                       |
 | `--keep-open`                                   | 关闭         | 运行结束后保留仪表盘直到 Ctrl+C（保留循环的真实退出码）                                                                                                                                                                                                                    |
 | `--port <n>`                                    | `7331`       | 仪表盘端口；必须是 0–65535 的十进制整数，0 表示由系统选择可用端口                                                                                                                                                                                                          |
@@ -751,8 +768,9 @@ GitHub 状态给出。
 | `--input <file>`                                | —            | 仅 `workspace apply-prd` / `workspace record-review-decision`：读取 workspace 外的严格 UTF-8 JSON 请求；不能把请求放进目标 workspace                                                                                                                                       |
 | `--yes`                                         | 关闭         | 仅 `init`：接受命令已经展示的远端和文件变更；必须同时提供人工确认过的 `--contract`，不会替用户选择平台或填写不适用理由                                                                                                                                                     |
 | `--local`                                       | 关闭         | 仅 `doctor`：不查询 GitHub，只检查本地契约、派生快照、文档和 workspace；用于项目原生 CI                                                                                                                                                                                    |
-| `--json`                                        | 关闭         | `init`、`workspace`、`doctor`、`status`、`models` 输出单个 JSON 对象；交互提示不写入 JSON stdout                                                                                                                                                                           |
+| `--json`                                        | 关闭         | `init`、`workspace`、`doctor`、`status`、`models`、`issue`、`candidate` 输出单个 JSON 对象；交互提示不写入 JSON stdout                                                                                                                                                     |
 | `--shadow`                                      | 关闭         | 只供固定候选 Dogfood，且只允许用于 run、doctor、`workspace apply-prd`；健康固定退出 7，不能表示正式通过；真实失败仍保留原失败码，其他子命令会拒绝该参数                                                                                                                    |
+| `--candidate-evidence <file>`                   | —            | 只与 `--shadow` 同用；读取候选 `packed.json`，从当前实际安装的 coding-x 包根逐文件核对发布文件树，并把候选身份绑定到 Story 凭证和最终 Dogfood 证明。只复制摘要、替换入口或修改任一运行文件都会拒绝                                                                            |
 | `--review-model <id>`                           | —            | 最终 Review 的精确模型 ID；不能使用 runner 默认值，因为结果必须能绑定并复现实际模型                                                                                                                                                                                        |
 
 ### `status` 子命令退出码

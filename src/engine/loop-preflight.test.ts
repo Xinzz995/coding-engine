@@ -30,6 +30,14 @@ import {
   validationReceiptFor,
   setupGitProject,
 } from './loop-test-support.js';
+import {
+  candidateIdentityDigest,
+  type VerifiedCandidateIdentity,
+} from '../release/candidate-identity.js';
+import {
+  CANDIDATE_PROOF_FILE,
+  parseCandidateDogfoodProof,
+} from '../release/candidate-proof.js';
 
 function writeFinalReviewFixture(workspace: string, state: FinalReviewState): void {
   writeFileSync(join(workspace, 'final-review.json'), `${JSON.stringify(state, null, 2)}\n`);
@@ -495,6 +503,79 @@ describe('quality contract preflight and shadow mode', () => {
         qualityContractReader: () => readyQualityContract(candidate),
       }),
     ).toBe(7);
+  });
+
+  it('writes a machine-readable Dogfood proof only for a bound candidate and ready shadow review', async () => {
+    const target = story({ passes: true });
+    const { workspace, instructionsDir, head } = setup([target]);
+    const baseIdentity = {
+      packageName: 'coding-x' as const,
+      version: CODING_X_VERSION,
+      commit: 'a'.repeat(40),
+      candidateWorkflowRunId: '123',
+      tarballSha256: `sha256:${'2'.repeat(64)}`,
+      runtimeTreeDigest: `sha256:${'3'.repeat(64)}`,
+    };
+    const identity: VerifiedCandidateIdentity = {
+      schemaVersion: 1,
+      ...baseIdentity,
+      digest: candidateIdentityDigest(baseIdentity),
+      evidencePath: '/candidate/packed.json',
+    };
+    writeFileSync(
+      join(workspace, 'state.json'),
+      JSON.stringify({
+        'US-001': {
+          passes: true,
+          validated: true,
+          storyBaseGitHead: head(),
+          notes: '',
+          retryCount: 0,
+          blocked: false,
+          escalated: false,
+          validationReceipt: validationReceiptFor(target, head(), 'candidate-receipt', {
+            mode: 'shadow',
+            actualCodingXVersion: CODING_X_VERSION,
+            candidateIdentityDigest: identity.digest,
+          }),
+        },
+      }),
+    );
+    const candidate = { ...TEST_QUALITY_CONTRACT, codingXVersion: '9.9.9' } as QualityContract;
+    const code = await runProductionLoop({
+      ...strictConfig(workspace, instructionsDir),
+      shadow: true,
+      candidateIdentity: identity,
+      qualityContractReader: () => readyQualityContract(candidate),
+      finalReviewRunner: async (options) => {
+        const state = previousFinalReview(head());
+        state.shadow = true;
+        state.deliveryStatus = 'shadow';
+        state.binding.storyValidationDigest = options.storyValidationDigest;
+        state.remote.checks = [
+          {
+            name: 'quality-gate',
+            status: 'completed',
+            conclusion: 'success',
+            appId: 15_368,
+            appSlug: 'github-actions',
+          },
+        ];
+        return { exitCode: 7, message: 'candidate shadow ready', state };
+      },
+    });
+    expect(code).toBe(7);
+    const proof = parseCandidateDogfoodProof(
+      JSON.parse(readFileSync(join(workspace, CANDIDATE_PROOF_FILE), 'utf8')),
+    );
+    expect(proof).toMatchObject({
+      candidate: { digest: identity.digest },
+      review: {
+        headSha: head(),
+        remoteStatus: 'ready',
+        checks: [{ name: 'quality-gate', conclusion: 'success' }],
+      },
+    });
   });
 
   it.each([

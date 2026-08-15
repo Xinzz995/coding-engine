@@ -5,16 +5,29 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Exact version in the verified candidate artifact (for example 0.33.0)
+        description: Exact version in the verified candidate artifact (for example 0.36.0)
         required: true
         type: string
       candidate_run_id:
-        description: Successful Build release candidate run already used by all Dogfood projects
+        description: Successful Build release candidate run used by all Dogfood projects
+        required: true
+        type: string
+      engine_pr:
+        description: coding-engine Dogfood PR containing the owner-published candidate proof
+        required: true
+        type: string
+      go_pr:
+        description: Go Dogfood PR containing the owner-published candidate proof
+        required: true
+        type: string
+      python_pr:
+        description: Python Dogfood PR containing the owner-published candidate proof
         required: true
         type: string
 
 permissions:
   actions: read
+  checks: read
   contents: read
 
 concurrency:
@@ -22,24 +35,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  stage:
-    name: submit selected candidate through stage-only OIDC
+  verify:
+    name: verify candidate and three repository proofs before approval
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    environment: npm-staging
     permissions:
       actions: read
+      checks: read
       contents: read
-      id-token: write
     env:
       EXPECTED_VERSION: ${{ inputs.version }}
       CANDIDATE_WORKFLOW_RUN_ID: ${{ inputs.candidate_run_id }}
+      ENGINE_PR: ${{ inputs.engine_pr }}
+      GO_PR: ${{ inputs.go_pr }}
+      PYTHON_PR: ${{ inputs.python_pr }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
           sparse-checkout: |
+            .release/dogfood-policy.json
             build/release-evidence.mjs
             build/sync-plugin-versions.mjs
           sparse-checkout-cone-mode: false
@@ -47,7 +63,6 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
-          registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
       - name: Verify selected candidate run and current main identity
@@ -56,11 +71,13 @@ jobs:
           SELECTED_REF: ${{ github.ref }}
           CURRENT_MAIN_COMMIT: ${{ github.sha }}
         run: |
-          case "$CANDIDATE_WORKFLOW_RUN_ID" in
-            ''|*[!0-9]*) echo "::error::Candidate run ID must contain digits only"; exit 1 ;;
-          esac
+          for value in "$CANDIDATE_WORKFLOW_RUN_ID" "$ENGINE_PR" "$GO_PR" "$PYTHON_PR"; do
+            case "$value" in
+              ''|0|*[!0-9]*) echo "::error::Run and PR identifiers must be positive digits"; exit 1 ;;
+            esac
+          done
           if [ "$SELECTED_REF" != refs/heads/main ]; then
-            echo "::error::Staging must run from refs/heads/main"
+            echo "::error::Staging verification must run from refs/heads/main"
             exit 1
           fi
           REMOTE_MAIN_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
@@ -79,79 +96,246 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-candidate-${{ inputs.version }}
-          path: ${{ runner.temp }}/npm-candidate
+          path: ${{ runner.temp }}/npm-stage-input
           github-token: ${{ github.token }}
           run-id: ${{ inputs.candidate_run_id }}
 
-      - name: Verify and reconstruct the non-executable candidate
+      - name: Verify the exact candidate artifact
         env:
           CURRENT_MAIN_COMMIT: ${{ github.sha }}
         run: |
           node build/release-evidence.mjs verify-tarball \
-            --evidence "$RUNNER_TEMP/npm-candidate/packed.json" \
-            --tarball "$RUNNER_TEMP/npm-candidate/coding-x-$EXPECTED_VERSION.tgz"
+            --evidence "$RUNNER_TEMP/npm-stage-input/packed.json" \
+            --tarball "$RUNNER_TEMP/npm-stage-input/coding-x-$EXPECTED_VERSION.tgz"
           jq -e --arg version "$EXPECTED_VERSION" --arg commit "$CURRENT_MAIN_COMMIT" '
-            .schemaVersion == 2 and
+            .schemaVersion == 3 and
             .status == "packed" and
             .version == $version and
             .commit == $commit and
-            .candidateWorkflowRunId == $ENV.CANDIDATE_WORKFLOW_RUN_ID
-          ' "$RUNNER_TEMP/npm-candidate/packed.json" >/dev/null
+            .candidateWorkflowRunId == $ENV.CANDIDATE_WORKFLOW_RUN_ID and
+            (.candidateIdentityDigest | test("^sha256:[0-9a-f]{64}$"))
+          ' "$RUNNER_TEMP/npm-stage-input/packed.json" >/dev/null
+
+      - name: Read and verify all three owner-published Dogfood proofs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/dogfood-observations"
+          observe_repository() {
+            local role="$1" repository="$2" pr_number="$3" head_sha
+            gh api "repos/$repository/pulls/$pr_number" \
+              > "$RUNNER_TEMP/dogfood-observations/$role-pr.json"
+            head_sha="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' \
+              "$RUNNER_TEMP/dogfood-observations/$role-pr.json")"
+            gh api --paginate --slurp "repos/$repository/issues/$pr_number/comments?per_page=100" \
+              > "$RUNNER_TEMP/dogfood-observations/$role-comments.json"
+            gh api --paginate --slurp \
+              "repos/$repository/commits/$head_sha/check-runs?per_page=100&filter=all" \
+              > "$RUNNER_TEMP/dogfood-observations/$role-checks.json"
+          }
+          observe_repository engine Xinzz995/coding-engine "$ENGINE_PR"
+          observe_repository go Xinzz995/coding-x-dogfood-go "$GO_PR"
+          observe_repository python Xinzz995/coding-x-dogfood-python "$PYTHON_PR"
+          node - "$RUNNER_TEMP/dogfood-observations" "$RUNNER_TEMP/observations.json" <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const [root, output] = process.argv.slice(2)
+          const repositories = {
+            engine: 'Xinzz995/coding-engine',
+            go: 'Xinzz995/coding-x-dogfood-go',
+            python: 'Xinzz995/coding-x-dogfood-python',
+          }
+          const read = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'))
+          const entries = Object.entries(repositories).map(([role, repository]) => ({
+            role,
+            repository,
+            pr: read(`${role}-pr.json`),
+            comments: read(`${role}-comments.json`).flat(),
+            checkRuns: read(`${role}-checks.json`).flatMap(page => page.check_runs),
+          }))
+          fs.writeFileSync(output, `${JSON.stringify({ schemaVersion: 1, entries }, null, 2)}\n`)
+          NODE
+          node build/release-evidence.mjs verify-dogfood \
+            --candidate "$RUNNER_TEMP/npm-stage-input/packed.json" \
+            --policy .release/dogfood-policy.json \
+            --observations "$RUNNER_TEMP/observations.json" \
+            --output "$RUNNER_TEMP/npm-stage-input/dogfood.json"
+
+      - name: Preserve the machine-verified approval input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-stage-input-${{ inputs.version }}
+          path: |
+            ${{ runner.temp }}/npm-stage-input/coding-x-${{ inputs.version }}.tgz
+            ${{ runner.temp }}/npm-stage-input/packed.json
+            ${{ runner.temp }}/npm-stage-input/dogfood.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  stage:
+    name: submit machine-verified candidate through stage-only OIDC
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm-staging
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      id-token: write
+    env:
+      EXPECTED_VERSION: ${{ inputs.version }}
+      CANDIDATE_WORKFLOW_RUN_ID: ${{ inputs.candidate_run_id }}
+      ENGINE_PR: ${{ inputs.engine_pr }}
+      GO_PR: ${{ inputs.go_pr }}
+      PYTHON_PR: ${{ inputs.python_pr }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            .release/dogfood-policy.json
+            build/release-evidence.mjs
+            build/sync-plugin-versions.mjs
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Download only the pre-approval verified handoff
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-stage-input-${{ inputs.version }}
+          path: ${{ runner.temp }}/npm-stage-input
+
+      - name: Recheck immutable handoff and current main after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_MAIN_COMMIT: ${{ github.sha }}
+        run: |
+          REMOTE_MAIN_COMMIT="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$CURRENT_MAIN_COMMIT" != "$REMOTE_MAIN_COMMIT" ]; then
+            echo "::error::Remote main advanced after approval input verification"
+            exit 1
+          fi
+          node build/release-evidence.mjs verify-tarball \
+            --evidence "$RUNNER_TEMP/npm-stage-input/packed.json" \
+            --tarball "$RUNNER_TEMP/npm-stage-input/coding-x-$EXPECTED_VERSION.tgz"
+          node build/release-evidence.mjs verify-dogfood-set \
+            --candidate "$RUNNER_TEMP/npm-stage-input/packed.json" \
+            --dogfood "$RUNNER_TEMP/npm-stage-input/dogfood.json"
           mkdir -p "$RUNNER_TEMP/stage-package"
-          tar -xzf "$RUNNER_TEMP/npm-candidate/coding-x-$EXPECTED_VERSION.tgz" \
+          tar -xzf "$RUNNER_TEMP/npm-stage-input/coding-x-$EXPECTED_VERSION.tgz" \
             -C "$RUNNER_TEMP/stage-package"
           test -f "$RUNNER_TEMP/stage-package/package/package.json"
           mkdir -p "$RUNNER_TEMP/stage-package/package/.git"
           printf '%s\n' "$CURRENT_MAIN_COMMIT" > "$RUNNER_TEMP/stage-package/package/.git/HEAD"
+
+      - name: Re-read all three repositories after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/dogfood-observations-current"
+          observe_repository() {
+            local role="$1" repository="$2" pr_number="$3" head_sha
+            gh api "repos/$repository/pulls/$pr_number" \
+              > "$RUNNER_TEMP/dogfood-observations-current/$role-pr.json"
+            head_sha="$(jq -er '.head.sha | select(test("^[0-9a-f]{40}$"))' \
+              "$RUNNER_TEMP/dogfood-observations-current/$role-pr.json")"
+            gh api --paginate --slurp "repos/$repository/issues/$pr_number/comments?per_page=100" \
+              > "$RUNNER_TEMP/dogfood-observations-current/$role-comments.json"
+            gh api --paginate --slurp \
+              "repos/$repository/commits/$head_sha/check-runs?per_page=100&filter=all" \
+              > "$RUNNER_TEMP/dogfood-observations-current/$role-checks.json"
+          }
+          observe_repository engine Xinzz995/coding-engine "$ENGINE_PR"
+          observe_repository go Xinzz995/coding-x-dogfood-go "$GO_PR"
+          observe_repository python Xinzz995/coding-x-dogfood-python "$PYTHON_PR"
+          node - "$RUNNER_TEMP/dogfood-observations-current" "$RUNNER_TEMP/observations-current.json" <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const [root, output] = process.argv.slice(2)
+          const repositories = {
+            engine: 'Xinzz995/coding-engine',
+            go: 'Xinzz995/coding-x-dogfood-go',
+            python: 'Xinzz995/coding-x-dogfood-python',
+          }
+          const read = name => JSON.parse(fs.readFileSync(path.join(root, name), 'utf8'))
+          const entries = Object.entries(repositories).map(([role, repository]) => ({
+            role,
+            repository,
+            pr: read(`${role}-pr.json`),
+            comments: read(`${role}-comments.json`).flat(),
+            checkRuns: read(`${role}-checks.json`).flatMap(page => page.check_runs),
+          }))
+          fs.writeFileSync(output, `${JSON.stringify({ schemaVersion: 1, entries }, null, 2)}\n`)
+          NODE
+          node build/release-evidence.mjs verify-dogfood \
+            --candidate "$RUNNER_TEMP/npm-stage-input/packed.json" \
+            --policy .release/dogfood-policy.json \
+            --observations "$RUNNER_TEMP/observations-current.json" \
+            --output "$RUNNER_TEMP/npm-stage-input/dogfood-current.json"
+          if ! cmp -s \
+            "$RUNNER_TEMP/npm-stage-input/dogfood.json" \
+            "$RUNNER_TEMP/npm-stage-input/dogfood-current.json"; then
+            echo "::error::Three-repository evidence changed during approval"
+            exit 1
+          fi
 
       - name: Submit the verified bytes through stage-only npm OIDC
         env:
           CURRENT_MAIN_COMMIT: ${{ github.sha }}
           STAGE_WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
-          # No project dependency or lifecycle script runs in this OIDC-enabled job.
           npm stage publish "$RUNNER_TEMP/stage-package/package" \
             --ignore-scripts --tag next --access public --provenance --json \
-            > "$RUNNER_TEMP/npm-candidate/stage.json"
+            > "$RUNNER_TEMP/npm-stage-input/stage.json"
           node build/release-evidence.mjs record-stage \
-            --candidate "$RUNNER_TEMP/npm-candidate/packed.json" \
+            --candidate "$RUNNER_TEMP/npm-stage-input/packed.json" \
+            --dogfood "$RUNNER_TEMP/npm-stage-input/dogfood.json" \
             --commit "$CURRENT_MAIN_COMMIT" \
             --candidate-workflow-run-id "$CANDIDATE_WORKFLOW_RUN_ID" \
             --stage-workflow-run-id "$STAGE_WORKFLOW_RUN_ID" \
             --require-node-major 24 \
             --min-npm 11.15.0 \
-            --stage-json "$RUNNER_TEMP/npm-candidate/stage.json" \
-            --output "$RUNNER_TEMP/npm-candidate/candidate.json"
+            --stage-json "$RUNNER_TEMP/npm-stage-input/stage.json" \
+            --output "$RUNNER_TEMP/npm-stage-input/candidate.json"
 
       - name: Preserve stage identity and exact-byte evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-stage-${{ inputs.version }}
           path: |
-            ${{ runner.temp }}/npm-candidate/candidate.json
-            ${{ runner.temp }}/npm-candidate/stage.json
+            ${{ runner.temp }}/npm-stage-input/candidate.json
+            ${{ runner.temp }}/npm-stage-input/dogfood.json
+            ${{ runner.temp }}/npm-stage-input/stage.json
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
 
       - name: Write maintainer handoff
         run: |
-          node - "$RUNNER_TEMP/npm-candidate/candidate.json" "$GITHUB_STEP_SUMMARY" <<'NODE'
+          node - "$RUNNER_TEMP/npm-stage-input/candidate.json" "$GITHUB_STEP_SUMMARY" <<'NODE'
           const fs = require('node:fs')
           const [evidencePath, summaryPath] = process.argv.slice(2)
           const evidence = JSON.parse(fs.readFileSync(evidencePath, 'utf8'))
           fs.appendFileSync(summaryPath, [
-            '## verified npm candidate staged',
+            '## machine-verified npm candidate staged',
             '',
             `- package: ${evidence.packageName}@${evidence.version}`,
             `- commit: ${evidence.commit}`,
+            `- candidate identity: ${evidence.candidateIdentityDigest}`,
+            `- dogfood set: ${evidence.dogfood.digest}`,
             `- candidate run ID: ${evidence.candidateWorkflowRunId}`,
             `- stage run ID: ${evidence.stageWorkflowRunId}`,
             `- stage ID: ${evidence.stageId}`,
             `- tarball SHA-256: ${evidence.tarball.sha256}`,
             `- requested tag after 2FA approval: ${evidence.requestedTag}`,
-            '',
-            'Verify the stage identity before 2FA approval.',
             '',
           ].join('\n'))
           NODE

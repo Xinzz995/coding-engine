@@ -150,7 +150,7 @@ describe('evaluateStoryValidationCurrentness', () => {
       referenceAliases: [
         { ref: 'refs/remotes/origin/main', target: DEFAULT_BRANCH_HEAD },
       ],
-      additionalPolicy: { domain: 'story-validation-v2', tdd: null },
+      additionalPolicy: { domain: 'story-validation-v3', tdd: null },
     });
   });
 
@@ -171,6 +171,26 @@ describe('evaluateStoryValidationCurrentness', () => {
     expect(formal).not.toBe(shadow);
     expect(shadow).not.toBe(nextShadow);
     expect(digestFor('shadow', '0.34.0')).toBe(shadow);
+  });
+
+  it('separates two candidate packages even when their semantic version is identical', () => {
+    const digestFor = (candidateIdentityDigest: string) =>
+      digestCandidateStoryValidationEnvironment({
+        contract,
+        headSha: HEAD,
+        defaultBranchGitHead: DEFAULT_BRANCH_HEAD,
+        tddConfig: null,
+        platform: 'linux',
+        runtimeIdentity: {
+          mode: 'shadow',
+          actualCodingXVersion: '0.35.0',
+          candidateIdentityDigest,
+        },
+      });
+
+    expect(digestFor(`sha256:${'a'.repeat(64)}`)).not.toBe(
+      digestFor(`sha256:${'b'.repeat(64)}`),
+    );
   });
 
   it('expires a shadow receipt in formal mode and in another candidate version', () => {

@@ -420,7 +420,12 @@ describe('runQualityInit', () => {
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(true);
     expect(readFileSync(join(root, QUALITY_WORKFLOW_PATH), 'utf8')).toContain('name: quality-gate');
     expect(client.labels).toEqual(
-      new Set(['quality-policy-approved', 'quality-policy-exception', 'quality-p1-deferral']),
+      new Set([
+        'quality-policy-approved',
+        'quality-policy-exception',
+        'quality-p1-deferral',
+        'ready-for-agent',
+      ]),
     );
 
     git(root, 'add', '.');

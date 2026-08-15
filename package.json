@@ -52,12 +52,10 @@
     "version": "node build/sync-plugin-versions.mjs && git add .claude-plugin/plugin.json .cursor-plugin/plugin.json .codex-plugin/plugin.json src/version.ts",
     "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "jsonrepair": "^3.15.0"
-  },
   "devDependencies": {
     "@types/node": "^22.20.1",
     "eslint": "^10.8.0",
+    "jsonrepair": "3.15.0",
     "prettier": "^3.9.6",
     "tsup": "^8.5.1",
     "tsx": "^4.23.9",

@@ -14,7 +14,11 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { readQualityContract, type QualityContract } from '../quality/contract.js';
+import {
+  digestQualityContract,
+  readQualityContract,
+  type QualityContract,
+} from '../quality/contract.js';
 import type { GitHubReviewReadClient } from '../quality/github.js';
 import type { WorkspaceSession, WorkspaceWriteData } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
@@ -26,6 +30,8 @@ import type { ManagedReviewObservation } from './managed-observation.js';
 import { RUNNER_TOOL_POLICY_VERSION } from './runner.js';
 import { readFinalReviewState } from './state.js';
 import { REVIEW_STATE_FILE, type ReviewAxis, type ReviewRemoteState } from './types.js';
+import { createFullGateProof } from '../engine/full-gate-proof.js';
+import { finalReviewMechanicalEnvironmentPolicy } from '../engine/story-validation-currentness.js';
 
 const roots: string[] = [];
 function makeFixtureRemovable(path: string): void {
@@ -395,6 +401,48 @@ describe('runFinalReview', () => {
     expect(result.exitCode).toBe(0);
     expect(calls).toEqual(['spec', 'engineering']);
     expect(result.state).toMatchObject({ status: 'passed', deliveryStatus: 'ready' });
+  });
+
+  it('reuses a full gate only when the final review input is exactly identical', async () => {
+    const exact = context();
+    exact.baseContractDigest = digestQualityContract(exact.baseContract);
+    const policy = finalReviewMechanicalEnvironmentPolicy(exact.baseContract, exact.baseSha);
+    const proof = createFullGateProof(
+      {
+        contract: exact.baseContract,
+        headSha: exact.headSha,
+        defaultBranchGitHead: exact.baseSha,
+        additionalRefs: policy.additionalRefs,
+        referenceAliases: policy.referenceAliases,
+      },
+      await gate(),
+    );
+    let gateCalls = 0;
+    const reused = await runFinalReview({
+      ...options(workspace(), exact),
+      reusableFullGate: proof,
+      gate: async () => {
+        gateCalls += 1;
+        return gate();
+      },
+      axisRunner: async (request) => output(request.axis),
+    });
+    expect(reused.exitCode).toBe(0);
+    expect(gateCalls).toBe(0);
+
+    const changed = context({ baseSha: 'f'.repeat(40) });
+    changed.baseContractDigest = digestQualityContract(changed.baseContract);
+    const rerun = await runFinalReview({
+      ...options(workspace(), changed),
+      reusableFullGate: proof,
+      gate: async () => {
+        gateCalls += 1;
+        return gate();
+      },
+      axisRunner: async (request) => output(request.axis),
+    });
+    expect(rerun.exitCode).toBe(0);
+    expect(gateCalls).toBe(1);
   });
 
   it('runs risk-triggered deep review and blocks P1 until human handling', async () => {

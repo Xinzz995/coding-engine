@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { delimiter, join, relative } from 'node:path';
+import { delimiter, dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runLoop } from './loop.js';
 import { readEvidence } from './evidence.js';
@@ -516,6 +516,7 @@ describe('runLoop clean validation checkout', () => {
       const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
       const fake = fakeBoundValidator(fixture.workspace, 'passed');
       const calls = join(fixture.projectRoot, 'bound-calls.txt');
+      const retainedContainers = new Set<string>();
       process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
       try {
         const first = await runLoop({
@@ -524,6 +525,7 @@ describe('runLoop clean validation checkout', () => {
           unsafeAllowProjectScopedRunnerForValidationTests: true,
           validationEnvironmentDigestForTests: undefined,
           beforeValidatorRequestForTests: (root) => {
+            retainedContainers.add(dirname(root));
             mkdirSync(join(root, 'node_modules'), { recursive: true });
             symlinkSync(
               join(fixture.projectRoot, 'source.txt'),
@@ -540,6 +542,7 @@ describe('runLoop clean validation checkout', () => {
           validated: false,
           validationReceipt: null,
         });
+        expect([...retainedContainers].some((path) => existsSync(path))).toBe(true);
 
         const second = await runLoop({
           ...strictConfig(fixture.workspace, fixture.instructionsDir),
@@ -551,6 +554,7 @@ describe('runLoop clean validation checkout', () => {
         expect(readFileSync(calls, 'utf8')).toBe('1');
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
+        for (const path of retainedContainers) rmSync(path, { recursive: true, force: true });
       }
     },
     90_000,
@@ -610,6 +614,7 @@ describe('runLoop clean validation checkout', () => {
     async () => {
       const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
       const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      const retainedContainers = new Set<string>();
       process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
       try {
         const first = await runLoop({
@@ -618,6 +623,7 @@ describe('runLoop clean validation checkout', () => {
           unsafeAllowProjectScopedRunnerForValidationTests: true,
           validationEnvironmentDigestForTests: undefined,
           beforeValidationCheckoutCleanupForTests: (root) => {
+            retainedContainers.add(dirname(root));
             mkdirSync(join(root, 'node_modules'), { recursive: true });
             symlinkSync(
               join(fixture.projectRoot, 'source.txt'),
@@ -633,6 +639,7 @@ describe('runLoop clean validation checkout', () => {
           validated: false,
           validationReceipt: null,
         });
+        expect([...retainedContainers].some((path) => existsSync(path))).toBe(true);
 
         const second = await runLoop({
           ...strictConfig(fixture.workspace, fixture.instructionsDir),
@@ -643,6 +650,7 @@ describe('runLoop clean validation checkout', () => {
         expect(second).toBe(2);
       } finally {
         delete process.env.CODING_X_CLAUDE_BIN;
+        for (const path of retainedContainers) rmSync(path, { recursive: true, force: true });
       }
     },
     90_000,

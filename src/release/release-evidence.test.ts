@@ -31,6 +31,8 @@ function rootFixture(): string {
     json(join(root, path), { version: '1.2.3' });
   mkdirSync(join(root, 'src'), { recursive: true });
   writeFileSync(join(root, 'src/version.ts'), "export const CODING_X_VERSION = '1.2.3';\n");
+  mkdirSync(join(root, 'dist'), { recursive: true });
+  writeFileSync(join(root, 'dist/cli.js'), '#!/usr/bin/env node\n');
   return root;
 }
 
@@ -49,6 +51,166 @@ function digest(bytes: Buffer) {
     shasum: createHash('sha1').update(bytes).digest('hex'),
     sha256: createHash('sha256').update(bytes).digest('hex'),
     integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+  };
+}
+
+function objectDigest(value: unknown): string {
+  return `sha256:${createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')}`;
+}
+
+function runtimeFor(root: string) {
+  const files = ['dist/cli.js', 'package.json']
+    .map((path) => {
+      const bytes = readFileSync(join(root, path));
+      return {
+        path,
+        size: bytes.byteLength,
+        sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+      };
+    })
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return {
+    algorithm: 'sha256-path-size-bytes-v1',
+    fileCount: files.length,
+    treeDigest: objectDigest({
+      domain: 'coding-x-candidate-runtime-tree-v1',
+      algorithm: 'sha256-path-size-bytes-v1',
+      files,
+    }),
+    files,
+  };
+}
+
+function candidateIdentityDigest(evidence: {
+  packageName: string;
+  version: string;
+  commit: string;
+  candidateWorkflowRunId: string;
+  tarball: { sha256: string };
+  runtime: ReturnType<typeof runtimeFor>;
+}): string {
+  return objectDigest({
+    schemaVersion: 1,
+    domain: 'coding-x-candidate-identity-v1',
+    packageName: evidence.packageName,
+    version: evidence.version,
+    commit: evidence.commit,
+    candidateWorkflowRunId: evidence.candidateWorkflowRunId,
+    tarballSha256: `sha256:${evidence.tarball.sha256}`,
+    runtimeTreeDigest: evidence.runtime.treeDigest,
+  });
+}
+
+function dogfoodSetFor(evidence: {
+  candidateIdentityDigest: string;
+  candidateWorkflowRunId: string;
+  tarball: { sha256: string };
+}) {
+  const proofs = [
+    ['engine', 'Xinzz995/coding-engine'],
+    ['go', 'Xinzz995/coding-x-dogfood-go'],
+    ['python', 'Xinzz995/coding-x-dogfood-python'],
+  ].map(([role, repository], index) => ({
+    role,
+    repository,
+    prNumber: index + 1,
+    headSha: String(index + 1).repeat(40),
+    proofDigest: `sha256:${String(index + 4).repeat(64)}`,
+    commentId: index + 10,
+    commentUrl: `https://github.com/${repository}/pull/${index + 1}#issuecomment-${index + 10}`,
+    completedAt: `2026-08-15T00:0${index}:00.000Z`,
+  }));
+  const base = {
+    schemaVersion: 1,
+    status: 'verified',
+    candidateIdentityDigest: evidence.candidateIdentityDigest,
+    candidateWorkflowRunId: evidence.candidateWorkflowRunId,
+    tarballSha256: `sha256:${evidence.tarball.sha256}`,
+    proofs,
+  };
+  return {
+    ...base,
+    digest: objectDigest({ domain: 'coding-x-candidate-dogfood-set-v1', evidence: base }),
+  };
+}
+
+function dogfoodCandidateFromJson(value: string): Parameters<typeof dogfoodSetFor>[0] {
+  const parsed = JSON.parse(value) as unknown;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('packed evidence fixture 必须是对象');
+  }
+  const root = parsed as Record<string, unknown>;
+  const tarballValue = root.tarball;
+  if (typeof tarballValue !== 'object' || tarballValue === null || Array.isArray(tarballValue)) {
+    throw new Error('packed evidence fixture tarball 必须是对象');
+  }
+  const tarball = tarballValue as Record<string, unknown>;
+  if (
+    typeof root.candidateIdentityDigest !== 'string' ||
+    typeof root.candidateWorkflowRunId !== 'string' ||
+    typeof tarball.sha256 !== 'string'
+  ) {
+    throw new Error('packed evidence fixture 缺少 Dogfood 身份字段');
+  }
+  return {
+    candidateIdentityDigest: root.candidateIdentityDigest,
+    candidateWorkflowRunId: root.candidateWorkflowRunId,
+    tarball: { sha256: tarball.sha256 },
+  };
+}
+
+function dogfoodProofFor(
+  candidate: {
+    packageName: string;
+    version: string;
+    commit: string;
+    candidateWorkflowRunId: string;
+    candidateIdentityDigest: string;
+    tarball: { sha256: string };
+    runtime: { treeDigest: string };
+  },
+  repository: string,
+  prNumber: number,
+  headSha: string,
+) {
+  const proof = {
+    schemaVersion: 1,
+    status: 'passed',
+    repository: { provider: 'github', fullName: repository, defaultBranch: 'main' },
+    candidate: {
+      schemaVersion: 1,
+      packageName: candidate.packageName,
+      version: candidate.version,
+      commit: candidate.commit,
+      candidateWorkflowRunId: candidate.candidateWorkflowRunId,
+      tarballSha256: `sha256:${candidate.tarball.sha256}`,
+      runtimeTreeDigest: candidate.runtime.treeDigest,
+      digest: candidate.candidateIdentityDigest,
+    },
+    review: {
+      prNumber,
+      baseSha: 'e'.repeat(40),
+      headSha,
+      bindingDigest: `sha256:${'a'.repeat(64)}`,
+      storyValidationDigest: `sha256:${'b'.repeat(64)}`,
+      storyValidationEnvironmentDigest: `sha256:${'c'.repeat(64)}`,
+      remoteStatus: 'ready',
+      remoteCheckedAt: '2026-08-15T00:00:00.000Z',
+      checks: [
+        {
+          name: 'quality-gate',
+          status: 'completed',
+          conclusion: 'success',
+          appId: 15_368,
+          appSlug: 'github-actions',
+        },
+      ],
+    },
+    completedAt: '2026-08-15T00:01:00.000Z',
+  };
+  return {
+    ...proof,
+    proofDigest: objectDigest({ domain: 'coding-x-candidate-dogfood-proof-v1', proof }),
   };
 }
 
@@ -255,6 +417,159 @@ describe('release evidence script', () => {
     }
   });
 
+  it('accepts exactly one owner-published proof from each fixed dogfood repository', () => {
+    const root = rootFixture();
+    const bytes = Buffer.from('candidate with dogfood proofs');
+    const sums = digest(bytes);
+    const tarball = join(root, 'coding-x-1.2.3.tgz');
+    const packJson = join(root, 'pack.json');
+    const candidatePath = join(root, 'packed.json');
+    const policyPath = join(root, 'dogfood-policy.json');
+    const observationsPath = join(root, 'observations.json');
+    const outputPath = join(root, 'dogfood.json');
+    writeFileSync(tarball, bytes);
+    json(packJson, [
+      {
+        name: 'coding-x',
+        version: '1.2.3',
+        filename: 'coding-x-1.2.3.tgz',
+        shasum: sums.shasum,
+        integrity: sums.integrity,
+        files: runtimeFor(root).files.map(({ path, size }) => ({ path, size, mode: 0o644 })),
+      },
+    ]);
+    const packed = run(
+      [
+        'record-pack',
+        '--root',
+        root,
+        '--expected-version',
+        '1.2.3',
+        '--commit',
+        'a'.repeat(40),
+        '--candidate-workflow-run-id',
+        '123',
+        '--min-npm',
+        '0.0.0',
+        '--pack-json',
+        packJson,
+        '--tarball',
+        tarball,
+        '--output',
+        candidatePath,
+      ],
+      root,
+    );
+    expect(packed.status, packed.stderr).toBe(0);
+    const candidate = JSON.parse(readFileSync(candidatePath, 'utf8')) as unknown as Parameters<
+      typeof dogfoodProofFor
+    >[0];
+    const repositories = [
+      { role: 'engine', fullName: 'Xinzz995/coding-engine', defaultBranch: 'main' },
+      { role: 'go', fullName: 'Xinzz995/coding-x-dogfood-go', defaultBranch: 'main' },
+      { role: 'python', fullName: 'Xinzz995/coding-x-dogfood-python', defaultBranch: 'main' },
+    ];
+    json(policyPath, {
+      schemaVersion: 1,
+      proofMarker: '<!-- coding-x-candidate-proof-v1 -->',
+      trustedAuthors: ['Xinzz995'],
+      repositories,
+    });
+    const entries = repositories.map((repository, index) => {
+      const prNumber = index + 11;
+      const headSha = String(index + 1).repeat(40);
+      const proof = dogfoodProofFor(candidate, repository.fullName, prNumber, headSha);
+      return {
+        role: repository.role,
+        repository: repository.fullName,
+        pr: {
+          number: prNumber,
+          state: 'open',
+          draft: false,
+          base: { ref: 'main', sha: 'e'.repeat(40) },
+          head: { sha: headSha },
+          mergeable: true,
+          mergeable_state: 'clean',
+        },
+        checkRuns: [
+          {
+            id: index + 201,
+            name: 'quality-gate',
+            head_sha: headSha,
+            status: 'completed',
+            conclusion: 'success',
+            app: { id: 15_368, slug: 'github-actions' },
+          },
+        ],
+        comments: [
+          {
+            id: index + 101,
+            html_url: `https://github.com/${repository.fullName}/pull/${prNumber}#issuecomment-${index + 101}`,
+            user: { login: 'Xinzz995' },
+            author_association: 'OWNER',
+            body: `<!-- coding-x-candidate-proof-v1 -->\n\`\`\`json\n${JSON.stringify(proof)}\n\`\`\``,
+          },
+        ],
+      };
+    });
+    json(observationsPath, { schemaVersion: 1, entries });
+    const args = [
+      'verify-dogfood',
+      '--candidate',
+      candidatePath,
+      '--policy',
+      policyPath,
+      '--observations',
+      observationsPath,
+      '--output',
+      outputPath,
+    ];
+    const verified = run(args, root);
+    expect(verified.status, verified.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(outputPath, 'utf8'))).toMatchObject({
+      status: 'verified',
+      candidateIdentityDigest: candidate.candidateIdentityDigest,
+      proofs: repositories.map(({ role, fullName }) => ({ role, repository: fullName })),
+    });
+
+    json(observationsPath, { schemaVersion: 1, entries: entries.slice(0, 2) });
+    const missing = run(args, root);
+    expect(missing.status).toBe(1);
+    expect(missing.stderr).toContain('observations 格式非法');
+
+    const wrongAuthor = structuredClone(entries);
+    wrongAuthor[2].comments[0].user.login = 'attacker';
+    json(observationsPath, { schemaVersion: 1, entries: wrongAuthor });
+    const untrusted = run(args, root);
+    expect(untrusted.status).toBe(1);
+    expect(untrusted.stderr).toContain('owner 发布');
+
+    const staleBase = structuredClone(entries);
+    staleBase[0].pr.base.sha = 'f'.repeat(40);
+    json(observationsPath, { schemaVersion: 1, entries: staleBase });
+    const stale = run(args, root);
+    expect(stale.status).toBe(1);
+    expect(stale.stderr).toContain('Review/PR 绑定非法');
+
+    const rerunFailed = structuredClone(entries);
+    rerunFailed[1].checkRuns.push({
+      ...rerunFailed[1].checkRuns[0],
+      id: 999,
+      conclusion: 'failure',
+    });
+    json(observationsPath, { schemaVersion: 1, entries: rerunFailed });
+    const failedCurrentCheck = run(args, root);
+    expect(failedCurrentCheck.status).toBe(1);
+    expect(failedCurrentCheck.stderr).toContain('当前检查 quality-gate 未保持成功');
+
+    const blocked = structuredClone(entries);
+    blocked[2].pr.mergeable_state = 'blocked';
+    json(observationsPath, { schemaVersion: 1, entries: blocked });
+    const notMergeable = run(args, root);
+    expect(notMergeable.status).toBe(1);
+    expect(notMergeable.stderr).toContain('PR 尚未 ready');
+  });
+
   it('binds the exact packed bytes to the npm stage id and rejects mismatches', () => {
     const root = rootFixture();
     const bytes = Buffer.from('fixed candidate tarball bytes');
@@ -262,6 +577,7 @@ describe('release evidence script', () => {
     const tarball = join(root, 'coding-x-1.2.3.tgz');
     const packJson = join(root, 'pack.json');
     const packedEvidence = join(root, 'packed.json');
+    const dogfoodEvidence = join(root, 'dogfood.json');
     const stagedEvidence = join(root, 'candidate.json');
     const stageJson = join(root, 'stage.json');
     writeFileSync(tarball, bytes);
@@ -272,6 +588,7 @@ describe('release evidence script', () => {
         filename: 'coding-x-1.2.3.tgz',
         shasum: sums.shasum,
         integrity: sums.integrity,
+        files: runtimeFor(root).files.map(({ path, size }) => ({ path, size, mode: 0o644 })),
       },
     ]);
 
@@ -299,11 +616,15 @@ describe('release evidence script', () => {
     );
     expect(packed.status, packed.stderr).toBe(0);
     expect(readFileSync(packedEvidence, 'utf8')).toContain(sums.sha256);
+    json(
+      dogfoodEvidence,
+      dogfoodSetFor(dogfoodCandidateFromJson(readFileSync(packedEvidence, 'utf8'))),
+    );
 
     const legacyEvidence = join(root, 'legacy-packed.json');
     json(legacyEvidence, {
       ...JSON.parse(readFileSync(packedEvidence, 'utf8')),
-      schemaVersion: 1,
+      schemaVersion: 2,
     });
     const legacy = run(
       ['verify-tarball', '--evidence', legacyEvidence, '--tarball', tarball],
@@ -326,6 +647,8 @@ describe('release evidence script', () => {
         packedEvidence,
         '--stage-json',
         stageJson,
+        '--dogfood',
+        dogfoodEvidence,
         '--commit',
         'a'.repeat(40),
         '--candidate-workflow-run-id',
@@ -349,6 +672,8 @@ describe('release evidence script', () => {
         packedEvidence,
         '--stage-json',
         stageJson,
+        '--dogfood',
+        dogfoodEvidence,
         '--commit',
         'a'.repeat(40),
         '--candidate-workflow-run-id',
@@ -379,6 +704,8 @@ describe('release evidence script', () => {
         packedEvidence,
         '--stage-json',
         stageJson,
+        '--dogfood',
+        dogfoodEvidence,
         '--commit',
         'a'.repeat(40),
         '--candidate-workflow-run-id',
@@ -411,8 +738,8 @@ describe('release evidence script', () => {
     const tagsPath = join(root, 'tags.json');
     const attestationsPath = join(root, 'attestations.json');
     writeFileSync(tarball, bytes);
-    json(evidencePath, {
-      schemaVersion: 2,
+    const evidence = {
+      schemaVersion: 3,
       status: 'staged',
       packageName: 'coding-x',
       version: '1.2.3',
@@ -434,7 +761,16 @@ describe('release evidence script', () => {
         sha256: sums.sha256,
         integrity: sums.integrity,
       },
+      runtime: runtimeFor(root),
       toolchain: { node: '24.0.0', npm: '11.15.0' },
+    };
+    const identifiedEvidence = {
+      ...evidence,
+      candidateIdentityDigest: candidateIdentityDigest(evidence),
+    };
+    json(evidencePath, {
+      ...identifiedEvidence,
+      dogfood: dogfoodSetFor(identifiedEvidence),
     });
     json(metadataPath, {
       name: 'coding-x',

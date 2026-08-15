@@ -58,6 +58,14 @@ import {
   recordReviewDecision,
 } from './review/decision-command.js';
 import { createManagedReviewObservation } from './review/managed-observation.js';
+import {
+  verifyCandidateRuntime,
+  type VerifiedCandidateIdentity,
+} from './release/candidate-identity.js';
+import { publishCandidateProof } from './release/candidate-proof-publish.js';
+import { runReadyIssue } from './issue/issue-run.js';
+import { readFinalReviewState } from './review/state.js';
+import { digestReviewBinding } from './review/binding.js';
 
 export interface CliConfig {
   command:
@@ -71,11 +79,16 @@ export interface CliConfig {
     | 'models'
     | 'config'
     | 'hooks'
-    | 'workspace';
+    | 'workspace'
+    | 'candidate'
+    | 'issue';
   /** 全局帮助请求；先于任何子命令校验与副作用处理。 */
   help: boolean;
   configAction: 'path' | 'init' | 'validate' | null;
   hooksAction: CursorHookAction | null;
+  candidateAction: 'publish-proof' | null;
+  issueAction: 'run' | null;
+  issueNumber: number | null;
   workspaceAction:
     'init' | 'apply-prd' | 'record-review-decision' | 'recover' | 'resume-mutation' | null;
   kind: AgentKind;
@@ -97,6 +110,8 @@ export interface CliConfig {
   stallLimit: number;
   /** 候选版本 Dogfood；成功也固定返回 7，不能表示可交付。 */
   shadow: boolean;
+  /** 候选构建证据；提供时必须逐文件证明当前实际 CLI 就是该候选。 */
+  candidateEvidence: string | undefined;
   /** init 从用户确认过的文件读取契约；相对路径基于项目根。 */
   contractFile: string | undefined;
   /** init 明确跳过是/否提示；必须同时提供已经人工确认的 --contract。 */
@@ -140,6 +155,8 @@ runner:
   config path|init|validate      查看、初始化或校验全局模型配置
   hooks cursor install|status|remove
                                  安装、检查或移除当前项目的 Cursor TDD 提交前检查
+  candidate publish-proof        核对当前仓库、PR 与提交后发布候选 Dogfood 机器证明
+  issue run <编号> [runner]       从 ready-for-agent Issue 继续唯一分支与 PR
   help                           显示本帮助
 
 选项:
@@ -156,8 +173,9 @@ runner:
   --port <n>                     仪表盘端口（仅接受 0–65535 的十进制整数；0 由系统选择可用端口；默认 7331）
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
-  --json                         JSON 输出（init/workspace/doctor/status/models）
+  --json                         JSON 输出（init/workspace/doctor/status/models/issue/candidate）
   --shadow                       候选 Dogfood；仅用于 run、doctor、workspace apply-prd，永远不可交付
+  --candidate-evidence <file>    候选 packed.json；与 --shadow 同用并核对当前 CLI 实际文件
   --contract <file>              init 使用已确认的质量契约文件
   --input <file>                 workspace 写命令的严格 JSON 请求文件
   --yes                          init 接受已展示的变更；必须同时提供 --contract
@@ -238,6 +256,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
       json: { type: 'boolean' },
       'stall-limit': { type: 'string' },
       shadow: { type: 'boolean' },
+      'candidate-evidence': { type: 'string' },
       contract: { type: 'string' },
       yes: { type: 'boolean' },
       local: { type: 'boolean' },
@@ -265,11 +284,15 @@ export function parseCliArgs(argv: string[]): CliConfig {
                   ? 'models'
                   : first === 'config'
                     ? 'config'
-                    : first === 'hooks'
+                  : first === 'hooks'
                       ? 'hooks'
                       : first === 'workspace'
                         ? 'workspace'
-                        : 'run';
+                        : first === 'candidate'
+                          ? 'candidate'
+                          : first === 'issue'
+                            ? 'issue'
+                            : 'run';
   if (!help && command === 'init' && positionals.length > 1) {
     throw new Error('❌ init 不接受额外位置参数');
   }
@@ -316,6 +339,44 @@ export function parseCliArgs(argv: string[]): CliConfig {
   if (!help && command === 'hooks' && positionals.length > 3) {
     throw new Error(`❌ hooks cursor ${hooksAction} 不接受额外位置参数`);
   }
+  let candidateAction: CliConfig['candidateAction'] = null;
+  if (command === 'candidate') {
+    if (positionals[1] === 'publish-proof') candidateAction = 'publish-proof';
+    else if (!help) throw new Error('❌ candidate 子命令必须是 publish-proof');
+  }
+  if (!help && command === 'candidate' && positionals.length > 2) {
+    throw new Error(`❌ candidate ${candidateAction} 不接受额外位置参数`);
+  }
+  let issueAction: CliConfig['issueAction'] = null;
+  let issueNumber: number | null = null;
+  if (command === 'issue') {
+    if (positionals[1] !== 'run') {
+      if (!help) throw new Error('❌ issue 子命令必须是 run <编号> [runner]');
+    } else {
+      issueAction = 'run';
+      const rawNumber = positionals[2];
+      if (!help && (rawNumber === undefined || !/^[1-9]\d*$/u.test(rawNumber))) {
+        throw new Error('❌ issue run 必须指定正整数 Issue 编号');
+      }
+      if (rawNumber !== undefined && /^[1-9]\d*$/u.test(rawNumber)) issueNumber = Number(rawNumber);
+      const issueRunner = positionals[3];
+      if (
+        !help &&
+        issueRunner !== undefined &&
+        issueRunner !== 'claude' &&
+        issueRunner !== 'codex' &&
+        issueRunner !== 'cursor'
+      ) {
+        throw new Error('❌ issue run runner 必须是 claude、codex 或 cursor');
+      }
+    }
+  }
+  if (!help && command === 'issue' && positionals.length > 4) {
+    throw new Error('❌ issue run 不接受 runner 以外的额外位置参数');
+  }
+  if (!help && command === 'issue' && values['keep-open'] === true) {
+    throw new Error('❌ issue run 不支持 --keep-open；运行结束必须写回 Issue 状态');
+  }
   let workspaceAction: CliConfig['workspaceAction'] = null;
   if (command === 'workspace') {
     const rawAction = positionals[1];
@@ -345,6 +406,25 @@ export function parseCliArgs(argv: string[]): CliConfig {
   ) {
     throw new Error('❌ --shadow 只能用于 run、doctor 或 workspace apply-prd');
   }
+  const candidateEvidenceAllowed =
+    command === 'run' ||
+    command === 'doctor' ||
+    (command === 'workspace' && workspaceAction === 'apply-prd');
+  if (!help && values['candidate-evidence'] !== undefined && !candidateEvidenceAllowed) {
+    throw new Error(
+      '❌ --candidate-evidence 只能用于 run、doctor 或 workspace apply-prd',
+    );
+  }
+  if (
+    !help &&
+    values['candidate-evidence'] !== undefined &&
+    values['candidate-evidence'].trim() === ''
+  ) {
+    throw new Error('❌ --candidate-evidence 必须指定 packed.json 路径');
+  }
+  if (!help && values['candidate-evidence'] !== undefined && values.shadow !== true) {
+    throw new Error('❌ --candidate-evidence 必须与 --shadow 同时使用');
+  }
   if (
     !help &&
     values.input !== undefined &&
@@ -361,7 +441,8 @@ export function parseCliArgs(argv: string[]): CliConfig {
   ) {
     throw new Error(`❌ workspace ${workspaceAction} 必须指定 --input <file>`);
   }
-  const runnerPositional = command === 'models' ? positionals[1] : first;
+  const runnerPositional =
+    command === 'models' ? positionals[1] : command === 'issue' ? positionals[3] : first;
   if (
     !help &&
     command === 'models' &&
@@ -394,7 +475,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
   let stallLimit = 3;
   if (values['stall-limit'] !== undefined) {
     const raw = values['stall-limit'];
-    if (!help && command === 'run' && !/^[1-9]\d*$/.test(raw)) {
+    if (!help && (command === 'run' || command === 'issue') && !/^[1-9]\d*$/.test(raw)) {
       throw new Error(`❌ --stall-limit 必须是正整数，收到「${raw}」`);
     }
     stallLimit = Number(raw);
@@ -416,6 +497,9 @@ export function parseCliArgs(argv: string[]): CliConfig {
     help,
     configAction,
     hooksAction,
+    candidateAction,
+    issueAction,
+    issueNumber,
     workspaceAction,
     kind,
     kindExplicit,
@@ -434,6 +518,7 @@ export function parseCliArgs(argv: string[]): CliConfig {
     json: values.json ?? false,
     stallLimit,
     shadow: values.shadow ?? false,
+    candidateEvidence: values['candidate-evidence'],
     contractFile: values.contract,
     yes: values.yes ?? false,
     local: values.local ?? false,
@@ -620,6 +705,20 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
+  let candidateIdentity: VerifiedCandidateIdentity | undefined;
+  if (cfg.candidateEvidence !== undefined) {
+    try {
+      candidateIdentity = verifyCandidateRuntime({
+        evidencePath: cfg.candidateEvidence,
+        packageRoot: resolve(dirname(fileURLToPath(import.meta.url)), '..'),
+        expectedVersion: CODING_X_VERSION,
+      });
+    } catch (error) {
+      console.error(`❌ ${error instanceof Error ? error.message : String(error)}`);
+      return 2;
+    }
+  }
+
   if (cfg.command === 'hooks') {
     const here = dirname(fileURLToPath(import.meta.url));
     const bundledCandidates = [
@@ -635,6 +734,90 @@ export async function main(argv: string[]): Promise<number> {
     if (hookResult.exitCode === 0) console.log(hookResult.message);
     else console.error(hookResult.message);
     return hookResult.exitCode;
+  }
+
+  if (cfg.command === 'candidate') {
+    try {
+      const result = publishCandidateProof({
+        root: process.cwd(),
+        workspace: resolve(cfg.workspace),
+      });
+      if (cfg.json) console.log(JSON.stringify({ ...result, exitCode: 0 }, null, 2));
+      else {
+        console.log(
+          `✅ 候选 Dogfood 机器证明已${result.status === 'created' ? '发布' : '更新'}：${result.url}`,
+        );
+      }
+      return 0;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (cfg.json) console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
+      else console.error(`❌ 候选证明发布失败：${message}`);
+      return 2;
+    }
+  }
+
+  if (cfg.command === 'issue') {
+    try {
+      const instructionsDir = join(dirname(fileURLToPath(import.meta.url)), 'instructions');
+      const result = await runReadyIssue({
+        root: process.cwd(),
+        workspaceBase: cfg.workspace,
+        issueNumber: cfg.issueNumber!,
+        runEngine: async ({ workspace }) => {
+          const exitCode = await runLoop({
+            kind: cfg.kind,
+            kindExplicit: cfg.kindExplicit,
+            maxIterations: cfg.maxIterations,
+            devTimeoutMs: cfg.devTimeoutMs,
+            valTimeoutMs: cfg.valTimeoutMs,
+            builderModel: cfg.builderModel,
+            validatorModel: cfg.validatorModel,
+            reviewModel: cfg.reviewModel,
+            escalationModel: cfg.escalationModel,
+            workspace,
+            instructionsDir,
+            port: cfg.port,
+            keepOpen: false,
+            stallLimit: cfg.stallLimit,
+            shadow: false,
+            actualVersion: CODING_X_VERSION,
+          });
+          const review = readFinalReviewState(workspace);
+          const evidence =
+            review.status === 'ready' && review.state.schemaVersion !== 1
+              ? {
+                  reviewBindingDigest: digestReviewBinding(review.state.binding),
+                  storyValidationDigest: review.state.binding.storyValidationDigest,
+                }
+              : {};
+          return {
+            exitCode,
+            message:
+              exitCode === 0
+                ? '当前 PR 已取得可信结论'
+                : exitCode === 6
+                  ? '本地已完成，等待当前提交的远端检查'
+                  : `coding-x 以退出码 ${exitCode} 停止`,
+            evidence,
+          };
+        },
+      });
+      if (cfg.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        const emit = result.exitCode === 0 ? console.log : console.error;
+        emit(
+          `${result.exitCode === 0 ? '✅' : result.exitCode === 6 ? '⏳' : '❌'} ${result.state.message}\n` +
+            `   PR: ${result.pullRequestUrl}`,
+        );
+      }
+      return result.exitCode;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (cfg.json) console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
+      else console.error(`❌ Issue 运行失败：${message}`);
+      return 2;
+    }
   }
 
   if (cfg.command === 'workspace') {
@@ -1017,6 +1200,7 @@ export async function main(argv: string[]): Promise<number> {
     stallLimit: cfg.stallLimit,
     shadow: cfg.shadow,
     actualVersion: CODING_X_VERSION,
+    candidateIdentity,
   });
 }
 

@@ -14,6 +14,7 @@ export const POLICY_WORKFLOW_PATH = '.github/workflows/policy-guard.yml';
 export const PULL_REQUEST_TEMPLATE_PATH = '.github/PULL_REQUEST_TEMPLATE.md';
 export const P1_ISSUE_TEMPLATE_PATH = '.github/ISSUE_TEMPLATE/quality-p1.yml';
 export const POLICY_ISSUE_TEMPLATE_PATH = '.github/ISSUE_TEMPLATE/quality-policy.yml';
+export const READY_ISSUE_TEMPLATE_PATH = '.github/ISSUE_TEMPLATE/ready-for-agent.yml';
 
 /** 官方 setup Actions v7 的完整提交标识；升级必须通过政策 PR。 */
 export const CHECKOUT_ACTION_SHA = '3d3c42e5aac5ba805825da76410c181273ba90b1';
@@ -448,6 +449,47 @@ body:
 `;
 }
 
+function readyIssueTemplate(): string {
+  return `# Generated from .coding-x/quality.json. Change the contract, then regenerate.
+name: 'Agent 执行任务'
+description: '建立一个可由 coding-x 显式启动的单 Issue、单分支、单 PR 任务'
+title: ''
+body:
+  - type: markdown
+    attributes:
+      value: '填写并人工确认后再添加 ready-for-agent 标签；创建 Issue 本身不会启动运行。'
+  - type: textarea
+    id: goal
+    attributes:
+      label: 本次目标
+      description: 本次改动必须完成的行为
+    validations:
+      required: true
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: 明确的非目标
+      description: 本次刻意不处理的内容
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 每行一个可判定条目，使用 Markdown 列表
+      placeholder: '- 第一个可判定结果'
+    validations:
+      required: true
+  - type: textarea
+    id: risk
+    attributes:
+      label: 风险说明
+      description: 影响范围、回退方式、数据或兼容性风险
+    validations:
+      required: true
+`;
+}
+
 export function renderManagedGitHubFiles(contract: QualityContract): Record<string, string> {
   return {
     [QUALITY_WORKFLOW_PATH]: renderQualityGateWorkflow(contract),
@@ -467,5 +509,6 @@ export function renderManagedGitHubFiles(contract: QualityContract): Record<stri
       'quality-policy-exception',
       contract.exceptions.policy.maxDays,
     ),
+    [READY_ISSUE_TEMPLATE_PATH]: readyIssueTemplate(),
   };
 }

@@ -6,7 +6,7 @@
 
 coding-x：Ralph 自动化编码 harness——把 Developer → Validator 循环固化成确定性程序。同一仓库既是 npm 包（TS 引擎，`npx coding-x`），也是多工具插件（skills + commands）。
 
-技术栈：TypeScript（strict, ESM）/ Node ≥22；tsup 构建、tsx 开发、Vitest 测试；引擎唯一运行时依赖 jsonrepair。
+技术栈：TypeScript（strict, ESM）/ Node ≥22；tsup 构建、tsx 开发、Vitest 测试；唯一第三方运行库 jsonrepair 在构建时并入发布包，安装后不再加载包外运行依赖。
 
 ## 关键命令
 

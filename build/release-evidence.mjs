@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PLUGIN_MANIFESTS, RUNTIME_VERSION_SOURCE } from './sync-plugin-versions.mjs';
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const PACKAGE_NAME = 'coding-x';
 const STAGE_TAG = 'next';
 const STABLE_TAG = 'latest';
@@ -16,6 +16,15 @@ const SOURCE_REPOSITORY = 'https://github.com/Xinzz995/coding-engine';
 const EXACT_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GIT_SHA = /^[0-9a-f]{40}$/;
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const RUNTIME_TREE_ALGORITHM = 'sha256-path-size-bytes-v1';
+const RUNTIME_TREE_DOMAIN = 'coding-x-candidate-runtime-tree-v1';
+const CANDIDATE_IDENTITY_DOMAIN = 'coding-x-candidate-identity-v1';
+const CANDIDATE_PROOF_DOMAIN = 'coding-x-candidate-dogfood-proof-v1';
+const DOGFOOD_SET_DOMAIN = 'coding-x-candidate-dogfood-set-v1';
+const GITHUB_ACTIONS_APP_ID = 15_368;
+const MAX_RUNTIME_FILES = 4096;
+const MAX_RUNTIME_FILE_BYTES = 64 * 1024 * 1024;
 
 function fail(message) {
   throw new Error(message);
@@ -144,6 +153,147 @@ function hashes(path) {
   };
 }
 
+function sha256Digest(value) {
+  return `sha256:${createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')}`;
+}
+
+function candidateRuntimeTreeDigest(files) {
+  return sha256Digest({
+    domain: RUNTIME_TREE_DOMAIN,
+    algorithm: RUNTIME_TREE_ALGORITHM,
+    files,
+  });
+}
+
+function candidateIdentityDigest(evidence) {
+  return sha256Digest({
+    schemaVersion: 1,
+    domain: CANDIDATE_IDENTITY_DOMAIN,
+    packageName: evidence.packageName,
+    version: evidence.version,
+    commit: evidence.commit,
+    candidateWorkflowRunId: evidence.candidateWorkflowRunId,
+    tarballSha256: `sha256:${evidence.tarball.sha256}`,
+    runtimeTreeDigest: evidence.runtime.treeDigest,
+  });
+}
+
+function runtimePath(value, index) {
+  if (
+    typeof value !== 'string' ||
+    value === '' ||
+    value.includes('\\') ||
+    value.includes('\0') ||
+    isAbsolute(value) ||
+    value.split('/').some((part) => part === '' || part === '.' || part === '..')
+  ) {
+    fail(`npm pack files[${index}].path 非法`);
+  }
+  return value;
+}
+
+function runtimeTreeFromPack(root, pack) {
+  if (
+    !Array.isArray(pack.files) ||
+    pack.files.length < 2 ||
+    pack.files.length > MAX_RUNTIME_FILES
+  ) {
+    fail('npm pack 没有返回有界的完整文件清单');
+  }
+  const canonicalRoot = realpathSync(root);
+  const files = pack.files
+    .map((entry, index) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        fail(`npm pack files[${index}] 非法`);
+      }
+      const path = runtimePath(entry.path, index);
+      const target = resolve(canonicalRoot, ...path.split('/'));
+      const relation = relative(canonicalRoot, target);
+      if (
+        relation === '' ||
+        relation === '..' ||
+        relation.startsWith(`..${sep}`) ||
+        isAbsolute(relation)
+      ) {
+        fail(`npm pack 文件解析到项目根之外：${path}`);
+      }
+      const info = lstatSync(target);
+      if (info.isSymbolicLink() || !info.isFile() || info.nlink !== 1) {
+        fail(`npm pack 文件不是独立普通文件：${path}`);
+      }
+      if (realpathSync(target) !== target) fail(`npm pack 文件经过链接目录：${path}`);
+      const bytes = readFileSync(target);
+      if (
+        !Number.isSafeInteger(entry.size) ||
+        entry.size < 0 ||
+        entry.size > MAX_RUNTIME_FILE_BYTES ||
+        entry.size !== bytes.byteLength
+      ) {
+        fail(`npm pack 文件大小与源文件不一致：${path}`);
+      }
+      return {
+        path,
+        size: bytes.byteLength,
+        sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+      };
+    })
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  const paths = files.map((file) => file.path);
+  if (new Set(paths).size !== paths.length) fail('npm pack 文件清单含重复路径');
+  if (!paths.includes('package.json') || !paths.includes('dist/cli.js')) {
+    fail('npm pack 文件清单缺少 package.json 或 dist/cli.js');
+  }
+  return {
+    algorithm: RUNTIME_TREE_ALGORITHM,
+    fileCount: files.length,
+    treeDigest: candidateRuntimeTreeDigest(files),
+    files,
+  };
+}
+
+function verifyRuntimeTree(runtime) {
+  if (
+    !runtime ||
+    typeof runtime !== 'object' ||
+    Array.isArray(runtime) ||
+    runtime.algorithm !== RUNTIME_TREE_ALGORITHM ||
+    !Array.isArray(runtime.files) ||
+    runtime.files.length < 2 ||
+    runtime.files.length > MAX_RUNTIME_FILES ||
+    runtime.fileCount !== runtime.files.length
+  ) {
+    fail('候选证据缺少合法的运行文件树');
+  }
+  const paths = [];
+  for (const [index, entry] of runtime.files.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail(`候选运行文件 ${index} 非法`);
+    }
+    const path = runtimePath(entry.path, index);
+    paths.push(path);
+    if (
+      !Number.isSafeInteger(entry.size) ||
+      entry.size < 0 ||
+      entry.size > MAX_RUNTIME_FILE_BYTES ||
+      !SHA256_DIGEST.test(entry.sha256 ?? '')
+    ) {
+      fail(`候选运行文件身份非法：${path}`);
+    }
+  }
+  if (
+    new Set(paths).size !== paths.length ||
+    paths.some((path, index) => path !== [...paths].sort()[index]) ||
+    !paths.includes('package.json') ||
+    !paths.includes('dist/cli.js')
+  ) {
+    fail('候选运行文件路径集合非法');
+  }
+  const expected = candidateRuntimeTreeDigest(runtime.files);
+  if (!SHA256_DIGEST.test(runtime.treeDigest ?? '') || runtime.treeDigest !== expected) {
+    fail('候选运行文件树摘要非法');
+  }
+}
+
 function onePackEntry(value) {
   if (!Array.isArray(value) || value.length !== 1 || !value[0] || typeof value[0] !== 'object') {
     fail('npm pack --json 必须返回唯一候选包');
@@ -204,6 +354,14 @@ function verifyEvidenceIdentity(evidence) {
   if (typeof evidence.toolchain?.node !== 'string' || typeof evidence.toolchain?.npm !== 'string') {
     fail('候选证据缺少工具链身份');
   }
+  verifyRuntimeTree(evidence.runtime);
+  if (
+    !SHA256_DIGEST.test(evidence.candidateIdentityDigest ?? '') ||
+    evidence.candidateIdentityDigest !== candidateIdentityDigest(evidence)
+  ) {
+    fail('候选证据的候选身份摘要非法');
+  }
+  if (evidence.status === 'staged') verifyDogfoodSet(evidence.dogfood, evidence);
   if (
     evidence.status === 'staged' &&
     (typeof evidence.stageToolchain?.node !== 'string' ||
@@ -215,6 +373,404 @@ function verifyEvidenceIdentity(evidence) {
   ) {
     fail('候选证据缺少合法的暂存身份或暂存工具链');
   }
+}
+
+function verifyDogfoodSet(value, candidate) {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    value.schemaVersion !== 1 ||
+    value.status !== 'verified' ||
+    value.candidateIdentityDigest !== candidate.candidateIdentityDigest ||
+    value.candidateWorkflowRunId !== candidate.candidateWorkflowRunId ||
+    value.tarballSha256 !== `sha256:${candidate.tarball.sha256}` ||
+    !Array.isArray(value.proofs) ||
+    value.proofs.length !== 3
+  ) {
+    fail('三仓 Dogfood 汇总证据与候选身份不一致');
+  }
+  const roles = value.proofs.map((proof) => proof?.role);
+  const repositories = value.proofs.map((proof) => proof?.repository);
+  if (
+    !['engine', 'go', 'python'].every((role) => roles.includes(role)) ||
+    new Set(roles).size !== 3 ||
+    new Set(repositories).size !== 3
+  ) {
+    fail('三仓 Dogfood 汇总缺少唯一的 engine/go/python 证明');
+  }
+  for (const [index, proof] of value.proofs.entries()) {
+    if (
+      !proof ||
+      typeof proof !== 'object' ||
+      Array.isArray(proof) ||
+      typeof proof.repository !== 'string' ||
+      !Number.isSafeInteger(proof.prNumber) ||
+      proof.prNumber < 1 ||
+      !GIT_SHA.test(proof.headSha ?? '') ||
+      !SHA256_DIGEST.test(proof.proofDigest ?? '') ||
+      !Number.isSafeInteger(proof.commentId) ||
+      proof.commentId < 1 ||
+      typeof proof.commentUrl !== 'string' ||
+      Number.isNaN(Date.parse(proof.completedAt ?? ''))
+    ) {
+      fail(`三仓 Dogfood proofs[${index}] 非法`);
+    }
+  }
+  const base = {
+    schemaVersion: 1,
+    status: 'verified',
+    candidateIdentityDigest: value.candidateIdentityDigest,
+    candidateWorkflowRunId: value.candidateWorkflowRunId,
+    tarballSha256: value.tarballSha256,
+    proofs: value.proofs,
+  };
+  const expected = sha256Digest({ domain: DOGFOOD_SET_DOMAIN, evidence: base });
+  if (!SHA256_DIGEST.test(value.digest ?? '') || value.digest !== expected) {
+    fail('三仓 Dogfood 汇总摘要非法');
+  }
+  return { ...base, digest: expected };
+}
+
+function oneOf(value, values, label) {
+  if (!values.includes(value)) fail(`${label} 非法`);
+  return value;
+}
+
+function nonEmptyString(value, label) {
+  if (typeof value !== 'string' || value.trim() === '' || value.includes('\0')) {
+    fail(`${label} 必须是非空字符串`);
+  }
+  return value;
+}
+
+function positiveInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1) fail(`${label} 必须是正整数`);
+  return value;
+}
+
+function timestamp(value, label) {
+  const text = nonEmptyString(value, label);
+  if (Number.isNaN(Date.parse(text))) fail(`${label} 必须是合法时间`);
+  return text;
+}
+
+function candidateProofDigest(proof) {
+  return sha256Digest({ domain: CANDIDATE_PROOF_DOMAIN, proof });
+}
+
+function parseDogfoodPolicy(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.schemaVersion !== 1) {
+    fail('三仓 Dogfood policy 格式非法');
+  }
+  const marker = nonEmptyString(value.proofMarker, 'dogfood policy proofMarker');
+  if (!Array.isArray(value.trustedAuthors) || value.trustedAuthors.length < 1) {
+    fail('三仓 Dogfood policy 缺少 trustedAuthors');
+  }
+  const trustedAuthors = value.trustedAuthors.map((author, index) =>
+    nonEmptyString(author, `dogfood policy trustedAuthors[${index}]`),
+  );
+  if (new Set(trustedAuthors).size !== trustedAuthors.length) {
+    fail('三仓 Dogfood policy trustedAuthors 重复');
+  }
+  if (!Array.isArray(value.repositories) || value.repositories.length !== 3) {
+    fail('三仓 Dogfood policy 必须精确声明三个仓库');
+  }
+  const repositories = value.repositories.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail(`dogfood policy repositories[${index}] 非法`);
+    }
+    return {
+      role: oneOf(entry.role, ['engine', 'go', 'python'], `repositories[${index}].role`),
+      fullName: nonEmptyString(entry.fullName, `repositories[${index}].fullName`),
+      defaultBranch: nonEmptyString(entry.defaultBranch, `repositories[${index}].defaultBranch`),
+    };
+  });
+  if (
+    new Set(repositories.map((entry) => entry.role)).size !== 3 ||
+    new Set(repositories.map((entry) => entry.fullName.toLowerCase())).size !== 3
+  ) {
+    fail('三仓 Dogfood policy 的 role 或仓库重复');
+  }
+  return { schemaVersion: 1, marker, trustedAuthors, repositories };
+}
+
+function proofJsonFromComment(body, marker) {
+  if (typeof body !== 'string') return null;
+  const first = body.indexOf(marker);
+  if (first < 0 || body.indexOf(marker, first + marker.length) >= 0) return null;
+  const encoded = body.slice(first + marker.length).trim();
+  const match = /^```json\s*\n([\s\S]+)\n```\s*$/u.exec(encoded);
+  if (!match) fail('候选证明评论的 JSON 围栏格式非法');
+  try {
+    return JSON.parse(match[1]);
+  } catch (error) {
+    fail(`候选证明评论不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function normalizeCandidateChecks(value, label) {
+  if (!Array.isArray(value) || value.length === 0) fail(`${label} 必须是非空数组`);
+  const checks = value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail(`${label}[${index}] 非法`);
+    }
+    if (
+      entry.status !== 'completed' ||
+      entry.conclusion !== 'success' ||
+      entry.appId !== GITHUB_ACTIONS_APP_ID
+    ) {
+      fail(`${label}[${index}] 不是 GitHub Actions 成功检查`);
+    }
+    return {
+      name: nonEmptyString(entry.name, `${label}[${index}].name`),
+      status: 'completed',
+      conclusion: 'success',
+      appId: GITHUB_ACTIONS_APP_ID,
+      appSlug: nonEmptyString(entry.appSlug, `${label}[${index}].appSlug`),
+    };
+  });
+  if (new Set(checks.map((check) => check.name)).size !== checks.length) {
+    fail(`${label} 含重复检查名`);
+  }
+  return checks.sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function verifyCurrentCandidateChecks(value, expected, headSha, label) {
+  if (!Array.isArray(value)) fail(`${label} 当前 check runs 必须是数组`);
+  for (const check of expected) {
+    const matches = value
+      .filter(
+        (run) =>
+          run &&
+          typeof run === 'object' &&
+          !Array.isArray(run) &&
+          run.name === check.name &&
+          run.app?.id === check.appId,
+      )
+      .map((run, index) => ({
+        id: positiveInteger(run.id, `${label} ${check.name} run[${index}].id`),
+        headSha: nonEmptyString(run.head_sha, `${label} ${check.name} head_sha`),
+        status: nonEmptyString(run.status, `${label} ${check.name} status`),
+        conclusion: run.conclusion,
+        appSlug: nonEmptyString(run.app?.slug, `${label} ${check.name} app.slug`),
+      }))
+      .sort((left, right) => right.id - left.id);
+    const latest = matches[0];
+    if (
+      !latest ||
+      latest.headSha !== headSha ||
+      latest.status !== 'completed' ||
+      latest.conclusion !== 'success' ||
+      latest.appSlug !== check.appSlug
+    ) {
+      fail(`${label} 当前检查 ${check.name} 未保持成功`);
+    }
+  }
+}
+
+function normalizeProof(
+  value,
+  expectedEvidence,
+  policyRepository,
+  prNumber,
+  headSha,
+  baseSha,
+  checkRuns,
+) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    fail(`${policyRepository.role} 候选证明必须是对象`);
+  }
+  if (value.schemaVersion !== 1 || value.status !== 'passed') {
+    fail(`${policyRepository.role} 候选证明状态非法`);
+  }
+  const repository = value.repository;
+  if (
+    !repository ||
+    typeof repository !== 'object' ||
+    Array.isArray(repository) ||
+    repository.provider !== 'github' ||
+    repository.fullName !== policyRepository.fullName ||
+    repository.defaultBranch !== policyRepository.defaultBranch
+  ) {
+    fail(`${policyRepository.role} 候选证明仓库身份非法`);
+  }
+  const candidate = value.candidate;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    fail(`${policyRepository.role} 候选证明缺少 candidate`);
+  }
+  const expectedIdentity = {
+    schemaVersion: 1,
+    packageName: expectedEvidence.packageName,
+    version: expectedEvidence.version,
+    commit: expectedEvidence.commit,
+    candidateWorkflowRunId: expectedEvidence.candidateWorkflowRunId,
+    tarballSha256: `sha256:${expectedEvidence.tarball.sha256}`,
+    runtimeTreeDigest: expectedEvidence.runtime.treeDigest,
+    digest: expectedEvidence.candidateIdentityDigest,
+  };
+  for (const [key, expected] of Object.entries(expectedIdentity)) {
+    if (candidate[key] !== expected) {
+      fail(`${policyRepository.role} 候选证明的 candidate.${key} 与选定候选不一致`);
+    }
+  }
+  const review = value.review;
+  if (!review || typeof review !== 'object' || Array.isArray(review)) {
+    fail(`${policyRepository.role} 候选证明缺少 review`);
+  }
+  if (
+    review.prNumber !== prNumber ||
+    review.headSha !== headSha ||
+    review.baseSha !== baseSha ||
+    !SHA256_DIGEST.test(review.bindingDigest ?? '') ||
+    !SHA256_DIGEST.test(review.storyValidationDigest ?? '') ||
+    !SHA256_DIGEST.test(review.storyValidationEnvironmentDigest ?? '') ||
+    review.remoteStatus !== 'ready'
+  ) {
+    fail(`${policyRepository.role} 候选证明的 Review/PR 绑定非法`);
+  }
+  const checks = normalizeCandidateChecks(
+    review.checks,
+    `${policyRepository.role} 候选证明 checks`,
+  );
+  const normalized = {
+    schemaVersion: 1,
+    status: 'passed',
+    repository: {
+      provider: 'github',
+      fullName: policyRepository.fullName,
+      defaultBranch: policyRepository.defaultBranch,
+    },
+    candidate: expectedIdentity,
+    review: {
+      prNumber,
+      baseSha: review.baseSha,
+      headSha,
+      bindingDigest: review.bindingDigest,
+      storyValidationDigest: review.storyValidationDigest,
+      storyValidationEnvironmentDigest: review.storyValidationEnvironmentDigest,
+      remoteStatus: 'ready',
+      remoteCheckedAt: timestamp(
+        review.remoteCheckedAt,
+        `${policyRepository.role} remoteCheckedAt`,
+      ),
+      checks,
+    },
+    completedAt: timestamp(value.completedAt, `${policyRepository.role} completedAt`),
+  };
+  if (
+    !SHA256_DIGEST.test(value.proofDigest ?? '') ||
+    value.proofDigest !== candidateProofDigest(normalized)
+  ) {
+    fail(`${policyRepository.role} 候选证明摘要非法`);
+  }
+  verifyCurrentCandidateChecks(checkRuns, checks, headSha, `${policyRepository.role} 候选证明`);
+  return { ...normalized, proofDigest: value.proofDigest };
+}
+
+function commandVerifyDogfood(args) {
+  const candidate = readJson(required(args, 'candidate'));
+  verifyEvidenceIdentity(candidate);
+  if (candidate.status !== 'packed') fail('三仓验证必须消费未暂存的 packed 候选');
+  const policy = parseDogfoodPolicy(readJson(required(args, 'policy')));
+  const observations = readJson(required(args, 'observations'));
+  if (
+    !observations ||
+    typeof observations !== 'object' ||
+    Array.isArray(observations) ||
+    observations.schemaVersion !== 1 ||
+    !Array.isArray(observations.entries) ||
+    observations.entries.length !== 3
+  ) {
+    fail('三仓 Dogfood observations 格式非法');
+  }
+  const verified = policy.repositories.map((repository) => {
+    const matches = observations.entries.filter(
+      (entry) => entry?.role === repository.role && entry?.repository === repository.fullName,
+    );
+    if (matches.length !== 1) fail(`${repository.role} 必须有且只有一份远端观察`);
+    const observation = matches[0];
+    const pr = observation.pr;
+    if (!pr || typeof pr !== 'object' || Array.isArray(pr)) {
+      fail(`${repository.role} 缺少 PR 观察`);
+    }
+    const prNumber = positiveInteger(pr.number, `${repository.role} PR number`);
+    if (
+      pr.state !== 'open' ||
+      pr.draft !== false ||
+      pr.base?.ref !== repository.defaultBranch ||
+      !GIT_SHA.test(pr.base?.sha ?? '') ||
+      pr.mergeable !== true ||
+      pr.mergeable_state !== 'clean' ||
+      !GIT_SHA.test(pr.head?.sha ?? '')
+    ) {
+      fail(`${repository.role} PR 尚未 ready 或没有绑定当前 head/default branch`);
+    }
+    if (!Array.isArray(observation.checkRuns)) {
+      fail(`${repository.role} 当前 check runs 必须是数组`);
+    }
+    if (!Array.isArray(observation.comments)) fail(`${repository.role} comments 必须是数组`);
+    const trusted = observation.comments.flatMap((comment) => {
+      if (
+        !comment ||
+        typeof comment !== 'object' ||
+        Array.isArray(comment) ||
+        !policy.trustedAuthors.includes(comment.user?.login) ||
+        comment.author_association !== 'OWNER'
+      ) {
+        return [];
+      }
+      const proof = proofJsonFromComment(comment.body, policy.marker);
+      return proof === null ? [] : [{ comment, proof }];
+    });
+    if (trusted.length !== 1) {
+      fail(`${repository.role} 必须有且只有一条 owner 发布的候选证明评论`);
+    }
+    const normalized = normalizeProof(
+      trusted[0].proof,
+      candidate,
+      repository,
+      prNumber,
+      pr.head.sha,
+      pr.base.sha,
+      observation.checkRuns,
+    );
+    return {
+      role: repository.role,
+      repository: repository.fullName,
+      prNumber,
+      headSha: pr.head.sha,
+      proofDigest: normalized.proofDigest,
+      commentId: positiveInteger(trusted[0].comment.id, `${repository.role} comment id`),
+      commentUrl: nonEmptyString(trusted[0].comment.html_url, `${repository.role} comment URL`),
+      completedAt: normalized.completedAt,
+    };
+  });
+  const base = {
+    schemaVersion: 1,
+    status: 'verified',
+    candidateIdentityDigest: candidate.candidateIdentityDigest,
+    candidateWorkflowRunId: candidate.candidateWorkflowRunId,
+    tarballSha256: `sha256:${candidate.tarball.sha256}`,
+    proofs: verified,
+  };
+  const result = { ...base, digest: sha256Digest({ domain: DOGFOOD_SET_DOMAIN, evidence: base }) };
+  writeJson(required(args, 'output'), result);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+function commandVerifyDogfoodSet(args) {
+  const candidate = readJson(required(args, 'candidate'));
+  verifyEvidenceIdentity(candidate);
+  if (candidate.status !== 'packed') fail('三仓汇总复核必须消费 packed 候选');
+  const dogfood = verifyDogfoodSet(readJson(required(args, 'dogfood')), candidate);
+  process.stdout.write(
+    `${JSON.stringify({
+      status: 'verified',
+      candidateIdentityDigest: candidate.candidateIdentityDigest,
+      dogfoodDigest: dogfood.digest,
+    })}\n`,
+  );
 }
 
 function verifyTarballAgainstEvidence(evidence, tarballPath) {
@@ -272,7 +828,8 @@ function commandRecordPack(args) {
   if (pack.shasum !== actual.sha1 || String(pack.integrity) !== actual.integrity) {
     fail('npm pack 摘要与实际 tarball 不一致');
   }
-  const evidence = {
+  const runtime = runtimeTreeFromPack(root, pack);
+  const baseEvidence = {
     schemaVersion: SCHEMA_VERSION,
     status: 'packed',
     packageName: PACKAGE_NAME,
@@ -284,7 +841,12 @@ function commandRecordPack(args) {
     candidateWorkflowRunId,
     requestedTag: STAGE_TAG,
     tarball: { filename: basename(tarballPath), ...actual },
+    runtime,
     toolchain: releaseToolchain(args),
+  };
+  const evidence = {
+    ...baseEvidence,
+    candidateIdentityDigest: candidateIdentityDigest(baseEvidence),
   };
   writeJson(required(args, 'output'), evidence);
   process.stdout.write(`${JSON.stringify(evidence)}\n`);
@@ -292,9 +854,11 @@ function commandRecordPack(args) {
 
 function commandRecordStage(args) {
   const packed = readJson(required(args, 'candidate'));
+  const dogfood = readJson(required(args, 'dogfood'));
   const staged = stageEntry(readJson(required(args, 'stage-json')));
   verifyEvidenceIdentity(packed);
   if (packed.status !== 'packed') fail('暂存前候选证据不是 packed 状态');
+  const verifiedDogfood = verifyDogfoodSet(dogfood, packed);
   const commit = required(args, 'commit');
   if (packed.commit !== commit || !GIT_SHA.test(commit)) fail('暂存任务与候选 commit 不一致');
   const candidateWorkflowRunId = required(args, 'candidate-workflow-run-id');
@@ -321,6 +885,7 @@ function commandRecordStage(args) {
   const evidence = {
     ...packed,
     status: 'staged',
+    dogfood: verifiedDogfood,
     stageWorkflow: STAGE_WORKFLOW,
     stageWorkflowRunId,
     stageId: staged.stageId,
@@ -506,6 +1071,8 @@ const args = parseArgs(rawArgs);
 const commands = {
   'verify-source': commandVerifySource,
   'verify-candidate-run': commandVerifyCandidateRun,
+  'verify-dogfood': commandVerifyDogfood,
+  'verify-dogfood-set': commandVerifyDogfoodSet,
   'record-pack': commandRecordPack,
   'record-stage': commandRecordStage,
   'verify-tarball': commandVerifyTarball,

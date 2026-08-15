@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "proofMarker": "<!-- coding-x-candidate-proof-v1 -->",
+  "trustedAuthors": ["Xinzz995"],
+  "repositories": [
+    {
+      "role": "engine",
+      "fullName": "Xinzz995/coding-engine",
+      "defaultBranch": "main"
+    },
+    {
+      "role": "go",
+      "fullName": "Xinzz995/coding-x-dogfood-go",
+      "defaultBranch": "main"
+    },
+    {
+      "role": "python",
+      "fullName": "Xinzz995/coding-x-dogfood-python",
+      "defaultBranch": "main"
+    }
+  ]
+}

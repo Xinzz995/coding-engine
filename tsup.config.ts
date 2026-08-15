@@ -6,6 +6,8 @@ export default defineConfig({
   entry: ['src/cli.ts'],
   format: ['esm'],
   target: 'node22',
+  // 候选身份只覆盖发布包文件；唯一运行库必须并入 dist，不能从包外加载未绑定字节。
+  noExternal: ['jsonrepair'],
   clean: true,
   banner: { js: '#!/usr/bin/env node' },
   async onSuccess() {

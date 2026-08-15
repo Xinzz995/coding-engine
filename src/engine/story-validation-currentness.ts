@@ -18,13 +18,15 @@ import {
 } from './state.js';
 import { readTddConfig, type TddConfigReadResult } from './tdd-gate.js';
 
-export const STORY_VALIDATION_ENVIRONMENT_DOMAIN = 'story-validation-v2' as const;
+export const STORY_VALIDATION_ENVIRONMENT_DOMAIN = 'story-validation-v3' as const;
 export const FINAL_REVIEW_MECHANICAL_ENVIRONMENT_DOMAIN = 'final-review-mechanical-v1' as const;
 export type StoryValidationRuntimeMode = 'formal' | 'shadow';
 
 export interface StoryValidationRuntimeIdentity {
   readonly mode: StoryValidationRuntimeMode;
   readonly actualCodingXVersion: string;
+  /** null 表示普通正式运行或未绑定候选制品的 Shadow 试验。 */
+  readonly candidateIdentityDigest?: string | null;
 }
 
 export function validationDefaultBranchReference(
@@ -233,11 +235,19 @@ export function bindStoryValidationRuntimeIdentity(
   if (identity.actualCodingXVersion.trim() === '') {
     throw new Error('Story 验收实际 coding-x 版本不能为空');
   }
+  const candidateIdentityDigest = identity.candidateIdentityDigest ?? null;
+  if (candidateIdentityDigest !== null && !isSha256Digest(candidateIdentityDigest)) {
+    throw new Error('Story 验收候选包身份摘要非法');
+  }
+  if (identity.mode === 'formal' && candidateIdentityDigest !== null) {
+    throw new Error('正式 Story 验收不能绑定候选包身份');
+  }
   const canonical = JSON.stringify({
     domain: STORY_VALIDATION_ENVIRONMENT_DOMAIN,
     environmentDigest,
     mode: identity.mode,
     actualCodingXVersion: identity.actualCodingXVersion,
+    candidateIdentityDigest,
   });
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
 }
