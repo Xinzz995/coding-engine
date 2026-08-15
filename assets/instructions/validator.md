@@ -7,6 +7,7 @@
 - 唯一目标是引擎注入的 validation request；不得从 `{{WORKSPACE}}/progress.md`、最近提交说明或其他 agent 输出猜测 story。
 - `request.storyId` 指定 story；`request.acceptanceCriteria` 是本轮唯一验收标准，数组顺序就是 `acIndex` 的 1 基序号。
 - `request.acceptanceHash`、`request.requestId`、`request.storyBaseGitHead`、`request.gitHead`、`request.changeManifestDigest` 与 `request.changedPathCount` 必须原样回显，不能自行重算或替换。
+- `request.engineQualityGate` 若存在，是引擎在本次运行、同一 `gitHead` 上完成的全量质量契约证明；它只覆盖其中列出的 `checks`，不是整个 Story 的通过声明。
 - 可读取 `{{WORKSPACE}}/prd.json` 中同一 story 的标题/描述作为背景，但不得从中增删、替换 request 内的 AC。
 - 若 prompt 中没有合法 request、resultPath 不可写或无法完成验证，明确报错并退出；引擎会 fail closed，不得改写 state 来代替结果。
 
@@ -18,7 +19,9 @@
 
 1. 解析 prompt 末尾的 validation request，确认 `version=2`，记住唯一的 `resultPath`。
 2. 先核对并只读检查 `request.storyBaseGitHead..request.gitHead` 的完整变化，再逐条验证 `acceptanceCriteria`。不得改用 `HEAD^`、当前父提交、最近一次提交或自行选择的基线缩窄范围；`changeManifestDigest` 是引擎对该完整范围的机械绑定，不是让你跳过实际 diff 检查的替代证据：
-   - 对 typecheck/test 类 AC，执行项目已有命令并核对真实退出结果。
+   - 先对照 `request.engineQualityGate`。某条 AC 若只要求其中 `checks` 已明确列出的测试、构建、静态或安全检查，直接引用该引擎证明及对应 check id，禁止重复执行相同命令。
+   - 机械证明未列出的能力不得猜测为已覆盖。例如只有 Ruff 或构建记录时，不能声称独立 typecheck 已通过；此类显式 AC 仍须运行项目已有命令，无法取得证据则按“无法验证”处理。
+   - 机械证明不覆盖代码语义、改动范围、预置测试是否被改写、浏览器行为或业务边界；这些 AC 仍须独立检查，必要时只运行未被证明替代的聚焦验证。
    - 对浏览器类 AC，按下方浏览器流程实际操作和观察。
    - 对描述性 AC，结合代码检查、现有测试和必要的运行时验证；不能用“大概率正确”代替证据。
    - 验证检出是引擎按当前提交建立、并会在返回后完整核对的一次性基线，不是通用临时目录。运行工具时优先使用其禁止缓存或把临时内容重定向到系统临时目录的选项；测试缓存、语言运行时字节码、覆盖率数据、静态检查缓存、构建和安装冒烟产物，只能写入系统临时目录或质量契约已声明的生成产物目录。

@@ -3,6 +3,7 @@ import { readQualityContract, type QualityContract } from '../quality/contract.j
 import type { ContractGateResult } from './gate.js';
 import {
   createFullGateProof,
+  engineQualityGateEvidence,
   reusableFullGateResult,
   type FullGateInput,
 } from './full-gate-proof.js';
@@ -25,20 +26,40 @@ function input(over: Partial<FullGateInput> = {}): FullGateInput {
   };
 }
 
-const passed: ContractGateResult = {
-  ok: true,
-  failure: null,
-  total: 3,
-  ran: 3,
-  ms: 50,
-  skipped: ['windows-only'],
-};
+function passedFor(value: FullGateInput): ContractGateResult {
+  const declared = (['test', 'build', 'static', 'security'] as const).flatMap((category) => {
+    const policy = value.contract.checks[category];
+    return 'checks' in policy ? policy.checks : [];
+  });
+  const platform = value.platform ?? 'linux';
+  const total = declared.filter((check) => check.command.platforms.includes(platform)).length;
+  return {
+    ok: true,
+    failure: null,
+    total,
+    ran: total,
+    ms: 50,
+    skipped: declared
+      .filter((check) => !check.command.platforms.includes(platform))
+      .map((check) => check.id),
+  };
+}
 
 describe('full gate proof', () => {
   it('reuses a complete result only for the exact same effective input', () => {
     const original = input();
+    const passed = passedFor(original);
     const proof = createFullGateProof(original, passed);
     expect(reusableFullGateResult(proof, input())).toEqual(passed);
+    expect(engineQualityGateEvidence(proof)).toMatchObject({
+      source: 'engine-full-gate',
+      status: 'passed',
+      gitHead: original.headSha,
+      defaultBranchGitHead: original.defaultBranchGitHead,
+      total: passed.total,
+      ran: passed.total,
+    });
+    expect(proof.checks).toHaveLength(passed.total);
 
     const changedContract = contract();
     changedContract.generatedPaths = [...changedContract.generatedPaths, 'different/**'];
@@ -54,8 +75,10 @@ describe('full gate proof', () => {
   });
 
   it('never turns a partial or failed result into a reusable proof', () => {
+    const original = input();
+    const passed = passedFor(original);
     expect(() =>
-      createFullGateProof(input(), {
+      createFullGateProof(original, {
         ...passed,
         ok: false,
         ran: 1,
@@ -67,6 +90,11 @@ describe('full gate proof', () => {
         },
       }),
     ).toThrow('完整通过');
-    expect(() => createFullGateProof(input(), { ...passed, ran: 2 })).toThrow('完整通过');
+    expect(() => createFullGateProof(original, { ...passed, ran: passed.ran - 1 })).toThrow(
+      '完整通过',
+    );
+    expect(() =>
+      createFullGateProof(original, { ...passed, skipped: [...passed.skipped].reverse() }),
+    ).toThrow('实际检查范围不一致');
   });
 });

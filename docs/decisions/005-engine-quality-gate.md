@@ -28,11 +28,17 @@ prd.json 顶层可选 `qualityChecks`（完整 shell 命令数组）；引擎在
 本 ADR 仍然有效的核心是不变量：Developer 之后、Validator 之前由引擎独立运行机械检查；失败时
 fail-fast、跳过该轮 Validator，并由引擎掌握打回与阻断状态。
 
+2026-08-15 的 Python 多包候选提供了下述“有实证再优化”的反例：门禁已经通过 wheel 构建，断网
+Validator 重跑相同命令却因再次下载构建依赖而不可验证。ADR-028 现已替代“validator 不减负”的
+旧裁决：同一次运行的完整门禁证明会列出实际检查并进入 Validator 请求，清单明确覆盖的机械 AC
+不得重跑；语义 AC 和清单未覆盖能力仍独立验证。`prd-to-json` 同时停止给每个 Story 强制追加
+通用 `Typecheck passes`。
+
 ## 理由与备选
 
 - **为什么在引擎而非 git hooks**：pre-commit 侵入目标仓库配置、agent 可 `--no-verify` 绕过；引擎层不可绕过、不可共谋，且与项目定位同构——循环编排已是确定性程序，验证中可机械化的部分应当下沉。
 - **为什么跳过该轮 validator**：门禁失败已足以打回，validator 那轮 token 纯属浪费；失败信息（输出尾部）直接进 notes 供 builder 下轮重现。
-- **为什么 validator 不减负**（门禁通过后仍逐条验收含 Typecheck passes 类 AC）：让 validator 跳过已覆盖条目需要 AC↔命令映射，复杂度不值；保留冗余防线，有实证再优化。
+- **历史上的“validator 不减负”已被替代**：不做脆弱的 AC 字符串自动映射；引擎把实际检查清单交给 Validator，只复用能明确对应的机械要求，边界不明仍失败关闭。
 - **为什么不做独立子命令**（`coding-x gate`）：用户手动验证直接敲 npm test 即可，多余入口（YAGNI）。
 
 ## 后果
@@ -40,6 +46,6 @@ fail-fast、跳过该轮 Validator，并由引擎掌握打回与阻断状态。
 - 循环内新增一段确定性执行时间（每轮 builder 后跑一遍 qualityChecks，典型秒级到分钟级）；换来 builder 谎报「检查通过」被零成本戳穿、失败轮不再烧 validator 的 token。
 - `MAX_RETRIES` 成为 gate.ts 与 validator.md 的共享耦合点（经 `{{MAX_RETRIES}}` 渲染共享）：改上限只动引擎一处；新增渲染键时须同步 renderInstruction 测试。
 - 配置错的命令（不存在/写错）在循环内与真实失败不可区分（127 不特判）：拦截完全依赖 prd-to-json 派生环节的试跑检查项——绕过派生链手写 prd.json 的用户失去这层保护，门禁失败会烧满 5 轮到 blocked。
-- validator 的 token 成本有意不减：门禁通过后「Typecheck passes」类 AC 仍被 validator 重验（接受的冗余防线）。
+- Validator 继续逐条产出 AC claim，但已被引擎检查清单覆盖的机械要求只引用证明，不再运行相同命令。
 - 门禁命令由 ADR-021 的平台隔离器统一启动和收口；根进程结束、超时或中断都必须等到整组后代已确认退出。仍有后代或无法确认时保留隔离状态，不能让下一轮与旧门禁重叠，也不能把单个 kill 命令成功当成完成证明。
 - 「不可绕过、不可共谋」的论证隐含依赖 prd.json 运行期不可变——该前提当时无机械保证（builder 改写 qualityChecks 可延迟一轮静默架空门禁），由 ADR-007 运行期冻结闭环。

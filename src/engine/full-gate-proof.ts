@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto';
-import { isGitHead, isSha256Digest } from '../contracts/validation-contract.js';
+import {
+  ENGINE_QUALITY_GATE_EVIDENCE_SCHEMA_VERSION,
+  isGitHead,
+  isSha256Digest,
+  type EngineQualityGateCheckEvidence,
+  type EngineQualityGateEvidence,
+} from '../contracts/validation-contract.js';
 import {
   digestQualityContract,
   type QualityContract,
@@ -33,7 +39,38 @@ export interface FullGateProof {
   readonly defaultBranchGitHead: string;
   readonly qualityContractDigest: string;
   readonly platform: QualityPlatform;
+  readonly checks: readonly EngineQualityGateCheckEvidence[];
   readonly result: ContractGateResult & { readonly ok: true; readonly failure: null };
+}
+
+const QUALITY_CATEGORIES = ['test', 'build', 'static', 'security'] as const;
+
+function contractCheckEvidence(
+  contract: QualityContract,
+  platform: QualityPlatform,
+): EngineQualityGateCheckEvidence[] {
+  const checks: EngineQualityGateCheckEvidence[] = [];
+  for (const category of QUALITY_CATEGORIES) {
+    const policy = contract.checks[category];
+    if (!('checks' in policy)) continue;
+    for (const check of policy.checks) {
+      if (!check.command.platforms.includes(platform)) continue;
+      checks.push({ category, id: check.id, module: check.module });
+    }
+  }
+  return checks;
+}
+
+function skippedContractCheckIds(contract: QualityContract, platform: QualityPlatform): string[] {
+  const skipped: string[] = [];
+  for (const category of QUALITY_CATEGORIES) {
+    const policy = contract.checks[category];
+    if (!('checks' in policy)) continue;
+    for (const check of policy.checks) {
+      if (!check.command.platforms.includes(platform)) skipped.push(check.id);
+    }
+  }
+  return skipped;
 }
 
 function currentPlatform(): QualityPlatform {
@@ -82,6 +119,16 @@ export function createFullGateProof(
   if (!result.ok || result.failure !== null || result.ran !== result.total) {
     throw new Error('只有完整通过的全量契约检查才能生成复用证明');
   }
+  const platform = input.platform ?? currentPlatform();
+  const checks = contractCheckEvidence(input.contract, platform);
+  const skipped = skippedContractCheckIds(input.contract, platform);
+  if (
+    checks.length !== result.total ||
+    skipped.length !== result.skipped.length ||
+    skipped.some((id, index) => id !== result.skipped[index])
+  ) {
+    throw new Error('全量检查结果与冻结质量契约的实际检查范围不一致');
+  }
   return {
     schemaVersion: FULL_GATE_PROOF_SCHEMA_VERSION,
     status: 'passed',
@@ -89,7 +136,8 @@ export function createFullGateProof(
     headSha: input.headSha,
     defaultBranchGitHead: input.defaultBranchGitHead,
     qualityContractDigest: digestQualityContract(input.contract),
-    platform: input.platform ?? currentPlatform(),
+    platform,
+    checks,
     result: {
       ok: true,
       failure: null,
@@ -101,10 +149,31 @@ export function createFullGateProof(
   };
 }
 
+/** 将同进程完整门禁证明收缩为 Validator 可引用、不可扩大的请求证据。 */
+export function engineQualityGateEvidence(proof: FullGateProof): EngineQualityGateEvidence {
+  return {
+    schemaVersion: ENGINE_QUALITY_GATE_EVIDENCE_SCHEMA_VERSION,
+    source: 'engine-full-gate',
+    status: 'passed',
+    inputDigest: proof.inputDigest,
+    gitHead: proof.headSha,
+    defaultBranchGitHead: proof.defaultBranchGitHead,
+    qualityContractDigest: proof.qualityContractDigest,
+    platform: proof.platform,
+    total: proof.result.total,
+    ran: proof.result.ran,
+    checks: proof.checks.map((check) => ({ ...check })),
+    skippedCheckIds: [...proof.result.skipped],
+  };
+}
+
 export function reusableFullGateResult(
   proof: FullGateProof | undefined,
   expected: FullGateInput,
 ): FullGateProof['result'] | null {
+  const expectedPlatform = expected.platform ?? currentPlatform();
+  const expectedChecks = contractCheckEvidence(expected.contract, expectedPlatform);
+  const expectedSkipped = skippedContractCheckIds(expected.contract, expectedPlatform);
   if (
     proof === undefined ||
     proof.schemaVersion !== FULL_GATE_PROOF_SCHEMA_VERSION ||
@@ -114,8 +183,17 @@ export function reusableFullGateResult(
     proof.headSha !== expected.headSha ||
     proof.defaultBranchGitHead !== expected.defaultBranchGitHead ||
     proof.qualityContractDigest !== digestQualityContract(expected.contract) ||
-    proof.platform !== (expected.platform ?? currentPlatform()) ||
+    proof.platform !== expectedPlatform ||
     proof.inputDigest !== fullGateInputDigest(expected) ||
+    proof.checks.length !== expectedChecks.length ||
+    proof.checks.some(
+      (check, index) =>
+        check.category !== expectedChecks[index]?.category ||
+        check.id !== expectedChecks[index]?.id ||
+        check.module !== expectedChecks[index]?.module,
+    ) ||
+    proof.result.skipped.length !== expectedSkipped.length ||
+    proof.result.skipped.some((id, index) => id !== expectedSkipped[index]) ||
     !proof.result.ok ||
     proof.result.failure !== null ||
     proof.result.ran !== proof.result.total

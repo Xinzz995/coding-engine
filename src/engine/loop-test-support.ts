@@ -441,6 +441,7 @@ export interface FakeBoundValidatorOptions {
   readonly builderPromptMarker?: string;
   readonly environmentMarker?: string;
   readonly validatorCwdMarker?: string;
+  readonly validatorPromptMarker?: string;
   readonly validatorVisibilityMarker?: string;
 }
 
@@ -483,6 +484,8 @@ export function fakeBoundValidator(
     }
     const validatorCwdMarker = ${JSON.stringify(options.validatorCwdMarker ?? null)};
     if (validatorCwdMarker !== null) writeFileSync(validatorCwdMarker, process.cwd());
+    const validatorPromptMarker = ${JSON.stringify(options.validatorPromptMarker ?? null)};
+    if (validatorPromptMarker !== null) writeFileSync(validatorPromptMarker, prompt);
     const validatorVisibilityMarker = ${JSON.stringify(options.validatorVisibilityMarker ?? null)};
     if (validatorVisibilityMarker !== null) {
       writeFileSync(validatorVisibilityMarker, JSON.stringify({
