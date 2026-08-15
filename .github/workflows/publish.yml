@@ -102,7 +102,7 @@ jobs:
           VERSION: ${{ steps.source.outputs.version }}
         run: |
           jq -e --arg commit "$RELEASE_COMMIT" --arg version "$VERSION" '
-            .schemaVersion == 2 and
+            .schemaVersion == 3 and
             .status == "staged" and
             .version == $version and
             .commit == $commit and

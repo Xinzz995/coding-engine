@@ -14,10 +14,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CANDIDATE_INSTALL_SMOKE_SCRIPT,
+  assertInstalledRuntimeTree,
   assertInstalledCandidate,
   buildWindowsCommandEnvironment,
   buildWindowsCommandInvocation,
@@ -32,6 +33,62 @@ const VERSION = '1.2.3';
 const COMMIT = 'a'.repeat(40);
 const RUN_ID = '123456';
 const roots = [];
+const RUNTIME_TREE_ALGORITHM = 'sha256-path-size-bytes-v1';
+
+function objectDigest(value) {
+  return `sha256:${createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')}`;
+}
+
+function runtimeFiles(packageRoot) {
+  if (!packageRoot) {
+    return [
+      { path: 'dist/cli.js', size: 1, sha256: `sha256:${'c'.repeat(64)}` },
+      { path: 'package.json', size: 1, sha256: `sha256:${'d'.repeat(64)}` },
+    ];
+  }
+  const files = [];
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile()) {
+        const bytes = readFileSync(path);
+        files.push({
+          path: relative(packageRoot, path).split('\\').join('/'),
+          size: bytes.byteLength,
+          sha256: `sha256:${createHash('sha256').update(bytes).digest('hex')}`,
+        });
+      }
+    }
+  };
+  visit(packageRoot);
+  return files.sort((left, right) =>
+    left.path < right.path ? -1 : left.path > right.path ? 1 : 0,
+  );
+}
+
+function runtimeIdentity(packageRoot) {
+  const files = runtimeFiles(packageRoot);
+  const treeDigest = objectDigest({
+    domain: 'coding-x-candidate-runtime-tree-v1',
+    algorithm: RUNTIME_TREE_ALGORITHM,
+    files,
+  });
+  return { algorithm: RUNTIME_TREE_ALGORITHM, fileCount: files.length, treeDigest, files };
+}
+
+function candidateDigest(evidence) {
+  return objectDigest({
+    schemaVersion: 1,
+    domain: 'coding-x-candidate-identity-v1',
+    packageName: evidence.packageName,
+    version: evidence.version,
+    commit: evidence.commit,
+    candidateWorkflowRunId: evidence.candidateWorkflowRunId,
+    tarballSha256: `sha256:${evidence.tarball.sha256}`,
+    runtimeTreeDigest: evidence.runtime.treeDigest,
+  });
+}
 
 function temporaryRoot(prefix = 'candidate-install-smoke-') {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -50,23 +107,29 @@ function tarballFixture(root, bytes = Buffer.from('candidate bytes')) {
   return path;
 }
 
-function evidenceFor(tarball, overrides = {}) {
+function evidenceFor(tarball, overrides = {}, packageRoot) {
   const bytes = readFileSync(tarball);
-  return {
-    schemaVersion: 2,
+  const base = {
+    schemaVersion: 3,
     status: 'packed',
     packageName: 'coding-x',
     version: VERSION,
     commit: COMMIT,
     sourceRef: 'refs/heads/main',
     sourceWorkflow: '.github/workflows/build-candidate.yml',
+    sourceRepository: 'https://github.com/Xinzz995/coding-engine',
     candidateWorkflowRunId: RUN_ID,
     tarball: {
       filename: `coding-x-${VERSION}.tgz`,
       size: bytes.length,
       sha256: createHash('sha256').update(bytes).digest('hex'),
     },
+    runtime: runtimeIdentity(packageRoot),
     ...overrides,
+  };
+  return {
+    ...base,
+    candidateIdentityDigest: overrides.candidateIdentityDigest ?? candidateDigest(base),
   };
 }
 
@@ -219,7 +282,7 @@ if (args.includes('--help')) {
     [npmScript, 'pack', packageRoot, '--ignore-scripts', '--pack-destination', outputRoot],
     { cwd: root, stdio: 'ignore' },
   );
-  return join(outputRoot, `coding-x-${VERSION}.tgz`);
+  return { tarball: join(outputRoot, `coding-x-${VERSION}.tgz`), packageRoot };
 }
 
 function committedProject(root) {
@@ -255,6 +318,7 @@ describe('candidate install smoke identity', () => {
   it('installs the downloaded tarball directly without npm exec, npx, or repacking it', () => {
     const source = readFileSync(CANDIDATE_INSTALL_SMOKE_SCRIPT, 'utf8');
     expect(source).toContain("'install',\n        verifiedTarballPath,");
+    expect(source).toContain("'--candidate-evidence',\n        evidencePath,");
     expect(source).not.toMatch(/\bnpm\s+exec\b/iu);
     expect(source).not.toMatch(/\bnpx\b/iu);
     expect(source).not.toMatch(/['"](?:exec|pack)['"]\s*,/u);
@@ -279,6 +343,20 @@ describe('candidate install smoke identity', () => {
       ).toThrow(/identity changed after it was opened/u);
     },
   );
+
+  it('reads an explicitly allowed zero-byte runtime file', () => {
+    const root = temporaryRoot();
+    const target = join(root, 'empty-runtime-file');
+    writeFileSync(target, '');
+
+    expect(
+      readStableCandidateFile(target, {
+        label: 'empty runtime file',
+        minBytes: 0,
+        maxBytes: 0,
+      }),
+    ).toEqual(Buffer.alloc(0));
+  });
 
   it('builds a fixed Windows command boundary and rejects command metacharacters', () => {
     const invocation = buildWindowsCommandInvocation('C:\\Users\\RUNNER~1\\coding-x.cmd', [
@@ -444,6 +522,17 @@ describe('candidate installed command boundary', () => {
   });
 });
 
+describe('candidate installed runtime tree', () => {
+  it('rejects an unlisted file added to the installed package', () => {
+    const installed = installedFixture(candidatePlatform(process.platform));
+    const runtime = runtimeIdentity(installed.packageRoot);
+    writeFileSync(join(installed.packageRoot, 'dist', 'injected.js'), 'unexpected\n');
+    expect(() =>
+      assertInstalledRuntimeTree(installed.packageRoot, runtime.files, runtime.treeDigest),
+    ).toThrow(/extra: dist\/injected\.js/u);
+  });
+});
+
 describe('candidate doctor proof', () => {
   it('accepts only exit 7, schema 1, shadow identity and zero reported issues', () => {
     expect(validateDoctorResult(doctorResult(), VERSION)).toMatchObject({
@@ -514,9 +603,9 @@ describe('candidate doctor proof', () => {
 describe('candidate install smoke end to end', () => {
   it('installs one local tarball in a disposable npm project and runs the real bin three times', () => {
     const root = temporaryRoot('candidate-install-e2e-');
-    const tarball = packFixture(root);
+    const { tarball, packageRoot } = packFixture(root);
     const { project, commit } = committedProject(root);
-    const evidence = evidenceFor(tarball, { commit });
+    const evidence = evidenceFor(tarball, { commit }, packageRoot);
     const evidencePath = join(root, 'packed.json');
     writeJson(evidencePath, evidence);
     const smokeTemp = join(root, 'runner-temp');

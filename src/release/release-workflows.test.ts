@@ -152,26 +152,54 @@ describe('release candidate workflow boundaries', () => {
     );
   });
 
-  it('stages only a selected successful candidate from the current main commit', () => {
+  it('machine-verifies the candidate and all three repositories before staging approval', () => {
     const source = workflow('stage-candidate.yml');
-    const stage = parsedWorkflow('stage-candidate.yml').jobs.stage;
-    const verifyRun = stepWithRun(stage, 'verify-candidate-run');
+    const jobs = parsedWorkflow('stage-candidate.yml').jobs;
+    const verify = jobs.verify;
+    const stage = jobs.stage;
+    const verifyRun = stepWithRun(verify, 'verify-candidate-run');
 
     expect(source).toContain('candidate_run_id:');
+    expect(source).toContain('engine_pr:');
+    expect(source).toContain('go_pr:');
+    expect(source).toContain('python_pr:');
     expect(verifyRun.run).toContain('node build/release-evidence.mjs verify-candidate-run');
     expect(verifyRun.run).toContain('--run-json "$RUNNER_TEMP/candidate-run.json"');
     expect(verifyRun.run).toContain('--candidate-workflow-run-id "$CANDIDATE_WORKFLOW_RUN_ID"');
     expect(verifyRun.run).toContain('--commit "$CURRENT_MAIN_COMMIT"');
     expect(verifyRun.if).toBeUndefined();
+    expectNoContinueOnError(verify);
     expectNoContinueOnError(stage);
+    expect(stage.needs).toBe('verify');
+    expect(verify.permissions).toEqual({ actions: 'read', checks: 'read', contents: 'read' });
+    expect(stage.permissions).toEqual({
+      actions: 'read',
+      checks: 'read',
+      contents: 'read',
+      'id-token': 'write',
+    });
     expect(source).toContain('git/ref/heads/main');
     expect(source).toContain('if [ "$CURRENT_MAIN_COMMIT" != "$REMOTE_MAIN_COMMIT" ]');
     expect(source).toContain('run-id: ${{ inputs.candidate_run_id }}');
     expect(source).toContain('--candidate-workflow-run-id');
     expect(source).toContain('--stage-workflow-run-id');
+    expect(source).toContain('verify-dogfood');
+    expect(source).toContain('verify-dogfood-set');
+    expect(source).toContain('.release/dogfood-policy.json');
+    expect(source).toContain('issues/$pr_number/comments');
+    expect(source).toContain('check-runs?per_page=100&filter=all');
+    expect(source).toContain('Re-read all three repositories after approval');
+    expect(source).toContain('dogfood-current.json');
+    expect(source).toContain('Three-repository evidence changed during approval');
+    expect(source.indexOf('verify-dogfood')).toBeLessThan(
+      source.indexOf('environment: npm-staging'),
+    );
     expect(source).toContain('environment: npm-staging');
     expect(source).toContain('id-token: write');
     expect(source).toContain('npm stage publish');
+    expect(source.indexOf('environment: npm-staging')).toBeLessThan(
+      source.indexOf('npm stage publish'),
+    );
     expect(source).not.toContain('npm ci');
     expect(source).not.toContain('npm test');
     expect(source).not.toContain('npm run build');

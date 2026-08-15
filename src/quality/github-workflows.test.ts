@@ -8,6 +8,7 @@ import {
   POLICY_WORKFLOW_PATH,
   PULL_REQUEST_TEMPLATE_PATH,
   QUALITY_WORKFLOW_PATH,
+  READY_ISSUE_TEMPLATE_PATH,
   renderManagedGitHubFiles,
   renderPolicyGuardWorkflow,
   renderQualityGateWorkflow,
@@ -273,6 +274,7 @@ describe('renderManagedGitHubFiles', () => {
         POLICY_WORKFLOW_PATH,
         PULL_REQUEST_TEMPLATE_PATH,
         POLICY_ISSUE_TEMPLATE_PATH,
+        READY_ISSUE_TEMPLATE_PATH,
       ]),
     );
     expect(files[PULL_REQUEST_TEMPLATE_PATH]).toContain('明确的非目标');
@@ -283,6 +285,9 @@ describe('renderManagedGitHubFiles', () => {
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 负责人');
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 到期日');
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 跟进事项');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('label: 本次目标');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('label: 验收标准');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).not.toContain("labels:\n  - 'ready-for-agent'");
   });
 
   it('contains no hosted review task or provider credential name', () => {

@@ -153,6 +153,7 @@ function renderManagedGitHubFilesPlaceholder(): Record<string, string> {
     '.github/PULL_REQUEST_TEMPLATE.md': '',
     '.github/ISSUE_TEMPLATE/quality-p1.yml': '',
     '.github/ISSUE_TEMPLATE/quality-policy.yml': '',
+    '.github/ISSUE_TEMPLATE/ready-for-agent.yml': '',
   };
 }
 
@@ -485,6 +486,12 @@ function ensureManagedLabels(client: GitHubQualityClient, repository: string): v
     'Time-bounded quality policy exception.',
   );
   client.ensureLabel(repository, 'quality-p1-deferral', 'FBCA04', 'Time-bounded P1 deferral.');
+  client.ensureLabel(
+    repository,
+    'ready-for-agent',
+    '0E8A16',
+    'Explicitly approved for one coding-x Issue run.',
+  );
 }
 
 function result(

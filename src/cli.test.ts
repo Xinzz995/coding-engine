@@ -149,12 +149,56 @@ describe('parseCliArgs', () => {
     ]) {
       expect(() => parseCliArgs(args)).toThrow('--shadow 只能用于');
     }
+    expect(
+      parseCliArgs(['codex', '--shadow', '--candidate-evidence', '/tmp/packed.json'])
+        .candidateEvidence,
+    ).toBe('/tmp/packed.json');
+    expect(() => parseCliArgs(['codex', '--candidate-evidence', '/tmp/packed.json'])).toThrow(
+      '必须与 --shadow 同时使用',
+    );
+    expect(() =>
+      parseCliArgs(['status', '--shadow', '--candidate-evidence', '/tmp/packed.json']),
+    ).toThrow('--shadow 只能用于');
   });
   it('recognizes the repair subcommand', () => {
     expect(parseCliArgs(['repair']).command).toBe('repair');
   });
   it('recognizes the dashboard subcommand', () => {
     expect(parseCliArgs(['dashboard']).command).toBe('dashboard');
+  });
+  it('recognizes the explicit candidate proof publisher', () => {
+    expect(parseCliArgs(['candidate', 'publish-proof', '--workspace', 'ws'])).toMatchObject({
+      command: 'candidate',
+      candidateAction: 'publish-proof',
+      workspace: 'ws',
+    });
+    expect(() => parseCliArgs(['candidate', 'unknown'])).toThrow('candidate 子命令');
+    expect(() => parseCliArgs(['candidate', 'publish-proof', 'extra'])).toThrow('额外位置参数');
+  });
+
+  it('applies loop stall validation to the ready Issue entry', () => {
+    expect(() => parseCliArgs(['issue', 'run', '42', 'codex', '--stall-limit', 'NaN'])).toThrow(
+      '--stall-limit 必须是正整数',
+    );
+    expect(parseCliArgs(['issue', 'run', '42', 'codex', '--stall-limit', '5']).stallLimit).toBe(5);
+  });
+  it('recognizes one ready Issue run with an optional explicit runner', () => {
+    expect(parseCliArgs(['issue', 'run', '42', 'codex', '--workspace', '.runs'])).toMatchObject({
+      command: 'issue',
+      issueAction: 'run',
+      issueNumber: 42,
+      kind: 'codex',
+      kindExplicit: true,
+      workspace: '.runs',
+    });
+    expect(parseCliArgs(['issue', 'run', '42'])).toMatchObject({
+      kind: 'claude',
+      kindExplicit: false,
+    });
+    expect(() => parseCliArgs(['issue', 'run'])).toThrow('Issue 编号');
+    expect(() => parseCliArgs(['issue', 'run', 'x'])).toThrow('Issue 编号');
+    expect(() => parseCliArgs(['issue', 'run', '42', 'other'])).toThrow('runner');
+    expect(() => parseCliArgs(['issue', 'run', '42', '--keep-open'])).toThrow('--keep-open');
   });
   it('recognizes the doctor subcommand', () => {
     expect(parseCliArgs(['doctor']).command).toBe('doctor');

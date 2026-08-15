@@ -1,7 +1,7 @@
 ---
 title: 架构地图
 status: active
-updated: 2026-08-13
+updated: 2026-08-15
 scope: root
 ---
 
@@ -89,7 +89,9 @@ Git HEAD 注入 Validator；claim 写往单次调用临时身份域的授权输�
 HEAD；变化或不可读时立即停止且不增加重试。若命令已经结束，evidence 保留真实执行事实，但以
 `accepted=false` 明确表示它没有进入裁决；同轮 iteration 另存通用中止阶段与预期/实际身份，
 status/report 不能把该命令显示为普通通过或普通失败。本地 evidence 只用于诊断，不是 GitHub
-共享交付证明。
+共享交付证明。最终 Review 可以消费本次进程内刚完成的全量检查，但只有 head、默认分支基线、
+质量契约、平台、额外引用和验证环境逐项相同且结果完整通过时才复用；证明不落盘，任一输入变化、
+失败或局部结果都会重新执行（ADR-028）。
 
 coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。它们运行仓库机械健康检查，
 只验证文档、契约结构和契约生成文件；完整 doctor 继续拒绝候选版本与固定版本不一致。
@@ -99,12 +101,24 @@ coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。
 
 发布链把“构建候选”和“取得 npm 暂存身份”拆成两个独立工作流与权限域。前者执行完整项目
 代码但没有发布身份，只在 Ubuntu 打包一次，再让 Linux、macOS、Windows 从同一 artifact 校验摘要、
-仓库外安装并经真实 npm bin 启动；任一任务失败、取消、超时或跳过都会让候选总闸失败。产物随后供
-三个项目 Dogfood；后者由维护者选择已经验证的候选运行，回读
-其来源、成功状态与当前 `main`，只下载固定候选、重建不执行脚本的包目录并核对摘要，OIDC
-只能执行 `npm stage publish`。维护者 2FA 批准后仍需三个项目从 registry 验证精确版本，人工
-移动 `latest` 后才创建标签；标签固定所选暂存任务、npm stage ID 与候选摘要，标签工作流沿
-stage 证据找到原候选运行，分别对账后创建不可变 Release（ADR-018、019、024）。
+仓库外安装并经真实 npm bin 启动；任一任务失败、取消、超时或跳过都会让候选总闸失败。候选证据
+同时绑定 tarball 和安装后应存在的完整发布文件树；CLI 在每次候选运行前对自己的实际包根逐文件
+复核。唯一运行库被并入发布文件，不再从包外加载未绑定字节（ADR-027）。
+
+同一候选随后在固定三个仓库 Dogfood。每个通过的 Shadow 运行写出绑定候选、仓库、PR/head、
+Story 凭证与最终 Review 的证明；维护者命令再次核对当前 owner、仓库、PR、head/base 和可合并状态后，
+把唯一机器证明评论写回该 PR。staging 的预批准任务从三个固定 PR 直接读取并验证这些证明、当前检查
+以及候选 artifact，生成不可变交接物；只有该任务通过后才进入受保护环境。批准后的 OIDC 任务会再读
+一次三仓，要求结果未变后才执行 `npm stage publish`。registry 验证、移动 `latest`、建标签和 Release
+仍是后续独立边界，不能由三仓通过替代（ADR-018、019、024、027）。
+
+`issue run` 是单用户优先的最小任务入口：只接受开放、带 `ready-for-agent` 且字段完整的 Issue；
+一个 Issue 固定映射一个运行身份、`codex/issue-<number>` 分支、源 PRD、隔离 workspace 和草稿 PR。
+命令创建或继续同一运行；切分支和建 PR 前先写预备状态，首次推送/建 PR、工作区准备、运行、等待或
+收口失败都更新同一条 owner 评论，PR 建立后把原评论升级为完整状态。远端门禁未完成时退出，由人
+再次运行同一命令；引擎结束后还会回读 PR，只有它仍开放、目标和最新提交未变才可标为可信并把草稿
+改为 ready。入口不轮询、不排队、不合并、不发布。指标从最新 ready 标签事件开始，累计实际运行
+时间，并把其余时间记为等待，从而直接衡量“ready Issue 到当前 head 可信 PR”的总时间（ADR-029）。
 
 workspace 是运行边界：`workspace-safety.json` 与永久 `engine.lock/` 绑定目录身份；活动 writer 位于
 `engine.lock/lease/`。progress、evidence、Validator IPC、截图、Review 与报告的每次修改都属于当前

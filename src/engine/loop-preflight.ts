@@ -102,6 +102,18 @@ export async function runLoopPreflight(
     return { status: 'failed', exitCode: 2 };
   }
   const actualCodingXVersion = cfg.actualVersion ?? CODING_X_VERSION;
+  if (cfg.candidateIdentity && !cfg.shadow) {
+    console.error('❌ 候选包身份只能用于显式 Shadow Dogfood');
+    return { status: 'failed', exitCode: 2 };
+  }
+  if (
+    cfg.candidateIdentity &&
+    (cfg.candidateIdentity.packageName !== 'coding-x' ||
+      cfg.candidateIdentity.version !== actualCodingXVersion)
+  ) {
+    console.error('❌ 候选包身份与当前实际 coding-x 版本不一致');
+    return { status: 'failed', exitCode: 2 };
+  }
   const runtime = assessQualityRuntime(
     qualityRead.contract,
     actualCodingXVersion,
@@ -190,6 +202,7 @@ export async function runLoopPreflight(
   const validationRuntimeIdentity: StoryValidationRuntimeIdentity = {
     mode: runtime.mode,
     actualCodingXVersion,
+    candidateIdentityDigest: cfg.candidateIdentity?.digest ?? null,
   };
   const currentValidationEnvironmentDigest =
     cfg.validationEnvironmentDigestForTests !== undefined

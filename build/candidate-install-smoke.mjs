@@ -10,20 +10,27 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve, win32 } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PACKAGE_NAME = 'coding-x';
 const CANDIDATE_WORKFLOW = '.github/workflows/build-candidate.yml';
+const SOURCE_REPOSITORY = 'https://github.com/Xinzz995/coding-engine';
 const EXACT_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const GIT_SHA = /^[0-9a-f]{40}$/u;
 const RUN_ID = /^[1-9]\d*$/u;
 const SHA_256 = /^[0-9a-f]{64}$/u;
+const SHA_256_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+const RUNTIME_TREE_ALGORITHM = 'sha256-path-size-bytes-v1';
+const RUNTIME_TREE_DOMAIN = 'coding-x-candidate-runtime-tree-v1';
+const CANDIDATE_IDENTITY_DOMAIN = 'coding-x-candidate-identity-v1';
+const MAX_RUNTIME_FILES = 4096;
 const SUPPORTED_OS = ['darwin', 'linux', 'win32'];
 const POSIX_HELPERS = [
   'posix-launcher-helper.mjs',
@@ -59,9 +66,20 @@ function sameFileSnapshot(left, right) {
 
 export function readStableCandidateFile(
   path,
-  { label = 'candidate file', maxBytes = MAX_CANDIDATE_FILE_BYTES, afterOpen } = {},
+  {
+    label = 'candidate file',
+    minBytes = 1,
+    maxBytes = MAX_CANDIDATE_FILE_BYTES,
+    afterOpen,
+  } = {},
 ) {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) fail(`${label} size limit is invalid`);
+  if (
+    !Number.isSafeInteger(minBytes) ||
+    minBytes < 0 ||
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < minBytes
+  )
+    fail(`${label} size limit is invalid`);
   let descriptor;
   try {
     const noFollow = process.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0);
@@ -71,10 +89,10 @@ export function readStableCandidateFile(
     if (
       !opened.isFile() ||
       opened.nlink !== 1n ||
-      opened.size < 1n ||
+      opened.size < BigInt(minBytes) ||
       opened.size > BigInt(maxBytes)
     ) {
-      fail(`${label} must be a non-empty bounded single-link regular file`);
+      fail(`${label} must be a bounded single-link regular file`);
     }
     afterOpen?.();
     const openedPath = lstatSync(path, { bigint: true });
@@ -129,6 +147,87 @@ function readJson(path, label) {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function sha256Digest(value) {
+  return `sha256:${createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex')}`;
+}
+
+function runtimeTreeDigest(files) {
+  return sha256Digest({
+    domain: RUNTIME_TREE_DOMAIN,
+    algorithm: RUNTIME_TREE_ALGORITHM,
+    files,
+  });
+}
+
+function identityDigest(identity) {
+  return sha256Digest({
+    schemaVersion: 1,
+    domain: CANDIDATE_IDENTITY_DOMAIN,
+    packageName: PACKAGE_NAME,
+    version: identity.version,
+    commit: identity.commit,
+    candidateWorkflowRunId: identity.candidateWorkflowRunId,
+    tarballSha256: `sha256:${identity.sha256}`,
+    runtimeTreeDigest: identity.runtimeTreeDigest,
+  });
+}
+
+function safeRuntimePath(value, index) {
+  if (
+    typeof value !== 'string' ||
+    value === '' ||
+    value.includes('\\') ||
+    value.includes('\0') ||
+    isAbsolute(value) ||
+    value.split('/').some((part) => part === '' || part === '.' || part === '..')
+  ) {
+    fail(`packed evidence runtime.files[${String(index)}].path is invalid`);
+  }
+  return value;
+}
+
+function validateRuntimeTree(value) {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    value.algorithm !== RUNTIME_TREE_ALGORITHM ||
+    !Array.isArray(value.files) ||
+    value.files.length < 2 ||
+    value.files.length > MAX_RUNTIME_FILES ||
+    value.fileCount !== value.files.length
+  ) {
+    fail('packed evidence runtime tree is invalid');
+  }
+  const files = value.files.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      fail(`packed evidence runtime.files[${String(index)}] is invalid`);
+    }
+    const path = safeRuntimePath(entry.path, index);
+    if (
+      !Number.isSafeInteger(entry.size) ||
+      entry.size < 1 ||
+      entry.size > MAX_CANDIDATE_FILE_BYTES ||
+      !SHA_256_DIGEST.test(entry.sha256 ?? '')
+    ) {
+      fail(`packed evidence runtime file identity is invalid: ${path}`);
+    }
+    return { path, size: entry.size, sha256: entry.sha256 };
+  });
+  const paths = files.map((file) => file.path);
+  if (
+    new Set(paths).size !== paths.length ||
+    paths.some((path, index) => path !== [...paths].sort()[index]) ||
+    !paths.includes('package.json') ||
+    !paths.includes('dist/cli.js')
+  ) {
+    fail('packed evidence runtime file paths are invalid');
+  }
+  const digest = runtimeTreeDigest(files);
+  exactString(value.treeDigest, digest, 'packed evidence runtime tree digest');
+  return { files, treeDigest: digest };
 }
 
 function exactString(value, expected, label) {
@@ -212,11 +311,12 @@ export function validateCandidateIdentity(options) {
   if (!evidence || typeof evidence !== 'object' || Array.isArray(evidence)) {
     fail('packed evidence must be an object');
   }
-  if (evidence.schemaVersion !== 2) fail('packed evidence schemaVersion must be 2');
+  if (evidence.schemaVersion !== 3) fail('packed evidence schemaVersion must be 3');
   exactString(evidence.status, 'packed', 'packed evidence status');
   exactString(evidence.packageName, PACKAGE_NAME, 'packed evidence package name');
   exactString(evidence.sourceRef, 'refs/heads/main', 'packed evidence source ref');
   exactString(evidence.sourceWorkflow, CANDIDATE_WORKFLOW, 'packed evidence source workflow');
+  exactString(evidence.sourceRepository, SOURCE_REPOSITORY, 'packed evidence source repository');
   exactString(evidence.version, expectedVersion, 'packed evidence version');
   exactString(evidence.commit, expectedCommit, 'packed evidence commit');
   exactString(
@@ -256,14 +356,96 @@ export function validateCandidateIdentity(options) {
   if (!SHA_256.test(evidence.tarball.sha256 ?? '')) fail('packed evidence SHA-256 is invalid');
   const actualSha256 = sha256(tarballBytes);
   exactString(actualSha256, evidence.tarball.sha256, 'downloaded tarball SHA-256');
-  return {
+  const runtime = validateRuntimeTree(evidence.runtime);
+  const identity = {
     version: expectedVersion,
     commit: expectedCommit,
     candidateWorkflowRunId: expectedRunId,
     platform: expectedPlatform,
     sha256: actualSha256,
+    runtimeTreeDigest: runtime.treeDigest,
+  };
+  if (!SHA_256_DIGEST.test(evidence.candidateIdentityDigest ?? '')) {
+    fail('packed evidence candidate identity digest is invalid');
+  }
+  exactString(
+    evidence.candidateIdentityDigest,
+    identityDigest(identity),
+    'packed evidence candidate identity digest',
+  );
+  return {
+    ...identity,
+    candidateIdentityDigest: evidence.candidateIdentityDigest,
+    runtimeFiles: runtime.files,
     tarballBytes,
   };
+}
+
+export function assertInstalledRuntimeTree(packageRoot, runtimeFiles, expectedTreeDigest) {
+  const canonicalRoot = realpathSync(packageRoot);
+  const expectedPaths = runtimeFiles.map((file) => file.path);
+  const assertExactFiles = () => {
+    const files = [];
+    const visit = (directory, prefix) => {
+      for (const name of readdirSync(directory).sort()) {
+        const target = resolve(directory, name);
+        const relativePath = prefix ? `${prefix}/${name}` : name;
+        const stat = lstatSync(target);
+        if (stat.isSymbolicLink()) fail(`installed package contains a link: ${relativePath}`);
+        if (realpathSync(target) !== target) {
+          fail(`installed package path crosses a link: ${relativePath}`);
+        }
+        if (stat.isDirectory()) visit(target, relativePath);
+        else if (stat.isFile()) files.push(relativePath);
+        else fail(`installed package contains a non-regular path: ${relativePath}`);
+      }
+    };
+    visit(canonicalRoot, '');
+    if (
+      files.length !== expectedPaths.length ||
+      files.some((path, index) => path !== expectedPaths[index])
+    ) {
+      const expected = new Set(expectedPaths);
+      const observed = new Set(files);
+      const missing = expectedPaths.filter((path) => !observed.has(path));
+      const extra = files.filter((path) => !expected.has(path));
+      fail(
+        'installed package file set does not match packed evidence' +
+          (missing.length === 0 ? '' : `; missing: ${missing.join(', ')}`) +
+          (extra.length === 0 ? '' : `; extra: ${extra.join(', ')}`),
+      );
+    }
+  };
+  assertExactFiles();
+  const observed = runtimeFiles.map((expected) => {
+    const target = resolve(canonicalRoot, ...expected.path.split('/'));
+    const relation = relative(canonicalRoot, target);
+    if (
+      relation === '' ||
+      relation === '..' ||
+      relation.startsWith(`..${sep}`) ||
+      isAbsolute(relation) ||
+      realpathSync(target) !== target
+    ) {
+      fail(`installed runtime file escapes or crosses a link: ${expected.path}`);
+    }
+    const bytes = readStableCandidateFile(target, {
+      label: `installed runtime file ${expected.path}`,
+      minBytes: 0,
+      maxBytes: expected.size,
+    });
+    if (bytes.byteLength !== expected.size) {
+      fail(`installed runtime file size mismatch: ${expected.path}`);
+    }
+    exactString(
+      `sha256:${sha256(bytes)}`,
+      expected.sha256,
+      `installed runtime file SHA-256 for ${expected.path}`,
+    );
+    return expected;
+  });
+  assertExactFiles();
+  exactString(runtimeTreeDigest(observed), expectedTreeDigest, 'installed runtime tree digest');
 }
 
 function assertProjectHead(projectRoot, expectedCommit) {
@@ -542,7 +724,7 @@ export function runCandidateInstallSmoke(rawOptions) {
     expectedPlatform: rawOptions.expectedPlatform,
     actualPlatform: process.platform,
   });
-  const { tarballBytes, ...identity } = validatedIdentity;
+  const { tarballBytes, runtimeFiles, ...identity } = validatedIdentity;
   assertProjectHead(projectRoot, identity.commit);
 
   const sandbox = mkdtempSync(join(tempRoot, 'coding-x-candidate-install-'));
@@ -572,6 +754,11 @@ export function runCandidateInstallSmoke(rawOptions) {
     requireExit('fresh npm install', install, 0);
 
     const commandPath = assertInstalledCandidate(installRoot, identity.version, identity.platform);
+    assertInstalledRuntimeTree(
+      join(installRoot, 'node_modules', PACKAGE_NAME),
+      runtimeFiles,
+      identity.runtimeTreeDigest,
+    );
     const help = runInstalledCommand(commandPath, ['--help'], projectRoot, identity.platform);
     requireExit('coding-x --help', help, 0);
     if (String(help.stderr).trim() !== '')
@@ -590,7 +777,16 @@ export function runCandidateInstallSmoke(rawOptions) {
 
     const doctor = runInstalledCommand(
       commandPath,
-      ['doctor', '--shadow', '--local', '--workspace', workspacePath, '--json'],
+      [
+        'doctor',
+        '--shadow',
+        '--candidate-evidence',
+        evidencePath,
+        '--local',
+        '--workspace',
+        workspacePath,
+        '--json',
+      ],
       projectRoot,
       identity.platform,
     );

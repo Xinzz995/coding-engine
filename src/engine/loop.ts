@@ -109,6 +109,12 @@ import {
   type StoryValidationObservation,
 } from '../review/story-validation-observation.js';
 import { classifyValidatorAttempt } from './validator-outcome.js';
+import type { VerifiedCandidateIdentity } from '../release/candidate-identity.js';
+import {
+  CANDIDATE_PROOF_FILE,
+  createCandidateDogfoodProof,
+} from '../release/candidate-proof.js';
+import { createFullGateProof, type FullGateProof } from './full-gate-proof.js';
 
 export { renderInstruction } from './loop-instructions.js';
 
@@ -143,6 +149,8 @@ export interface LoopConfig {
   shadow?: boolean;
   /** 实际运行版本；生产由 CLI 注入，API 缺省使用构建内常量。 */
   actualVersion?: string;
+  /** 已逐文件核对的候选包身份；只有 shadow Dogfood 可以绑定。 */
+  candidateIdentity?: VerifiedCandidateIdentity;
   /** 项目根；生产缺省当前目录，测试/嵌入环境可显式指定。 */
   projectRoot?: string;
   /** 只供隔离测试注入；生产始终读取项目根 .coding-x/quality.json。 */
@@ -166,6 +174,7 @@ export interface LoopConfig {
     shadow: boolean;
     timeoutMs: number;
     storyValidationDigest: string;
+    reusableFullGate?: FullGateProof;
     observeStoryValidation: () =>
       StoryValidationBindingObservation | Promise<StoryValidationBindingObservation>;
     termination?: {
@@ -312,6 +321,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       validationRuntimeIdentity,
       defaultBranchGitHead,
     } = startup;
+    await session.writer.removeFile(CANDIDATE_PROOF_FILE);
     const agentCwd = projectRoot;
     const storyValidationEnvironmentAt = (headSha: string): string =>
       cfg.validationEnvironmentDigestForTests !== undefined
@@ -523,6 +533,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       return true;
     };
     let exitCode = 1;
+    let reusableFullGate: FullGateProof | undefined;
     let reportCurrentReview: CurrentReviewStatus | undefined;
     const reportOptionsFor = (
       trustedPrd: Prd | null,
@@ -641,6 +652,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         shadow: cfg.shadow ?? false,
         timeoutMs: cfg.valTimeoutMs,
         storyValidationDigest: initialDigest,
+        reusableFullGate,
         observeStoryValidation,
         termination: commandSignals.termination,
       });
@@ -659,6 +671,31 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           }
           console.error('⏸️  loop 接受最终 Review 前 Story 验收凭证集合已变化；本轮结果已作废');
           return 5;
+        }
+      }
+      if (cfg.candidateIdentity && finalReview.state !== undefined) {
+        if (
+          finalReview.state.shadow &&
+          finalReview.state.status === 'passed' &&
+          finalReview.state.remote.status === 'ready'
+        ) {
+          try {
+            const proof = createCandidateDogfoodProof({
+              identity: cfg.candidateIdentity,
+              contract: qualityRead.contract,
+              review: finalReview.state,
+              storyValidationEnvironmentDigest: initialEnvironmentDigest,
+            });
+            await session.writer.writeFile(CANDIDATE_PROOF_FILE, `${JSON.stringify(proof, null, 2)}\n`);
+            console.log(`📦 候选 Dogfood 机器证明已写入 ${CANDIDATE_PROOF_FILE}`);
+          } catch (error) {
+            console.error(
+              `❌ 候选 Dogfood 机器证明无法签发：${error instanceof Error ? error.message : String(error)}`,
+            );
+            return 5;
+          }
+        } else if (finalReview.state.shadow && finalReview.state.status === 'passed') {
+          console.warn('⏳ Shadow Review 已通过，但远端总闸尚未 ready；不会生成发布用候选证明');
         }
       }
       reportCurrentReview =
@@ -1489,6 +1526,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           storyDifficulty: currentStoryObj?.difficulty ?? null,
         });
         const stateBeforeGate = rawOf(statePath);
+        reusableFullGate = undefined;
         const managedGate = {
           session,
           kind: 'quality-check' as const,
@@ -1672,6 +1710,33 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
             break;
           }
           continue;
+        }
+        if (
+          derivedSnapshot &&
+          'skipped' in gate &&
+          Array.isArray(gate.skipped) &&
+          verificationHead
+        ) {
+          const proofPolicy = candidateStoryValidationEnvironmentPolicy(
+            tddConfig,
+            qualityRead.contract,
+            defaultBranchGitHead,
+          );
+          reusableFullGate = createFullGateProof(
+            {
+              contract: qualityRead.contract,
+              headSha: verificationHead,
+              defaultBranchGitHead,
+              additionalRefs: proofPolicy.additionalRefs,
+              referenceAliases: proofPolicy.referenceAliases,
+            },
+            {
+              ...gate,
+              skipped: gate.skipped.filter(
+                (value): value is string => typeof value === 'string',
+              ),
+            },
+          );
         }
       }
 

@@ -1,7 +1,7 @@
 ---
 title: coding-x 候选发布与恢复手册
 status: active
-updated: 2026-08-08
+updated: 2026-08-15
 scope: root
 ---
 
@@ -14,8 +14,9 @@ scope: root
 到 `next` → 公开精确版本再次验证 → 维护者移动 `latest` → 创建不可改写的标签和 GitHub
 Release。
 
-`build-candidate.yml` 只能构建和保存候选，没有 npm 身份。`stage-candidate.yml` 只能把明确
-选择且已经验证的候选提交到 npm 暂存区，不能批准、不能直接公开、不能移动 `latest`。本机
+`build-candidate.yml` 只能构建和保存候选，没有 npm 身份。`stage-candidate.yml` 先在无 npm
+身份的任务中机器读取固定三仓证明；只有该任务通过，后续任务才进入受保护 environment 等待人工
+批准，并把同一候选提交到 npm 暂存区。它不能批准、不能直接公开、不能移动 `latest`。本机
 也不运行 `npm publish`。发布身份只存在于独立的暂存任务；该任务不安装项目依赖，也不运行
 项目脚本。
 
@@ -69,8 +70,12 @@ PR 合并到 `main` 后再完成 npm 配置，因为 npm 只接受已经存在�
 
 下载该次运行的制品：
 
-- `npm-candidate-X.Y.Z`：压缩包、打包结果和 schema v2 候选证据；证据记录 commit、candidate
-  run ID、文件大小、SHA-1、SHA-256 和 SHA-512 integrity。
+- `npm-candidate-X.Y.Z`：压缩包、打包结果和 schema v3 候选证据；证据记录 commit、candidate
+  run ID、文件大小、SHA-1、SHA-256、SHA-512 integrity，以及发布包全部运行文件的路径、大小、
+  内容摘要和统一候选身份摘要。
+
+发布包的唯一运行库已经并入 `dist`，公共包不再从包外加载运行代码。三系统安装后不仅核对 tarball，
+还要从真实安装目录逐文件核对运行文件树；换掉入口或任一发布文件都必须失败。
 
 构建、摘要、任一系统安装或候选总闸失败时 npm 尚未收到任何内容。取消、超时或跳过也视为失败。
 通过受保护 PR 修复后，从新的 main 重新构建候选。
@@ -87,16 +92,20 @@ coding-engine、Go 多模块合成试点和 Python Monorepo 合成试点都安�
 
 ```bash
 <candidate-cli> workspace init --workspace <new-workspace>
-<candidate-cli> doctor --shadow --json --workspace <new-workspace>
+<candidate-cli> doctor --shadow --candidate-evidence <packed.json> \
+  --json --workspace <new-workspace>
 <candidate-cli> workspace apply-prd --shadow --json \
-  --input <system-temp-request> --workspace <new-workspace>
-<candidate-cli> <runner> --shadow --workspace <new-workspace> --no-open
+  --candidate-evidence <packed.json> --input <system-temp-request> --workspace <new-workspace>
+<candidate-cli> <runner> --shadow --candidate-evidence <packed.json> \
+  --workspace <new-workspace> --no-open
 ```
 
 - workspace init 返回 0；
 - shadow doctor 必须同时得到退出 7、`quality.status=shadow` 且没有其他错误；
 - shadow apply-prd 必须同时得到退出 7 和 `status=applied-shadow`；
 - 最终 run 必须退出 7，并保留 `shadow=true` 的最终 Review；
+- Story 凭证和最终 `candidate-proof.json` 必须绑定 `packed.json` 的同一候选身份摘要；每次新进程
+  都重新核对当前实际 CLI 文件，不能只复制摘要；
 - 普通 doctor/apply-prd 仍应因固定版本不一致而失败，不能靠手写 `prd.json`/`state.json` 绕过；
 - shadow Story 凭证在正式模式或另一候选版本中必须自动过期并重验。
 
@@ -106,25 +115,38 @@ coding-engine、Go 多模块合成试点和 Python Monorepo 合成试点都安�
 - Go 多模块项目运行自身 Go 检查，GitHub CI 不安装 Node 或 coding-x；
 - Python Monorepo 运行自身 Python 检查，GitHub CI 不安装 Node 或 coding-x。
 
-三个候选 PR、候选摘要和远端总闸均通过后，才进入批准。当前尚未实现三仓机器回执，总闸不会
-自动证明这一步已经完成；发布维护者必须逐仓人工核对，不能把 workflow 可触发误写成机器强制。
+每个候选 PR 必须开放、非草稿、目标为该仓默认分支，并让当前 head 的远端总闸达到 ready。随后在
+对应仓库从该候选 CLI 显式运行：
+
+```bash
+<candidate-cli> candidate publish-proof --workspace <new-workspace>
+```
+
+该命令再次核对当前仓库、owner、分支、PR 编号、head、Final Review 使用的 base 和当前可合并状态，
+只创建或更新一条 owner 证明评论。评论绑定候选身份、Story 凭证集合、最终 Review、当前 head/base
+和当时全部必需检查；普通日志、Agent 自述或旧评论不能替代它。
 
 ### 4. 提升已验证候选到 npm staging
 
 从 GitHub Actions 手动运行 `Stage verified npm candidate`，分支必须选 `main`，输入：
 
 - 候选的精确版本；
-- `Build release candidate` 页面显示的 candidate run ID。
+- `Build release candidate` 页面显示的 candidate run ID；
+- coding-engine、Go、Python 三个当前候选 PR 的编号。
 
-不需要手工复制文件摘要。工作流自动回读候选运行，要求它来自
+不需要手工复制文件摘要。工作流先自动回读候选运行，要求它来自
 `.github/workflows/build-candidate.yml`、已成功结束、对应提交仍是当前远端 main，并重新核对
-tarball 摘要。该运行只有在三系统安装总闸成功后才能得到成功结论，因此不另接受人工“已检查”输入。
-任一条件不满足都会在联系 npm 前停止；此时应从新 main 重新构建并重跑三仓
-Dogfood。
+tarball 与运行文件树身份；再读取固定三仓的指定 PR、全部评论和当前 head 的检查结果，要求每仓
+恰有一条受信任 owner 证明，且三个证明都绑定同一候选、各自当前 PR head/base，PR 仍可合并，证明
+列出的必需检查仍是最新成功结果。机器核对完成并保存三仓证明集合后，npm environment 才显示批准
+请求。任一条件不满足都不会进入批准，也不会取得 npm 身份；此时应修正对应 PR 或从新 main 重新
+构建候选。
 
 成功后下载该次 staging 运行的 `npm-stage-X.Y.Z`。它记录 candidate run、stage run、npm
-stage ID 和同一候选摘要。若该制品不存在，不得推测暂存成功。查看日志和 npm Staged
-Packages；若 npm 已创建 stage 但后续摘要核验或证据上传失败，必须用 2FA 拒绝该 stage。
+stage ID、同一候选摘要和三仓证明集合摘要。批准后任务还会重新读取三仓 PR、评论与检查，要求重算
+结果和批准前集合完全一致，并再次核对当前 main；任何批准等待期间的 base/head、评论或检查变化都会
+停止，不会在有 npm 身份的步骤接受旧快照或人工文字。若该制品不存在，不得推测暂存成功。查看日志
+和 npm Staged Packages；若 npm 已创建 stage 但后续摘要核验或证据上传失败，必须用 2FA 拒绝该 stage。
 
 若 npm 报告版本曾经发布，停止重试该版本。npm 的版本标识不可复用，即使公开内容已经撤回；
 必须通过新的受保护版本 PR 选择新版本，再从新的 main 构建和验证候选。
@@ -180,6 +202,7 @@ git push origin vX.Y.Z
 - `vX.Y.Z` 是 annotated tag，指向同一提交且属于受保护 `main`；
 - GitHub Release 显示 Immutable，两个资产摘要和 Release attestation 均通过；
 - coding-engine 与两个合成试点记录的是同一候选摘要；本地 `main` 干净并与远端同步；
+- staging 证据包含固定三仓唯一证明集合，三份证明分别绑定各自 PR 的当前 head；
 - 本轮证据只证明跨语言试点，不声称已经完成真实业务下游验证。
 
 ## 失败恢复
@@ -201,7 +224,8 @@ npm staged publishing 不可用时不自动降级。只有用户明确批准新�
 
 ## 证据保留
 
-Actions 候选制品保留 30 天，供批准前 Dogfood、staging 和发布工作流消费；stage 证据沿
+Actions 候选制品保留 30 天，供批准前 Dogfood、staging 和发布工作流消费；三个 PR 的 owner
+证明评论是可回读的批准输入，stage 证据保存其集合摘要、评论 ID 和 PR head。stage 证据沿
 candidate run ID 回到原候选，不复制或重建一个替代候选。npm stage、公开 registry、GitHub
 不可变 Release 和对应 attestation 是共享记录。workspace 里的 Review 文件仍只是本地反馈，
 不能替代这些交付记录。

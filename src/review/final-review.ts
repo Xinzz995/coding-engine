@@ -54,6 +54,10 @@ import {
   ReviewTemporaryDirectoryError,
 } from './temporary-directory.js';
 import {
+  reusableFullGateResult,
+  type FullGateProof,
+} from '../engine/full-gate-proof.js';
+import {
   invalidateFinalReviewState,
   readFinalReviewState,
   readReviewDecisions,
@@ -186,6 +190,8 @@ export async function runFinalReview(options: {
     root: string,
     managed: ManagedGateContext,
   ) => Promise<ContractGateResult>;
+  /** 同一 loop 内由引擎签发；输入不完全一致时静默放弃并重新运行。 */
+  reusableFullGate?: FullGateProof;
   probe?: typeof probeRunnerIsolation;
   axisRunner?: AxisRunner;
   runnerVersion?: string;
@@ -369,13 +375,27 @@ export async function runFinalReview(options: {
   });
   let gate: ContractGateResult | null = null;
   let mechanicalEnvironmentError: string | null = null;
+  const mechanicalPolicy = finalReviewMechanicalEnvironmentPolicy(
+    context.baseContract,
+    context.baseSha,
+  );
+  const reused = reusableFullGateResult(options.reusableFullGate, {
+    contract: context.baseContract,
+    headSha: context.headSha,
+    defaultBranchGitHead: context.baseSha,
+    additionalRefs: mechanicalPolicy.additionalRefs,
+    referenceAliases: mechanicalPolicy.referenceAliases,
+  });
   try {
-    if (!options.gate) {
+    if (reused) {
+      gate = reused;
+      console.log('♻️  最终 Review 复用同一进程中输入完全一致的全量检查结果');
+    } else if (!options.gate) {
       mechanicalCheckout = await createCleanValidationCheckout({
         sourceRoot: context.root,
         head: context.headSha,
         contract: context.baseContract,
-        ...finalReviewMechanicalEnvironmentPolicy(context.baseContract, context.baseSha),
+        ...mechanicalPolicy,
         managed: managedGate,
       });
       mechanicalRoot = mechanicalCheckout.root;
@@ -386,20 +406,22 @@ export async function runFinalReview(options: {
         await verifyStoryValidationBinding('最终 Review 干净检出准备结束后：');
       if (preparedStoryError) return { exitCode: 5, message: preparedStoryError };
     }
-    gate = await (options.gate
-      ? options.gate(context.baseContract, context.root, managedGate)
-      : runContractQualityChecks(
-          context.baseContract.checks,
-          mechanicalRoot,
-          undefined,
-          mechanicalCheckout
-            ? {
-                ...managedGate,
-                environment: mechanicalCheckout.processEnvironment,
-                forbiddenExecutableRoot: context.root,
-              }
-            : managedGate,
-        ));
+    if (!reused) {
+      gate = await (options.gate
+        ? options.gate(context.baseContract, context.root, managedGate)
+        : runContractQualityChecks(
+            context.baseContract.checks,
+            mechanicalRoot,
+            undefined,
+            mechanicalCheckout
+              ? {
+                  ...managedGate,
+                  environment: mechanicalCheckout.processEnvironment,
+                  forbiddenExecutableRoot: context.root,
+                }
+              : managedGate,
+          ));
+    }
     if (mechanicalCheckout) {
       await mechanicalCheckout.assertCurrent('最终 Review 机械检查结束后');
     }
