@@ -53,4 +53,3 @@ scope: root
 2. 定向运行 validation protocol、full gate、loop instruction 和 loop gate/review 测试。
 3. 运行格式、静态检查、类型检查、构建、仓库健康、依赖审计和完整测试。
 4. 从新 main 重建候选；不用额外 Python wheelhouse 或宿主环境注入，重做三仓 fresh Shadow。
-
