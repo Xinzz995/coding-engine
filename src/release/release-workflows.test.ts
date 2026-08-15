@@ -11,6 +11,7 @@ interface WorkflowStep {
   run?: string;
   if?: string;
   env?: Record<string, string>;
+  with?: Record<string, unknown>;
   'continue-on-error'?: boolean | string;
 }
 
@@ -48,6 +49,23 @@ function stepWithRun(job: WorkflowJob, text: string): WorkflowStep {
 function expectNoContinueOnError(job: WorkflowJob): void {
   expect(job['continue-on-error']).toBeUndefined();
   for (const step of job.steps ?? []) expect(step['continue-on-error']).toBeUndefined();
+}
+
+function sparseCheckoutPaths(job: WorkflowJob): readonly string[] {
+  const checkout = job.steps?.find((step) => step.uses?.startsWith('actions/checkout@'));
+  const sparseCheckout = checkout?.with?.['sparse-checkout'];
+  if (typeof sparseCheckout !== 'string') throw new Error('checkout step has no sparse-checkout');
+  return sparseCheckout
+    .split('\n')
+    .map((path) => path.trim())
+    .filter(Boolean);
+}
+
+function localBuildImports(path: string): readonly string[] {
+  const source = readFileSync(resolve(path), 'utf8');
+  return [...source.matchAll(/from '\.\/(?<path>[^']+)'/gu)].map(
+    (match) => `build/${match.groups?.path ?? ''}`,
+  );
 }
 
 describe('release candidate workflow boundaries', () => {
@@ -188,6 +206,14 @@ describe('release candidate workflow boundaries', () => {
     expect(source).toContain('.release/dogfood-policy.json');
     expect(source).toContain('issues/$pr_number/comments');
     expect(source).toContain('check-runs?per_page=100&filter=all');
+    const requiredSparsePaths = [
+      '.release/dogfood-policy.json',
+      'build/release-evidence.mjs',
+      ...localBuildImports('build/release-evidence.mjs'),
+    ];
+    for (const job of [verify, stage]) {
+      expect(sparseCheckoutPaths(job)).toEqual(expect.arrayContaining(requiredSparsePaths));
+    }
     expect(source).toContain('Re-read all three repositories after approval');
     expect(source).toContain('dogfood-current.json');
     expect(source).toContain('Three-repository evidence changed during approval');
