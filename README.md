@@ -658,8 +658,8 @@ npx coding-x workspace resume-mutation --workspace ./run
                                 # 继续已验证的 apply-prd / repair 操作
 npx coding-x issue run 42 codex --validator-model model-d
                                 # 显式继续一个 ready Issue 的唯一分支、草稿 PR 和状态评论
-npx coding-x candidate publish-proof --workspace ./run
-                                # 候选三仓专用：核对 owner、仓库、PR 与 head 后发布机器证明
+npx coding-x candidate publish-proof --candidate-evidence /path/to/packed.json --workspace ./run
+                                # 候选三仓专用：只刷新晚到检查、补签并发布机器证明
 npx coding-x                    # 默认 claude，max-iter 50
 npx coding-x codex              # 改用 codex 后端
 npx coding-x cursor             # 改用 Cursor Agent 后端
@@ -746,7 +746,7 @@ GitHub 状态给出。
 | 位置参数 `models [claude\|codex\|cursor]`       | —            | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json`                                                                                                                                                                                                 |
 | 位置参数 `hooks cursor install\|status\|remove` | —            | 在当前 Git 项目安全安装、只读检查或卸载 Cursor TDD 提交前检查；只管理 `.cursor/` 中 coding-x 拥有的内容，不改 Git hooks、索引或提交。install/remove 成功与 status 健康返回 0；缺失、冲突或过期返回 1                                                                       |
 | 位置参数 `issue run <编号> [runner]`            | —            | 只接受当前带 `ready-for-agent` 的受管 Issue；首次建立唯一 `codex/issue-<编号>` 分支、源 PRD、隔离 workspace、草稿 PR 和 owner 状态评论，后续只继续同一运行。可以推送当前分支并把可信草稿标为 ready，但不轮询、不排队、不合并、不发布                                         |
-| 位置参数 `candidate publish-proof`              | —            | 候选 Dogfood 专用；从 workspace 读取引擎生成的证明，重新核对当前 owner、仓库、默认分支、PR 和 head 后创建或更新唯一 PR 证明评论，不产生新的通过结论                                                                                                                        |
+| 位置参数 `candidate publish-proof`              | —            | 候选 Dogfood 专用；带同一 `--candidate-evidence` 时重新核对候选运行文件、已有 Story/Review/Runner/PR 绑定，只刷新远端检查并在 ready 后补签，再创建或更新唯一 PR 证明评论；不带证据时只发布 workspace 中已有证明，不产生新结论                                             |
 | 位置参数 `repair`                               | —            | 获取短租约，修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；活动租约或未完成恢复会拒绝                                                                                                                                                                             |
 | 位置参数 `dashboard`                            | —            | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告                                                                                                                                                                |
 | 位置参数 `doctor`                               | —            | `docs/` 知识库健康检查（frontmatter、`updated`、AGENTS.md 索引、相对链接；`docs/archive/` 仍查结构/链接但跳过新鲜度）、机械门禁、全局模型目录/PRD 映射与 workspace Git 隔离核对；未忽略/已跟踪只建议且不自动改仓库；普通错误退出 1，显式 shadow 且其余健康时退出 7         |
@@ -770,7 +770,7 @@ GitHub 状态给出。
 | `--local`                                       | 关闭         | 仅 `doctor`：不查询 GitHub，只检查本地契约、派生快照、文档和 workspace；用于项目原生 CI                                                                                                                                                                                    |
 | `--json`                                        | 关闭         | `init`、`workspace`、`doctor`、`status`、`models`、`issue`、`candidate` 输出单个 JSON 对象；交互提示不写入 JSON stdout                                                                                                                                                     |
 | `--shadow`                                      | 关闭         | 只供固定候选 Dogfood，且只允许用于 run、doctor、`workspace apply-prd`；健康固定退出 7，不能表示正式通过；真实失败仍保留原失败码，其他子命令会拒绝该参数                                                                                                                    |
-| `--candidate-evidence <file>`                   | —            | 只与 `--shadow` 同用；读取候选 `packed.json`，从当前实际安装的 coding-x 包根逐文件核对发布文件树，并把候选身份绑定到 Story 凭证和最终 Dogfood 证明。只复制摘要、替换入口或修改任一运行文件都会拒绝                                                                            |
+| `--candidate-evidence <file>`                   | —            | Shadow 的 doctor/apply/run 或 `candidate publish-proof` 使用；读取候选 `packed.json`，从当前实际安装的 coding-x 包根逐文件核对发布文件树，并把候选身份绑定到 Story 凭证或补签证明。只复制摘要、替换入口或修改任一运行文件都会拒绝                                              |
 | `--review-model <id>`                           | —            | 最终 Review 的精确模型 ID；不能使用 runner 默认值，因为结果必须能绑定并复现实际模型                                                                                                                                                                                        |
 
 ### `status` 子命令退出码

@@ -124,6 +124,19 @@ function executor(options: { existing?: boolean; head?: string } = {}) {
 }
 
 describe('publishCandidateProof', () => {
+  it('does not invent a missing proof and points late remote recovery to candidate evidence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'candidate-proof-publish-'));
+    roots.push(root);
+    const workspace = join(root, 'workspace');
+    mkdirSync(workspace);
+    const fake = executor();
+
+    expect(() => publishCandidateProof({ root, workspace, executor: fake.execute })).toThrow(
+      '--candidate-evidence <packed.json>',
+    );
+    expect(fake.calls).toEqual([]);
+  });
+
   it('creates the single owner proof comment after binding repository, PR and head', () => {
     const paths = fixture();
     const fake = executor();

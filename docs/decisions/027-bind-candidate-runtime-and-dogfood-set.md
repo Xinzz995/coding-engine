@@ -1,7 +1,7 @@
 ---
 title: 027-bind-candidate-runtime-and-dogfood-set
 status: active
-updated: 2026-08-15
+updated: 2026-08-17
 scope: root
 ---
 
@@ -24,11 +24,15 @@ scope: root
    ready，才在 workspace 生成 `candidate-proof.json`。证明同时保存当时的默认分支提交和全部必需
    检查。显式 `candidate publish-proof` 再核对当前仓库、owner、分支、PR、head、base 和可合并状态，
    把唯一证明评论发布到该 PR。
-4. 发布政策固定 coding-engine、Go、Python 三个试点。暂存工作流先读取三个指定 PR 及 owner 证明
+4. 若本地 Shadow Review 已通过、但远端检查在收口后才 ready，维护者显式执行带同一
+   `--candidate-evidence` 的 `candidate publish-proof`。命令重新逐文件证明当前 CLI、在短租约内
+   复核 Story/Review/Runner/Git/PR/契约当前性，只刷新远端 Ruleset/checks；全部仍匹配且远端 ready
+   时补签证明，不重跑 Builder、Validator、完整质量检查或 Review 轴。
+5. 发布政策固定 coding-engine、Go、Python 三个试点。暂存工作流先读取三个指定 PR 及 owner 证明
    评论，并重新读取每个 head 的检查结果，逐项核对唯一仓库、默认分支、当前 head/base、可合并状态、
    候选身份、证明摘要和必需检查；三份都通过后才进入需要人工批准的 npm environment。批准后的
    任务会再次读取三仓并要求结果与批准输入完全一致，随后才取得 npm 身份。
-5. 证明不是密码学签名，也不证明真实业务采用。它证明的是固定 owner 在三个固定公开试点上，针对
+6. 证明不是密码学签名，也不证明真实业务采用。它证明的是固定 owner 在三个固定公开试点上，针对
    同一候选和当前 PR head 完成了当前项目已有的验收链。
 
 ## 被否方案
@@ -43,4 +47,6 @@ scope: root
 - 旧 schema 2 候选、无文件树身份的 Shadow 凭证和人工三仓说明不能进入新暂存流程。
 - 任一候选运行文件被替换、经过链接、缺失，或三仓少一份/错仓/错 head/错 base/错 owner、检查被
   重跑为失败、PR 在批准期间变化，都会在 npm OIDC 之前停止。
+- 晚到远端检查只需一次显式受管刷新；无候选证据、旧 Review/Story/Runner/PR 失效或远端仍未 ready
+  时不会生成新证明，已有本地证明也不会被失败刷新覆盖。
 - npm 暂存仍需人工批准；本决策没有授予自动批准、发布、移动标签或合并 PR 的权限。

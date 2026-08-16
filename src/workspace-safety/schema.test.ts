@@ -46,6 +46,9 @@ describe('workspace safety strict record schema', () => {
     expect(parseWorkspaceMarker(marker)).toEqual(marker);
     expect(parseProtocolRecord(protocol)).toEqual(protocol);
     expect(parseOwnerRecord(owner)).toEqual(owner);
+    expect(parseOwnerRecord({ ...owner, command: 'candidate-proof' }).command).toBe(
+      'candidate-proof',
+    );
   });
 
   it.each([

@@ -47,6 +47,7 @@ const OWNER_COMMANDS = new Set<OwnerCommand>([
   'report',
   'apply-prd',
   'review-decision',
+  'candidate-proof',
 ]);
 
 const PROCESS_IDENTITY_KINDS = new Set<ProcessIdentityKind>([
