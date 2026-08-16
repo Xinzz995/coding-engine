@@ -1,7 +1,7 @@
 ---
 title: coding-x 候选发布与恢复手册
 status: active
-updated: 2026-08-15
+updated: 2026-08-16
 scope: root
 ---
 
@@ -15,10 +15,10 @@ scope: root
 Release。
 
 `build-candidate.yml` 只能构建和保存候选，没有 npm 身份。`stage-candidate.yml` 先在无 npm
-身份的任务中机器读取固定三仓证明；只有该任务通过，后续任务才进入受保护 environment 等待人工
-批准，并把同一候选提交到 npm 暂存区。它不能批准、不能直接公开、不能移动 `latest`。本机
-也不运行 `npm publish`。发布身份只存在于独立的暂存任务；该任务不安装项目依赖，也不运行
-项目脚本。
+身份的任务中先读取 `npm-staging` 当前保护规则，再机器读取固定三仓证明；只有两者都通过，后续任务
+才进入受保护 environment 等待人工批准。批准后、接触 npm 前再次读取保护规则和三仓证明，随后把
+同一候选提交到 npm 暂存区。它不能批准、不能直接公开、不能移动 `latest`。本机也不运行
+`npm publish`。发布身份只存在于独立的暂存任务；该任务不安装项目依赖，也不运行项目脚本。
 
 候选版本与质量契约固定的稳定裁判版本不同是预期状态。GitHub 和暂存流程只运行
 `repository-health` 机械检查，不运行候选版本的完整 `doctor`，也不把 shadow 结果转换成成功。
@@ -34,7 +34,15 @@ Release。
 
 PR 合并到 `main` 后再完成 npm 配置，因为 npm 只接受已经存在于默认分支的工作流文件：
 
-1. 在 GitHub 创建 `npm-staging` environment，并只允许受保护的 `main` 使用。
+1. 在 GitHub 创建 `npm-staging` environment：
+   - 至少配置一个 required reviewer；单人维护时允许该维护者批准自己的运行；
+   - 关闭管理员绕过保护规则；
+   - 使用自定义部署分支政策，且只添加一个精确的 `main` 分支，不添加标签或通配符。
+
+   不要选择 environment 的 “protected branches only”。本仓库用 GitHub ruleset 保护 `main`，但
+   environment 不会把它识别为旧式 protected branch；该模式会显示没有旧分支保护规则，并实际允许
+   所有分支部署。仓库内 `.release/npm-staging-policy.json` 不绑定具体批准人账号，但每次暂存会在批准
+   前后核对至少一名批准人、禁止管理员绕过和唯一 `main` 分支政策。
 2. 在 npm 的 `coding-x` 包设置中添加 GitHub Actions Trusted Publisher：
    - 用户：`Xinzz995`
    - 仓库：`coding-engine`

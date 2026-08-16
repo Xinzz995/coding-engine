@@ -56,6 +56,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .release/dogfood-policy.json
+            .release/npm-staging-policy.json
             build/candidate-install-smoke.mjs
             build/release-evidence.mjs
             build/sync-plugin-versions.mjs
@@ -65,6 +66,20 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+
+      - name: Verify live npm staging environment policy before candidate input
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/environments/npm-staging" \
+            > "$RUNNER_TEMP/npm-staging-environment.json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/npm-staging/deployment-branch-policies" \
+            > "$RUNNER_TEMP/npm-staging-branch-policies.json"
+          node build/release-evidence.mjs verify-stage-environment \
+            --policy .release/npm-staging-policy.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --environment-json "$RUNNER_TEMP/npm-staging-environment.json" \
+            --branch-policies-json "$RUNNER_TEMP/npm-staging-branch-policies.json"
 
       - name: Verify selected candidate run and current main identity
         env:
@@ -198,6 +213,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             .release/dogfood-policy.json
+            .release/npm-staging-policy.json
             build/candidate-install-smoke.mjs
             build/release-evidence.mjs
             build/sync-plugin-versions.mjs
@@ -208,6 +224,20 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
+
+      - name: Reverify live npm staging environment policy after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/environments/npm-staging" \
+            > "$RUNNER_TEMP/npm-staging-environment.json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/npm-staging/deployment-branch-policies" \
+            > "$RUNNER_TEMP/npm-staging-branch-policies.json"
+          node build/release-evidence.mjs verify-stage-environment \
+            --policy .release/npm-staging-policy.json \
+            --repository "$GITHUB_REPOSITORY" \
+            --environment-json "$RUNNER_TEMP/npm-staging-environment.json" \
+            --branch-policies-json "$RUNNER_TEMP/npm-staging-branch-policies.json"
 
       - name: Download only the pre-approval verified handoff
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
