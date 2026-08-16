@@ -70,11 +70,18 @@ export class MonotonicDeadline {
 
     return await new Promise<T>((resolve, reject) => {
       let settled = false;
-      const timer = setTimeout(() => {
+      let timer: NodeJS.Timeout;
+      const rejectWhenExpired = (): void => {
         if (settled) return;
+        const stillRemaining = this.remainingMs();
+        if (stillRemaining > 0) {
+          timer = setTimeout(rejectWhenExpired, stillRemaining);
+          return;
+        }
         settled = true;
         reject(timeoutError());
-      }, remaining);
+      };
+      timer = setTimeout(rejectWhenExpired, remaining);
       void pending.then(
         (value) => {
           if (settled) return;
