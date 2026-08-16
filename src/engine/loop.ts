@@ -200,6 +200,8 @@ export interface LoopConfig {
   validatorOutputForTests?: { readonly stdout: Writable; readonly stderr: Writable };
   /** 只供 Builder 输出故障闭环测试；生产始终使用进程 stdout/stderr。 */
   builderOutputForTests?: { readonly stdout: Writable; readonly stderr: Writable };
+  /** @internal 隔离单次测试使用的假 Runner 环境，避免修改进程级环境后因超时串扰后续用例。 */
+  runnerEnvironmentForTests?: Readonly<NodeJS.ProcessEnv>;
   /** 只供 session release 信号竞态测试；生产始终安装真实进程信号。 */
   commandSignalsForTests?: CommandSignalController;
   /** 只供 session release 信号竞态测试：close 已进入 closing、尚未 await 时执行。 */
@@ -343,7 +345,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
     const runId = randomUUID();
     const validationRunnerEnvironment = Object.fromEntries(
       ['CODING_X_CLAUDE_BIN', 'CODING_X_CODEX_BIN', 'CODING_X_CURSOR_BIN'].flatMap((name) => {
-        const value = process.env[name];
+        const value = agentEnv[name] ?? process.env[name];
         if (!value) return [];
         if (
           !cfg.unsafeAllowProjectScopedRunnerForValidationTests &&
