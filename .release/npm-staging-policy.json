@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "repository": "Xinzz995/coding-engine",
+  "environment": "npm-staging",
+  "canAdminsBypass": false,
+  "requiredReviewers": {
+    "minimumCount": 1,
+    "preventSelfReview": false
+  },
+  "deploymentBranchPolicy": {
+    "protectedBranches": false,
+    "customBranchPolicies": true
+  },
+  "branchPolicies": [
+    {
+      "name": "main",
+      "type": "branch"
+    }
+  ]
+}

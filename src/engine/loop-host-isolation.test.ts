@@ -112,149 +112,153 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('runLoop Validator host isolation (ADR-025)', () => {
-  it('keeps the candidate, issues no receipt and exits 5 when the profile boundary cannot be proven', async () => {
-    const fixture = setupGitProject([story({ acceptanceCriteria: ['AC 1'] })]);
-    const fake = fakeBoundValidator(fixture.workspace, 'passed');
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
-    const warned: string[] = [];
-    vi.spyOn(console, 'warn').mockImplementation((message: unknown) => {
-      warned.push(String(message));
-    });
-
-    // 真实链：project-root 验证目录违反 profile 分离不变式 → invalid-profile。
-    const code = await runLoop({
-      ...strictConfig(fixture.workspace, fixture.instructionsDir),
-      validatorRunnerBindingForTests: undefined,
-      validatorRunnerObservationForTests: observation(
-        join(fixture.instructionsDir, 'claude'),
-        PINNED.claude,
-      ),
-    });
-
-    expect(code).toBe(5);
-    expect(warned.some((line) => line.includes('ADR-025'))).toBe(true);
-    // Builder 正常产出候选；Validator 未被启动（宽权限回退不存在）。
-    expect(readFileSync(join(resolve(fixture.workspace, '..'), 'bound-calls.txt'), 'utf8')).toBe(
-      '1',
-    );
-    const state = JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8')) as {
-      'US-001': Record<string, unknown>;
-    };
-    expect(state['US-001']).toMatchObject({
-      passes: true,
-      validated: false,
-      validationReceipt: null,
-      retryCount: 0,
-    });
-    expect(state['US-001'].validatorUnverifiable).toMatchObject({ gitHead: fixture.head() });
-    const iteration = readEvidence(fixture.workspace).records.find(
-      (record) => record.type === 'iteration',
-    );
-    expect(iteration).toMatchObject({
-      validatorOutcome: 'skipped',
-      validationProtocol: 'invalid',
-      validationProtocolError: { code: 'environment-unverifiable' },
-      validatorProfile: {
-        policyVersion: 'validator-host-isolation-v1',
-        resolution: 'invalid-profile',
-      },
-    });
-  });
-
-  it('refuses a wrapper command as unobservable instead of sealing a partial invocation', async () => {
-    const fixture = setupGitProject([story({ acceptanceCriteria: ['AC 1'] })]);
-    const fake = fakeBoundValidator(fixture.workspace, 'passed');
-    process.env.CODING_X_CODEX_BIN = `node ${fake}`;
-
-    const code = await runLoop({
-      ...strictConfig(fixture.workspace, fixture.instructionsDir),
-      kind: 'codex',
-      validatorRunnerBindingForTests: undefined,
-    });
-
-    expect(code).toBe(5);
-    const iteration = readEvidence(fixture.workspace).records.find(
-      (record) => record.type === 'iteration',
-    );
-    expect(iteration).toMatchObject({
-      validatorOutcome: 'skipped',
-      validatorProfile: { resolution: 'runner-unobservable' },
-    });
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'runs the sealed Codex profile with the real engine canary end to end and binds the v4 receipt',
-    async () => {
+describe(
+  'runLoop Validator host isolation (ADR-025)',
+  { timeout: 30_000, concurrent: false },
+  () => {
+    it('keeps the candidate, issues no receipt and exits 5 when the profile boundary cannot be proven', async () => {
       const fixture = setupGitProject([story({ acceptanceCriteria: ['AC 1'] })]);
-      const canaryMarker = join(fixture.instructionsDir, 'canary-result-path.txt');
-      const fake = fakeIsolationRunner(fixture.workspace, canaryMarker);
-      // 密封调用只接受单一可执行入口：用 POSIX shim 把 profile argv 交给 fake runner。
-      const binDir = mkdtempSync(join(tmpdir(), 'sealed-runner-'));
-      cleanups.push(() => rmSync(binDir, { recursive: true, force: true }));
-      const shim = join(binDir, 'codex');
-      writeFileSync(shim, `#!/bin/sh\nexec node ${JSON.stringify(fake)} "$@"\n`, { mode: 0o755 });
-      process.env.CODING_X_CODEX_BIN = shim;
+      const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+      const warned: string[] = [];
+      vi.spyOn(console, 'warn').mockImplementation((message: unknown) => {
+        warned.push(String(message));
+      });
 
-      // 不注入 canary：走生产默认的引擎 canary 执行器（builder → canary → validator 三次调用）。
+      // 真实链：project-root 验证目录违反 profile 分离不变式 → invalid-profile。
+      const code = await runLoop({
+        ...strictConfig(fixture.workspace, fixture.instructionsDir),
+        validatorRunnerBindingForTests: undefined,
+        validatorRunnerObservationForTests: observation(
+          join(fixture.instructionsDir, 'claude'),
+          PINNED.claude,
+        ),
+      });
+
+      expect(code).toBe(5);
+      expect(warned.some((line) => line.includes('ADR-025'))).toBe(true);
+      // Builder 正常产出候选；Validator 未被启动（宽权限回退不存在）。
+      expect(readFileSync(join(resolve(fixture.workspace, '..'), 'bound-calls.txt'), 'utf8')).toBe(
+        '1',
+      );
+      const state = JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8')) as {
+        'US-001': Record<string, unknown>;
+      };
+      expect(state['US-001']).toMatchObject({
+        passes: true,
+        validated: false,
+        validationReceipt: null,
+        retryCount: 0,
+      });
+      expect(state['US-001'].validatorUnverifiable).toMatchObject({ gitHead: fixture.head() });
+      const iteration = readEvidence(fixture.workspace).records.find(
+        (record) => record.type === 'iteration',
+      );
+      expect(iteration).toMatchObject({
+        validatorOutcome: 'skipped',
+        validationProtocol: 'invalid',
+        validationProtocolError: { code: 'environment-unverifiable' },
+        validatorProfile: {
+          policyVersion: 'validator-host-isolation-v1',
+          resolution: 'invalid-profile',
+        },
+      });
+    });
+
+    it('refuses a wrapper command as unobservable instead of sealing a partial invocation', async () => {
+      const fixture = setupGitProject([story({ acceptanceCriteria: ['AC 1'] })]);
+      const fake = fakeBoundValidator(fixture.workspace, 'passed');
+      process.env.CODING_X_CODEX_BIN = `node ${fake}`;
+
       const code = await runLoop({
         ...strictConfig(fixture.workspace, fixture.instructionsDir),
         kind: 'codex',
-        unsafeUseProjectRootForValidationTests: false,
-        validationEnvironmentDigestForTests: undefined,
         validatorRunnerBindingForTests: undefined,
-        validatorRunnerObservationForTests: observation(shim, PINNED.codex),
       });
 
-      expect(code).toBe(0);
+      expect(code).toBe(5);
       const iteration = readEvidence(fixture.workspace).records.find(
         (record) => record.type === 'iteration',
-      ) as {
-        validatorProfile?: {
-          resolution: string;
-          runnerVersion?: string;
-          profileDigest?: string;
-          canaryEvidenceDigest?: string;
-          canaryDurationMs?: number;
-        };
-      };
+      );
       expect(iteration).toMatchObject({
-        validationReceipt: true,
-        validationProtocol: 'passed',
-        validatorProfile: {
-          resolution: 'ready',
-          runnerVersion: PINNED.codex,
-          profileDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
-          canaryEvidenceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
-          canaryDurationMs: expect.any(Number),
-        },
+        validatorOutcome: 'skipped',
+        validatorProfile: { resolution: 'runner-unobservable' },
       });
+    });
 
-      const state = JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8')) as {
-        'US-001': {
-          validated: boolean;
-          validationReceipt: {
-            schemaVersion: number;
-            runnerProfileDigest: string;
-            canaryEvidenceDigest: string;
+    it.skipIf(process.platform === 'win32')(
+      'runs the sealed Codex profile with the real engine canary end to end and binds the v4 receipt',
+      async () => {
+        const fixture = setupGitProject([story({ acceptanceCriteria: ['AC 1'] })]);
+        const canaryMarker = join(fixture.instructionsDir, 'canary-result-path.txt');
+        const fake = fakeIsolationRunner(fixture.workspace, canaryMarker);
+        // 密封调用只接受单一可执行入口：用 POSIX shim 把 profile argv 交给 fake runner。
+        const binDir = mkdtempSync(join(tmpdir(), 'sealed-runner-'));
+        cleanups.push(() => rmSync(binDir, { recursive: true, force: true }));
+        const shim = join(binDir, 'codex');
+        writeFileSync(shim, `#!/bin/sh\nexec node ${JSON.stringify(fake)} "$@"\n`, { mode: 0o755 });
+        process.env.CODING_X_CODEX_BIN = shim;
+
+        // 不注入 canary：走生产默认的引擎 canary 执行器（builder → canary → validator 三次调用）。
+        const code = await runLoop({
+          ...strictConfig(fixture.workspace, fixture.instructionsDir),
+          kind: 'codex',
+          unsafeUseProjectRootForValidationTests: false,
+          validationEnvironmentDigestForTests: undefined,
+          validatorRunnerBindingForTests: undefined,
+          validatorRunnerObservationForTests: observation(shim, PINNED.codex),
+        });
+
+        expect(code).toBe(0);
+        const iteration = readEvidence(fixture.workspace).records.find(
+          (record) => record.type === 'iteration',
+        ) as {
+          validatorProfile?: {
+            resolution: string;
+            runnerVersion?: string;
+            profileDigest?: string;
+            canaryEvidenceDigest?: string;
+            canaryDurationMs?: number;
           };
         };
-      };
-      expect(state['US-001'].validated).toBe(true);
-      // 凭证与证据索引互绑：同一 profile 与 canary 摘要出现在两处。
-      expect(state['US-001'].validationReceipt).toMatchObject({
-        schemaVersion: 4,
-        runnerProfileDigest: `sha256:${iteration.validatorProfile!.profileDigest}`,
-        canaryEvidenceDigest: `sha256:${iteration.validatorProfile!.canaryEvidenceDigest}`,
-      });
+        expect(iteration).toMatchObject({
+          validationReceipt: true,
+          validationProtocol: 'passed',
+          validatorProfile: {
+            resolution: 'ready',
+            runnerVersion: PINNED.codex,
+            profileDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+            canaryEvidenceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+            canaryDurationMs: expect.any(Number),
+          },
+        });
 
-      // canary 曾在临时身份域的授权输出区写回执；收口后整个域必须删除。
-      const canaryResultPath = readFileSync(canaryMarker, 'utf8').trim();
-      const identityRoot = resolve(canaryResultPath, '..', '..');
-      expect(identityRoot).toContain('coding-x-validator-identity-');
-      expect(existsSync(identityRoot)).toBe(false);
-      expect(existsSync(join(fixture.workspace, 'validation-result.json'))).toBe(false);
-    },
-    60_000,
-  );
-});
+        const state = JSON.parse(readFileSync(join(fixture.workspace, 'state.json'), 'utf8')) as {
+          'US-001': {
+            validated: boolean;
+            validationReceipt: {
+              schemaVersion: number;
+              runnerProfileDigest: string;
+              canaryEvidenceDigest: string;
+            };
+          };
+        };
+        expect(state['US-001'].validated).toBe(true);
+        // 凭证与证据索引互绑：同一 profile 与 canary 摘要出现在两处。
+        expect(state['US-001'].validationReceipt).toMatchObject({
+          schemaVersion: 4,
+          runnerProfileDigest: `sha256:${iteration.validatorProfile!.profileDigest}`,
+          canaryEvidenceDigest: `sha256:${iteration.validatorProfile!.canaryEvidenceDigest}`,
+        });
+
+        // canary 曾在临时身份域的授权输出区写回执；收口后整个域必须删除。
+        const canaryResultPath = readFileSync(canaryMarker, 'utf8').trim();
+        const identityRoot = resolve(canaryResultPath, '..', '..');
+        expect(identityRoot).toContain('coding-x-validator-identity-');
+        expect(existsSync(identityRoot)).toBe(false);
+        expect(existsSync(join(fixture.workspace, 'validation-result.json'))).toBe(false);
+      },
+      60_000,
+    );
+  },
+);

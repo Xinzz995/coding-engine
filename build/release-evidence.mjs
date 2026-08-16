@@ -14,6 +14,8 @@ const STABLE_TAG = 'latest';
 const CANDIDATE_WORKFLOW = '.github/workflows/build-candidate.yml';
 const STAGE_WORKFLOW = '.github/workflows/stage-candidate.yml';
 const SOURCE_REPOSITORY = 'https://github.com/Xinzz995/coding-engine';
+const SOURCE_REPOSITORY_FULL_NAME = 'Xinzz995/coding-engine';
+const STAGE_ENVIRONMENT = 'npm-staging';
 const EXACT_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GIT_SHA = /^[0-9a-f]{40}$/;
@@ -452,6 +454,154 @@ function positiveInteger(value, label) {
   return value;
 }
 
+function jsonObject(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${label} 必须是对象`);
+  return value;
+}
+
+function exactObject(value, keys, label) {
+  const object = jsonObject(value, label);
+  const actual = Object.keys(object).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    fail(`${label} 字段必须精确为 ${expected.join(', ')}`);
+  }
+  return object;
+}
+
+function parseNpmStagingPolicy(value) {
+  const policy = exactObject(
+    value,
+    [
+      'schemaVersion',
+      'repository',
+      'environment',
+      'canAdminsBypass',
+      'requiredReviewers',
+      'deploymentBranchPolicy',
+      'branchPolicies',
+    ],
+    'npm staging policy',
+  );
+  if (
+    policy.schemaVersion !== 1 ||
+    policy.repository !== SOURCE_REPOSITORY_FULL_NAME ||
+    policy.environment !== STAGE_ENVIRONMENT ||
+    policy.canAdminsBypass !== false
+  ) {
+    fail('npm staging policy 必须固定当前仓库、npm-staging 且禁止管理员绕过');
+  }
+  const reviewers = exactObject(
+    policy.requiredReviewers,
+    ['minimumCount', 'preventSelfReview'],
+    'npm staging policy requiredReviewers',
+  );
+  if (reviewers.minimumCount !== 1 || reviewers.preventSelfReview !== false) {
+    fail('npm staging policy 必须要求至少一个批准人并允许单人自审');
+  }
+  const deployment = exactObject(
+    policy.deploymentBranchPolicy,
+    ['protectedBranches', 'customBranchPolicies'],
+    'npm staging policy deploymentBranchPolicy',
+  );
+  if (deployment.protectedBranches !== false || deployment.customBranchPolicies !== true) {
+    fail('npm staging policy 必须使用显式分支政策，不能使用旧 protected branches 模式');
+  }
+  if (!Array.isArray(policy.branchPolicies) || policy.branchPolicies.length !== 1) {
+    fail('npm staging policy 必须精确声明一个分支政策');
+  }
+  const branch = exactObject(policy.branchPolicies[0], ['name', 'type'], 'npm staging branch policy');
+  if (branch.name !== 'main' || branch.type !== 'branch') {
+    fail('npm staging policy 必须只允许 main 分支，不能允许标签或通配符');
+  }
+  return {
+    repository: policy.repository,
+    environment: policy.environment,
+    canAdminsBypass: policy.canAdminsBypass,
+    requiredReviewers: reviewers,
+    deploymentBranchPolicy: deployment,
+    branchPolicies: [branch],
+  };
+}
+
+function verifyNpmStagingEnvironment(policy, environmentValue, branchPoliciesValue) {
+  const environment = jsonObject(environmentValue, 'GitHub npm-staging environment');
+  if (environment.name !== policy.environment) {
+    fail(`GitHub environment 不是 ${policy.environment}`);
+  }
+  if (environment.can_admins_bypass !== policy.canAdminsBypass) {
+    fail('GitHub npm-staging 必须禁止管理员绕过批准');
+  }
+  if (!Array.isArray(environment.protection_rules)) {
+    fail('GitHub npm-staging 缺少保护规则');
+  }
+  const reviewerRules = environment.protection_rules.filter(
+    (entry) => jsonObject(entry, 'GitHub environment protection rule').type === 'required_reviewers',
+  );
+  const branchRules = environment.protection_rules.filter(
+    (entry) => jsonObject(entry, 'GitHub environment protection rule').type === 'branch_policy',
+  );
+  if (reviewerRules.length !== 1 || branchRules.length !== 1) {
+    fail('GitHub npm-staging 必须各有且仅有一条批准人规则和分支规则');
+  }
+  const reviewerRule = reviewerRules[0];
+  if (reviewerRule.prevent_self_review !== policy.requiredReviewers.preventSelfReview) {
+    fail('GitHub npm-staging 必须允许单人管理员批准自己的运行');
+  }
+  if (
+    !Array.isArray(reviewerRule.reviewers) ||
+    reviewerRule.reviewers.length < policy.requiredReviewers.minimumCount
+  ) {
+    fail('GitHub npm-staging 必须至少配置一个批准人');
+  }
+  for (const [index, value] of reviewerRule.reviewers.entries()) {
+    const reviewerEntry = jsonObject(value, `GitHub environment reviewer[${index}]`);
+    const reviewer = jsonObject(
+      reviewerEntry.reviewer,
+      `GitHub environment reviewer[${index}] identity`,
+    );
+    if (
+      !['User', 'Team'].includes(reviewerEntry.type) ||
+      !Number.isSafeInteger(reviewer.id) ||
+      reviewer.id < 1
+    ) {
+      fail(`GitHub npm-staging reviewer[${index}] 身份非法`);
+    }
+  }
+  const deployment = jsonObject(
+    environment.deployment_branch_policy,
+    'GitHub environment deployment branch policy',
+  );
+  if (
+    deployment.protected_branches !== policy.deploymentBranchPolicy.protectedBranches ||
+    deployment.custom_branch_policies !== policy.deploymentBranchPolicy.customBranchPolicies
+  ) {
+    fail('GitHub npm-staging 必须启用显式分支政策并关闭旧 protected branches 模式');
+  }
+  const branchPolicies = jsonObject(branchPoliciesValue, 'GitHub deployment branch policies');
+  if (
+    branchPolicies.total_count !== policy.branchPolicies.length ||
+    !Array.isArray(branchPolicies.branch_policies) ||
+    branchPolicies.branch_policies.length !== policy.branchPolicies.length
+  ) {
+    fail('GitHub npm-staging 必须精确配置一个部署分支政策');
+  }
+  const actualBranch = jsonObject(branchPolicies.branch_policies[0], 'GitHub deployment branch policy');
+  const expectedBranch = policy.branchPolicies[0];
+  if (actualBranch.name !== expectedBranch.name || actualBranch.type !== expectedBranch.type) {
+    fail('GitHub npm-staging 必须只允许 main 分支，不能允许标签或通配符');
+  }
+  return {
+    status: 'verified',
+    repository: policy.repository,
+    environment: policy.environment,
+    canAdminsBypass: policy.canAdminsBypass,
+    reviewerCount: reviewerRule.reviewers.length,
+    preventSelfReview: policy.requiredReviewers.preventSelfReview,
+    branches: policy.branchPolicies.map((entry) => entry.name),
+  };
+}
+
 function timestamp(value, label) {
   const text = nonEmptyString(value, label);
   if (Number.isNaN(Date.parse(text))) fail(`${label} 必须是合法时间`);
@@ -813,6 +963,20 @@ function commandVerifySource(args) {
   );
 }
 
+function commandVerifyStageEnvironment(args) {
+  const policy = parseNpmStagingPolicy(readJson(resolve(required(args, 'policy'))));
+  const repository = required(args, 'repository');
+  if (repository !== policy.repository) {
+    fail(`workflow 仓库 ${repository} 与 npm staging policy 不一致`);
+  }
+  const result = verifyNpmStagingEnvironment(
+    policy,
+    readJson(resolve(required(args, 'environment-json'))),
+    readJson(resolve(required(args, 'branch-policies-json'))),
+  );
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
 function commandRecordPack(args) {
   const root = resolve(args.root ?? process.cwd());
   const version = required(args, 'expected-version');
@@ -1073,6 +1237,7 @@ const [command, ...rawArgs] = process.argv.slice(2);
 const args = parseArgs(rawArgs);
 const commands = {
   'verify-source': commandVerifySource,
+  'verify-stage-environment': commandVerifyStageEnvironment,
   'verify-candidate-run': commandVerifyCandidateRun,
   'verify-dogfood': commandVerifyDogfood,
   'verify-dogfood-set': commandVerifyDogfoodSet,

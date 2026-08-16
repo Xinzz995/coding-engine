@@ -418,6 +418,197 @@ describe('release evidence script', () => {
     expect(stale.stderr).toContain('不是当前远端 main');
   });
 
+  it('requires a real single-admin staging gate without binding reviewer identity', () => {
+    const root = rootFixture();
+    const policyPath = join(root, 'npm-staging-policy.json');
+    const environmentPath = join(root, 'npm-staging-environment.json');
+    const branchPoliciesPath = join(root, 'npm-staging-branch-policies.json');
+    const policy = {
+      schemaVersion: 1,
+      repository: 'Xinzz995/coding-engine',
+      environment: 'npm-staging',
+      canAdminsBypass: false,
+      requiredReviewers: {
+        minimumCount: 1,
+        preventSelfReview: false,
+      },
+      deploymentBranchPolicy: {
+        protectedBranches: false,
+        customBranchPolicies: true,
+      },
+      branchPolicies: [{ name: 'main', type: 'branch' }],
+    };
+    const reviewerRule = {
+      type: 'required_reviewers',
+      prevent_self_review: false,
+      reviewers: [
+        {
+          type: 'User',
+          reviewer: { type: 'User', login: 'Xinzz995', id: 25_764_232 },
+        },
+      ],
+    };
+    const branchRule = { type: 'branch_policy' };
+    const environment = {
+      name: 'npm-staging',
+      can_admins_bypass: false,
+      protection_rules: [reviewerRule, branchRule],
+      deployment_branch_policy: {
+        protected_branches: false,
+        custom_branch_policies: true,
+      },
+    };
+    const branchPolicies = {
+      total_count: 1,
+      branch_policies: [{ id: 1, name: 'main', type: 'branch' }],
+    };
+    const args = [
+      'verify-stage-environment',
+      '--policy',
+      policyPath,
+      '--repository',
+      'Xinzz995/coding-engine',
+      '--environment-json',
+      environmentPath,
+      '--branch-policies-json',
+      branchPoliciesPath,
+    ];
+    json(policyPath, policy);
+    json(environmentPath, environment);
+    json(branchPoliciesPath, branchPolicies);
+
+    const verified = run(args, root);
+    expect(verified.status, verified.stderr).toBe(0);
+    expect(JSON.parse(verified.stdout)).toEqual({
+      status: 'verified',
+      repository: 'Xinzz995/coding-engine',
+      environment: 'npm-staging',
+      canAdminsBypass: false,
+      reviewerCount: 1,
+      preventSelfReview: false,
+      branches: ['main'],
+    });
+
+    json(environmentPath, {
+      ...environment,
+      protection_rules: [
+        {
+          ...reviewerRule,
+          reviewers: [
+            {
+              type: 'User',
+              reviewer: { type: 'User', login: 'future-admin', id: 99 },
+            },
+          ],
+        },
+        branchRule,
+        { type: 'wait_timer', wait_timer: 5 },
+      ],
+    });
+    const changedReviewer = run(args, root);
+    expect(changedReviewer.status, changedReviewer.stderr).toBe(0);
+    expect(JSON.parse(changedReviewer.stdout)).toMatchObject({ reviewerCount: 1 });
+
+    const environmentFailures: Array<{ label: string; value: unknown; message: string }> = [
+      {
+        label: 'admin bypass',
+        value: { ...environment, can_admins_bypass: true },
+        message: '禁止管理员绕过',
+      },
+      {
+        label: 'self review disabled',
+        value: {
+          ...environment,
+          protection_rules: [
+            { ...reviewerRule, prevent_self_review: true },
+            branchRule,
+          ],
+        },
+        message: '允许单人管理员批准自己的运行',
+      },
+      {
+        label: 'missing reviewer rule',
+        value: { ...environment, protection_rules: [branchRule] },
+        message: '各有且仅有一条批准人规则和分支规则',
+      },
+      {
+        label: 'zero reviewers',
+        value: {
+          ...environment,
+          protection_rules: [
+            {
+              ...reviewerRule,
+              reviewers: [],
+            },
+            branchRule,
+          ],
+        },
+        message: '至少配置一个批准人',
+      },
+      {
+        label: 'old protected branch mode',
+        value: {
+          ...environment,
+          deployment_branch_policy: {
+            protected_branches: true,
+            custom_branch_policies: false,
+          },
+        },
+        message: '关闭旧 protected branches 模式',
+      },
+    ];
+    for (const failure of environmentFailures) {
+      json(environmentPath, failure.value);
+      json(branchPoliciesPath, branchPolicies);
+      const rejected = run(args, root);
+      expect(rejected.status, failure.label).toBe(1);
+      expect(rejected.stderr, failure.label).toContain(failure.message);
+    }
+
+    json(environmentPath, environment);
+    for (const failure of [
+      {
+        label: 'missing main branch policy',
+        value: { total_count: 0, branch_policies: [] },
+        message: '精确配置一个部署分支政策',
+      },
+      {
+        label: 'extra branch policy',
+        value: {
+          total_count: 2,
+          branch_policies: [
+            { id: 1, name: 'main', type: 'branch' },
+            { id: 2, name: 'release/*', type: 'branch' },
+          ],
+        },
+        message: '精确配置一个部署分支政策',
+      },
+      {
+        label: 'tag policy',
+        value: { total_count: 1, branch_policies: [{ id: 1, name: 'v*', type: 'tag' }] },
+        message: '只允许 main 分支',
+      },
+    ]) {
+      json(branchPoliciesPath, failure.value);
+      const rejected = run(args, root);
+      expect(rejected.status, failure.label).toBe(1);
+      expect(rejected.stderr, failure.label).toContain(failure.message);
+    }
+
+    json(branchPoliciesPath, branchPolicies);
+    json(policyPath, { ...policy, canAdminsBypass: true });
+    const weakenedPolicy = run(args, root);
+    expect(weakenedPolicy.status).toBe(1);
+    expect(weakenedPolicy.stderr).toContain('禁止管理员绕过');
+
+    json(policyPath, policy);
+    const wrongRepository = [...args];
+    wrongRepository[wrongRepository.indexOf('Xinzz995/coding-engine')] = 'other/repository';
+    const wrongRepositoryResult = run(wrongRepository, root);
+    expect(wrongRepositoryResult.status).toBe(1);
+    expect(wrongRepositoryResult.stderr).toContain('与 npm staging policy 不一致');
+  });
+
   it('accepts only the selected successful completed candidate run from current main', () => {
     const root = rootFixture();
     const runJson = join(root, 'candidate-run.json');
