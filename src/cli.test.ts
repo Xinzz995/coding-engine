@@ -172,6 +172,19 @@ describe('parseCliArgs', () => {
       candidateAction: 'publish-proof',
       workspace: 'ws',
     });
+    expect(
+      parseCliArgs([
+        'candidate',
+        'publish-proof',
+        '--candidate-evidence',
+        '/tmp/packed.json',
+      ]),
+    ).toMatchObject({
+      command: 'candidate',
+      candidateAction: 'publish-proof',
+      shadow: false,
+      candidateEvidence: '/tmp/packed.json',
+    });
     expect(() => parseCliArgs(['candidate', 'unknown'])).toThrow('candidate 子命令');
     expect(() => parseCliArgs(['candidate', 'publish-proof', 'extra'])).toThrow('额外位置参数');
   });

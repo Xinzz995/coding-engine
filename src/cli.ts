@@ -63,6 +63,7 @@ import {
   type VerifiedCandidateIdentity,
 } from './release/candidate-identity.js';
 import { publishCandidateProof } from './release/candidate-proof-publish.js';
+import { refreshCandidateDogfoodProof } from './release/candidate-proof-refresh.js';
 import { runReadyIssue } from './issue/issue-run.js';
 import { readFinalReviewState } from './review/state.js';
 import { digestReviewBinding } from './review/binding.js';
@@ -155,7 +156,7 @@ runner:
   config path|init|validate      查看、初始化或校验全局模型配置
   hooks cursor install|status|remove
                                  安装、检查或移除当前项目的 Cursor TDD 提交前检查
-  candidate publish-proof        核对当前仓库、PR 与提交后发布候选 Dogfood 机器证明
+  candidate publish-proof        可刷新晚到远端检查并补签，再发布候选 Dogfood 机器证明
   issue run <编号> [runner]       从 ready-for-agent Issue 继续唯一分支与 PR
   help                           显示本帮助
 
@@ -175,7 +176,7 @@ runner:
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（init/workspace/doctor/status/models/issue/candidate）
   --shadow                       候选 Dogfood；仅用于 run、doctor、workspace apply-prd，永远不可交付
-  --candidate-evidence <file>    候选 packed.json；与 --shadow 同用并核对当前 CLI 实际文件
+  --candidate-evidence <file>    候选 packed.json；用于 Shadow 或候选凭证补签并核对实际 CLI
   --contract <file>              init 使用已确认的质量契约文件
   --input <file>                 workspace 写命令的严格 JSON 请求文件
   --yes                          init 接受已展示的变更；必须同时提供 --contract
@@ -409,10 +410,11 @@ export function parseCliArgs(argv: string[]): CliConfig {
   const candidateEvidenceAllowed =
     command === 'run' ||
     command === 'doctor' ||
+    command === 'candidate' ||
     (command === 'workspace' && workspaceAction === 'apply-prd');
   if (!help && values['candidate-evidence'] !== undefined && !candidateEvidenceAllowed) {
     throw new Error(
-      '❌ --candidate-evidence 只能用于 run、doctor 或 workspace apply-prd',
+      '❌ --candidate-evidence 只能用于 run、doctor、workspace apply-prd 或 candidate publish-proof',
     );
   }
   if (
@@ -422,7 +424,12 @@ export function parseCliArgs(argv: string[]): CliConfig {
   ) {
     throw new Error('❌ --candidate-evidence 必须指定 packed.json 路径');
   }
-  if (!help && values['candidate-evidence'] !== undefined && values.shadow !== true) {
+  if (
+    !help &&
+    values['candidate-evidence'] !== undefined &&
+    values.shadow !== true &&
+    command !== 'candidate'
+  ) {
     throw new Error('❌ --candidate-evidence 必须与 --shadow 同时使用');
   }
   if (
@@ -737,23 +744,58 @@ export async function main(argv: string[]): Promise<number> {
   }
 
   if (cfg.command === 'candidate') {
+    const commandSignals = installCommandSignals();
     try {
+      const workspace = resolve(cfg.workspace);
+      const refreshed =
+        candidateIdentity === undefined
+          ? undefined
+          : await withWorkspaceSession(workspace, 'candidate-proof', async (session) =>
+              refreshCandidateDogfoodProof({
+                session,
+                root: process.cwd(),
+                workspace,
+                identity: candidateIdentity,
+                termination: commandSignals.termination,
+              }),
+            );
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, '候选凭证刷新', commandSignals);
+      }
       const result = publishCandidateProof({
         root: process.cwd(),
-        workspace: resolve(cfg.workspace),
+        workspace,
       });
-      if (cfg.json) console.log(JSON.stringify({ ...result, exitCode: 0 }, null, 2));
+      const refresh =
+        refreshed === undefined
+          ? { status: 'existing' as const }
+          : {
+              status: 'refreshed' as const,
+              durationMs: refreshed.durationMs,
+              remoteCheckedAt: refreshed.proof.review.remoteCheckedAt,
+            };
+      if (cfg.json) console.log(JSON.stringify({ ...result, refresh, exitCode: 0 }, null, 2));
       else {
+        if (refreshed !== undefined) {
+          console.log(
+            `🔄 已刷新远端状态并补签候选凭证（${(refreshed.durationMs / 1000).toFixed(1)} 秒）`,
+          );
+        }
         console.log(
           `✅ 候选 Dogfood 机器证明已${result.status === 'created' ? '发布' : '更新'}：${result.url}`,
         );
       }
       return 0;
     } catch (error) {
+      if (commandSignals.exitCode !== null) {
+        return commandInterrupted(cfg, '候选凭证命令', commandSignals);
+      }
       const message = error instanceof Error ? error.message : String(error);
       if (cfg.json) console.log(JSON.stringify({ status: 'error', exitCode: 2, message }, null, 2));
       else console.error(`❌ 候选证明发布失败：${message}`);
       return 2;
+    } finally {
+      commandSignals.dispose();
     }
   }
 

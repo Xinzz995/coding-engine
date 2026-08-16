@@ -143,7 +143,12 @@ function parseComments(value: unknown): CommentObservation[] {
 function readProof(workspace: string): CandidateDogfoodProof {
   const path = join(workspace, CANDIDATE_PROOF_FILE);
   const read = readStableFile(path, { label: '候选 Dogfood 证明', maxBytes: 1024 * 1024 });
-  if (read.status === 'missing') throw new Error(`未找到候选 Dogfood 证明：${path}`);
+  if (read.status === 'missing') {
+    throw new Error(
+      `未找到候选 Dogfood 证明：${path}；若远端检查稍晚完成，请用同一候选 CLI ` +
+        '追加 --candidate-evidence <packed.json> 后重试',
+    );
+  }
   if (read.status === 'invalid') throw new Error(read.diagnostic);
   return parseCandidateDogfoodProof(json(read.bytes.toString('utf8'), '候选 Dogfood 证明'));
 }

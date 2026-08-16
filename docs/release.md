@@ -123,16 +123,23 @@ coding-engine、Go 多模块合成试点和 Python Monorepo 合成试点都安�
 - Go 多模块项目运行自身 Go 检查，GitHub CI 不安装 Node 或 coding-x；
 - Python Monorepo 运行自身 Python 检查，GitHub CI 不安装 Node 或 coding-x。
 
-每个候选 PR 必须开放、非草稿、目标为该仓默认分支，并让当前 head 的远端总闸达到 ready。随后在
-对应仓库从该候选 CLI 显式运行：
+每个候选 PR 必须开放、非草稿、目标为该仓默认分支。对应仓库从该候选 CLI 显式运行：
 
 ```bash
-<candidate-cli> candidate publish-proof --workspace <new-workspace>
+<candidate-cli> candidate publish-proof --candidate-evidence <packed.json> \
+  --workspace <new-workspace>
 ```
 
-该命令再次核对当前仓库、owner、分支、PR 编号、head、Final Review 使用的 base 和当前可合并状态，
-只创建或更新一条 owner 证明评论。评论绑定候选身份、Story 凭证集合、最终 Review、当前 head/base
-和当时全部必需检查；普通日志、Agent 自述或旧评论不能替代它。
+该命令再次逐文件证明当前 CLI 是同一候选，在短租约内核对 Story 凭证、已有 Final Review、Runner、
+Git/PR head/base、契约、Ruleset 和检查。远端总闸 ready 时，它补签或更新
+`candidate-proof.json`；短租约安全关闭后，原发布入口再核对当前仓库、owner、分支、PR 编号、
+head/base 和可合并状态，创建或更新唯一 owner 证明评论。若 Final Review 收口时 CI 尚未结束，
+等待检查自然完成后直接重跑这条命令；不要重跑 Builder、Validator、完整机械检查或 Review。命令不
+轮询，远端仍 pending/failed、候选证据缺失或任一绑定变化时失败关闭且不发布新评论。
+
+不带 `--candidate-evidence` 的兼容模式只会发布 workspace 中已经存在的证明，不能产生新结论。评论
+绑定候选身份、Story 凭证集合、最终 Review、当前 head/base 和当时全部必需检查；普通日志、Agent
+自述或旧评论不能替代它。
 
 ### 4. 提升已验证候选到 npm staging
 

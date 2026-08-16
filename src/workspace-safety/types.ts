@@ -25,7 +25,13 @@ export type WorkspaceSafetyClassification =
   | 'recovering';
 
 export type OwnerCommand =
-  'workspace-init' | 'run' | 'repair' | 'report' | 'apply-prd' | 'review-decision';
+  | 'workspace-init'
+  | 'run'
+  | 'repair'
+  | 'report'
+  | 'apply-prd'
+  | 'review-decision'
+  | 'candidate-proof';
 
 export type ProcessIdentityKind = 'linux-boot-start' | 'macos-boot-start' | 'windows-filetime';
 

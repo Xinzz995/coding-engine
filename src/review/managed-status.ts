@@ -148,6 +148,8 @@ export async function collectManagedStatusQuality(options: {
   refreshRemote: boolean;
   termination?: ManagedReviewTermination;
   codingXVersion?: string;
+  /** 候选命令复核 Shadow 凭证时必须显式提供；普通状态观察保持为空。 */
+  candidateIdentityDigest?: string | null;
   /** @internal Deterministic currentness seam; production always uses the fixed observer. */
   adapters?: Partial<ManagedStatusAdapters>;
 }): Promise<ManagedStatusQualityResult> {
@@ -160,6 +162,10 @@ export async function collectManagedStatusQuality(options: {
     runtimeIdentity: {
       mode: read.status === 'ready' && read.state.shadow ? 'shadow' as const : 'formal' as const,
       actualCodingXVersion: options.codingXVersion ?? CODING_X_VERSION,
+      candidateIdentityDigest:
+        read.status === 'ready' && read.state.shadow
+          ? options.candidateIdentityDigest ?? null
+          : null,
     },
     ...(options.termination === undefined ? {} : { termination: options.termination }),
   };
