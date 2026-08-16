@@ -175,12 +175,22 @@ describe('release candidate workflow boundaries', () => {
     const jobs = parsedWorkflow('stage-candidate.yml').jobs;
     const verify = jobs.verify;
     const stage = jobs.stage;
+    const environmentVerify = stepWithRun(verify, 'verify-stage-environment');
+    const environmentReverify = stepWithRun(stage, 'verify-stage-environment');
     const verifyRun = stepWithRun(verify, 'verify-candidate-run');
 
     expect(source).toContain('candidate_run_id:');
     expect(source).toContain('engine_pr:');
     expect(source).toContain('go_pr:');
     expect(source).toContain('python_pr:');
+    expect(source.match(/verify-stage-environment/gu)).toHaveLength(2);
+    expect(environmentVerify.run).toContain('--policy .release/npm-staging-policy.json');
+    expect(environmentVerify.run).toContain('--repository "$GITHUB_REPOSITORY"');
+    expect(environmentVerify.run).toContain('/environments/npm-staging');
+    expect(environmentVerify.run).toContain('/deployment-branch-policies');
+    expect(environmentVerify.env).toEqual({ GH_TOKEN: '${{ github.token }}' });
+    expect(environmentReverify.run).toContain('--policy .release/npm-staging-policy.json');
+    expect(environmentReverify.env).toEqual({ GH_TOKEN: '${{ github.token }}' });
     expect(verifyRun.run).toContain('node build/release-evidence.mjs verify-candidate-run');
     expect(verifyRun.run).toContain('--run-json "$RUNNER_TEMP/candidate-run.json"');
     expect(verifyRun.run).toContain('--candidate-workflow-run-id "$CANDIDATE_WORKFLOW_RUN_ID"');
@@ -208,6 +218,7 @@ describe('release candidate workflow boundaries', () => {
     expect(source).toContain('check-runs?per_page=100&filter=all');
     const requiredSparsePaths = [
       '.release/dogfood-policy.json',
+      '.release/npm-staging-policy.json',
       'build/release-evidence.mjs',
       ...localBuildImports('build/release-evidence.mjs'),
     ];
@@ -217,6 +228,12 @@ describe('release candidate workflow boundaries', () => {
     expect(source).toContain('Re-read all three repositories after approval');
     expect(source).toContain('dogfood-current.json');
     expect(source).toContain('Three-repository evidence changed during approval');
+    expect(source.indexOf('Verify live npm staging environment policy')).toBeLessThan(
+      source.indexOf('Verify selected candidate run'),
+    );
+    expect(source.indexOf('Reverify live npm staging environment policy')).toBeLessThan(
+      source.indexOf('Download only the pre-approval verified handoff'),
+    );
     expect(source.indexOf('verify-dogfood')).toBeLessThan(
       source.indexOf('environment: npm-staging'),
     );
