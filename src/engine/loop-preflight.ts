@@ -245,6 +245,7 @@ export async function runLoopPreflight(
   }
 
   const agentEnv: NodeJS.ProcessEnv = {
+    ...cfg.runnerEnvironmentForTests,
     CODING_X_WORKSPACE: workspace,
     CODING_X_PROJECT_ROOT: projectRoot,
   };

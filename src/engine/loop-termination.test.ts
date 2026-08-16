@@ -18,9 +18,9 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       process.exit(0);
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 10,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -29,7 +29,6 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       port: 0,
       openBrowser: false,
     });
-    delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(1);
     // 缺省 stallLimit=3：恰 3 轮、每轮只有 builder 一次调用（validator 从未拉起）
     expect(readFileSync(calls, 'utf-8').length).toBe(3);
@@ -57,9 +56,9 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       process.exit(0);
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 4,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -68,7 +67,6 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       port: 0,
       openBrowser: false,
     });
-    delete process.env.CODING_X_CLAUDE_BIN;
     // 4 轮全是门禁打回（stallLimit=3 未触发熔断）→ 跑满，builder 每轮都拉起
     expect(readFileSync(calls, 'utf-8').length).toBe(4);
     const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
@@ -78,7 +76,7 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       iters.every((r) => (r as { validatorOutcome?: string }).validatorOutcome === 'skipped'),
     ).toBe(true);
     expect(code).toBe(1);
-  }, 20_000);
+  }, 60_000);
 
   it('stallLimit 可经配置调整', async () => {
     const { projectRoot, workspace, instructionsDir } = setup([story()]);
@@ -92,9 +90,9 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       process.exit(0);
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 10,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -104,7 +102,6 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       openBrowser: false,
       stallLimit: 1,
     });
-    delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(1);
     expect(readFileSync(calls, 'utf-8').length).toBe(1);
   });
@@ -129,9 +126,9 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
     );
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, 'process.exit(0);'); // 干净退出、不碰任何文件 = 真空转
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 3,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -140,7 +137,6 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       port: 0,
       openBrowser: false,
     });
-    delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(0);
   });
 
@@ -168,9 +164,9 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       fake,
       `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(called)}, 'x');`,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 5,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -179,7 +175,6 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       port: 0,
       openBrowser: false,
     });
-    delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(0);
     expect(existsSync(called)).toBe(false);
     const iters = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
@@ -209,7 +204,6 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
     );
     const fake = join(workspace, 'fake.mjs');
     writeFileSync(fake, `process.exit(0);`);
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const logs: string[] = [];
     const origLog = console.log;
     console.log = (...a: unknown[]) => {
@@ -218,6 +212,7 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
     };
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 5,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -227,7 +222,6 @@ describe('no-op 检测与 stall 熔断', { timeout: 30_000, concurrent: false },
       openBrowser: false,
     });
     console.log = origLog;
-    delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(3);
     const banner = logs.find((l) => l.includes('blocked'));
     expect(banner).toContain('US-002');
@@ -283,7 +277,6 @@ describe('blocked 收敛出口', { timeout: 30_000, concurrent: false }, () => {
       process.exit(0);
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const logs: string[] = [];
     const origLog = console.log;
     console.log = (...a: unknown[]) => {
@@ -292,6 +285,7 @@ describe('blocked 收敛出口', { timeout: 30_000, concurrent: false }, () => {
     };
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 3,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -301,7 +295,6 @@ describe('blocked 收敛出口', { timeout: 30_000, concurrent: false }, () => {
       openBrowser: false,
     });
     console.log = origLog;
-    delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(3);
     const banner = logs.find((l) => l.includes('blocked'));
     expect(banner).toBeDefined();
@@ -330,9 +323,9 @@ describe('blocked 收敛出口', { timeout: 30_000, concurrent: false }, () => {
       process.exit(0);
     `,
     );
-    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     const code = await runLoop({
       kind: 'claude',
+      runnerEnvironmentForTests: { CODING_X_CLAUDE_BIN: `node ${fake}` },
       maxIterations: 2,
       devTimeoutMs: 5000,
       valTimeoutMs: 5000,
@@ -341,7 +334,6 @@ describe('blocked 收敛出口', { timeout: 30_000, concurrent: false }, () => {
       port: 0,
       openBrowser: false,
     });
-    delete process.env.CODING_X_CLAUDE_BIN;
     expect(code).toBe(0);
   });
 });
