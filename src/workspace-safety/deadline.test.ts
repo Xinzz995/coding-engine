@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MonotonicDeadline, type MonotonicClock } from './deadline.js';
 
 class FakeClock implements MonotonicClock {
@@ -53,6 +53,39 @@ describe('MonotonicDeadline', () => {
       ),
     ).rejects.toThrow(/phase timed out/u);
     expect(started).toBe(false);
+  });
+
+  it('does not report a timeout when the runtime timer wakes before the monotonic deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const clock = new FakeClock();
+      const deadline = MonotonicDeadline.after(10, clock);
+      const pending = new Promise<string>(() => undefined);
+      const observed = deadline.run(
+        () => pending,
+        () => new Error('phase timed out'),
+      );
+      let settlement: 'pending' | 'resolved' | 'rejected' = 'pending';
+      void observed.then(
+        () => {
+          settlement = 'resolved';
+        },
+        () => {
+          settlement = 'rejected';
+        },
+      );
+
+      clock.value = 9.2;
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settlement).toBe('pending');
+
+      clock.value = 10;
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(observed).rejects.toThrow(/phase timed out/u);
+      expect(settlement).toBe('rejected');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects a successful operation that synchronously crosses the absolute deadline', async () => {
