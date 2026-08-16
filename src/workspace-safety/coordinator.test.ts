@@ -43,6 +43,26 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<v
   }
 }
 
+async function readCompleteJson<T>(path: string, timeoutMs = 5_000): Promise<T> {
+  let parsed: T | undefined;
+  await waitUntil(() => {
+    try {
+      parsed = JSON.parse(readFileSync(path, 'utf8')) as T;
+      return true;
+    } catch (error) {
+      if (
+        error instanceof SyntaxError ||
+        (error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT')
+      ) {
+        return false;
+      }
+      throw error;
+    }
+  }, timeoutMs);
+  if (parsed === undefined) throw new Error('JSON marker completed without a value');
+  return parsed;
+}
+
 async function within<T>(promise: Promise<T>, milliseconds = 5_000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -75,14 +95,10 @@ afterEach(async () => {
       // The nonce-bound exit marker below still decides whether cleanup completed safely.
     }
     try {
-      await waitUntil(() => {
-        if (!existsSync(fixture.exitedPath)) return false;
-        const exited = JSON.parse(readFileSync(fixture.exitedPath, 'utf8')) as {
-          nonce: string;
-          reason: string;
-        };
-        return exited.nonce === fixture.nonce && exited.reason === 'stop-marker';
-      });
+      const exited = await readCompleteJson<{ nonce: string; reason: string }>(fixture.exitedPath);
+      if (exited.nonce !== fixture.nonce || exited.reason !== 'stop-marker') {
+        throw new Error('detached fixture exited without the nonce-bound stop marker');
+      }
     } catch (error) {
       retainedRoots.add(fixture.controlRoot);
       cleanupFailure ??= error instanceof Error ? error : new Error('fixture cleanup failed');
@@ -98,6 +114,19 @@ afterEach(async () => {
 describe.runIf(
   process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32',
 )('managed workspace process coordinator', () => {
+  it('waits for a complete JSON control marker instead of treating path existence as ready', async () => {
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-partial-json-marker-'));
+    roots.push(controlRoot);
+    const markerPath = join(controlRoot, 'ready.json');
+    writeFileSync(markerPath, '', { flag: 'wx' });
+
+    const reading = readCompleteJson<{ ready: boolean }>(markerPath);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    writeFileSync(markerPath, '{"ready":true}\n');
+
+    await expect(reading).resolves.toEqual({ ready: true });
+  });
+
   it('runs a read-only command through the fixed supervisor and settles the operation', async () => {
     const { workspace, session } = await readySession();
     const result = await runManagedWorkspaceProcess(session, {
@@ -305,11 +334,10 @@ describe.runIf(
       };
 
       const running = runManagedWorkspaceProcess(session, options);
-      await waitUntil(() => existsSync(readyPath));
-      const ready = JSON.parse(readFileSync(readyPath, 'utf8')) as {
+      const ready = await readCompleteJson<{
         pid: number;
         nonce: string;
-      };
+      }>(readyPath);
       expect(ready.nonce).toBe(nonce);
       const detachedPid = ready.pid;
       expect(inspectPosixProcessPlacement(detachedPid)).toMatchObject({
