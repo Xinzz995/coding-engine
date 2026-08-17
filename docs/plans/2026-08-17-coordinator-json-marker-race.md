@@ -1,6 +1,6 @@
 ---
 title: 修复进程协调测试的 JSON 标记竞态
-status: active
+status: done
 updated: 2026-08-17
 scope: root
 ---
@@ -46,4 +46,8 @@ PR #249 合并后的 main Quality Gate 运行 31963826960 在 Ubuntu Node 24 暴
   1567.65 秒。
 - 完整测试前后 `/private/tmp` 的 `coding-x-*` 顶层目录均为 216 个，路径集合摘要均为
   `59d109ef1f2503f119da38da2677d152a19674e9fe390fab9721b02920d32278`，没有新增残留。
-- 格式、lint、类型、构建、仓库健康、旧版本兼容与生产依赖审计均通过；远端 PR 多平台检查待提交后执行。
+- 格式、lint、类型、构建、仓库健康、旧版本兼容与生产依赖审计均通过。
+- PR #252 的 Policy Guard、CodeQL 与七套 Quality Gate 全部通过后合并到 main，合并提交为
+  `3cc577222154f0be1b842b1d858f8c32202b49b5`。
+- 新 main 的 CodeQL 运行 31983837920 成功；Quality Gate 运行 31983837913 七个平台与总质量门全部成功，
+  此前失败的 Ubuntu Node 24 在 12 分 32 秒完整通过；政策例外 #251 已关闭。
