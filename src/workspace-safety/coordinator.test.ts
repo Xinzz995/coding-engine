@@ -25,12 +25,7 @@ import {
   environmentEntries,
   runManagedWorkspaceProcess,
 } from './coordinator.js';
-import {
-  ACTIVE_LEASE_DIR,
-  type OwnerCommand,
-  OPERATION_DIR,
-  PROTOCOL_ROOT_DIR,
-} from './types.js';
+import { ACTIVE_LEASE_DIR, type OwnerCommand, OPERATION_DIR, PROTOCOL_ROOT_DIR } from './types.js';
 
 const roots: string[] = [];
 const escapedFixtures: Array<{

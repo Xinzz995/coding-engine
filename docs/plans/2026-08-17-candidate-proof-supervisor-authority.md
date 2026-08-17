@@ -15,13 +15,13 @@ Windows `WindowsJobAuthority` 的命令白名单均漏掉该值。首个受管�
 
 # 完成合同
 
-| 验收标准 | 失败时可观察结果 | 验证方式 |
-|---|---|---|
-| POSIX 固定监督器接受合法 `candidate-proof` owner | macOS/Linux 候选补签在首个受管查询前隔离 | 在 `candidate-proof` 短租约中真实运行 `quality-check` 并安全结算 |
-| Windows 固定监督器接受同一 owner command | Windows 候选补签仍被固定二进制拒绝 | 同一跨平台 coordinator 回归在 Windows native proof 中通过 |
-| 未知命令与其他权威约束仍 fail-closed | 放宽为任意字符串或绕过 owner 绑定 | 既有非法 owner、篡改 marker/protocol/owner 和 helper 身份回归继续通过 |
-| Windows 源与提交二进制完全一致 | 只改 C# 源但实际发布仍带旧二进制 | 固定 SDK 双槽可复现构建与 committed executable 字节核对 |
-| 旧候选不得复用 | 用源码修复解释运行 32003942139 已恢复 | 关闭 PR #258；修复合并后从新 main 重建候选和全新 workspace |
+| 验收标准                                         | 失败时可观察结果                         | 验证方式                                                              |
+| ------------------------------------------------ | ---------------------------------------- | --------------------------------------------------------------------- |
+| POSIX 固定监督器接受合法 `candidate-proof` owner | macOS/Linux 候选补签在首个受管查询前隔离 | 在 `candidate-proof` 短租约中真实运行 `quality-check` 并安全结算      |
+| Windows 固定监督器接受同一 owner command         | Windows 候选补签仍被固定二进制拒绝       | 同一跨平台 coordinator 回归在 Windows native proof 中通过             |
+| 未知命令与其他权威约束仍 fail-closed             | 放宽为任意字符串或绕过 owner 绑定        | 既有非法 owner、篡改 marker/protocol/owner 和 helper 身份回归继续通过 |
+| Windows 源与提交二进制完全一致                   | 只改 C# 源但实际发布仍带旧二进制         | 固定 SDK 双槽可复现构建与 committed executable 字节核对               |
+| 旧候选不得复用                                   | 用源码修复解释运行 32003942139 已恢复    | 关闭 PR #258；修复合并后从新 main 重建候选和全新 workspace            |
 
 # 黄金原则对照
 
