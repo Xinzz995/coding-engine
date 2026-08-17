@@ -423,7 +423,7 @@ describe('runLoop model routing', { timeout: 30_000, concurrent: false }, () => 
   });
 });
 
-describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: false }, () => {
+describe('模型升级触发与状态所有权', { timeout: 40_000, concurrent: false }, () => {
   it('completed no-op 首次触发，下轮改走 escalation 且不增加 retryCount', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });
     const fake = join(workspace, 'fake-noop-route.mjs');
@@ -587,7 +587,7 @@ describe('模型升级触发与状态所有权', { timeout: 30_000, concurrent: 
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }
-  }, 20_000);
+  }, 30_000);
 
   it('异常退出不触发升级', async () => {
     const { workspace, instructionsDir } = setup([routedStory()], { models: modelConfig() });

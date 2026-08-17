@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 export const DEFAULT_GITHUB_READ_TIMEOUT_MS = 10_000;
 export const DEFAULT_GITHUB_READ_ATTEMPTS = 3;
 export const GITHUB_RETRY_BASE_DELAY_MS = 250;
@@ -227,7 +229,12 @@ function parseRule(value: unknown): GitHubRulesetRule {
   };
 }
 
-export function parseGitHubRuleset(value: unknown): GitHubRuleset {
+interface ParsedGitHubRulesetCore {
+  readonly ruleset: Omit<GitHubRuleset, 'bypass_actors'>;
+  readonly updatedAt: string | null;
+}
+
+function parseGitHubRulesetCore(value: unknown): ParsedGitHubRulesetCore {
   if (!isRecord(value)) throw new GitHubQualityError('无法解析 GitHub Ruleset');
   const conditions = value.conditions;
   const refName = isRecord(conditions) ? conditions.ref_name : null;
@@ -240,23 +247,108 @@ export function parseGitHubRuleset(value: unknown): GitHubRuleset {
   ) {
     throw new GitHubQualityError('GitHub Ruleset 缺少合法 ref_name 条件');
   }
-  if (!Array.isArray(value.rules) || !Array.isArray(value.bypass_actors)) {
-    throw new GitHubQualityError('GitHub Ruleset 缺少 rules 或 bypass_actors');
+  if (!Array.isArray(value.rules)) throw new GitHubQualityError('GitHub Ruleset 缺少 rules');
+  if (
+    value.updated_at !== undefined &&
+    value.updated_at !== null &&
+    typeof value.updated_at !== 'string'
+  ) {
+    throw new GitHubQualityError('GitHub Ruleset updated_at 非法');
   }
   return {
-    id: numberField(value.id, 'ruleset.id'),
-    name: stringField(value.name, 'ruleset.name'),
-    target: stringField(value.target, 'ruleset.target'),
-    enforcement: stringField(value.enforcement, 'ruleset.enforcement'),
-    bypass_actors: value.bypass_actors,
-    conditions: {
-      ref_name: {
-        include: [...refName.include] as string[],
-        exclude: [...refName.exclude] as string[],
+    ruleset: {
+      id: numberField(value.id, 'ruleset.id'),
+      name: stringField(value.name, 'ruleset.name'),
+      target: stringField(value.target, 'ruleset.target'),
+      enforcement: stringField(value.enforcement, 'ruleset.enforcement'),
+      conditions: {
+        ref_name: {
+          include: [...refName.include] as string[],
+          exclude: [...refName.exclude] as string[],
+        },
       },
+      rules: value.rules.map(parseRule),
     },
-    rules: value.rules.map(parseRule),
+    updatedAt: typeof value.updated_at === 'string' ? value.updated_at : null,
   };
+}
+
+export function parseGitHubRuleset(value: unknown): GitHubRuleset {
+  const core = parseGitHubRulesetCore(value);
+  if (!isRecord(value) || !Array.isArray(value.bypass_actors)) {
+    throw new GitHubQualityError('GitHub Ruleset 缺少 bypass_actors');
+  }
+  return { ...core.ruleset, bypass_actors: value.bypass_actors };
+}
+
+export function githubRulesetBypassActorsOmitted(value: unknown): boolean {
+  return isRecord(value) && !Object.hasOwn(value, 'bypass_actors');
+}
+
+export interface GitHubRulesetHistoryMarker {
+  readonly versionId: number;
+  readonly updatedAt: string;
+}
+
+export function parseLatestGitHubRulesetHistory(value: unknown): GitHubRulesetHistoryMarker {
+  if (!Array.isArray(value) || value.length === 0 || !isRecord(value[0])) {
+    throw new GitHubQualityError('GitHub Ruleset 最新历史版本缺失');
+  }
+  const entry = value[0];
+  return {
+    versionId: numberField(entry.version_id, 'ruleset history.version_id'),
+    updatedAt: stringField(entry.updated_at, 'ruleset history.updated_at'),
+  };
+}
+
+export function recoverGitHubRulesetFromHistory(options: {
+  readonly detailBefore: unknown;
+  readonly historyBefore: unknown;
+  readonly historyVersion: unknown;
+  readonly detailAfter: unknown;
+  readonly historyAfter: unknown;
+}): GitHubRuleset {
+  const currentBefore = parseGitHubRulesetCore(options.detailBefore);
+  const currentAfter = parseGitHubRulesetCore(options.detailAfter);
+  if (currentBefore.updatedAt === null || currentAfter.updatedAt === null) {
+    throw new GitHubQualityError('GitHub Ruleset 历史补证缺少当前 updated_at');
+  }
+  if (
+    currentBefore.updatedAt !== currentAfter.updatedAt ||
+    !isDeepStrictEqual(currentBefore.ruleset, currentAfter.ruleset)
+  ) {
+    throw new GitHubQualityError('GitHub Ruleset 当前详情在历史补证期间变化');
+  }
+
+  const latestBefore = parseLatestGitHubRulesetHistory(options.historyBefore);
+  const latestAfter = parseLatestGitHubRulesetHistory(options.historyAfter);
+  if (!isDeepStrictEqual(latestBefore, latestAfter)) {
+    throw new GitHubQualityError('GitHub Ruleset 最新历史版本在补证期间变化');
+  }
+  if (!isRecord(options.historyVersion)) {
+    throw new GitHubQualityError('GitHub Ruleset 历史版本响应非法');
+  }
+  if (
+    numberField(options.historyVersion.version_id, 'ruleset history version.version_id') !==
+      latestBefore.versionId ||
+    stringField(options.historyVersion.updated_at, 'ruleset history version.updated_at') !==
+      latestBefore.updatedAt
+  ) {
+    throw new GitHubQualityError('GitHub Ruleset 历史版本与最新标识不一致');
+  }
+  const historical = parseGitHubRuleset(options.historyVersion.state);
+  const historicalCore = parseGitHubRulesetCore(options.historyVersion.state).ruleset;
+  if (!isDeepStrictEqual(currentBefore.ruleset, historicalCore)) {
+    throw new GitHubQualityError('GitHub Ruleset 历史状态与当前详情不一致');
+  }
+
+  if (isRecord(options.detailAfter) && Object.hasOwn(options.detailAfter, 'bypass_actors')) {
+    const completeCurrent = parseGitHubRuleset(options.detailAfter);
+    if (!isDeepStrictEqual(completeCurrent.bypass_actors, historical.bypass_actors)) {
+      throw new GitHubQualityError('GitHub Ruleset 绕过列表与历史状态不一致');
+    }
+  }
+  return historical;
 }
 
 export function parseGitHubPullRequest(value: unknown): GitHubPullRequestInfo {

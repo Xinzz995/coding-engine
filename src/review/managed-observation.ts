@@ -3,6 +3,7 @@ import { delimiter, isAbsolute, relative, resolve, sep } from 'node:path';
 import { resolveExecutablePath } from '../engine/agent.js';
 import {
   classifyCommandError,
+  githubRulesetBypassActorsOmitted,
   GitHubQualityError,
   parseGitHubCheckRun,
   parseGitHubImmutableReleases,
@@ -10,6 +11,8 @@ import {
   parseGitHubPullRequest,
   parseGitHubRepository,
   parseGitHubRuleset,
+  parseLatestGitHubRulesetHistory,
+  recoverGitHubRulesetFromHistory,
   type GitHubCheckRun,
   type GitHubImmutableReleases,
   type GitHubIssueInfo,
@@ -250,8 +253,26 @@ class ManagedGhReviewClient implements GitHubReviewReadClient {
       if (!record(entry) || !Number.isInteger(entry.id) || (entry.id as number) < 1) {
         throw new GitHubQualityError('GitHub 返回非法 Ruleset 列表项');
       }
+      const detailPath = `repos/${repository}/rulesets/${entry.id as number}`;
+      const detailBefore = await this.api(detailPath);
+      if (!githubRulesetBypassActorsOmitted(detailBefore)) {
+        result.push(parseGitHubRuleset(detailBefore));
+        continue;
+      }
+      const historyPath = `${detailPath}/history?per_page=1`;
+      const historyBefore = await this.api(historyPath);
+      const latest = parseLatestGitHubRulesetHistory(historyBefore);
+      const historyVersion = await this.api(`${detailPath}/history/${latest.versionId}`);
+      const detailAfter = await this.api(detailPath);
+      const historyAfter = await this.api(historyPath);
       result.push(
-        parseGitHubRuleset(await this.api(`repos/${repository}/rulesets/${entry.id as number}`)),
+        recoverGitHubRulesetFromHistory({
+          detailBefore,
+          historyBefore,
+          historyVersion,
+          detailAfter,
+          historyAfter,
+        }),
       );
     }
     return result;
