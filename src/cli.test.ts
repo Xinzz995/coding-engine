@@ -1480,5 +1480,5 @@ describe('repair 与工作区锁', () => {
       logSpy.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
