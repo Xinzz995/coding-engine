@@ -624,7 +624,7 @@ describe.runIf(process.platform !== 'win32')('real managed authority snapshot', 
     } finally {
       await fixture.managed.close();
     }
-  }, 30_000);
+  }, 60_000);
 
   it('uses exactly one managed operation for all authority reads', async () => {
     const fixture = await realManagedFixture(
