@@ -7,8 +7,10 @@ scope: root
 
 # 实测目的
 
-本文件只用于修复后重新构建的 coding-x 0.37.0 候选自托管 Shadow Dogfood，验证本地最终
-Review 先观察到远端检查未完成，随后在同一 PR head 上只刷新远端状态并补签候选证明。
+本文件只用于修复后重新构建的 coding-x 0.37.0 候选自托管 Shadow Dogfood。实测必须先记录
+同一 PR head 的远端状态为 pending，等待检查自然变为 ready 后，仅执行一次
+`candidate publish-proof --candidate-evidence` 补签；不得重跑 Builder、Validator、完整质量检查
+或最终 Review。
 
 # 边界
 
