@@ -94,7 +94,7 @@ namespace CodingX.WorkspaceSafety
                 ownerIdentityKind != "windows-filetime" ||
                 (ownerCommand != "workspace-init" && ownerCommand != "run" && ownerCommand != "repair" &&
                  ownerCommand != "report" && ownerCommand != "apply-prd" &&
-                 ownerCommand != "review-decision") ||
+                 ownerCommand != "review-decision" && ownerCommand != "candidate-proof") ||
                 !Patterns.Uuid.IsMatch(result.OwnerId) || !Patterns.Uuid.IsMatch(result.OperationId) ||
                 result.OwnerId == result.OperationId ||
                 result.OperationId != target.OperationId || expectedDelegation == null ||

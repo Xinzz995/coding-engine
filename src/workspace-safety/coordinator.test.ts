@@ -25,7 +25,7 @@ import {
   environmentEntries,
   runManagedWorkspaceProcess,
 } from './coordinator.js';
-import { ACTIVE_LEASE_DIR, OPERATION_DIR, PROTOCOL_ROOT_DIR } from './types.js';
+import { ACTIVE_LEASE_DIR, type OwnerCommand, OPERATION_DIR, PROTOCOL_ROOT_DIR } from './types.js';
 
 const roots: string[] = [];
 const escapedFixtures: Array<{
@@ -77,11 +77,11 @@ async function within<T>(promise: Promise<T>, milliseconds = 5_000): Promise<T> 
   }
 }
 
-async function readySession() {
+async function readySession(command: Exclude<OwnerCommand, 'workspace-init'> = 'run') {
   const workspace = mkdtempSync(join(tmpdir(), 'coding-x-managed-process-'));
   roots.push(workspace);
   await bootstrapWorkspace({ workspacePath: workspace });
-  const lease = await acquireWorkspaceLease({ workspacePath: workspace, command: 'run' });
+  const lease = await acquireWorkspaceLease({ workspacePath: workspace, command });
   return { workspace, session: createWorkspaceSession(lease) };
 }
 
@@ -147,6 +147,28 @@ describe.runIf(
     });
     expect(result.stdout.toString('utf8')).toBe('managed-ok');
     expect(result.stderr.toString('utf8')).toBe('managed-err');
+    await session.close();
+  }, 20_000);
+
+  it('runs a managed status probe through the fixed supervisor under a candidate-proof owner', async () => {
+    const { workspace, session } = await readySession('candidate-proof');
+    const result = await runManagedWorkspaceProcess(session, {
+      kind: 'quality-check',
+      delegation: 'read-only-v1',
+      executable: process.execPath,
+      args: ['-e', "process.stdout.write('candidate-proof-owner-ok')"],
+      cwd: workspace,
+      environment: environmentEntries(process.env),
+      timeoutMs: 5_000,
+    });
+
+    expect(result).toMatchObject({
+      verdict: 'completed',
+      exitCode: 0,
+      timedOut: false,
+      processTreeNotEmpty: false,
+    });
+    expect(result.stdout.toString('utf8')).toBe('candidate-proof-owner-ok');
     await session.close();
   }, 20_000);
 

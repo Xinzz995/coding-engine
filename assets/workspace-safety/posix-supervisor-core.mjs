@@ -767,9 +767,8 @@ export function validateCoreAuthority(authority, workspacePath) {
     protocol.createdBy !== '0.34.0' ||
     owner.schemaVersion !== 2 ||
     !['linux-boot-start', 'macos-boot-start'].includes(owner.processIdentity.kind) ||
-    !['workspace-init', 'run', 'repair', 'report', 'apply-prd', 'review-decision'].includes(
-      owner.command,
-    ) ||
+    // prettier-ignore
+    !['workspace-init', 'run', 'repair', 'report', 'apply-prd', 'review-decision', 'candidate-proof'].includes(owner.command) ||
     marker.workspaceIdentity !== workspaceIdentity ||
     protocol.workspaceIdentity !== workspaceIdentity ||
     owner.workspaceIdentity !== workspaceIdentity ||
