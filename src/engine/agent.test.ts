@@ -153,7 +153,7 @@ async function expectTimedOutTreeExited(mode: 'tree' | 'stubborn-tree'): Promise
 
 describe('buildManagedAgentArgs', () => {
   it('uses stdin for Codex and Claude while keeping Cursor prompt-free for the proxy', () => {
-    expect(buildManagedAgentArgs('codex', 'gpt-5')).toEqual([
+    expect(buildManagedAgentArgs('codex', 'gpt-5', {})).toEqual([
       'codex',
       'exec',
       '--dangerously-bypass-approvals-and-sandbox',
@@ -161,27 +161,16 @@ describe('buildManagedAgentArgs', () => {
       'gpt-5',
       '-',
     ]);
-    expect(buildManagedAgentArgs('claude', 'opus')).toEqual([
+    expect(buildManagedAgentArgs('claude', 'opus', {})).toEqual([
       'claude',
       '--print',
       '--dangerously-skip-permissions',
       '--model',
       'opus',
     ]);
-    const original = process.env.CODING_X_CURSOR_BIN;
-    process.env.CODING_X_CURSOR_BIN = 'agent';
-    try {
-      expect(buildManagedAgentArgs('cursor', 'composer-1')).toEqual([
-        'agent',
-        '-p',
-        '--force',
-        '--model',
-        'composer-1',
-      ]);
-    } finally {
-      if (original === undefined) delete process.env.CODING_X_CURSOR_BIN;
-      else process.env.CODING_X_CURSOR_BIN = original;
-    }
+    expect(
+      buildManagedAgentArgs('cursor', 'composer-1', { CODING_X_CURSOR_BIN: 'agent' }),
+    ).toEqual(['agent', '-p', '--force', '--model', 'composer-1']);
   });
 });
 

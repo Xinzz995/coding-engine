@@ -121,6 +121,11 @@ Story 凭证与最终 Review 的证明；维护者命令再次核对当前 owner
 改为 ready。入口不轮询、不排队、不合并、不发布。指标从最新 ready 标签事件开始，累计实际运行
 时间，并把其余时间记为等待，从而直接衡量“ready Issue 到当前 head 可信 PR”的总时间（ADR-029）。
 
+GitHub Ruleset 详情可能按调用者权限省略 `bypass_actors`。普通 doctor/status 与受管 Review 都先
+严格读取当前详情；只有该字段完全省略时，才双夹取最新 Ruleset history 版本并读取其完整 state，
+要求前后版本标识稳定、当前详情未变化，且历史 state 的规则核心逐字段等于当前详情。任何竞态、
+差异或历史仍缺绕过列表都保持不可验证；字段缺失本身绝不解释为空列表。
+
 workspace 是运行边界：`workspace-safety.json` 与永久 `engine.lock/` 绑定目录身份；活动 writer 位于
 `engine.lock/lease/`。progress、evidence、Validator IPC、截图、Review 与报告的每次修改都属于当前
 owner 或一个明示 delegated child。Agent stdout/stderr 实时 tee，异常时只留有界尾部；operation

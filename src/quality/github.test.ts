@@ -33,6 +33,28 @@ function rulesetPayload(): GitHubRulesetPayload {
   };
 }
 
+const RULESET_DETAIL = {
+  id: 7,
+  name: 'test ruleset',
+  target: 'branch',
+  enforcement: 'active',
+  conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
+  rules: [{ type: 'deletion' }],
+  updated_at: '2026-08-17T00:00:00.000Z',
+};
+const RULESET_HISTORY = [
+  { version_id: 99, updated_at: '2026-08-17T00:00:00.100Z' },
+];
+const RULESET_HISTORY_VERSION = {
+  version_id: 99,
+  updated_at: '2026-08-17T00:00:00.100Z',
+  state: { ...RULESET_DETAIL, updated_at: null, bypass_actors: [] },
+};
+
+function apiPath(invocation: GitHubCommandInvocation): string {
+  return invocation.args.at(-1) ?? '';
+}
+
 describe('GhGitHubQualityClient read retries', () => {
   it('recovers from a transient GraphQL EOF with bounded backoff', () => {
     const invocations: GitHubCommandInvocation[] = [];
@@ -300,5 +322,135 @@ describe('GhGitHubQualityClient read retries', () => {
     expect(invocations).toHaveLength(2);
     expect(invocations[1]?.args).toContain('POST');
     expect(invocations[1]?.timeoutMs).toBeUndefined();
+  });
+
+  it('keeps the direct ruleset path when bypass actors are visible', () => {
+    const invocations: GitHubCommandInvocation[] = [];
+    const client = new GhGitHubQualityClient({
+      executor: (invocation) => {
+        invocations.push(invocation);
+        return apiPath(invocation).includes('?includes_parents=')
+          ? JSON.stringify([{ id: 7 }])
+          : JSON.stringify({ ...RULESET_DETAIL, bypass_actors: [] });
+      },
+      sleep: () => {},
+    });
+
+    expect(client.listRulesets('owner/repository')).toEqual([
+      expect.objectContaining({ id: 7, bypass_actors: [] }),
+    ]);
+    expect(invocations.map(apiPath)).toEqual([
+      'repos/owner/repository/rulesets?includes_parents=false&per_page=100',
+      'repos/owner/repository/rulesets/7',
+    ]);
+  });
+
+  it('recovers an omitted bypass list only from one stable latest history version', () => {
+    const invocations: GitHubCommandInvocation[] = [];
+    const client = new GhGitHubQualityClient({
+      executor: (invocation) => {
+        invocations.push(invocation);
+        const path = apiPath(invocation);
+        if (path.includes('?includes_parents=')) return JSON.stringify([{ id: 7 }]);
+        if (path.endsWith('/history?per_page=1')) return JSON.stringify(RULESET_HISTORY);
+        if (path.endsWith('/history/99')) return JSON.stringify(RULESET_HISTORY_VERSION);
+        return JSON.stringify(RULESET_DETAIL);
+      },
+      sleep: () => {},
+    });
+
+    expect(client.listRulesets('owner/repository')).toEqual([
+      expect.objectContaining({
+        id: 7,
+        name: 'test ruleset',
+        bypass_actors: [],
+        rules: [{ type: 'deletion' }],
+      }),
+    ]);
+    expect(invocations.map(apiPath)).toEqual([
+      'repos/owner/repository/rulesets?includes_parents=false&per_page=100',
+      'repos/owner/repository/rulesets/7',
+      'repos/owner/repository/rulesets/7/history?per_page=1',
+      'repos/owner/repository/rulesets/7/history/99',
+      'repos/owner/repository/rulesets/7',
+      'repos/owner/repository/rulesets/7/history?per_page=1',
+    ]);
+  });
+
+  it('rejects a ruleset history version race instead of reusing an old bypass list', () => {
+    let historyReads = 0;
+    const client = new GhGitHubQualityClient({
+      executor: (invocation) => {
+        const path = apiPath(invocation);
+        if (path.includes('?includes_parents=')) return JSON.stringify([{ id: 7 }]);
+        if (path.endsWith('/history?per_page=1')) {
+          historyReads++;
+          return JSON.stringify(
+            historyReads === 1
+              ? RULESET_HISTORY
+              : [{ version_id: 100, updated_at: '2026-08-17T00:00:01.000Z' }],
+          );
+        }
+        if (path.endsWith('/history/99')) return JSON.stringify(RULESET_HISTORY_VERSION);
+        return JSON.stringify(RULESET_DETAIL);
+      },
+      sleep: () => {},
+    });
+
+    expect(() => client.listRulesets('owner/repository')).toThrow(
+      '最新历史版本在补证期间变化',
+    );
+  });
+
+  it('rejects a current ruleset detail race during history recovery', () => {
+    let detailReads = 0;
+    const client = new GhGitHubQualityClient({
+      executor: (invocation) => {
+        const path = apiPath(invocation);
+        if (path.includes('?includes_parents=')) return JSON.stringify([{ id: 7 }]);
+        if (path.endsWith('/history?per_page=1')) return JSON.stringify(RULESET_HISTORY);
+        if (path.endsWith('/history/99')) return JSON.stringify(RULESET_HISTORY_VERSION);
+        detailReads++;
+        return JSON.stringify(
+          detailReads === 1
+            ? RULESET_DETAIL
+            : { ...RULESET_DETAIL, updated_at: '2026-08-17T00:00:02.000Z' },
+        );
+      },
+      sleep: () => {},
+    });
+
+    expect(() => client.listRulesets('owner/repository')).toThrow(
+      '当前详情在历史补证期间变化',
+    );
+  });
+
+  it.each([
+    [
+      'history state drift',
+      { ...RULESET_HISTORY_VERSION, state: { ...RULESET_HISTORY_VERSION.state, rules: [] } },
+      '历史状态与当前详情不一致',
+    ],
+    [
+      'history bypass omission',
+      {
+        ...RULESET_HISTORY_VERSION,
+        state: RULESET_DETAIL,
+      },
+      '缺少 bypass_actors',
+    ],
+  ])('rejects %s', (_label, historyVersion, message) => {
+    const client = new GhGitHubQualityClient({
+      executor: (invocation) => {
+        const path = apiPath(invocation);
+        if (path.includes('?includes_parents=')) return JSON.stringify([{ id: 7 }]);
+        if (path.endsWith('/history?per_page=1')) return JSON.stringify(RULESET_HISTORY);
+        if (path.endsWith('/history/99')) return JSON.stringify(historyVersion);
+        return JSON.stringify(RULESET_DETAIL);
+      },
+      sleep: () => {},
+    });
+
+    expect(() => client.listRulesets('owner/repository')).toThrow(message);
   });
 });

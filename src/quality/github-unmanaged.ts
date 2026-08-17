@@ -5,6 +5,7 @@ import {
   DEFAULT_GITHUB_READ_TIMEOUT_MS,
   GITHUB_RETRY_BASE_DELAY_MS,
   GitHubQualityError,
+  githubRulesetBypassActorsOmitted,
   isRecord,
   numberField,
   parseGitHubCheckRun,
@@ -13,7 +14,9 @@ import {
   parseGitHubPullRequest,
   parseGitHubRepository,
   parseGitHubRuleset,
+  parseLatestGitHubRulesetHistory,
   parseSecurityFeatures,
+  recoverGitHubRulesetFromHistory,
   type GhGitHubQualityClientOptions,
   type GitHubCheckRun,
   type GitHubCommandExecutor,
@@ -149,7 +152,24 @@ export class GhGitHubQualityClient implements GitHubQualityClient {
   }
 
   getRuleset(repository: string, id: number): GitHubRuleset {
-    return parseGitHubRuleset(this.api(`repos/${repository}/rulesets/${id}`));
+    const detailPath = `repos/${repository}/rulesets/${id}`;
+    const detailBefore = this.api(detailPath);
+    if (!githubRulesetBypassActorsOmitted(detailBefore)) {
+      return parseGitHubRuleset(detailBefore);
+    }
+    const historyPath = `${detailPath}/history?per_page=1`;
+    const historyBefore = this.api(historyPath);
+    const latest = parseLatestGitHubRulesetHistory(historyBefore);
+    const historyVersion = this.api(`${detailPath}/history/${latest.versionId}`);
+    const detailAfter = this.api(detailPath);
+    const historyAfter = this.api(historyPath);
+    return recoverGitHubRulesetFromHistory({
+      detailBefore,
+      historyBefore,
+      historyVersion,
+      detailAfter,
+      historyAfter,
+    });
   }
 
   createRuleset(repository: string, payload: GitHubRulesetPayload): GitHubRuleset {
