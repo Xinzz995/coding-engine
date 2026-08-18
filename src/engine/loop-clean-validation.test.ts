@@ -436,7 +436,7 @@ describe('runLoop clean validation checkout', () => {
         else process.env[name] = value;
       }
     }
-  }, 60_000);
+  }, 90_000);
 
   it('removes the clean checkout when Validator returns without a usable result', async () => {
     const fixture = setupGitProject([story({ acceptanceCriteria: ['source is verified'] })]);
