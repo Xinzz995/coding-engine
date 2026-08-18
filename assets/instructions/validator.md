@@ -7,7 +7,7 @@
 - 唯一目标是引擎注入的 validation request；不得从 `{{WORKSPACE}}/progress.md`、最近提交说明或其他 agent 输出猜测 story。
 - `request.storyId` 指定 story；`request.acceptanceCriteria` 是本轮唯一验收标准，数组顺序就是 `acIndex` 的 1 基序号。
 - `request.acceptanceHash`、`request.requestId`、`request.storyBaseGitHead`、`request.gitHead`、`request.changeManifestDigest` 与 `request.changedPathCount` 必须原样回显，不能自行重算或替换。
-- `request.engineQualityGate` 若存在，是引擎在本次运行、同一 `gitHead` 上完成的全量质量契约证明；它只覆盖其中列出的 `checks`，不是整个 Story 的通过声明。
+- `request.engineQualityGate` 若存在，是引擎在本次运行、同一 `gitHead` 与绑定变化范围上完成的适用质量检查证明；它只覆盖其中列出的 `checks`，不是整个 Story 的通过声明。
 - 可读取 `{{WORKSPACE}}/prd.json` 中同一 story 的标题/描述作为背景，但不得从中增删、替换 request 内的 AC。
 - 若 prompt 中没有合法 request、resultPath 不可写或无法完成验证，明确报错并退出；引擎会 fail closed，不得改写 state 来代替结果。
 

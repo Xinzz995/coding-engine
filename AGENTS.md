@@ -39,7 +39,7 @@ npm run format:check # 新增代码格式与全部差异空白检查
 
 ## 硬约束
 
-1. 提交前必须通过 `npm run format:check`、`npm run lint`、`npm run typecheck` 与 `npm test`
+1. 提交前必须通过 `.coding-x/quality.json` 按完整改动路径判定适用的检查；路径无法可靠分类时必须全跑。每周远端完整矩阵负责发现环境漂移
 2. `src/` 内相对导入必须写 `.js` 扩展名（ESM/NodeNext）
 3. `skills/`、`commands/` 是唯一源：各工具清单只指回，不复制内容
 4. 引擎运行时状态只读写 `--workspace` 目录（默认 `.workspace/`）

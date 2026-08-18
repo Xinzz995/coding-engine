@@ -264,7 +264,7 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
       const fenceAt = prompt.indexOf('\n```', jsonAt);
       const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
       expect(request.engineQualityGate).toMatchObject({
-        source: 'engine-full-gate',
+        source: 'engine-effective-gate',
         status: 'passed',
         gitHead: request.gitHead,
         total: 1,

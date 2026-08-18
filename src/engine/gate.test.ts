@@ -22,9 +22,11 @@ import {
   applyValidatorSuccess,
   classifyValidationOnlyGateFailure,
   runContractQualityChecks,
+  selectContractQualityChecks,
   abortDesc,
 } from './gate.js';
 import type { GateFailure } from './gate.js';
+import type { QualityChangeSelection } from './gate.js';
 import type { RunState } from './state.js';
 import type { Prd } from './prd.js';
 import type {
@@ -54,13 +56,14 @@ async function runManagedContractQualityChecks(
   checks: FrozenQualityChecks,
   projectRoot: string,
   platform?: 'linux' | 'macos' | 'windows' | null,
+  changeSelection?: QualityChangeSelection,
 ): ReturnType<typeof runContractQualityChecks> {
   const fixture = await createManagedProcessTestSession();
   try {
     return await runContractQualityChecks(checks, projectRoot, platform, {
       session: fixture.session,
       kind: 'quality-check',
-    });
+    }, changeSelection);
   } finally {
     await fixture.close();
   }
@@ -475,6 +478,166 @@ describe('runQualityChecks', { timeout: 30_000, concurrent: false }, () => {
 });
 
 describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () => {
+  it('selects only path-matched checks and keeps checks without paths applicable', () => {
+    const checks = contractWith(
+      {
+        checks: [
+          {
+            id: 'tests',
+            module: 'root',
+            paths: ['src/**'],
+            command: {
+              executable: 'node',
+              args: ['--test'],
+              cwd: '.',
+              platforms: ['linux'],
+              timeoutMs: 5_000,
+            },
+          },
+        ],
+      },
+      {
+        static: {
+          checks: [
+            {
+              id: 'docs-health',
+              module: 'root',
+              paths: ['docs/**'],
+              command: {
+                executable: 'node',
+                args: ['docs-health.mjs'],
+                cwd: '.',
+                platforms: ['linux'],
+                timeoutMs: 5_000,
+              },
+            },
+            {
+              id: 'always',
+              module: 'root',
+              command: {
+                executable: 'node',
+                args: ['always.mjs'],
+                cwd: '.',
+                platforms: ['linux'],
+                timeoutMs: 5_000,
+              },
+            },
+          ],
+        },
+      },
+    );
+    const selected = selectContractQualityChecks(checks, 'linux', {
+      matchedPathCheckIds: ['docs-health'],
+      allChangedPathsMatched: true,
+    });
+    expect(selected.mode).toBe('scoped');
+    expect(selected.applicable.map((check) => check.id)).toEqual(['docs-health', 'always']);
+    expect(selected.skippedByPath).toEqual(['tests']);
+  });
+
+  it.each([
+    ['unknown changed path', { matchedPathCheckIds: [], allChangedPathsMatched: false }],
+    ['duplicate helper result', { matchedPathCheckIds: ['tests', 'tests'], allChangedPathsMatched: true }],
+    ['unscoped id injection', { matchedPathCheckIds: ['always'], allChangedPathsMatched: true }],
+  ])('falls back to every platform check for %s', (_label, changeSelection) => {
+    const checks = contractWith(
+      {
+        checks: [
+          {
+            id: 'tests',
+            module: 'root',
+            paths: ['src/**'],
+            command: {
+              executable: 'node',
+              args: [],
+              cwd: '.',
+              platforms: ['linux'],
+              timeoutMs: 5_000,
+            },
+          },
+          {
+            id: 'always',
+            module: 'root',
+            command: {
+              executable: 'node',
+              args: [],
+              cwd: '.',
+              platforms: ['linux'],
+              timeoutMs: 5_000,
+            },
+          },
+        ],
+      },
+    );
+    const selected = selectContractQualityChecks(checks, 'linux', changeSelection);
+    expect(selected.mode).toBe('fallback-full');
+    expect(selected.applicable.map((check) => check.id)).toEqual(['tests', 'always']);
+    expect(selected.skippedByPath).toEqual([]);
+  });
+
+  it('executes only the selected path scope and reports the exact skipped ids', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'contract-scoped-gate-'));
+    const docsMarker = join(root, 'docs-ran.txt');
+    const testsMarker = join(root, 'tests-must-not-run.txt');
+    try {
+      const result = await runManagedContractQualityChecks(
+        contractWith({
+          checks: [
+            {
+              id: 'tests',
+              module: 'root',
+              paths: ['src/**'],
+              command: {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  `require('node:fs').writeFileSync(${JSON.stringify(testsMarker)}, 'ran')`,
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos', 'windows'],
+                timeoutMs: 5_000,
+              },
+            },
+            {
+              id: 'docs-health',
+              module: 'root',
+              paths: ['docs/**'],
+              command: {
+                executable: process.execPath,
+                args: [
+                  '-e',
+                  `require('node:fs').writeFileSync(${JSON.stringify(docsMarker)}, 'ran')`,
+                ],
+                cwd: '.',
+                platforms: ['linux', 'macos', 'windows'],
+                timeoutMs: 5_000,
+              },
+            },
+          ],
+        }),
+        root,
+        process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux',
+        {
+          matchedPathCheckIds: ['docs-health'],
+          allChangedPathsMatched: true,
+        },
+      );
+      expect(result).toMatchObject({
+        ok: true,
+        total: 1,
+        ran: 1,
+        selectionMode: 'scoped',
+        selectedCheckIds: ['docs-health'],
+        skipped: ['tests'],
+        skippedByPath: ['tests'],
+      });
+      expect(readFileSync(docsMarker, 'utf8')).toBe('ran');
+      expect(existsSync(testsMarker)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('returns a deterministic gate failure when the executable cannot be resolved', async () => {
     const result = await runManagedContractQualityChecks(
       contractWith({

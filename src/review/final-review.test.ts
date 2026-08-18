@@ -389,7 +389,7 @@ describe('runFinalReview', () => {
             mechanicalChecks: {
               status: 'passed',
               headSha: context().headSha,
-              scope: 'all-current-platform-applicable-contract-checks',
+              scope: 'all-current-change-applicable-contract-checks',
             },
             allReviewAxes: { owner: 'engine' },
             githubDelivery: { owner: 'engine' },
@@ -445,6 +445,78 @@ describe('runFinalReview', () => {
 
     const changed = context({ baseSha: 'f'.repeat(40) });
     changed.baseContractDigest = digestQualityContract(changed.baseContract);
+    const rerun = await runFinalReview({
+      ...options(workspace(), changed),
+      reusableFullGate: proof,
+      gate: async () => {
+        gateCalls += 1;
+        return gate();
+      },
+      axisRunner: async (request) => output(request.axis),
+    });
+    expect(rerun.exitCode).toBe(0);
+    expect(gateCalls).toBe(1);
+  });
+
+  it('reuses a scoped gate only when its change base still equals the PR base', async () => {
+    const exact = context();
+    const testPolicy = exact.baseContract.checks.test;
+    if (!('checks' in testPolicy) || testPolicy.checks.length === 0) {
+      throw new Error('fixture requires one test check');
+    }
+    const selected = { ...testPolicy.checks[0], id: 'docs-health', paths: ['README.md'] };
+    const skipped = { ...testPolicy.checks[0], id: 'tests', paths: ['src/**'] };
+    exact.baseContract = {
+      ...exact.baseContract,
+      checks: {
+        test: { checks: [selected, skipped] },
+        build: { notApplicable: 'fixture' },
+        static: { notApplicable: 'fixture' },
+        security: { notApplicable: 'fixture' },
+      },
+    };
+    exact.baseContractDigest = digestQualityContract(exact.baseContract);
+    const policy = finalReviewMechanicalEnvironmentPolicy(exact.baseContract, exact.baseSha);
+    const scopedResult = {
+      ok: true as const,
+      failure: null,
+      total: 1,
+      ran: 1,
+      ms: 1,
+      skipped: ['tests'],
+      skippedByPath: ['tests'],
+      selectionMode: 'scoped' as const,
+      selectedCheckIds: ['docs-health'],
+    };
+    const proof = createFullGateProof(
+      {
+        contract: exact.baseContract,
+        headSha: exact.headSha,
+        defaultBranchGitHead: exact.baseSha,
+        additionalRefs: policy.additionalRefs,
+        referenceAliases: policy.referenceAliases,
+        changeScope: {
+          baseGitHead: exact.baseSha,
+          manifestDigest: `sha256:${'c'.repeat(64)}`,
+          selectedCheckIds: ['docs-health'],
+        },
+      },
+      scopedResult,
+    );
+    let gateCalls = 0;
+    const reused = await runFinalReview({
+      ...options(workspace(), exact),
+      reusableFullGate: proof,
+      gate: async () => {
+        gateCalls += 1;
+        return gate();
+      },
+      axisRunner: async (request) => output(request.axis),
+    });
+    expect(reused.exitCode).toBe(0);
+    expect(gateCalls).toBe(0);
+
+    const changed = { ...exact, baseSha: 'f'.repeat(40) };
     const rerun = await runFinalReview({
       ...options(workspace(), changed),
       reusableFullGate: proof,

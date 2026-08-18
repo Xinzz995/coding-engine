@@ -625,12 +625,58 @@ describe.runIf(
     const managed = await createManagedProcessTestSession();
     let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
     try {
+      const pathContract = contract();
+      pathContract.checks = {
+        test: {
+          checks: [
+            {
+              id: 'first-check',
+              module: 'root',
+              paths: ['first.txt'],
+              command: {
+                executable: 'node',
+                args: [],
+                cwd: '.',
+                platforms: [
+                  process.platform === 'darwin'
+                    ? 'macos'
+                    : process.platform === 'win32'
+                      ? 'windows'
+                      : 'linux',
+                ],
+                timeoutMs: 5_000,
+              },
+            },
+            {
+              id: 'second-check',
+              module: 'root',
+              paths: ['second.txt'],
+              command: {
+                executable: 'node',
+                args: [],
+                cwd: '.',
+                platforms: [
+                  process.platform === 'darwin'
+                    ? 'macos'
+                    : process.platform === 'win32'
+                      ? 'windows'
+                      : 'linux',
+                ],
+                timeoutMs: 5_000,
+              },
+            },
+          ],
+        },
+        build: { notApplicable: 'fixture' },
+        static: { notApplicable: 'fixture' },
+        security: { notApplicable: 'fixture' },
+      };
       checkout = await createCleanValidationCheckout({
         sourceRoot: source.root,
         head,
         additionalRefs: [base],
         referenceAliases: [{ ref: 'refs/remotes/origin/main', target: base }],
-        contract: contract(),
+        contract: pathContract,
         managed: { session: managed.session, kind: 'quality-check' },
       });
       expect(
@@ -662,8 +708,16 @@ describe.runIf(
         gitHead: head,
         changedPathCount: 2,
         digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+        changeSelection: {
+          matchedPathCheckIds: ['first-check', 'second-check'],
+          allChangedPathsMatched: true,
+        },
       });
       expect(lastCommitOnly.changedPathCount).toBe(1);
+      expect(lastCommitOnly.changeSelection).toEqual({
+        matchedPathCheckIds: ['second-check'],
+        allChangedPathsMatched: true,
+      });
       expect(lastCommitOnly.digest).not.toBe(complete.digest);
       await expect(checkout.storyChangeManifest(base, '重复核对 ')).resolves.toEqual(complete);
       await checkout.assertCurrent('默认分支别名与完整变化范围');
@@ -672,6 +726,76 @@ describe.runIf(
       });
       await expect(checkout.assertCurrent('默认分支别名被改写后')).rejects.toMatchObject({
         code: 'identity-changed',
+      });
+    } finally {
+      checkout?.cleanup();
+      await managed.close();
+    }
+  }, 60_000);
+
+  it('classifies a rename as one deleted path plus one added path', async () => {
+    const source = repository({ 'src/original.ts': 'export const value = 1;\n' });
+    const base = source.head();
+    mkdirSync(join(source.root, 'docs'));
+    execFileSync('git', ['mv', 'src/original.ts', 'docs/renamed.md'], { cwd: source.root });
+    execFileSync('git', ['commit', '-q', '-m', 'rename source to docs'], { cwd: source.root });
+    const head = source.head();
+    const platform =
+      process.platform === 'darwin'
+        ? 'macos'
+        : process.platform === 'win32'
+          ? 'windows'
+          : 'linux';
+    const pathContract = contract();
+    pathContract.checks = {
+      test: {
+        checks: [
+          {
+            id: 'source-check',
+            module: 'root',
+            paths: ['src/**'],
+            command: {
+              executable: 'node',
+              args: [],
+              cwd: '.',
+              platforms: [platform],
+              timeoutMs: 5_000,
+            },
+          },
+          {
+            id: 'docs-check',
+            module: 'root',
+            paths: ['docs/**'],
+            command: {
+              executable: 'node',
+              args: [],
+              cwd: '.',
+              platforms: [platform],
+              timeoutMs: 5_000,
+            },
+          },
+        ],
+      },
+      build: { notApplicable: 'fixture' },
+      static: { notApplicable: 'fixture' },
+      security: { notApplicable: 'fixture' },
+    };
+    const managed = await createManagedProcessTestSession();
+    let checkout: Awaited<ReturnType<typeof createCleanValidationCheckout>> | null = null;
+    try {
+      checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head,
+        additionalRefs: [base],
+        contract: pathContract,
+        managed: { session: managed.session, kind: 'quality-check' },
+      });
+      await expect(checkout.storyChangeManifest(base, 'rename ')).resolves.toMatchObject({
+        changedPathCount: 2,
+        changeSelection: {
+          matchedPathCheckIds: ['source-check', 'docs-check'],
+          allChangedPathsMatched: true,
+        },
       });
     } finally {
       checkout?.cleanup();

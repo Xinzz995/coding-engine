@@ -19,7 +19,7 @@
    如果该 story 在 `state.json` 的 `notes` 不为空——可能是 Validator 的失败记录、需求变更记录（`[需求已变更]`）或待人工裁决的仲裁记录（{{ARBITRATION_PREFIXES}}）——请先阅读并针对性处理，而不是重新实现。
 {{TDD_WORKFLOW}}
 5. 实现该单个 user story,只实现这一个user story的内容
-6. 运行质量检查（例如，typecheck、lint、test - 使用项目所需的任何工具）
+6. 按项目质量契约中 `paths` 与本 Story 完整改动范围运行适用检查；没有可靠路径分类时运行全部检查。
 7. 如果检查通过，先只 stage/commit 本 story 的实现、测试与必要文档：
    - 禁止 stage 或 commit `{{WORKSPACE}}` 下的任何运行时文件（包括 prd.json、state.json、progress.md、evidence、validation-result、截图与报告）
    - 用明确的文件路径执行 `git add <path...>`，不要使用 `git add .` 或 `git add -A`
@@ -53,7 +53,7 @@
 
 ## 质量要求
 
-- 所有 commits 必须通过项目的质量检查（typecheck、lint、test）
+- 所有 commits 必须通过当前完整改动适用的项目质量检查；不得用最后一次提交缩小范围，未知路径必须全量检查
 - `state.json` 中的 `validated`、`escalated` 只能由引擎修改；无论当前值是 true 还是 false，都不得新增、删除、翻转或重置
 - 不要提交损坏的代码
 - 遵循现有的代码 patterns

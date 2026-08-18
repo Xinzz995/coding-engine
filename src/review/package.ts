@@ -39,18 +39,45 @@ export interface ReviewMechanicalEvidence {
   headSha: string;
   qualityContractDigest: string;
   validationEnvironmentDigest: string;
-  scope: 'all-current-platform-applicable-contract-checks';
+  scope: 'all-current-change-applicable-contract-checks';
+  selectionMode: 'full' | 'scoped' | 'fallback-full';
+  selectedCheckIds: string[];
+  skippedCheckIds: string[];
+  changeManifestDigest: string | null;
 }
 
 function assertMechanicalEvidence(
   context: ReviewPreflightContext,
   evidence: ReviewMechanicalEvidence,
 ): void {
-  if (evidence.status !== 'passed'
-      || evidence.headSha !== context.headSha
-      || evidence.qualityContractDigest !== context.baseContractDigest
-      || !/^sha256:[0-9a-f]{64}$/u.test(evidence.validationEnvironmentDigest)
-      || evidence.scope !== 'all-current-platform-applicable-contract-checks') {
+  const selected = new Set(evidence.selectedCheckIds);
+  const skipped = new Set(evidence.skippedCheckIds);
+  const declaredCheckIds = (['test', 'build', 'static', 'security'] as const).flatMap(
+    (category) => {
+      const policy = context.baseContract.checks[category];
+      return 'checks' in policy ? policy.checks.map((check) => check.id) : [];
+    },
+  );
+  const observed = new Set([...evidence.selectedCheckIds, ...evidence.skippedCheckIds]);
+  if (
+    evidence.status !== 'passed' ||
+    evidence.headSha !== context.headSha ||
+    evidence.qualityContractDigest !== context.baseContractDigest ||
+    !/^sha256:[0-9a-f]{64}$/u.test(evidence.validationEnvironmentDigest) ||
+    evidence.scope !== 'all-current-change-applicable-contract-checks' ||
+    (evidence.selectionMode !== 'full' &&
+      evidence.selectionMode !== 'scoped' &&
+      evidence.selectionMode !== 'fallback-full') ||
+    evidence.selectedCheckIds.length === 0 ||
+    selected.size !== evidence.selectedCheckIds.length ||
+    skipped.size !== evidence.skippedCheckIds.length ||
+    evidence.selectedCheckIds.some((id) => skipped.has(id)) ||
+    observed.size !== declaredCheckIds.length ||
+    declaredCheckIds.some((id) => !observed.has(id)) ||
+    (evidence.selectionMode === 'scoped') !==
+      (typeof evidence.changeManifestDigest === 'string' &&
+        /^sha256:[0-9a-f]{64}$/u.test(evidence.changeManifestDigest))
+  ) {
     throw new Error('前置机械检查证据未绑定当前 Review 上下文');
   }
 }

@@ -1,3 +1,7 @@
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { readQualityContract, type QualityContract } from './contract.js';
 import {
@@ -36,6 +40,105 @@ function codingEngineContract(): QualityContract {
   const result = readQualityContract(process.cwd());
   if (result.status !== 'ready') throw new Error(`contract fixture unavailable: ${result.status}`);
   return result.contract;
+}
+
+function planScript(workflow: string): string {
+  const marker = '      - name: Compute fail-closed change plan\n';
+  const markerAt = workflow.indexOf(marker);
+  const runAt = workflow.indexOf('        run: |\n', markerAt);
+  const endAt = workflow.indexOf('\n  checks_', runAt);
+  if (markerAt < 0 || runAt < 0 || endAt < 0) throw new Error('generated plan script missing');
+  return workflow
+    .slice(runAt + '        run: |\n'.length, endAt)
+    .split('\n')
+    .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+    .join('\n');
+}
+
+function aggregateScript(workflow: string): string {
+  const marker = '      - name: Verify every required job completed successfully\n';
+  const markerAt = workflow.indexOf(marker);
+  const runAt = workflow.indexOf('        run: |\n', markerAt);
+  if (markerAt < 0 || runAt < 0) throw new Error('generated aggregate script missing');
+  return workflow
+    .slice(runAt + '        run: |\n'.length)
+    .trimEnd()
+    .split('\n')
+    .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+    .join('\n');
+}
+
+function runGeneratedPlan(
+  contract: QualityContract,
+  changedPath: string,
+  eventName: 'pull_request' | 'schedule' = 'pull_request',
+  renameFrom?: string,
+): Map<string, string> {
+  const root = mkdtempSync(join(tmpdir(), 'coding-x-workflow-plan-'));
+  try {
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'workflow plan test'], { cwd: root });
+    execFileSync('git', ['config', 'user.email', 'workflow-plan@example.invalid'], {
+      cwd: root,
+    });
+    writeFileSync(join(root, 'base.txt'), 'base\n');
+    if (renameFrom !== undefined) {
+      mkdirSync(dirname(join(root, renameFrom)), { recursive: true });
+      writeFileSync(join(root, renameFrom), 'renamed\n');
+    }
+    execFileSync('git', ['add', '.'], { cwd: root });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: root });
+    const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    mkdirSync(dirname(join(root, changedPath)), { recursive: true });
+    if (renameFrom === undefined) {
+      writeFileSync(join(root, changedPath), 'changed\n');
+      execFileSync('git', ['add', changedPath], { cwd: root });
+    } else {
+      execFileSync('git', ['mv', renameFrom, changedPath], { cwd: root });
+    }
+    execFileSync('git', ['commit', '-q', '-m', 'change'], { cwd: root });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    const output = join(root, 'plan.out');
+    const script = join(root, 'plan.sh');
+    writeFileSync(script, planScript(renderQualityGateWorkflow(contract)), 'utf8');
+    execFileSync('bash', [script], {
+      cwd: root,
+      env: {
+        ...process.env,
+        EVENT_NAME: eventName,
+        PR_BASE: eventName === 'pull_request' ? base : '',
+        PR_HEAD: eventName === 'pull_request' ? head : '',
+        PUSH_BEFORE: '',
+        PUSH_AFTER: head,
+        GITHUB_OUTPUT: output,
+      },
+      stdio: 'pipe',
+    });
+    return new Map(
+      readFileSync(output, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => {
+          const separator = line.indexOf('=');
+          return [line.slice(0, separator), line.slice(separator + 1)];
+        }),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function outputForCheck(
+  contract: QualityContract,
+  output: Map<string, string>,
+  checkId: string,
+): string | undefined {
+  const checks = (['test', 'build', 'static', 'security'] as const).flatMap((category) => {
+    const policy = contract.checks[category];
+    return 'checks' in policy ? policy.checks : [];
+  });
+  const index = checks.findIndex((check) => check.id === checkId);
+  return index < 0 ? undefined : output.get(`check_${index + 1}`);
 }
 
 function pinnedRunnerContract(): QualityContract {
@@ -124,11 +227,17 @@ describe('coding-engine quality contract', () => {
 });
 
 describe('renderQualityGateWorkflow', () => {
-  it('creates unconditional native platform jobs and one always-run aggregate gate', () => {
+  it('creates a fail-closed change plan, scoped native jobs, and scheduled full drift checks', () => {
     const yaml = renderQualityGateWorkflow(codingEngineContract());
     expect(yaml).toContain('on:\n  pull_request:');
     expect(yaml).toContain("push:\n    branches: ['main']");
     expect(yaml).not.toMatch(/paths(?:-ignore)?:/);
+    expect(yaml).toContain("schedule:\n    - cron: '23 4 * * 1'");
+    expect(yaml).toContain('workflow_dispatch:');
+    expect(yaml).toContain('plan required checks');
+    expect(yaml).toContain('Compute fail-closed change plan');
+    expect(yaml).toContain("if: ${{ needs.plan.outputs.job_1 == 'true' }}");
+    expect(yaml).toContain("if: ${{ needs.plan.outputs.check_1 == 'true' }}");
     expect(yaml).toContain('checks_ubuntu-node-22:');
     expect(yaml).toContain('checks_ubuntu-node-24:');
     expect(yaml).toContain('checks_macos-node-22:');
@@ -137,7 +246,7 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).toContain('checks_windows-node-24:');
     expect(yaml).toContain('checks_windows-native-standard-user:');
     expect(yaml.match(/runs-on: windows-2022/gu)).toHaveLength(3);
-    expect(yaml.match(/runs-on: ubuntu-24\.04/gu)).toHaveLength(3);
+    expect(yaml.match(/runs-on: ubuntu-24\.04/gu)).toHaveLength(4);
     expect(yaml.match(/runs-on: macos-26/gu)).toHaveLength(2);
     expect(yaml).not.toContain('ubuntu-latest');
     expect(yaml).not.toContain('macos-latest');
@@ -161,18 +270,92 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).toContain('name: quality-gate');
     expect(yaml).toContain('if: ${{ always() }}');
     expect(yaml).toContain(
-      'needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-22, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]',
+      'needs: [plan, checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-22, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]',
     );
-    expect(yaml).toContain('must not fail, cancel, time out, or skip');
-    expect(yaml).toContain('github.event.pull_request.number || github.ref');
-    expect(yaml).not.toContain('github.event.pull_request.head.sha');
+    expect(yaml).toContain('job result does not match the fail-closed plan');
+    expect(yaml).toContain('github.event_name }}-${{ github.event.pull_request.number || github.ref');
+    expect(yaml).toContain('PR_HEAD: ${{ github.event.pull_request.head.sha }}');
+  });
+
+  it('runs the generated plan for docs, source, unknown paths, and scheduled full checks', () => {
+    const contract = codingEngineContract();
+    const docs = runGeneratedPlan(contract, 'docs/ordinary-note.md');
+    expect(docs.get('full')).toBe('false');
+    expect(outputForCheck(contract, docs, 'repository-health')).toBe('true');
+    expect(outputForCheck(contract, docs, 'tests')).toBe('false');
+    expect(outputForCheck(contract, docs, 'build')).toBe('false');
+    expect(docs.get('job_1')).toBe('true');
+    for (let index = 2; index <= contract.github.jobs.length; index += 1) {
+      expect(docs.get(`job_${index}`)).toBe('false');
+    }
+
+    const source = runGeneratedPlan(contract, 'src/change-scoped-fixture.ts');
+    expect(source.get('full')).toBe('false');
+    expect(outputForCheck(contract, source, 'tests')).toBe('true');
+    expect(outputForCheck(contract, source, 'build')).toBe('true');
+    expect(outputForCheck(contract, source, 'typecheck')).toBe('true');
+    expect(source.get('job_1')).toBe('true');
+    expect(source.get('job_6')).toBe('true');
+    expect(source.get('job_7')).toBe('false');
+
+    const renamed = runGeneratedPlan(
+      contract,
+      'docs/renamed-from-source.md',
+      'pull_request',
+      'src/original.ts',
+    );
+    expect(renamed.get('full')).toBe('false');
+    expect(outputForCheck(contract, renamed, 'tests')).toBe('true');
+    expect(outputForCheck(contract, renamed, 'repository-health')).toBe('true');
+
+    const unknown = runGeneratedPlan(contract, 'UNCLASSIFIED');
+    expect(unknown.get('full')).toBe('true');
+    for (let index = 1; index <= contract.github.jobs.length; index += 1) {
+      expect(unknown.get(`job_${index}`)).toBe('true');
+    }
+
+    const scheduled = runGeneratedPlan(contract, 'docs/scheduled-note.md', 'schedule');
+    expect(scheduled.get('full')).toBe('true');
+    expect(outputForCheck(contract, scheduled, 'tests')).toBe('true');
+    expect(outputForCheck(contract, scheduled, 'windows-native-proof')).toBe('true');
+  });
+
+  it('accepts only job results that exactly match the fail-closed plan', () => {
+    const contract = codingEngineContract();
+    const script = aggregateScript(renderQualityGateWorkflow(contract));
+    const environment: NodeJS.ProcessEnv = { ...process.env, PLAN_RESULT: 'success' };
+    contract.github.jobs.forEach((_job, index) => {
+      environment[`EXPECTED_${index + 1}`] = 'false';
+      environment[`RESULT_${index + 1}`] = 'skipped';
+    });
+    expect(() =>
+      execFileSync('bash', ['-c', script], { env: environment, stdio: 'pipe' }),
+    ).not.toThrow();
+    expect(() =>
+      execFileSync('bash', ['-c', script], {
+        env: { ...environment, EXPECTED_1: 'true', RESULT_1: 'skipped' },
+        stdio: 'pipe',
+      }),
+    ).toThrow();
+    expect(() =>
+      execFileSync('bash', ['-c', script], {
+        env: { ...environment, PLAN_RESULT: 'failure' },
+        stdio: 'pipe',
+      }),
+    ).toThrow();
+    expect(() =>
+      execFileSync('bash', ['-c', script], {
+        env: { ...environment, EXPECTED_1: '' },
+        stdio: 'pipe',
+      }),
+    ).toThrow();
   });
 
   it('pins hosted runner labels only for contracts created by 0.35.0 or later', () => {
     const contract = pinnedRunnerContract();
     const quality = renderQualityGateWorkflow(contract);
     const policy = renderPolicyGuardWorkflow(contract);
-    expect(quality.match(/runs-on: ubuntu-24\.04/gu)).toHaveLength(3);
+    expect(quality.match(/runs-on: ubuntu-24\.04/gu)).toHaveLength(4);
     expect(quality.match(/runs-on: macos-26/gu)).toHaveLength(2);
     expect(policy).toContain('runs-on: ubuntu-24.04');
     expect(`${quality}\n${policy}`).not.toMatch(/runs-on:\s*(?:ubuntu|macos|windows)-latest\b/u);
@@ -189,7 +372,7 @@ describe('renderQualityGateWorkflow', () => {
     expect(SETUP_NODE_ACTION_SHA).toMatch(/^[0-9a-f]{40}$/);
     expect(yaml).toContain(`actions/checkout@${CHECKOUT_ACTION_SHA}`);
     expect(yaml.match(/persist-credentials: false/gu)).toHaveLength(
-      codingEngineContract().github.jobs.length,
+      codingEngineContract().github.jobs.length + 1,
     );
     expect(yaml).toContain(`actions/setup-node@${SETUP_NODE_ACTION_SHA}`);
     expect(yaml).toContain("node-version: '22'");

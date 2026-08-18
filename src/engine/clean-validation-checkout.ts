@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
-import type { ManagedGateContext } from './gate.js';
+import type { ManagedGateContext, QualityChangeSelection } from './gate.js';
 import { runContractPrepareCommands } from './gate.js';
 import { resolveExecutablePath } from './agent.js';
 import { GIT_NULL_CONFIG_PATH } from './git-environment.js';
@@ -155,6 +155,38 @@ export interface StoryChangeManifest {
   readonly gitHead: string;
   readonly digest: string;
   readonly changedPathCount: number;
+  /** 仅供本进程选择当前平台适用检查；缺失时调用方必须回退全量。 */
+  readonly changeSelection?: QualityChangeSelection;
+}
+
+function currentPlatformPathChecks(contract: QualityContract): Array<{
+  readonly id: string;
+  readonly paths: readonly string[];
+}> {
+  const platform =
+    process.platform === 'linux'
+      ? 'linux'
+      : process.platform === 'darwin'
+        ? 'macos'
+        : process.platform === 'win32'
+          ? 'windows'
+          : null;
+  if (platform === null || !contract.checks) return [];
+  const selected: Array<{ id: string; paths: readonly string[] }> = [];
+  for (const category of ['test', 'build', 'static', 'security'] as const) {
+    const policy = contract.checks[category];
+    if (!policy || !('checks' in policy)) continue;
+    for (const check of policy.checks) {
+      if (
+        check.paths !== undefined &&
+        check.command.platforms.includes(platform) &&
+        check.paths.length > 0
+      ) {
+        selected.push({ id: check.id, paths: [...check.paths] });
+      }
+    }
+  }
+  return selected;
 }
 
 function directoryIdentity(path: string): DirectoryIdentity {
@@ -1024,6 +1056,90 @@ try {
 }
 `;
 
+/**
+ * 路径选择独立于主 Git helper，避免把后者推过跨平台固定程序传输上限。两者都只读同一
+ * 固定 base/head；调用方在前后继续执行完整 checkout currentness 核对。
+ */
+const MANAGED_PATH_SELECTION_HELPER = String.raw`
+import { spawnSync } from 'node:child_process';
+const request = JSON.parse(process.argv[1]);
+const run = (args) => {
+  const result = spawnSync(request.git, args, {
+    cwd: request.root,
+    env: process.env,
+    encoding: null,
+    maxBuffer: ${MAX_GIT_OUTPUT_BYTES},
+    windowsHide: true,
+  });
+  const stdout = Buffer.from(result.stdout ?? []);
+  const stderr = Buffer.from(result.stderr ?? []);
+  if (result.error || result.status !== 0) {
+    throw new Error(Buffer.concat([stdout, stderr]).toString('utf8').slice(-2000) || result.error?.message || args[0]);
+  }
+  return stdout;
+};
+const fields = (bytes) => {
+  const values = [];
+  let start = 0;
+  for (let index = 0; index < bytes.length; index += 1) {
+    if (bytes[index] !== 0) continue;
+    if (index === start) throw new Error('Git 变化路径含空字段');
+    values.push(bytes.subarray(start, index).toString('base64'));
+    start = index + 1;
+  }
+  if (start !== bytes.length) throw new Error('Git 变化路径缺少 NUL 终止');
+  return values;
+};
+try {
+  if (!Array.isArray(request.pathChecks) || request.pathChecks.length > 128) {
+    throw new Error('质量检查路径请求非法');
+  }
+  const pathChecks = request.pathChecks.map((entry) => {
+    if (
+      !entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      typeof entry.id !== 'string' || !/^[a-z0-9][a-z0-9._-]*$/u.test(entry.id) ||
+      !Array.isArray(entry.paths) || entry.paths.length === 0 || entry.paths.length > 64 ||
+      !entry.paths.every((path) =>
+        typeof path === 'string' && path !== '' && path.length <= 512 && !path.startsWith('/') &&
+        !/^[:!^]/u.test(path) && !path.includes('\\') && !path.includes('//') &&
+        !path.includes('\0') && !path.split('/').some((segment) => segment === '' || segment === '..')
+      )
+    ) throw new Error('质量检查路径形状非法');
+    return { id: entry.id, paths: entry.paths };
+  });
+  if (new Set(pathChecks.map((entry) => entry.id)).size !== pathChecks.length) {
+    throw new Error('质量检查路径 ID 重复');
+  }
+  const diffArgs = [
+    'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '--no-renames',
+    '--no-ext-diff', request.storyBaseGitHead, request.head, '--',
+  ];
+  const changedPaths = fields(run(diffArgs));
+  const coveredPaths = new Set();
+  const matchedPathCheckIds = [];
+  for (const check of pathChecks) {
+    const matchedPaths = fields(run([...diffArgs, ...check.paths]));
+    if (matchedPaths.length > 0) matchedPathCheckIds.push(check.id);
+    for (const path of matchedPaths) coveredPaths.add(path);
+  }
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    storyBaseGitHead: request.storyBaseGitHead,
+    head: request.head,
+    changedPathCount: changedPaths.length,
+    matchedPathCheckIds,
+    allChangedPathsMatched:
+      changedPaths.length > 0 && changedPaths.every((path) => coveredPaths.has(path)),
+  }));
+} catch (error) {
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    code: 'git-failed',
+    diagnostic: error instanceof Error ? error.message : String(error),
+  }));
+}
+`;
+
 interface GitHelperResult {
   readonly ok: boolean;
   readonly code?: CleanValidationCheckoutErrorCode;
@@ -1040,6 +1156,8 @@ interface GitHelperResult {
   readonly storyBaseGitHead?: string;
   readonly manifestDigest?: string;
   readonly changedPathCount?: number;
+  readonly matchedPathCheckIds?: string[];
+  readonly allChangedPathsMatched?: boolean;
 }
 
 async function runGitHelper(options: {
@@ -1808,6 +1926,33 @@ export async function createCleanValidationCheckout(
           observed.diagnostic ?? `${context}无法生成绑定固定起点的 Story 变化摘要`,
         );
       }
+      const selected = await runGitHelper({
+        program: MANAGED_PATH_SELECTION_HELPER,
+        request: {
+          git,
+          root: checkoutRoot,
+          head: options.head,
+          storyBaseGitHead,
+          pathChecks: currentPlatformPathChecks(contract),
+        },
+        cwd: checkoutRoot,
+        environment,
+        managed: options.managed,
+      });
+      const changeSelection =
+        selected.ok &&
+        selected.storyBaseGitHead === storyBaseGitHead &&
+        selected.head === options.head &&
+        selected.changedPathCount === observed.changedPathCount &&
+        Array.isArray(selected.matchedPathCheckIds) &&
+        selected.matchedPathCheckIds.every((id) => typeof id === 'string') &&
+        new Set(selected.matchedPathCheckIds).size === selected.matchedPathCheckIds.length &&
+        typeof selected.allChangedPathsMatched === 'boolean'
+          ? {
+              matchedPathCheckIds: [...selected.matchedPathCheckIds],
+              allChangedPathsMatched: selected.allChangedPathsMatched,
+            }
+          : { matchedPathCheckIds: [], allChangedPathsMatched: false };
       await assertCurrent(`${context}变化摘要后`);
       return {
         version: STORY_CHANGE_MANIFEST_VERSION,
@@ -1815,6 +1960,7 @@ export async function createCleanValidationCheckout(
         gitHead: options.head,
         digest: observed.manifestDigest,
         changedPathCount: observed.changedPathCount,
+        changeSelection,
       };
     };
 

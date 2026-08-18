@@ -1,7 +1,11 @@
 import { existsSync, lstatSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { readQualityContract } from '../quality/contract.js';
-import { createReviewPackage, reviewOutputSchema } from './package.js';
+import {
+  createReviewPackage,
+  reviewOutputSchema,
+  type ReviewMechanicalEvidence,
+} from './package.js';
 import type { ReviewPreflightContext } from './preflight.js';
 import { assessReviewRisk } from './risk.js';
 
@@ -33,6 +37,26 @@ function context(): ReviewPreflightContext {
   };
 }
 
+function fullMechanicalEvidence(ctx: ReviewPreflightContext): ReviewMechanicalEvidence {
+  const selectedCheckIds = (['test', 'build', 'static', 'security'] as const).flatMap(
+    (category) => {
+      const policy = ctx.baseContract.checks[category];
+      return 'checks' in policy ? policy.checks.map((check) => check.id) : [];
+    },
+  );
+  return {
+    status: 'passed',
+    headSha: ctx.headSha,
+    qualityContractDigest: ctx.baseContractDigest,
+    validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
+    scope: 'all-current-change-applicable-contract-checks',
+    selectionMode: 'full',
+    selectedCheckIds,
+    skippedCheckIds: [],
+    changeManifestDigest: null,
+  };
+}
+
 describe('createReviewPackage', () => {
   it('makes every structured-output property required and represents optional values as null', () => {
     const schema = reviewOutputSchema();
@@ -53,19 +77,14 @@ describe('createReviewPackage', () => {
 
   it('contains the bound old quality contract and only engine-selected review data', () => {
     const ctx = context();
+    const evidence = fullMechanicalEvidence(ctx);
     const reviewPackage = createReviewPackage({
       context: ctx,
       risk: assessReviewRisk(ctx),
       axis: 'engineering',
       runner: 'codex',
       model: 'gpt-5.6-terra',
-      mechanicalEvidence: {
-        status: 'passed',
-        headSha: ctx.headSha,
-        qualityContractDigest: ctx.baseContractDigest,
-        validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
-        scope: 'all-current-platform-applicable-contract-checks',
-      },
+      mechanicalEvidence: evidence,
     });
     try {
       const input = JSON.parse(reviewPackage.input) as Record<string, unknown>;
@@ -80,7 +99,11 @@ describe('createReviewPackage', () => {
             headSha: ctx.headSha,
             qualityContractDigest: ctx.baseContractDigest,
             validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
-            scope: 'all-current-platform-applicable-contract-checks',
+            scope: 'all-current-change-applicable-contract-checks',
+            selectionMode: 'full',
+            selectedCheckIds: evidence.selectedCheckIds,
+            skippedCheckIds: [],
+            changeManifestDigest: null,
           },
           allReviewAxes: { owner: 'engine' },
           githubDelivery: { owner: 'engine' },
@@ -113,19 +136,12 @@ describe('createReviewPackage', () => {
         axis: 'spec',
         runner: 'codex',
         model: 'gpt-5.6-terra',
-        mechanicalEvidence: {
-          status: 'passed',
-          headSha: ctx.headSha,
-          qualityContractDigest: ctx.baseContractDigest,
-          validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
-          scope: 'all-current-platform-applicable-contract-checks',
-          ...over,
-        },
+        mechanicalEvidence: { ...fullMechanicalEvidence(ctx), ...over },
       })
     );
     expect(() => create({ headSha: 'c'.repeat(40) })).toThrow('未绑定当前 Review 上下文');
     expect(() => create({
-      scope: 'different-scope' as 'all-current-platform-applicable-contract-checks',
+      scope: 'different-scope' as 'all-current-change-applicable-contract-checks',
     })).toThrow('未绑定当前 Review 上下文');
   });
 
@@ -141,13 +157,7 @@ describe('createReviewPackage', () => {
           axis: 'engineering',
           runner: 'codex',
           model: 'gpt-5.6-terra',
-          mechanicalEvidence: {
-            status: 'passed',
-            headSha: ctx.headSha,
-            qualityContractDigest: ctx.baseContractDigest,
-            validationEnvironmentDigest: `sha256:${'0'.repeat(64)}`,
-            scope: 'all-current-platform-applicable-contract-checks',
-          },
+          mechanicalEvidence: fullMechanicalEvidence(ctx),
           initializationHooks: {
             [stage]: (path: string) => {
               root = path;

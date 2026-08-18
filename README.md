@@ -134,13 +134,13 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
    │   ┌── Developer（builder.md）──────────────────────────┐ │
    │   │ 1. 读 prd.json+state.json，选最高优先级未完成 story │ │
    │   │ 2. 只实现这一个 story                               │ │
-   │   │ 3. 跑质量检查（typecheck / lint / test）            │ │
+   │   │ 3. 按完整变化范围跑质量契约中适用的检查             │ │
    │   │ 4. 通过则只提交 story 文件（不提交 workspace）      │ │
    │   │ 5. 再写 passes=true 候选并追加 progress.md           │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
    │   ┌── 质量契约机械门禁（必需）────────────────────────┐ │
-   │   │ 按冻结快照执行结构化项目检查（fail-fast）          │ │
+   │   │ 按冻结快照与 Git 变化摘要执行适用检查（fail-fast） │ │
    │   │ 失败 → 确定性打回 story、跳过本轮 Validator         │ │
    │   └────────────────────────────────────────────────────┘ │
    │                          ↓                               │
@@ -163,7 +163,7 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
    └─────────────────────────────────────────────────────────┘
                           ↓
         有 blocked → 等待人工处理（退出码 3）
-        无 blocked → 重跑完整机械检查
+        无 blocked → 复用或执行当前 PR 变化适用的机械检查
                    → Spec / 工程标准 / 风险触发的深度 Review
                    → 查询 GitHub PR、CI 与 Ruleset
                    → 三者均就绪才成功退出（退出码 0）
@@ -171,11 +171,11 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
         http://localhost:7331  实时查看进度
 ```
 
-- **实现收敛不等于可交付**：全部 story 同时满足 `passes && validated` 且无 blocked 后，引擎还会确认完整机械检查、执行本地最终 Review 并查询 GitHub 交付状态；三者均就绪才返回 0。同一进程刚完成的全量检查，只有提交、默认分支基线、完整契约、平台和可见 Git 引用全部相同才复用，任一变化都会重跑。存在 blocked 返回 3；后续检查、Review 或远端未就绪时返回对应的非零代码；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断，返回 1（完整对照见「命令行参数」后的「退出码」表）。
+- **实现收敛不等于可交付**：全部 story 同时满足 `passes && validated` 且无 blocked 后，引擎还会确认当前 PR 变化适用的机械检查、执行本地最终 Review 并查询 GitHub 交付状态；三者均就绪才返回 0。同一进程刚完成的检查只有提交、变化起点与摘要、默认分支基线、完整契约、平台、实际检查集合和可见 Git 引用全部相同才复用，任一变化都会重新裁决。存在 blocked 返回 3；后续检查、Review 或远端未就绪时返回对应的非零代码；跑满 `maxIterations` 仍未收敛，或连续无进展轮触发 `--stall-limit` 熔断，返回 1（完整对照见「命令行参数」后的「退出码」表）。
 - **工作区写租约**：初始化后永久保留 `engine.lock/` 协议根，活动 owner 位于其中的 `lease/`。run、repair、report、PRD 应用和 Review 裁决都进入同一写域；第二个写入口会被拒绝，不能靠 PID 看似已死就自动接管，也不能手删租约继续。
 - **异常恢复**：Builder、Validator、项目检查和最终 Review 都在受管范围内运行，返回前必须取得与调用类型相符的收口证明。异常中断留下的活动状态由 `doctor` / `status` 分类，再通过明确的 `workspace recover` 或 `workspace resume-mutation` 恢复；永久隔离状态不能恢复。继续前还要独立确认旧进程不会再影响原项目目录；无法确认时应改用新的隔离项目检出或重启主机，再配新的空 workspace。无法证明安全时不会伪装成已结束。
 - **超时保护**：开发/验证各有独立超时；任一侧异常退出都不会留下未经验收的通过态。普通项目命令在进程组收口证明成立后沿用既有重试规则；POSIX 上已经启动的 AI runner 被超时、用户中断、父进程关闭或输出通道故障从外部终止时，不再自动启动下一轮，而是永久隔离当前 workspace。只有已随普通 iteration 写入的调用，才在存档中保留完整收口耗时、退出码和最近 2000 字符异常诊断；proof-missing 只保留安全协议、隔离状态、终端已显示内容和受保护现场。
-- **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；固定候选只有显式 shadow doctor/apply/run 才能在不放宽其他检查的前提下跨过版本差异，健康也固定返回 7。Story 凭证还绑定实际 coding-x 版本和 formal/shadow 模式，候选结果不能被正式模式或另一个候选复用。每轮开发之后、验证之前按固定类别执行，默认不经 shell，只有契约显式声明时才使用指定 shell。schema v2 还要求明确确认本地依赖准备命令和允许产物目录，不能从 GitHub 工作流暗推。Node 缺少 lockfile、或 Python 无法安全推导隔离环境时，自动发现会停止并要求 `init --contract`，不会借用宿主全局依赖凑出绿色。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018、022）。
+- **质量契约机械门禁（必需）**：`.coding-x/quality.json` 是测试、构建、静态检查和安全检查的唯一人工维护来源；`prd-to-json` 把规范化摘要与结构化检查快照冻结进 `prd.json`。正式运行要求契约版本、coding-x 版本、摘要和快照全部一致；固定候选只有显式 shadow doctor/apply/run 才能在不放宽其他检查的前提下跨过版本差异，健康也固定返回 7。Story 凭证还绑定实际 coding-x 版本和 formal/shadow 模式，候选结果不能被正式模式或另一个候选复用。每项检查可用 `paths` 声明已知适用范围；范围由干净 Git 检出按完整 Story 变化机器计算，无路径声明的检查始终运行，未知路径、异常结果或零项自动回退本平台全量。生成的必需 GitHub Quality Gate 始终报告状态，只在内部跳过计划明确不适用的步骤和平台；每周及人工触发始终运行完整矩阵以发现环境漂移。命令默认不经 shell，只有契约显式声明时才使用指定 shell。schema v2 还要求明确确认本地依赖准备命令和允许产物目录，不能从 GitHub 工作流暗推。Node 缺少 lockfile、或 Python 无法安全推导隔离环境时，自动发现会停止并要求 `init --contract`，不会借用宿主全局依赖凑出绿色。失败会机械打回并跳过该轮 Validator，运行期契约或 PRD 漂移则停止。GitHub 代码扫描工具和阻断阈值只有在契约明确声明后才由 `init` 配置、由 `doctor` 回读；未声明时不猜测项目技术栈，也不删除仓库已有的扫描规则（ADR-007、018、022、030）。
 - **精确提交的干净验证**：Developer 仍在开发目录工作；本地准备、项目检查、TDD、Validator 和最终 Review 前机械检查在项目外的临时 Git 检出运行。检出只包含精确 HEAD 的已跟踪内容，不复制 `.env`、`.claude`、旧依赖或其他忽略文件；submodule、LFS/custom filter、提交身份变化、tracked 改写和未允许产物都按不可验证停止。Validator 通过后先安全清理检出，才签发绑定完整机械/TDD 环境的凭证；清理无法证明成功时不会留下绿色（ADR-022）。
 - **Validator 宿主隔离与 Runner 信任分层**：签发验收凭证的 Validator 必须满足可机械证明的宿主隔离——引擎按固定 Runner profile 启动它（受监督版本与可执行摘要绑定、环境允许清单、HOME/配置/缓存指向单次调用的临时身份域、沙箱只允许写干净检出与授权输出区）。宿主上下文的**自动注入**（memory、用户规则、插件、MCP、hooks、会话）由静态参数/环境事实机械切断（`CODEX_HOME`/`HOME`/`XDG` 重定向到干净临时域 + 临时域除预置认证外为空 + `--ignore-user-config`/`--ignore-rules`/`--disable` 全集）；每次验证前再跑一次引擎侧 canary 反测覆盖可动态观察的边界（越界**写**被拒、受控项目检查可执行、结构化回执可解析、预置凭据不外泄、进程与临时域收口）。诚实边界：Codex 的 `workspace-write` 沙箱只隔离写、**全盘可读**，因此不声称读隔离——Validator 为验收本就需要读检出与依赖，无界读输出由输出背压治理（见「超时保护」）。当前只有固定审计版本的 `codex` 满足该边界：`claude`/`cursor` 仍可完整运行 Builder，但进入验证阶段会按不可验证保留候选并以退出码 5 停止，不会静默降级回宽权限执行；换用 `npx coding-x codex` 重跑即可对已有候选做 validation-only 验收。验收凭证从 v3 起额外绑定 profile 与 canary 证据摘要；旧版本签发的凭证保持可读但不再构成当前通过，升级后首次运行会安全失效并重验（ADR-023、025）。
 - **TDD 门禁（可选）**：启用 `prd.json.tdd` 后，Builder 按 `tdd` skill 对每个公共行为做真实 RED→同命令 GREEN→绿色重构；宿主 hook 在 agent commit 前提前检查，引擎仍在 Validator 前独立校验 Git 基线、政策摘要、新增覆盖忽略标记并运行项目原生 `coverageCheck`。hook 通过不能跳过引擎重跑；覆盖率证明代码被执行，不证明断言有效或历史上一定先写测试（ADR-017）。
@@ -633,7 +633,7 @@ npx coding-x doctor
 npx coding-x codex      # 使用 Codex；也可以换成 claude 或 cursor
 ```
 
-启动后会依次发生：引擎获取 workspace 的活动写租约 → 读取/初始化状态 → 预检 runner 与模型 → 启动仪表盘 → 每轮在受管范围内启动一个 Builder → 运行机械门禁 → 启动一个 Validator → 引擎写入裁决 → 继续下一个 story。全部 Story 验证完成后，引擎会重跑完整机械检查、执行本地最终 Review，再查询 GitHub PR、CI 与 Ruleset；只有三部分都就绪才返回 0。Builder 会按 PRD 的 `branchName` 检查、创建或切换功能分支，并按 story 提交代码。
+启动后会依次发生：引擎获取 workspace 的活动写租约 → 读取/初始化状态 → 预检 runner 与模型 → 启动仪表盘 → 每轮在受管范围内启动一个 Builder → 按完整 Git 变化运行适用机械门禁 → 启动一个 Validator → 引擎写入裁决 → 继续下一个 story。全部 Story 验证完成后，引擎会复用或执行当前 PR 变化适用的机械检查、执行本地最终 Review，再查询 GitHub PR、CI 与 Ruleset；只有三部分都就绪才返回 0。Builder 会按 PRD 的 `branchName` 检查、创建或切换功能分支，并按 story 提交代码。
 
 可以按 `Ctrl+C` 中止。正常收口后稍后重跑，已验证 story 会保留；如果中断留下未完成活动状态，不要手删 `engine.lock/` 或直接重开，先运行 `doctor` / `status` 查看分类。只有可恢复分类才按提示使用 `workspace recover` 或 `workspace resume-mutation`；若 POSIX AI runner 已启动后被中断并进入永久隔离，不能恢复或自动开始下一轮。继续前还要独立确认旧进程不会再影响原项目目录；无法确认时改用新的隔离项目检出或重启主机，再创建新的空 workspace。
 
@@ -861,11 +861,11 @@ GitHub 状态给出。
 - **Agent 调用凭证**：已经权威结算的 Builder/Validator 调用，只有在所属普通 iteration 成功写入时，才把 outcome、退出码、收口耗时和有界异常尾部带入 evidence/status/report；成功 transcript 不落盘。若同轮后续调用发生 proof-missing，整轮不写普通 iteration，此前已结算的调用也不单独持久化，只保留安全协议与隔离事实。它是引擎观察，不是 provider 账单或执行证明（ADR-016）。
 - **自动重试与阻塞保护**：同一 story 验证失败累计 5 次后自动 `blocked` 跳过，避免卡死。
 - **空转检测与 stall 熔断**：builder 结束但 `state.json`/`progress.md` 均无变化（no-op）时跳过门禁与验收，省一次验证方调用；已经取得权威收口证明的 Developer no-op、超时或异常退出累计达 `--stall-limit`（缺省 3）时提前终止（退出码 1）。POSIX 不透明 Runner 外部终止后的永久隔离不进入 stall 重试；结构化 Validator 异常也不空转重试，而是立即以不可验证退出码 5 停止并保留候选。
-- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令、允许目录和交付必须验证的平台。`init` 可以把现有固定 GitHub runner 作为建议，但最终平台必须由用户确认；服务器项目可以只选 Linux，桌面项目可以只选 macOS/Windows，跨平台工具再选择三项。CI 的额外 Ubuntu 控制任务不会自动变成部署要求。引擎在精确 HEAD 的项目外检出中准备依赖并逐项执行，失败机械打回并跳过该轮验证。验证检出保留最多 16 个目标提交的完整可达历史，但不复制无关分支或标签；开发仓库为 shallow/partial、缺少对象、启用替换历史、可达对象超过 10 万个或保守容量估算超过 1 GiB 时会返回不可验证，检出后还会复核对象集合与实际文件大小。版本、摘要、快照、验证环境或运行中契约漂移都会停止，当前系统没有适用检查也会失败而不是以零项通过。普通项目命令超时会等进程组确认收口后才继续。项目代码主动脱离平台 containment 属于明确非目标；受支持 AI runner 自身在 POSIX 上创建独立 session 则按上文的不透明 runner 边界保守隔离。coding-x 不是操作系统沙箱。
+- **质量契约门禁**：项目只维护 `.coding-x/quality.json`；PRD 保存由 doctor 派生的摘要和结构化快照。schema v2 显式声明本地准备命令、允许目录和交付必须验证的平台。`init` 可以把现有固定 GitHub runner 作为建议，但最终平台必须由用户确认；服务器项目可以只选 Linux，桌面项目可以只选 macOS/Windows，跨平台工具再选择三项。CI 的额外 Ubuntu 控制任务不会自动变成部署要求。引擎在精确 HEAD 的项目外检出中准备依赖，以 Git 自身的路径规则选择当前变化适用的检查并逐项执行；未知变化保守全量，失败机械打回并跳过该轮验证。验证检出保留最多 16 个目标提交的完整可达历史，但不复制无关分支或标签；开发仓库为 shallow/partial、缺少对象、启用替换历史、可达对象超过 10 万个或保守容量估算超过 1 GiB 时会返回不可验证，检出后还会复核对象集合与实际文件大小。版本、摘要、快照、验证环境或运行中契约漂移都会停止，当前系统没有可信适用检查也会回退全量或失败，绝不以零项通过。普通项目命令超时会等进程组确认收口后才继续。项目代码主动脱离平台 containment 属于明确非目标；受支持 AI runner 自身在 POSIX 上创建独立 session 则按上文的不透明 runner 边界保守隔离。coding-x 不是操作系统沙箱。
 - **TDD 工作流与门禁**：共享 skill 约束逐行为红绿重构；Codex/Claude 插件 hook 与 Cursor 项目级检查在 agent commit 前提前反馈；引擎在 Validator 前独立校验政策并运行项目原生覆盖命令。非法配置启动前拒绝，运行期失败打回并写入单独证据与报告历史（ADR-017）。
 - **workspace 安全写入与 Git 隔离检查**：builder 只 stage/commit story 文件并在受管范围内回写运行时状态；所有正式写入口共用 owner-bound 租约。`prd-to-json` 与 `/review-loop` 只准备临时请求，再由引擎写入；`doctor` 只读报告安全分类与 Git 隔离状态，不替用户删租约或改索引。
 - **按难度的模型路由**：`models.runner` 绑定一个 runner，`builder.low/medium/high` 按 story `difficulty` 选初始模型，validator 恒定。首次机械门禁打回、引擎接受 Validator 的 failed claim 或 completed no-op 后，引擎置 `state.escalated=true`，下轮使用专用 escalation；超时、非零退出、认证/网络异常不会用更贵模型掩盖环境故障。启动前严格校验 schema、runner，并确认本次可能调用的 ID 已在全局模型目录声明；目录不承诺 provider 实时可用。CLI 覆盖只影响单次运行，不改写 PRD；存在待执行 story 时同样必须在目录中声明。
-- **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 只表示实现循环已经收敛；存在 blocked 返回 3。无 blocked 时继续执行完整机械检查、本地最终 Review 和 GitHub 交付查询，三者均就绪才返回 0；其余按下方完整退出码表返回。
+- **完成判定**：全部 story 有效通过（`passes && validated`）或 `blocked` 只表示实现循环已经收敛；存在 blocked 返回 3。无 blocked 时继续确认当前 PR 变化适用的机械检查、本地最终 Review 和 GitHub 交付查询，三者均就绪才返回 0；其余按下方完整退出码表返回。
 - **三种 agent runner**：`claude`（历史默认）、`codex` 与 `cursor`，均以跳过权限确认模式运行，启动前打印警告。
 - **超时与进程收口**：开发/验证阶段各有独立超时。普通项目命令必须在 operation 返回前证明本轮进程组清空，不能用 `nohup` 留到下一轮；POSIX AI runner 已启动后若被外部终止或以信号结束，coding-x 不把外层进程组为空当成其内部命令全部退出，而是永久隔离 workspace、禁止下一轮。用户在 coding-x 外预先启动的服务仍可复用。
 - **实时 Web 仪表盘**：默认 `http://localhost:7331`，含普通视图与像素风视图（`/p`）。正式 run 只打印地址；无写会话的 `npx coding-x dashboard` 才尝试自动打开浏览器。`--keep-open` 让跑完后面板继续可看；服务停止后页面冻结最后状态并显示「运行已结束」横幅。

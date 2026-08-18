@@ -5,7 +5,7 @@ export const VALIDATION_RECEIPT_SCHEMA_VERSION = 4 as const;
 export const VALIDATION_RESULT_FILE = 'validation-result.json';
 export const VALIDATION_RESULT_MAX_BYTES = 64 * 1024;
 export const VALIDATION_TEXT_MAX_CHARS = 2000;
-export const ENGINE_QUALITY_GATE_EVIDENCE_SCHEMA_VERSION = 1 as const;
+export const ENGINE_QUALITY_GATE_EVIDENCE_SCHEMA_VERSION = 2 as const;
 
 export type ContractParseResult<T> =
   { ok: true; value: T } | { ok: false; code: string; diagnostic: string };
@@ -25,7 +25,7 @@ export interface ValidationRequest {
   /** 同一 raw diff 中的路径记录数量；重命名关闭后每条记录只有一个路径。 */
   changedPathCount: number;
   /**
-   * 同一次 run 中刚完成的引擎全量检查。它只替代完全相同的机械命令重跑，
+   * 同一次 run 中刚完成的引擎适用检查。它只替代完全相同的机械命令重跑，
    * 不替 Validator 判断代码语义；旧请求可省略。
    */
   engineQualityGate?: EngineQualityGateEvidence;
@@ -40,7 +40,7 @@ export interface EngineQualityGateCheckEvidence {
 
 export interface EngineQualityGateEvidence {
   schemaVersion: typeof ENGINE_QUALITY_GATE_EVIDENCE_SCHEMA_VERSION;
-  source: 'engine-full-gate';
+  source: 'engine-effective-gate';
   status: 'passed';
   inputDigest: string;
   gitHead: string;
@@ -51,6 +51,11 @@ export interface EngineQualityGateEvidence {
   ran: number;
   checks: EngineQualityGateCheckEvidence[];
   skippedCheckIds: string[];
+  /** scoped 时绑定 Story 起点；全量与保守回退时为 null。 */
+  changeBaseGitHead: string | null;
+  /** scoped 时绑定完整变化摘要；全量与保守回退时为 null。 */
+  changeManifestDigest: string | null;
+  selectionMode: 'full' | 'scoped' | 'fallback-full';
 }
 
 export interface ValidationCheck {
