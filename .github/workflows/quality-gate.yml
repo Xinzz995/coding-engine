@@ -3,8 +3,6 @@ name: Quality Gate
 # Generated from .coding-x/quality.json. Change the contract, then regenerate.
 on:
   pull_request:
-  push:
-    branches: ['main']
   schedule:
     - cron: '23 4 * * 1'
   workflow_dispatch:
@@ -55,8 +53,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
-          PUSH_BEFORE: ${{ github.event.before }}
-          PUSH_AFTER: ${{ github.sha }}
         run: |
           set -euo pipefail
           full=0
@@ -75,14 +71,6 @@ jobs:
                 fi
               else
                 full=1
-              fi
-              ;;
-            push)
-              if [ -z "$PUSH_BEFORE" ] || [[ "$PUSH_BEFORE" =~ ^0+$ ]] || ! git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null || ! git cat-file -e "${PUSH_AFTER}^{commit}" 2>/dev/null; then
-                full=1
-              else
-                diff_base="$PUSH_BEFORE"
-                diff_head="$PUSH_AFTER"
               fi
               ;;
             *)
