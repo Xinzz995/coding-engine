@@ -86,6 +86,15 @@ describe('coding-engine repository mechanical health', () => {
   });
 
   it('keeps protected action pins aligned and dependency majors out of routine groups', () => {
+    const qualityGate = readFileSync(
+      join(ROOT, '.github/workflows/quality-gate.yml'),
+      'utf8',
+    ).replaceAll('\r\n', '\n');
+    expect(qualityGate).toContain('on:\n  pull_request:');
+    expect(qualityGate).not.toContain('\n  push:');
+    expect(qualityGate).toContain("schedule:\n    - cron: '23 4 * * 1'");
+    expect(qualityGate).toContain('workflow_dispatch:');
+
     const codeql = readFileSync(join(ROOT, '.github/workflows/codeql.yml'), 'utf8').replaceAll(
       '\r\n',
       '\n',

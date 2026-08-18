@@ -108,8 +108,6 @@ function runGeneratedPlan(
         EVENT_NAME: eventName,
         PR_BASE: eventName === 'pull_request' ? base : '',
         PR_HEAD: eventName === 'pull_request' ? head : '',
-        PUSH_BEFORE: '',
-        PUSH_AFTER: head,
         GITHUB_OUTPUT: output,
       },
       stdio: 'pipe',
@@ -230,7 +228,7 @@ describe('renderQualityGateWorkflow', () => {
   it('creates a fail-closed change plan, scoped native jobs, and scheduled full drift checks', () => {
     const yaml = renderQualityGateWorkflow(codingEngineContract());
     expect(yaml).toContain('on:\n  pull_request:');
-    expect(yaml).toContain("push:\n    branches: ['main']");
+    expect(yaml).not.toContain('\n  push:');
     expect(yaml).not.toMatch(/paths(?:-ignore)?:/);
     expect(yaml).toContain("schedule:\n    - cron: '23 4 * * 1'");
     expect(yaml).toContain('workflow_dispatch:');
