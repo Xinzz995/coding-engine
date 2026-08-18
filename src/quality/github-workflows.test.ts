@@ -99,7 +99,9 @@ function runGeneratedPlan(
     execFileSync('git', ['commit', '-q', '-m', 'change'], { cwd: root });
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
     const output = join(root, 'plan.out');
-    execFileSync('bash', ['-c', planScript(renderQualityGateWorkflow(contract))], {
+    const script = join(root, 'plan.sh');
+    writeFileSync(script, planScript(renderQualityGateWorkflow(contract)), 'utf8');
+    execFileSync('bash', [script], {
       cwd: root,
       env: {
         ...process.env,

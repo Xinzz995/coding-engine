@@ -86,7 +86,10 @@ describe('coding-engine repository mechanical health', () => {
   });
 
   it('keeps protected action pins aligned and dependency majors out of routine groups', () => {
-    const codeql = readFileSync(join(ROOT, '.github/workflows/codeql.yml'), 'utf8');
+    const codeql = readFileSync(join(ROOT, '.github/workflows/codeql.yml'), 'utf8').replaceAll(
+      '\r\n',
+      '\n',
+    );
     const codeqlPins = [...codeql.matchAll(
       /uses: github\/codeql-action\/(init|analyze)@([0-9a-f]{40}) # (v\d+\.\d+\.\d+)/gu,
     )].map((match) => ({ action: match[1], sha: match[2], version: match[3] }));
