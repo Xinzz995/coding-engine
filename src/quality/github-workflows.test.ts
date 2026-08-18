@@ -271,6 +271,8 @@ describe('renderQualityGateWorkflow', () => {
       'needs: [plan, checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-22, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]',
     );
     expect(yaml).toContain('job result does not match the fail-closed plan');
+    expect(yaml).toContain('for suffix in 1 2 3 4 5 6 7; do');
+    expect(yaml).not.toContain('${!EXPECTED_@}');
     expect(yaml).toContain('github.event_name }}-${{ github.event.pull_request.number || github.ref');
     expect(yaml).toContain('PR_HEAD: ${{ github.event.pull_request.head.sha }}');
   });
@@ -321,7 +323,12 @@ describe('renderQualityGateWorkflow', () => {
   it('accepts only job results that exactly match the fail-closed plan', () => {
     const contract = codingEngineContract();
     const script = aggregateScript(renderQualityGateWorkflow(contract));
-    const environment: NodeJS.ProcessEnv = { ...process.env, PLAN_RESULT: 'success' };
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      PLAN_RESULT: 'success',
+      EXPECTED_VERSION: '0.37.0',
+      RESULT_NOISE: 'failure',
+    };
     contract.github.jobs.forEach((_job, index) => {
       environment[`EXPECTED_${index + 1}`] = 'false';
       environment[`RESULT_${index + 1}`] = 'skipped';
