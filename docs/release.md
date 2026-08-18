@@ -117,6 +117,18 @@ coding-engine、Go 多模块合成试点和 Python Monorepo 合成试点都安�
 - 普通 doctor/apply-prd 仍应因固定版本不一致而失败，不能靠手写 `prd.json`/`state.json` 绕过；
 - shadow Story 凭证在正式模式或另一候选版本中必须自动过期并重验。
 
+若候选 Final Review 返回 finding，先按 `/review-loop` 取得用户对具体 finding 的决定，再继续使用同一
+候选 CLI 记录：
+
+```bash
+<candidate-cli> workspace record-review-decision --shadow \
+  --candidate-evidence <packed.json> --input <system-temp-request> --workspace <new-workspace>
+```
+
+该入口会再次逐文件证明当前 CLI 是同一候选，并以同一候选身份重核 Story、Review、HEAD 与决定；
+不得用普通 `npx coding-x`、workspace 中的旧摘要或另一候选代替。修复产生新提交后，旧 Story、Review
+和决定均失效，必须从该候选重新验证当前提交。
+
 随后分别核对：
 
 - coding-engine 使用候选版本运行 `--shadow`；退出 7 只表示影子验证走完，不表示可交付；

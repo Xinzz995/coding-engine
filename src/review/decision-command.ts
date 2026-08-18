@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { digestFinalReviewMechanicalEnvironment } from '../engine/story-validation-currentness.js';
+import {
+  digestFinalReviewMechanicalEnvironment,
+  type StoryValidationRuntimeIdentity,
+} from '../engine/story-validation-currentness.js';
 import {
   digestQualityContract,
   parseQualityContract,
@@ -55,6 +58,9 @@ export interface RecordReviewDecisionOptions {
   readonly client?: GitHubReviewReadClient;
   readonly observation?: ManagedReviewObservation;
   readonly termination?: ManagedReviewTermination;
+  /** Production CLI mode; Shadow candidate decisions also bind the verified candidate digest. */
+  readonly requestedShadow?: boolean;
+  readonly candidateIdentityDigest?: string;
   readonly now?: () => Date;
   readonly readHead?: () => string | Promise<string>;
   /** Test-only race seam. Production reconstructs and revalidates the complete binding. */
@@ -116,6 +122,26 @@ export async function readBoundReviewDecisionContract(
 
 function invalid(message: string): never {
   throw new WorkspaceSafetyError('invalid', message);
+}
+
+export function reviewDecisionRuntimeIdentity(options: {
+  readonly reviewShadow: boolean;
+  readonly requestedShadow: boolean;
+  readonly candidateIdentityDigest?: string;
+}): StoryValidationRuntimeIdentity {
+  if (options.reviewShadow !== options.requestedShadow) {
+    invalid('Review 裁决运行模式与 Final Review 不一致');
+  }
+  if (!options.requestedShadow && options.candidateIdentityDigest !== undefined) {
+    invalid('正式 Review 裁决不能绑定候选包身份');
+  }
+  return {
+    mode: options.requestedShadow ? 'shadow' : 'formal',
+    actualCodingXVersion: CODING_X_VERSION,
+    ...(options.candidateIdentityDigest === undefined
+      ? {}
+      : { candidateIdentityDigest: options.candidateIdentityDigest }),
+  };
 }
 
 function strictRecord(value: unknown, name: string): Record<string, unknown> {
@@ -244,6 +270,7 @@ function createCurrentBindingReader(options: {
   root: string;
   contract: QualityContract;
   review: FinalReviewState;
+  runtimeIdentity: StoryValidationRuntimeIdentity;
   observation: ManagedReviewObservation;
   termination?: ManagedReviewTermination;
 }): () => Promise<DecisionBindingObservation> {
@@ -253,10 +280,7 @@ function createCurrentBindingReader(options: {
       projectRoot: options.root,
       workspace: options.session.lease.workspace.path,
       session: options.session,
-      runtimeIdentity: {
-        mode: options.review.shadow ? 'shadow' : 'formal',
-        actualCodingXVersion: CODING_X_VERSION,
-      },
+      runtimeIdentity: options.runtimeIdentity,
       ...(options.termination ? { termination: options.termination } : {}),
     });
     if (storyBefore.status !== 'ready' || storyBefore.storyValidationDigest === null) {
@@ -300,10 +324,7 @@ function createCurrentBindingReader(options: {
       projectRoot: options.root,
       workspace: options.session.lease.workspace.path,
       session: options.session,
-      runtimeIdentity: {
-        mode: options.review.shadow ? 'shadow' : 'formal',
-        actualCodingXVersion: CODING_X_VERSION,
-      },
+      runtimeIdentity: options.runtimeIdentity,
       ...(options.termination ? { termination: options.termination } : {}),
     });
     if (storyAfter.status !== 'ready' || storyAfter.storyValidationDigest === null) {
@@ -595,6 +616,13 @@ export async function recordReviewDecision(
       termination: options.termination,
     });
   const seedArtifacts = readDecisionArtifacts(workspace);
+  const runtimeIdentity = reviewDecisionRuntimeIdentity({
+    reviewShadow: seedArtifacts.review.shadow,
+    requestedShadow: options.requestedShadow ?? seedArtifacts.review.shadow,
+    ...(options.candidateIdentityDigest === undefined
+      ? {}
+      : { candidateIdentityDigest: options.candidateIdentityDigest }),
+  });
   if (
     digestQualityContract(options.contract) !== seedArtifacts.review.binding.qualityContractDigest
   ) {
@@ -607,6 +635,7 @@ export async function recordReviewDecision(
       root: options.root,
       contract: options.contract,
       review: seedArtifacts.review,
+      runtimeIdentity,
       observation,
       termination: options.termination,
     });
