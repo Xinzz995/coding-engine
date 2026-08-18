@@ -5,10 +5,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { QualityContract } from '../quality/contract.js';
 import { digestQualityContract } from '../quality/contract.js';
 import type { GitHubQualityClient } from '../quality/github.js';
+import { bindStoryValidationRuntimeIdentity } from '../engine/story-validation-currentness.js';
 import { bootstrapWorkspace } from '../workspace-safety/bootstrap.js';
 import { acquireWorkspaceLease } from '../workspace-safety/lease.js';
 import { createWorkspaceSession } from '../workspace-safety/session.js';
-import { parseReviewDecisionRequest, recordReviewDecision } from './decision-command.js';
+import {
+  parseReviewDecisionRequest,
+  recordReviewDecision,
+  reviewDecisionRuntimeIdentity,
+} from './decision-command.js';
 import { digestReviewBinding } from './binding.js';
 import { digest } from './common.js';
 import type { FinalReviewState, ReviewFinding } from './types.js';
@@ -158,6 +163,27 @@ afterEach(() => {
 });
 
 describe('recordReviewDecision', () => {
+  it('keeps zero writes when the command mode does not match the saved Review', async () => {
+    const ctx = await fixture();
+    await expect(
+      recordReviewDecision({
+        ...ctx,
+        requestedShadow: true,
+        candidateIdentityDigest: `sha256:${'9'.repeat(64)}`,
+        request: {
+          schemaVersion: 1,
+          findingId: 'engineering-P1-example',
+          action: 'fix-requested',
+          operator: 'maintainer',
+          evidence: '用户明确授权修复当前 finding，并要求完成后重新验证。',
+        },
+        readHead: () => HEAD,
+      }),
+    ).rejects.toThrow('运行模式');
+    expect(() => readFileSync(join(ctx.workspace, 'review-decisions.json'))).toThrow();
+    await ctx.session.close();
+  });
+
   it('issues head and time itself and preserves prior decisions', async () => {
     const ctx = await fixture(finding({ severity: 'P2', id: 'engineering-P2-example' }));
     writeFileSync(
@@ -527,6 +553,68 @@ describe('recordReviewDecision', () => {
     ).rejects.toThrow('旧 Final Review 不能记录新裁决');
     expect(() => readFileSync(join(ctx.workspace, 'review-decisions.json'))).toThrow();
     await ctx.session.close();
+  });
+});
+
+describe('reviewDecisionRuntimeIdentity', () => {
+  it('reproduces the live invalidation when a candidate-bound Shadow receipt loses its digest', () => {
+    const environment = `sha256:${'8'.repeat(64)}`;
+    const candidateIdentityDigest = `sha256:${'9'.repeat(64)}`;
+    const receiptEnvironment = bindStoryValidationRuntimeIdentity(
+      environment,
+      reviewDecisionRuntimeIdentity({
+        reviewShadow: true,
+        requestedShadow: true,
+        candidateIdentityDigest,
+      }),
+    );
+    const omittedCandidate = bindStoryValidationRuntimeIdentity(
+      environment,
+      reviewDecisionRuntimeIdentity({ reviewShadow: true, requestedShadow: true }),
+    );
+
+    expect(omittedCandidate).not.toBe(receiptEnvironment);
+    expect(
+      bindStoryValidationRuntimeIdentity(
+        environment,
+        reviewDecisionRuntimeIdentity({
+          reviewShadow: true,
+          requestedShadow: true,
+          candidateIdentityDigest,
+        }),
+      ),
+    ).toBe(receiptEnvironment);
+  });
+
+  it('preserves the candidate digest for a matching Shadow decision command', () => {
+    const candidateIdentityDigest = `sha256:${'9'.repeat(64)}`;
+    expect(
+      reviewDecisionRuntimeIdentity({
+        reviewShadow: true,
+        requestedShadow: true,
+        candidateIdentityDigest,
+      }),
+    ).toEqual({
+      mode: 'shadow',
+      actualCodingXVersion: expect.any(String),
+      candidateIdentityDigest,
+    });
+  });
+
+  it.each([
+    { reviewShadow: true, requestedShadow: false },
+    { reviewShadow: false, requestedShadow: true },
+  ])('rejects a Review/command mode mismatch: %o', (input) => {
+    expect(() => reviewDecisionRuntimeIdentity(input)).toThrow('运行模式');
+  });
+
+  it('keeps a formal decision free of candidate identity', () => {
+    expect(
+      reviewDecisionRuntimeIdentity({ reviewShadow: false, requestedShadow: false }),
+    ).toEqual({
+      mode: 'formal',
+      actualCodingXVersion: expect.any(String),
+    });
   });
 });
 

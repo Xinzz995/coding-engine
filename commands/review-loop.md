@@ -69,6 +69,17 @@ description: 处理 coding-x 针对当前 PR 最新提交产生的结构化 Revi
 npx coding-x workspace record-review-decision --input <request-file> --workspace <workspace-dir>
 ```
 
+若当前 `final-review.json` 的 `shadow=true`，必须使用产生该 Review 的同一个候选 CLI，并让用户提供
+该候选的外部 `packed.json` 路径；命令改为：
+
+```bash
+<candidate-cli> workspace record-review-decision --shadow \
+  --candidate-evidence <packed.json> --input <request-file> --workspace <workspace-dir>
+```
+
+不得改用全局或 registry 中的另一份 CLI，也不得从 workspace、Review 或用户请求复制候选摘要。
+命令会从当前实际候选安装逐文件重核身份；缺少证据、候选不同或 Shadow/正式模式错配时保持零写入。
+
 - 不猜操作者身份；无法从已登录 GitHub 账户可靠取得时询问用户。
 - coding-x 会在短会话内重新核对当前 HEAD、PR 意图、base、Spec、工程规则、Final Review、finding、
   已有决定、Runner 版本和延期 Issue，并由引擎填入完整 Review binding 摘要、`headSha` 与 `at`。

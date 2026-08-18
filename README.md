@@ -721,6 +721,10 @@ Issue，绑定请求中的操作者标识，并由引擎填入完整 Review bind
 workspace，也不会自动推送、合并、创建标签或发布；正式交付结论仍由重新运行的引擎结合最新提交与
 GitHub 状态给出。
 
+候选 Dogfood 的 Final Review 若产生 finding，必须继续使用同一候选 CLI，并在裁决命令上同时提供
+`--shadow --candidate-evidence <packed.json>`。引擎会重新逐文件核对当前候选，再用同一候选身份
+重建 Story 当前性；缺失、错候选或模式错配都不会写入决定。
+
 ### 第 5 步：收口沉淀（可选）
 
 推荐在功能合并后、发布前，回到 Claude Code 等工具运行 `/compound-docs`。它基于**当前代码优先**，再与 Git、`progress.md`、本轮 PRD 交叉取证，把仍成立的结构变化、稳定约定和高频陷阱分层沉淀进 `docs/`；过程故事、一次性事故和已经失效的说法不会被当成长期知识。
@@ -769,8 +773,8 @@ GitHub 状态给出。
 | `--yes`                                         | 关闭         | 仅 `init`：接受命令已经展示的远端和文件变更；必须同时提供人工确认过的 `--contract`，不会替用户选择平台或填写不适用理由                                                                                                                                                     |
 | `--local`                                       | 关闭         | 仅 `doctor`：不查询 GitHub，只检查本地契约、派生快照、文档和 workspace；用于项目原生 CI                                                                                                                                                                                    |
 | `--json`                                        | 关闭         | `init`、`workspace`、`doctor`、`status`、`models`、`issue`、`candidate` 输出单个 JSON 对象；交互提示不写入 JSON stdout                                                                                                                                                     |
-| `--shadow`                                      | 关闭         | 只供固定候选 Dogfood，且只允许用于 run、doctor、`workspace apply-prd`；健康固定退出 7，不能表示正式通过；真实失败仍保留原失败码，其他子命令会拒绝该参数                                                                                                                    |
-| `--candidate-evidence <file>`                   | —            | Shadow 的 doctor/apply/run 或 `candidate publish-proof` 使用；读取候选 `packed.json`，从当前实际安装的 coding-x 包根逐文件核对发布文件树，并把候选身份绑定到 Story 凭证或补签证明。只复制摘要、替换入口或修改任一运行文件都会拒绝                                              |
+| `--shadow`                                      | 关闭         | 只供固定候选 Dogfood，允许用于 run、doctor、`workspace apply-prd` 和 `workspace record-review-decision`；健康固定退出 7，不能表示正式通过；真实失败仍保留原失败码，其他子命令会拒绝该参数                                                                                      |
+| `--candidate-evidence <file>`                   | —            | Shadow 的 doctor/apply/run/Review 裁决或 `candidate publish-proof` 使用；读取候选 `packed.json`，从当前实际安装的 coding-x 包根逐文件核对发布文件树，并把候选身份绑定到 Story 凭证、裁决当前性或补签证明。只复制摘要、替换入口或修改任一运行文件都会拒绝                       |
 | `--review-model <id>`                           | —            | 最终 Review 的精确模型 ID；不能使用 runner 默认值，因为结果必须能绑定并复现实际模型                                                                                                                                                                                        |
 
 ### `status` 子命令退出码

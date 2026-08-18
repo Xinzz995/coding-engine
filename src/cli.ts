@@ -175,8 +175,8 @@ runner:
   --stall-limit <n>              连续无进展轮熔断阈值（默认 3，仅 run）
   --stale-days <n>               active 文档过期阈值（默认 30；doctor 跳过冷档案）
   --json                         JSON 输出（init/workspace/doctor/status/models/issue/candidate）
-  --shadow                       候选 Dogfood；仅用于 run、doctor、workspace apply-prd，永远不可交付
-  --candidate-evidence <file>    候选 packed.json；用于 Shadow 或候选凭证补签并核对实际 CLI
+  --shadow                       候选 Dogfood；用于 run、doctor、apply-prd 或 Review 裁决，永远不可交付
+  --candidate-evidence <file>    候选 packed.json；用于 Shadow、候选 Review 裁决或凭证补签并核对实际 CLI
   --contract <file>              init 使用已确认的质量契约文件
   --input <file>                 workspace 写命令的严格 JSON 请求文件
   --yes                          init 接受已展示的变更；必须同时提供 --contract
@@ -403,18 +403,24 @@ export function parseCliArgs(argv: string[]): CliConfig {
     values.shadow === true &&
     command !== 'run' &&
     command !== 'doctor' &&
-    !(command === 'workspace' && workspaceAction === 'apply-prd')
+    !(
+      command === 'workspace' &&
+      (workspaceAction === 'apply-prd' || workspaceAction === 'record-review-decision')
+    )
   ) {
-    throw new Error('❌ --shadow 只能用于 run、doctor 或 workspace apply-prd');
+    throw new Error(
+      '❌ --shadow 只能用于 run、doctor、workspace apply-prd 或 record-review-decision',
+    );
   }
   const candidateEvidenceAllowed =
     command === 'run' ||
     command === 'doctor' ||
     command === 'candidate' ||
-    (command === 'workspace' && workspaceAction === 'apply-prd');
+    (command === 'workspace' &&
+      (workspaceAction === 'apply-prd' || workspaceAction === 'record-review-decision'));
   if (!help && values['candidate-evidence'] !== undefined && !candidateEvidenceAllowed) {
     throw new Error(
-      '❌ --candidate-evidence 只能用于 run、doctor、workspace apply-prd 或 candidate publish-proof',
+      '❌ --candidate-evidence 只能用于 run、doctor、workspace apply-prd、record-review-decision 或 candidate publish-proof',
     );
   }
   if (
@@ -964,6 +970,10 @@ export async function main(argv: string[]): Promise<number> {
             contract,
             observation,
             termination: commandSignals.termination,
+            requestedShadow: cfg.shadow,
+            ...(candidateIdentity === undefined
+              ? {}
+              : { candidateIdentityDigest: candidateIdentity.digest }),
           });
         },
       );

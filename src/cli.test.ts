@@ -139,6 +139,21 @@ describe('parseCliArgs', () => {
     expect(
       parseCliArgs(['workspace', 'apply-prd', '--input', '/tmp/request.json', '--shadow']).shadow,
     ).toBe(true);
+    expect(
+      parseCliArgs([
+        'workspace',
+        'record-review-decision',
+        '--input',
+        '/tmp/decision.json',
+        '--shadow',
+        '--candidate-evidence',
+        '/tmp/packed.json',
+      ]),
+    ).toMatchObject({
+      workspaceAction: 'record-review-decision',
+      shadow: true,
+      candidateEvidence: '/tmp/packed.json',
+    });
     for (const args of [
       ['init', '--shadow'],
       ['repair', '--shadow'],
@@ -159,6 +174,16 @@ describe('parseCliArgs', () => {
     expect(() =>
       parseCliArgs(['status', '--shadow', '--candidate-evidence', '/tmp/packed.json']),
     ).toThrow('--shadow 只能用于');
+    expect(() =>
+      parseCliArgs([
+        'workspace',
+        'record-review-decision',
+        '--input',
+        '/tmp/decision.json',
+        '--candidate-evidence',
+        '/tmp/packed.json',
+      ]),
+    ).toThrow('必须与 --shadow 同时使用');
   });
   it('recognizes the repair subcommand', () => {
     expect(parseCliArgs(['repair']).command).toBe('repair');
