@@ -208,7 +208,7 @@ describe('异常轮回写（builder 侧）', () => {
     const { projectRoot, workspace, instructionsDir } = setup([story()]);
     const fake = join(workspace, 'fake.mjs');
     const calls = join(projectRoot, 'builder-calls.txt');
-    // fake：不写任何文件，睡到被引擎 SIGTERM（devTimeoutMs=400 触发超时）
+    // fake：先同步留下已启动事实，再睡到被引擎 SIGTERM（5 秒给高负载宿主足够启动预算）。
     writeFileSync(
       fake,
       `
@@ -229,7 +229,7 @@ describe('异常轮回写（builder 侧）', () => {
       const code = await runLoop({
         kind: 'claude',
         maxIterations: 2,
-        devTimeoutMs: 400,
+        devTimeoutMs: 5_000,
         valTimeoutMs: 5000,
         workspace,
         instructionsDir,
@@ -238,6 +238,7 @@ describe('异常轮回写（builder 侧）', () => {
       });
       const state = JSON.parse(readFileSync(join(workspace, 'state.json'), 'utf-8'));
       expect(state['US-001']).toMatchObject({ passes: false, validated: false, notes: '' });
+      expect(existsSync(calls)).toBe(true);
       const callCount = readFileSync(calls, 'utf8').trim().split('\n').length;
       const iterations = readEvidence(workspace).records.filter((r) => r.type === 'iteration');
 
@@ -266,7 +267,7 @@ describe('异常轮回写（builder 侧）', () => {
         rmSync(invocationRoot, { recursive: true, force: true });
       }
     }
-  }, 60_000);
+  }, 90_000);
 
   it('agent 同轮置 blocked 且非零退出：不回写、evidence 如实记 agentBlocked', async () => {
     const { workspace, instructionsDir } = setup([story()]);
