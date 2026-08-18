@@ -257,6 +257,10 @@ const RISK_CATEGORIES = new Set<QualityRiskCategory>([
 ]);
 const MAX_ARTIFACT_PATHS_PER_LIST = 128;
 const MAX_ARTIFACT_PATH_LENGTH = 512;
+const MAX_QUALITY_CHECKS = 128;
+const MAX_QUALITY_PATHS_PER_CHECK = 64;
+const MAX_QUALITY_PATH_PATTERNS = 512;
+const MAX_QUALITY_PATH_PATTERN_CHARS = 10_000;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -337,6 +341,22 @@ function repoPath(
   return true;
 }
 
+/** quality check paths 会原样交给 Git pathspec；禁止调用方开启 pathspec magic。 */
+function qualityCheckPath(value: unknown, path: string, errors: string[]): value is string {
+  if (!repoPath(value, path, errors)) return false;
+  if (
+    /^[:!^]/u.test(value) ||
+    value.includes('\0') ||
+    value.length > MAX_ARTIFACT_PATH_LENGTH
+  ) {
+    errors.push(
+      `${path} 不能使用 Git pathspec magic/NUL，且不能超过 ${MAX_ARTIFACT_PATH_LENGTH} 字符`,
+    );
+    return false;
+  }
+  return true;
+}
+
 function stringArray(
   value: unknown,
   path: string,
@@ -344,6 +364,7 @@ function stringArray(
   options: {
     nonEmpty?: boolean;
     unique?: boolean;
+    maxItems?: number;
     validate?: (v: unknown, p: string, e: string[]) => boolean;
   } = {},
 ): value is string[] {
@@ -352,6 +373,9 @@ function stringArray(
     return false;
   }
   if (options.nonEmpty && value.length === 0) errors.push(`${path} 不能为空`);
+  if (options.maxItems !== undefined && value.length > options.maxItems) {
+    errors.push(`${path} 最多包含 ${options.maxItems} 项`);
+  }
   value.forEach((entry, index) => {
     if (options.validate) options.validate(entry, `${path}[${index}]`, errors);
     else nonEmptyString(entry, `${path}[${index}]`, errors);
@@ -706,6 +730,8 @@ function validateContract(value: unknown): string[] {
 
   const checks = objectShape(root.checks, 'checks', CHECK_CATEGORIES, [], errors);
   const checkIds = new Set<string>();
+  const qualityPathPatterns = new Set<string>();
+  let qualityPathPatternCharacters = 0;
   const checkPlatformsById = new Map<string, Set<QualityPlatform>>();
   let configuredCheckCount = 0;
   if (checks) {
@@ -755,8 +781,15 @@ function validateContract(value: unknown): string[] {
           stringArray(item.paths, `${checkPath}.paths`, errors, {
             nonEmpty: true,
             unique: true,
-            validate: (entryValue, entryPath, target) => repoPath(entryValue, entryPath, target),
+            maxItems: MAX_QUALITY_PATHS_PER_CHECK,
+            validate: qualityCheckPath,
           });
+          if (Array.isArray(item.paths)) {
+            for (const pattern of item.paths) {
+              if (typeof pattern === 'string') qualityPathPatterns.add(pattern);
+              if (typeof pattern === 'string') qualityPathPatternCharacters += pattern.length;
+            }
+          }
         }
         command(item.command, `${checkPath}.command`, errors);
         if (checkId && isRecord(item.command) && Array.isArray(item.command.platforms)) {
@@ -775,6 +808,15 @@ function validateContract(value: unknown): string[] {
   }
   if (configuredCheckCount === 0) {
     errors.push('checks 至少必须声明一项可重复执行的项目检查');
+  }
+  if (configuredCheckCount > MAX_QUALITY_CHECKS) {
+    errors.push(`checks 最多声明 ${MAX_QUALITY_CHECKS} 项检查`);
+  }
+  if (qualityPathPatterns.size > MAX_QUALITY_PATH_PATTERNS) {
+    errors.push(`checks paths 合计最多声明 ${MAX_QUALITY_PATH_PATTERNS} 个不同模式`);
+  }
+  if (qualityPathPatternCharacters > MAX_QUALITY_PATH_PATTERN_CHARS) {
+    errors.push(`checks paths 合计最多包含 ${MAX_QUALITY_PATH_PATTERN_CHARS} 个字符`);
   }
 
   const risk = objectShape(

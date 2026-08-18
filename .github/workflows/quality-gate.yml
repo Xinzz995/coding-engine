@@ -5,17 +5,308 @@ on:
   pull_request:
   push:
     branches: ['main']
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: quality-gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: quality-gate-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: plan required checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      check_1: ${{ steps.plan.outputs.check_1 }}
+      check_2: ${{ steps.plan.outputs.check_2 }}
+      check_3: ${{ steps.plan.outputs.check_3 }}
+      check_4: ${{ steps.plan.outputs.check_4 }}
+      check_5: ${{ steps.plan.outputs.check_5 }}
+      check_6: ${{ steps.plan.outputs.check_6 }}
+      check_7: ${{ steps.plan.outputs.check_7 }}
+      check_8: ${{ steps.plan.outputs.check_8 }}
+      check_9: ${{ steps.plan.outputs.check_9 }}
+      check_10: ${{ steps.plan.outputs.check_10 }}
+      check_11: ${{ steps.plan.outputs.check_11 }}
+      check_12: ${{ steps.plan.outputs.check_12 }}
+      check_13: ${{ steps.plan.outputs.check_13 }}
+      job_1: ${{ steps.plan.outputs.job_1 }}
+      job_2: ${{ steps.plan.outputs.job_2 }}
+      job_3: ${{ steps.plan.outputs.job_3 }}
+      job_4: ${{ steps.plan.outputs.job_4 }}
+      job_5: ${{ steps.plan.outputs.job_5 }}
+      job_6: ${{ steps.plan.outputs.job_6 }}
+      job_7: ${{ steps.plan.outputs.job_7 }}
+      full: ${{ steps.plan.outputs.full }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compute fail-closed change plan
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          full=0
+          diff_base=
+          diff_head=
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch)
+              full=1
+              ;;
+            pull_request)
+              if git cat-file -e "${PR_BASE}^{commit}" 2>/dev/null && git cat-file -e "${PR_HEAD}^{commit}" 2>/dev/null; then
+                if diff_base=$(git merge-base "$PR_BASE" "$PR_HEAD"); then
+                  diff_head="$PR_HEAD"
+                else
+                  full=1
+                fi
+              else
+                full=1
+              fi
+              ;;
+            push)
+              if [ -z "$PUSH_BEFORE" ] || [[ "$PUSH_BEFORE" =~ ^0+$ ]] || ! git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null || ! git cat-file -e "${PUSH_AFTER}^{commit}" 2>/dev/null; then
+                full=1
+              else
+                diff_base="$PUSH_BEFORE"
+                diff_head="$PUSH_AFTER"
+              fi
+              ;;
+            *)
+              full=1
+              ;;
+          esac
+          if [ "$full" -eq 0 ]; then
+            if git diff --quiet --no-renames "$diff_base" "$diff_head" --; then
+              full=1
+            else
+              status=$?
+              if [ "$status" -ne 1 ]; then
+                echo "::warning::Git diff could not be classified; falling back to full"
+                full=1
+              fi
+            fi
+          fi
+          if [ "$full" -eq 0 ]; then
+            if git diff --quiet --no-renames "$diff_base" "$diff_head" -- . ':(exclude).coding-x/**' ':(exclude).gitattributes' ':(exclude).github/workflows/**' ':(exclude).prettierrc.json' ':(exclude)AGENTS.md' ':(exclude)README.md' ':(exclude)assets/**' ':(exclude)build/**' ':(exclude)commands/**' ':(exclude)docs/golden-principles.md' ':(exclude)hooks/**' ':(exclude)native/**' ':(exclude)package.json' ':(exclude)package-lock.json' ':(exclude)skills/**' ':(exclude)src/**' ':(exclude)templates/**' ':(exclude)tsconfig.json' ':(exclude)tsup.config.ts' ':(exclude)vitest.config.ts' ':(exclude)src/engine/clean-validation-mounts.test.ts' ':(exclude)src/engine/clean-validation-mounts.ts' ':(exclude)src/workspace-safety/**' ':(exclude)assets/workspace-safety/**' ':(exclude)build/compile-windows-test-fixture.ps1' ':(exclude)build/run-windows-native-proof.ps1' ':(exclude)build/vitest.windows-native.config.mjs' ':(exclude)build/windows-native-proof.mjs' ':(exclude)src/review/temporary-directory.ts' ':(exclude)src/workspace-safety/__fixtures__/**' ':(exclude)src/workspace-safety/windows-*.ts' ':(exclude)src/workspace-safety/delegated-recovery.windows-crash.test.ts' ':(exclude)native/windows-supervisor/**' ':(exclude)assets/workspace-safety/coding-x-windows-supervisor.exe' ':(exclude)assets/workspace-safety/WindowsSupervisorProgram.cs' ':(exclude)assets/workspace-safety/WindowsJobSupervisor.cs' ':(exclude)assets/workspace-safety/WindowsJobProcess.cs' ':(exclude)assets/workspace-safety/WindowsJobAuthority.cs' ':(exclude)assets/workspace-safety/coding-x-windows-path-inspector.exe' ':(exclude)assets/workspace-safety/WindowsPathInspectorProgram.cs' ':(exclude)assets/workspace-safety/WindowsPathAttributes.cs' ':(exclude)*.ts' ':(exclude)*.js' ':(exclude)eslint.config.js' ':(exclude).github/ISSUE_TEMPLATE/**' ':(exclude).github/PULL_REQUEST_TEMPLATE.md' ':(exclude)docs/**' ':(exclude)src/doctor/repository-health.test.ts'; then
+              :
+            else
+              status=$?
+              full=1
+              if [ "$status" -ne 1 ]; then
+                echo "::warning::Git path coverage could not be classified; falling back to full"
+              fi
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_1=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- '.coding-x/**' '.gitattributes' '.github/workflows/**' '.prettierrc.json' 'AGENTS.md' 'README.md' 'assets/**' 'build/**' 'commands/**' 'docs/golden-principles.md' 'hooks/**' 'native/**' 'package.json' 'package-lock.json' 'skills/**' 'src/**' 'templates/**' 'tsconfig.json' 'tsup.config.ts' 'vitest.config.ts'; then
+            check_1=false
+          else
+            status=$?
+            check_1=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_2=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'src/engine/clean-validation-mounts.test.ts' 'src/engine/clean-validation-mounts.ts' 'src/workspace-safety/**' 'package.json' 'package-lock.json' 'vitest.config.ts'; then
+            check_2=false
+          else
+            status=$?
+            check_2=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_3=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'src/workspace-safety/**' 'package.json' 'package-lock.json'; then
+            check_3=false
+          else
+            status=$?
+            check_3=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_4=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- '.gitattributes' 'assets/workspace-safety/**' 'build/compile-windows-test-fixture.ps1' 'build/run-windows-native-proof.ps1' 'build/vitest.windows-native.config.mjs' 'build/windows-native-proof.mjs' 'vitest.config.ts' 'src/review/temporary-directory.ts' 'src/workspace-safety/__fixtures__/**' 'src/workspace-safety/windows-*.ts' 'src/workspace-safety/delegated-recovery.windows-crash.test.ts'; then
+            check_4=false
+          else
+            status=$?
+            check_4=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_5=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'assets/**' 'build/**' 'commands/**' 'hooks/**' 'package.json' 'package-lock.json' 'skills/**' 'src/**' 'templates/**' 'tsconfig.json' 'tsup.config.ts'; then
+            check_5=false
+          else
+            status=$?
+            check_5=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_6=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- '.gitattributes' 'native/windows-supervisor/**' 'assets/workspace-safety/coding-x-windows-supervisor.exe' 'assets/workspace-safety/WindowsSupervisorProgram.cs' 'assets/workspace-safety/WindowsJobSupervisor.cs' 'assets/workspace-safety/WindowsJobProcess.cs' 'assets/workspace-safety/WindowsJobAuthority.cs'; then
+            check_6=false
+          else
+            status=$?
+            check_6=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_7=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- '.gitattributes' 'native/windows-supervisor/**' 'assets/workspace-safety/coding-x-windows-path-inspector.exe' 'assets/workspace-safety/WindowsPathInspectorProgram.cs' 'assets/workspace-safety/WindowsPathAttributes.cs'; then
+            check_7=false
+          else
+            status=$?
+            check_7=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_8=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'assets/**' 'build/**' 'commands/**' 'hooks/**' 'package.json' 'package-lock.json' 'skills/**' 'src/**' 'templates/**' 'tsconfig.json' 'tsup.config.ts'; then
+            check_8=false
+          else
+            status=$?
+            check_8=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_9=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'src/**' 'build/**' 'hooks/**' '*.ts' '*.js'; then
+            check_9=false
+          else
+            status=$?
+            check_9=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_10=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'src/**' 'eslint.config.js' 'tsconfig.json'; then
+            check_10=false
+          else
+            status=$?
+            check_10=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_11=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'src/**' 'tsconfig.json'; then
+            check_11=false
+          else
+            status=$?
+            check_11=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_12=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- '.coding-x/**' '.github/ISSUE_TEMPLATE/**' '.github/PULL_REQUEST_TEMPLATE.md' '.github/workflows/**' 'AGENTS.md' 'README.md' 'docs/**' 'src/doctor/repository-health.test.ts'; then
+            check_12=false
+          else
+            status=$?
+            check_12=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          if [ "$full" -eq 1 ]; then
+            check_13=true
+          elif git diff --quiet --no-renames "$diff_base" "$diff_head" -- 'package.json' 'package-lock.json'; then
+            check_13=false
+          else
+            status=$?
+            check_13=true
+            if [ "$status" -ne 1 ]; then
+              echo "::warning::Git check scope could not be classified; falling back to full"
+              full=1
+            fi
+          fi
+          job_1=false
+          if [ "$check_1" = true ] || [ "$check_2" = true ] || [ "$check_3" = true ] || [ "$check_5" = true ] || [ "$check_8" = true ] || [ "$check_9" = true ] || [ "$check_10" = true ] || [ "$check_11" = true ] || [ "$check_12" = true ] || [ "$check_13" = true ]; then job_1=true; fi
+          job_2=false
+          if [ "$check_1" = true ] || [ "$check_5" = true ] || [ "$check_8" = true ]; then job_2=true; fi
+          job_3=false
+          if [ "$check_1" = true ] || [ "$check_3" = true ] || [ "$check_5" = true ] || [ "$check_8" = true ]; then job_3=true; fi
+          job_4=false
+          if [ "$check_1" = true ] || [ "$check_5" = true ] || [ "$check_8" = true ]; then job_4=true; fi
+          job_5=false
+          if [ "$check_1" = true ] || [ "$check_3" = true ] || [ "$check_5" = true ] || [ "$check_8" = true ]; then job_5=true; fi
+          job_6=false
+          if [ "$check_1" = true ] || [ "$check_5" = true ] || [ "$check_8" = true ]; then job_6=true; fi
+          job_7=false
+          if [ "$check_6" = true ] || [ "$check_7" = true ] || [ "$check_4" = true ]; then job_7=true; fi
+          if [ "$full" -eq 1 ]; then full_value=true; else full_value=false; fi
+          echo "full=$full_value" >> "$GITHUB_OUTPUT"
+          echo "check_1=$check_1" >> "$GITHUB_OUTPUT"
+          echo "check_2=$check_2" >> "$GITHUB_OUTPUT"
+          echo "check_3=$check_3" >> "$GITHUB_OUTPUT"
+          echo "check_4=$check_4" >> "$GITHUB_OUTPUT"
+          echo "check_5=$check_5" >> "$GITHUB_OUTPUT"
+          echo "check_6=$check_6" >> "$GITHUB_OUTPUT"
+          echo "check_7=$check_7" >> "$GITHUB_OUTPUT"
+          echo "check_8=$check_8" >> "$GITHUB_OUTPUT"
+          echo "check_9=$check_9" >> "$GITHUB_OUTPUT"
+          echo "check_10=$check_10" >> "$GITHUB_OUTPUT"
+          echo "check_11=$check_11" >> "$GITHUB_OUTPUT"
+          echo "check_12=$check_12" >> "$GITHUB_OUTPUT"
+          echo "check_13=$check_13" >> "$GITHUB_OUTPUT"
+          echo "job_1=$job_1" >> "$GITHUB_OUTPUT"
+          echo "job_2=$job_2" >> "$GITHUB_OUTPUT"
+          echo "job_3=$job_3" >> "$GITHUB_OUTPUT"
+          echo "job_4=$job_4" >> "$GITHUB_OUTPUT"
+          echo "job_5=$job_5" >> "$GITHUB_OUTPUT"
+          echo "job_6=$job_6" >> "$GITHUB_OUTPUT"
+          echo "job_7=$job_7" >> "$GITHUB_OUTPUT"
   checks_ubuntu-node-22:
     name: checks / ubuntu-node-22
+    needs: plan
+    if: ${{ needs.plan.outputs.job_1 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -34,58 +325,70 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''ci'''
-      - name: 'setup / 2'
-        working-directory: '.'
-        timeout-minutes: 2
-        shell: bash
-        run: '''bash'' ''-c'' ''CODING_X_RUN_LINUX_MOUNT_PROOF=1 npx vitest run src/engine/clean-validation-mounts.test.ts -t ''"''"''rejects a real Linux bind mount before recursive cleanup''"''"'''''
       - name: 'test / tests'
+        if: ${{ needs.plan.outputs.check_1 == 'true' }}
         working-directory: '.'
         timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
+      - name: 'test / linux-mount-proof'
+        if: ${{ needs.plan.outputs.check_2 == 'true' }}
+        working-directory: '.'
+        timeout-minutes: 2
+        shell: bash
+        run: '''bash'' ''-c'' ''CODING_X_RUN_LINUX_MOUNT_PROOF=1 npx vitest run src/engine/clean-validation-mounts.test.ts -t ''"''"''rejects a real Linux bind mount before recursive cleanup''"''"'''''
       - name: 'test / legacy-compatibility'
+        if: ${{ needs.plan.outputs.check_3 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''test:legacy-compat'''
       - name: 'build / build'
+        if: ${{ needs.plan.outputs.check_5 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''build'''
       - name: 'build / cli-smoke'
+        if: ${{ needs.plan.outputs.check_8 == 'true' }}
         working-directory: '.'
         timeout-minutes: 1
         shell: bash
         run: '''node'' ''dist/cli.js'' ''--help'''
       - name: 'static / format'
+        if: ${{ needs.plan.outputs.check_9 == 'true' }}
         working-directory: '.'
         timeout-minutes: 2
         shell: bash
         run: '''npm'' ''run'' ''format:check'''
       - name: 'static / lint'
+        if: ${{ needs.plan.outputs.check_10 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''lint'''
       - name: 'static / typecheck'
+        if: ${{ needs.plan.outputs.check_11 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''typecheck'''
       - name: 'static / repository-health'
+        if: ${{ needs.plan.outputs.check_12 == 'true' }}
         working-directory: '.'
         timeout-minutes: 2
         shell: bash
         run: '''npm'' ''run'' ''repository-health'''
       - name: 'security / dependency-audit'
+        if: ${{ needs.plan.outputs.check_13 == 'true' }}
         working-directory: '.'
         timeout-minutes: 5
         shell: bash
         run: '''npm'' ''audit'' ''--audit-level=high'''
   checks_ubuntu-node-24:
     name: checks / ubuntu-node-24
+    needs: plan
+    if: ${{ needs.plan.outputs.job_2 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -105,22 +408,27 @@ jobs:
         shell: bash
         run: '''npm'' ''ci'''
       - name: 'test / tests'
+        if: ${{ needs.plan.outputs.check_1 == 'true' }}
         working-directory: '.'
         timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'
+        if: ${{ needs.plan.outputs.check_5 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''build'''
       - name: 'build / cli-smoke'
+        if: ${{ needs.plan.outputs.check_8 == 'true' }}
         working-directory: '.'
         timeout-minutes: 1
         shell: bash
         run: '''node'' ''dist/cli.js'' ''--help'''
   checks_macos-node-22:
     name: checks / macos-node-22
+    needs: plan
+    if: ${{ needs.plan.outputs.job_3 == 'true' }}
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -140,27 +448,33 @@ jobs:
         shell: bash
         run: '''npm'' ''ci'''
       - name: 'test / tests'
+        if: ${{ needs.plan.outputs.check_1 == 'true' }}
         working-directory: '.'
         timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
+        if: ${{ needs.plan.outputs.check_3 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''test:legacy-compat'''
       - name: 'build / build'
+        if: ${{ needs.plan.outputs.check_5 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''build'''
       - name: 'build / cli-smoke'
+        if: ${{ needs.plan.outputs.check_8 == 'true' }}
         working-directory: '.'
         timeout-minutes: 1
         shell: bash
         run: '''node'' ''dist/cli.js'' ''--help'''
   checks_macos-node-24:
     name: checks / macos-node-24
+    needs: plan
+    if: ${{ needs.plan.outputs.job_4 == 'true' }}
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -180,22 +494,27 @@ jobs:
         shell: bash
         run: '''npm'' ''ci'''
       - name: 'test / tests'
+        if: ${{ needs.plan.outputs.check_1 == 'true' }}
         working-directory: '.'
         timeout-minutes: 45
         shell: bash
         run: '''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'
+        if: ${{ needs.plan.outputs.check_5 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: bash
         run: '''npm'' ''run'' ''build'''
       - name: 'build / cli-smoke'
+        if: ${{ needs.plan.outputs.check_8 == 'true' }}
         working-directory: '.'
         timeout-minutes: 1
         shell: bash
         run: '''node'' ''dist/cli.js'' ''--help'''
   checks_windows-node-22:
     name: checks / windows-node-22
+    needs: plan
+    if: ${{ needs.plan.outputs.job_5 == 'true' }}
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -215,27 +534,33 @@ jobs:
         shell: pwsh
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
+        if: ${{ needs.plan.outputs.check_1 == 'true' }}
         working-directory: '.'
         timeout-minutes: 45
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'test / legacy-compatibility'
+        if: ${{ needs.plan.outputs.check_3 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: pwsh
         run: '& ''npm'' ''run'' ''test:legacy-compat'''
       - name: 'build / build'
+        if: ${{ needs.plan.outputs.check_5 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: pwsh
         run: '& ''npm'' ''run'' ''build'''
       - name: 'build / cli-smoke'
+        if: ${{ needs.plan.outputs.check_8 == 'true' }}
         working-directory: '.'
         timeout-minutes: 1
         shell: pwsh
         run: '& ''node'' ''dist/cli.js'' ''--help'''
   checks_windows-node-24:
     name: checks / windows-node-24
+    needs: plan
+    if: ${{ needs.plan.outputs.job_6 == 'true' }}
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -255,22 +580,27 @@ jobs:
         shell: pwsh
         run: '& ''npm'' ''ci'''
       - name: 'test / tests'
+        if: ${{ needs.plan.outputs.check_1 == 'true' }}
         working-directory: '.'
         timeout-minutes: 45
         shell: pwsh
         run: '& ''npm'' ''test'' ''--'' ''--run'''
       - name: 'build / build'
+        if: ${{ needs.plan.outputs.check_5 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: pwsh
         run: '& ''npm'' ''run'' ''build'''
       - name: 'build / cli-smoke'
+        if: ${{ needs.plan.outputs.check_8 == 'true' }}
         working-directory: '.'
         timeout-minutes: 1
         shell: pwsh
         run: '& ''node'' ''dist/cli.js'' ''--help'''
   checks_windows-native-standard-user:
     name: checks / windows-native-standard-user
+    needs: plan
+    if: ${{ needs.plan.outputs.job_7 == 'true' }}
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -290,16 +620,19 @@ jobs:
         shell: pwsh
         run: '& ''npm'' ''ci'''
       - name: 'build / windows-supervisor-reproducibility'
+        if: ${{ needs.plan.outputs.check_6 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: pwsh
         run: '& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-supervisor.exe'''
       - name: 'build / windows-path-inspector-reproducibility'
+        if: ${{ needs.plan.outputs.check_7 == 'true' }}
         working-directory: '.'
         timeout-minutes: 10
         shell: pwsh
         run: '& ''pwsh'' ''-NoLogo'' ''-NoProfile'' ''-NonInteractive'' ''-ExecutionPolicy'' ''Bypass'' ''-File'' ''native/windows-supervisor/build.ps1'' ''-Mode'' ''Verify'' ''-Target'' ''PathInspector'' ''-CommittedExecutable'' ''assets/workspace-safety/coding-x-windows-path-inspector.exe'''
       - name: 'test / windows-native-proof'
+        if: ${{ needs.plan.outputs.check_4 == 'true' }}
         working-directory: '.'
         timeout-minutes: 30
         shell: pwsh
@@ -307,7 +640,7 @@ jobs:
   quality-gate:
     name: quality-gate
     if: ${{ always() }}
-    needs: [checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-22, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]
+    needs: [plan, checks_ubuntu-node-22, checks_ubuntu-node-24, checks_macos-node-22, checks_macos-node-24, checks_windows-node-22, checks_windows-node-24, checks_windows-native-standard-user]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -315,19 +648,38 @@ jobs:
       - name: Verify every required job completed successfully
         shell: bash
         env:
+          PLAN_RESULT: ${{ needs.plan.result }}
           RESULT_1: ${{ needs.checks_ubuntu-node-22.result }}
+          EXPECTED_1: ${{ needs.plan.outputs.job_1 }}
           RESULT_2: ${{ needs.checks_ubuntu-node-24.result }}
+          EXPECTED_2: ${{ needs.plan.outputs.job_2 }}
           RESULT_3: ${{ needs.checks_macos-node-22.result }}
+          EXPECTED_3: ${{ needs.plan.outputs.job_3 }}
           RESULT_4: ${{ needs.checks_macos-node-24.result }}
+          EXPECTED_4: ${{ needs.plan.outputs.job_4 }}
           RESULT_5: ${{ needs.checks_windows-node-22.result }}
+          EXPECTED_5: ${{ needs.plan.outputs.job_5 }}
           RESULT_6: ${{ needs.checks_windows-node-24.result }}
+          EXPECTED_6: ${{ needs.plan.outputs.job_6 }}
           RESULT_7: ${{ needs.checks_windows-native-standard-user.result }}
+          EXPECTED_7: ${{ needs.plan.outputs.job_7 }}
         run: |
           failed=0
-          for result in "${!RESULT_@}"; do
-            value="${!result}"
-            if [ "$value" != "success" ]; then
-              echo "::error::${result}=${value}; required jobs must not fail, cancel, time out, or skip"
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "::error::plan=${PLAN_RESULT}; change plan must complete successfully"
+            failed=1
+          fi
+          for expected in "${!EXPECTED_@}"; do
+            suffix="${expected#EXPECTED_}"
+            result="RESULT_${suffix}"
+            expected_value="${!expected}"
+            result_value="${!result}"
+            if [ "$expected_value" != "true" ] && [ "$expected_value" != "false" ]; then
+              echo "::error::${expected}=${expected_value}; plan output must be true or false"
+              failed=1
+            elif { [ "$expected_value" = "true" ] && [ "$result_value" != "success" ]; } ||
+                 { [ "$expected_value" = "false" ] && [ "$result_value" != "skipped" ]; }; then
+              echo "::error::${result}=${result_value}, ${expected}=${expected_value}; job result does not match the fail-closed plan"
               failed=1
             fi
           done

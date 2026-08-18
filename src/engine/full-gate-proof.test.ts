@@ -52,7 +52,7 @@ describe('full gate proof', () => {
     const proof = createFullGateProof(original, passed);
     expect(reusableFullGateResult(proof, input())).toEqual(passed);
     expect(engineQualityGateEvidence(proof)).toMatchObject({
-      source: 'engine-full-gate',
+      source: 'engine-effective-gate',
       status: 'passed',
       gitHead: original.headSha,
       defaultBranchGitHead: original.defaultBranchGitHead,
@@ -96,5 +96,75 @@ describe('full gate proof', () => {
     expect(() =>
       createFullGateProof(original, { ...passed, skipped: [...passed.skipped].reverse() }),
     ).toThrow('实际检查范围不一致');
+  });
+
+  it('binds a scoped result to the exact change manifest and selected check ids', () => {
+    const base = input();
+    base.contract.checks = {
+      test: {
+        checks: [
+          {
+            id: 'docs-health',
+            module: 'root',
+            paths: ['docs/**'],
+            command: {
+              executable: 'node',
+              args: ['docs-health.mjs'],
+              cwd: '.',
+              platforms: ['linux'],
+              timeoutMs: 5_000,
+            },
+          },
+          {
+            id: 'tests',
+            module: 'root',
+            paths: ['src/**'],
+            command: {
+              executable: 'node',
+              args: ['tests.mjs'],
+              cwd: '.',
+              platforms: ['linux'],
+              timeoutMs: 5_000,
+            },
+          },
+        ],
+      },
+      build: { notApplicable: 'fixture' },
+      static: { notApplicable: 'fixture' },
+      security: { notApplicable: 'fixture' },
+    };
+    const scoped: FullGateInput = {
+      ...base,
+      changeScope: {
+        baseGitHead: 'b'.repeat(40),
+        manifestDigest: `sha256:${'c'.repeat(64)}`,
+        selectedCheckIds: ['docs-health'],
+      },
+    };
+    const result: ContractGateResult = {
+      ok: true,
+      failure: null,
+      total: 1,
+      ran: 1,
+      ms: 25,
+      skipped: ['tests'],
+      skippedByPath: ['tests'],
+      selectionMode: 'scoped',
+      selectedCheckIds: ['docs-health'],
+    };
+    const proof = createFullGateProof(scoped, result);
+    expect(reusableFullGateResult(proof, { ...scoped, changeScope: undefined }, 'b'.repeat(40)))
+      .toEqual(result);
+    expect(
+      reusableFullGateResult(proof, { ...scoped, changeScope: undefined }, 'd'.repeat(40)),
+    ).toBeNull();
+    expect(engineQualityGateEvidence(proof)).toMatchObject({
+      schemaVersion: 2,
+      selectionMode: 'scoped',
+      changeBaseGitHead: 'b'.repeat(40),
+      changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+      checks: [{ id: 'docs-health' }],
+      skippedCheckIds: ['tests'],
+    });
   });
 });

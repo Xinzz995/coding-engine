@@ -83,8 +83,20 @@ export interface GateResult {
 }
 
 export interface ContractGateResult extends GateResult {
-  /** 因当前操作系统不适用而未运行的 check id；不是失败，也不会计入 total。 */
+  /** 因当前操作系统或当前变更不适用而未运行的 check id；不是失败，也不会计入 total。 */
   skipped: string[];
+  /** skipped 中由变更路径选择排除的 check id；其余为平台不适用。 */
+  skippedByPath?: string[];
+  /** 当前结果使用全量、按范围，还是因选择不可信回退全量。 */
+  selectionMode?: 'full' | 'scoped' | 'fallback-full';
+  /** 本轮按契约顺序实际选择的 check id。 */
+  selectedCheckIds?: string[];
+}
+
+/** 干净 Git helper 对固定 Story 变化范围计算的路径检查命中结果。 */
+export interface QualityChangeSelection {
+  readonly matchedPathCheckIds: readonly string[];
+  readonly allChangedPathsMatched: boolean;
 }
 
 /**
@@ -294,6 +306,65 @@ function allFrozenChecks(snapshot: FrozenQualityChecks): QualityCheck[] {
   return declared;
 }
 
+interface SelectedContractChecks {
+  readonly applicable: QualityCheck[];
+  readonly skippedByPlatform: string[];
+  readonly skippedByPath: string[];
+  readonly mode: 'full' | 'scoped' | 'fallback-full';
+}
+
+/**
+ * 只信任干净 Git helper 给出的命中集合。命中集合缺失、重复、引用无 paths 的检查、
+ * 没覆盖全部变化路径或最终零项时都回退本平台全量，绝不把不确定性变成零检查通过。
+ */
+export function selectContractQualityChecks(
+  snapshot: FrozenQualityChecks,
+  platform: QualityPlatform,
+  changeSelection?: QualityChangeSelection,
+): SelectedContractChecks {
+  const declared = allFrozenChecks(snapshot);
+  const platformChecks = declared.filter((check) => check.command.platforms.includes(platform));
+  const skippedByPlatform = declared
+    .filter((check) => !check.command.platforms.includes(platform))
+    .map((check) => check.id);
+  if (changeSelection === undefined) {
+    return { applicable: platformChecks, skippedByPlatform, skippedByPath: [], mode: 'full' };
+  }
+
+  const pathCheckIds = new Set(
+    declared
+      .filter((check) => check.command.platforms.includes(platform) && check.paths !== undefined)
+      .map((check) => check.id),
+  );
+  const matched = new Set<string>();
+  let valid = true;
+  for (const id of changeSelection.matchedPathCheckIds) {
+    if (matched.has(id) || !pathCheckIds.has(id)) valid = false;
+    matched.add(id);
+  }
+  const scoped = platformChecks.filter(
+    (check) => check.paths === undefined || matched.has(check.id),
+  );
+  if (!valid || !changeSelection.allChangedPathsMatched || scoped.length === 0) {
+    return {
+      applicable: platformChecks,
+      skippedByPlatform,
+      skippedByPath: [],
+      mode: 'fallback-full',
+    };
+  }
+  const selected = new Set(scoped.map((check) => check.id));
+  const skippedByPath = platformChecks
+    .filter((check) => !selected.has(check.id))
+    .map((check) => check.id);
+  return {
+    applicable: scoped,
+    skippedByPlatform,
+    skippedByPath,
+    mode: skippedByPath.length === 0 ? 'full' : 'scoped',
+  };
+}
+
 function resolveContractCwd(projectRoot: string, cwd: string): string {
   const root = realpathSync(projectRoot);
   const target = realpathSync(resolve(root, cwd));
@@ -422,6 +493,7 @@ export async function runContractQualityChecks(
   projectRoot: string,
   platform: QualityPlatform | null | undefined,
   managed: ManagedGateContext,
+  changeSelection?: QualityChangeSelection,
 ): Promise<ContractGateResult> {
   const started = Date.now();
   platform ??= nodeQualityPlatform(process.platform);
@@ -440,11 +512,9 @@ export async function runContractQualityChecks(
       skipped: [],
     };
   }
-  const declared = allFrozenChecks(checks);
-  const skipped = declared
-    .filter((check) => !check.command.platforms.includes(platform))
-    .map((check) => check.id);
-  const applicable = declared.filter((check) => check.command.platforms.includes(platform));
+  const selection = selectContractQualityChecks(checks, platform, changeSelection);
+  const applicable = selection.applicable;
+  const skipped = [...selection.skippedByPlatform, ...selection.skippedByPath];
   if (applicable.length === 0) {
     return {
       ok: false,
@@ -458,6 +528,9 @@ export async function runContractQualityChecks(
       ran: 0,
       ms: Date.now() - started,
       skipped,
+      skippedByPath: [...selection.skippedByPath],
+      selectionMode: selection.mode,
+      selectedCheckIds: [],
     };
   }
   let ran = 0;
@@ -479,6 +552,9 @@ export async function runContractQualityChecks(
         ran,
         ms: Date.now() - started,
         skipped,
+        skippedByPath: [...selection.skippedByPath],
+        selectionMode: selection.mode,
+        selectedCheckIds: applicable.map((check) => check.id),
       };
     }
     const spec = commandSpec(check.command, cwd, `[${check.id}]`);
@@ -491,6 +567,9 @@ export async function runContractQualityChecks(
         ran,
         ms: Date.now() - started,
         skipped,
+        skippedByPath: [...selection.skippedByPath],
+        selectionMode: selection.mode,
+        selectedCheckIds: applicable.map((check) => check.id),
       };
     }
   }
@@ -501,6 +580,9 @@ export async function runContractQualityChecks(
     ran,
     ms: Date.now() - started,
     skipped,
+    skippedByPath: [...selection.skippedByPath],
+    selectionMode: selection.mode,
+    selectedCheckIds: applicable.map((check) => check.id),
   };
 }
 

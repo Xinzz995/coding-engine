@@ -1,7 +1,9 @@
 import {
   runContractQualityChecks,
+  selectContractQualityChecks,
   type ContractGateResult,
   type ManagedGateContext,
+  type QualityChangeSelection,
 } from '../engine/gate.js';
 import type { AgentKind } from '../engine/agent.js';
 import { CODING_X_VERSION } from '../version.js';
@@ -374,6 +376,8 @@ export async function runFinalReview(options: {
     defaultBranchGitHead: context.baseSha,
   });
   let gate: ContractGateResult | null = null;
+  let mechanicalChangeManifestDigest: string | null = null;
+  let mechanicalChangeSelection: QualityChangeSelection | undefined;
   let mechanicalEnvironmentError: string | null = null;
   const mechanicalPolicy = finalReviewMechanicalEnvironmentPolicy(
     context.baseContract,
@@ -385,11 +389,12 @@ export async function runFinalReview(options: {
     defaultBranchGitHead: context.baseSha,
     additionalRefs: mechanicalPolicy.additionalRefs,
     referenceAliases: mechanicalPolicy.referenceAliases,
-  });
+  }, context.baseSha);
   try {
     if (reused) {
       gate = reused;
-      console.log('♻️  最终 Review 复用同一进程中输入完全一致的全量检查结果');
+      mechanicalChangeManifestDigest = options.reusableFullGate?.changeScope?.manifestDigest ?? null;
+      console.log('♻️  最终 Review 复用同一进程中输入完全一致的适用检查结果');
     } else if (!options.gate) {
       mechanicalCheckout = await createCleanValidationCheckout({
         sourceRoot: context.root,
@@ -405,6 +410,12 @@ export async function runFinalReview(options: {
       const preparedStoryError =
         await verifyStoryValidationBinding('最终 Review 干净检出准备结束后：');
       if (preparedStoryError) return { exitCode: 5, message: preparedStoryError };
+      const manifest = await mechanicalCheckout.storyChangeManifest(
+        context.baseSha,
+        '最终 Review ',
+      );
+      mechanicalChangeManifestDigest = manifest.digest;
+      mechanicalChangeSelection = manifest.changeSelection;
     }
     if (!reused) {
       gate = await (options.gate
@@ -420,6 +431,7 @@ export async function runFinalReview(options: {
                   forbiddenExecutableRoot: context.root,
                 }
               : managedGate,
+            mechanicalChangeSelection,
           ));
     }
     if (mechanicalCheckout) {
@@ -458,12 +470,35 @@ export async function runFinalReview(options: {
         `${failure?.timedOut ? '（超时）' : failure?.exitCode !== null && failure?.exitCode !== undefined ? `（退出码 ${failure.exitCode}）` : ''}`,
     };
   }
+  const platform =
+    process.platform === 'linux'
+      ? 'linux'
+      : process.platform === 'darwin'
+        ? 'macos'
+        : process.platform === 'win32'
+          ? 'windows'
+          : null;
+  const defaultSelection =
+    platform === null
+      ? null
+      : selectContractQualityChecks(context.baseContract.checks, platform);
+  const selectedCheckIds =
+    gate.selectedCheckIds ?? defaultSelection?.applicable.map((check) => check.id) ?? [];
+  const skippedCheckIds =
+    gate.selectedCheckIds === undefined
+      ? (defaultSelection?.skippedByPlatform ?? [])
+      : [...gate.skipped];
   const mechanicalEvidence = {
     status: 'passed' as const,
     headSha: context.headSha,
     qualityContractDigest: context.baseContractDigest,
     validationEnvironmentDigest: mechanicalValidationEnvironmentDigest,
-    scope: 'all-current-platform-applicable-contract-checks' as const,
+    scope: 'all-current-change-applicable-contract-checks' as const,
+    selectionMode: gate.selectionMode ?? ('full' as const),
+    selectedCheckIds,
+    skippedCheckIds,
+    changeManifestDigest:
+      gate.selectionMode === 'scoped' ? mechanicalChangeManifestDigest : null,
   };
   const preModelStoryError = await verifyStoryValidationBinding('机械检查结束后、模型调用前：');
   if (preModelStoryError) return { exitCode: 5, message: preModelStoryError };

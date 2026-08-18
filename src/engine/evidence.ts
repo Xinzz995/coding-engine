@@ -183,6 +183,10 @@ export type EvidenceRecord =
       total: number;
       ran: number;
       ms: number;
+      /** v0.38 起记录实际范围；旧记录缺省时只展示总数。 */
+      selectionMode?: 'full' | 'scoped' | 'fallback-full';
+      selectedCheckIds?: string[];
+      skippedCheckIds?: string[];
       /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
       accepted?: false;
       failedCommand?: string;
@@ -405,6 +409,30 @@ function hasValidOptionalChangeBinding(v: Record<string, unknown>): boolean {
   );
 }
 
+function hasValidOptionalGateSelection(v: Record<string, unknown>): boolean {
+  const values = [v.selectionMode, v.selectedCheckIds, v.skippedCheckIds];
+  if (values.every((value) => value === undefined)) return true;
+  if (
+    (v.selectionMode !== 'full' &&
+      v.selectionMode !== 'scoped' &&
+      v.selectionMode !== 'fallback-full') ||
+    !Array.isArray(v.selectedCheckIds) ||
+    !Array.isArray(v.skippedCheckIds) ||
+    !v.selectedCheckIds.every((id) => typeof id === 'string' && id.length > 0) ||
+    !v.skippedCheckIds.every((id) => typeof id === 'string' && id.length > 0)
+  ) {
+    return false;
+  }
+  const selected = new Set(v.selectedCheckIds);
+  const skipped = new Set(v.skippedCheckIds);
+  return (
+    selected.size === v.selectedCheckIds.length &&
+    skipped.size === v.skippedCheckIds.length &&
+    v.selectedCheckIds.every((id) => !skipped.has(id)) &&
+    v.total === v.selectedCheckIds.length
+  );
+}
+
 function isValidationTarget(v: unknown): v is ValidationTargetEvidence {
   return (
     isRec(v) &&
@@ -596,6 +624,7 @@ function isEvidenceRecord(v: unknown): v is EvidenceRecord {
         typeof v.total === 'number' &&
         typeof v.ran === 'number' &&
         typeof v.ms === 'number' &&
+        hasValidOptionalGateSelection(v) &&
         (v.accepted === undefined || v.accepted === false) &&
         (v.failedCommand === undefined || typeof v.failedCommand === 'string') &&
         (v.exitCode === undefined || v.exitCode === null || typeof v.exitCode === 'number') &&

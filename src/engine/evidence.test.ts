@@ -53,6 +53,24 @@ describe('appendEvidence / readEvidence 往返', () => {
     expect(r.skippedLines).toBe(0);
   });
 
+  it('范围选择记录必须同时保存模式、执行与跳过清单且数量自洽', () => {
+    const dir = ws();
+    const scoped: EvidenceRecord = {
+      ...gateRun,
+      selectionMode: 'scoped',
+      selectedCheckIds: ['docs-health', 'format'],
+      skippedCheckIds: ['tests'],
+    };
+    appendEvidence(dir, scoped);
+    writeFileSync(
+      join(dir, EVIDENCE_FILE),
+      `${JSON.stringify(scoped)}\n` +
+        `${JSON.stringify({ ...scoped, selectedCheckIds: ['docs-health'] })}\n` +
+        `${JSON.stringify({ ...scoped, skippedCheckIds: ['tests', 'docs-health'] })}\n`,
+    );
+    expect(readEvidence(dir)).toEqual({ records: [scoped], skippedLines: 2 });
+  });
+
   it('文件不存在返回空且零跳过', () => {
     expect(readEvidence(ws())).toEqual({ records: [], skippedLines: 0 });
   });

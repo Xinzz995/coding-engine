@@ -45,8 +45,8 @@ const story: Story = {
 
 function gateEvidence(): EngineQualityGateEvidence {
   return {
-    schemaVersion: 1,
-    source: 'engine-full-gate',
+    schemaVersion: 2,
+    source: 'engine-effective-gate',
     status: 'passed',
     inputDigest: `sha256:${'d'.repeat(64)}`,
     gitHead: 'a'.repeat(40),
@@ -60,6 +60,9 @@ function gateEvidence(): EngineQualityGateEvidence {
       { category: 'static', id: 'typecheck', module: 'root' },
     ],
     skippedCheckIds: ['windows-native'],
+    changeBaseGitHead: null,
+    changeManifestDigest: null,
+    selectionMode: 'full',
   };
 }
 
@@ -216,6 +219,46 @@ describe('validation request', () => {
         'request-mismatch',
         undefined,
         gateEvidence(),
+      ),
+    ).toThrow('未绑定当前完整通过的目标');
+  });
+
+  it('accepts a scoped gate proof only for the same Story base and change manifest', () => {
+    const dir = tempDir();
+    const scoped: EngineQualityGateEvidence = {
+      ...gateEvidence(),
+      selectionMode: 'scoped',
+      changeBaseGitHead: 'b'.repeat(40),
+      changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+    };
+    expect(
+      createValidationRequest(
+        story,
+        dir,
+        {
+          gitHead: 'a'.repeat(40),
+          storyBaseGitHead: 'b'.repeat(40),
+          changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+          changedPathCount: 2,
+        },
+        'request-scoped',
+        undefined,
+        scoped,
+      ).engineQualityGate,
+    ).toEqual(scoped);
+    expect(() =>
+      createValidationRequest(
+        story,
+        dir,
+        {
+          gitHead: 'a'.repeat(40),
+          storyBaseGitHead: '9'.repeat(40),
+          changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+          changedPathCount: 2,
+        },
+        'request-scoped-mismatch',
+        undefined,
+        scoped,
       ),
     ).toThrow('未绑定当前完整通过的目标');
   });

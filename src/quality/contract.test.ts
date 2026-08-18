@@ -610,6 +610,12 @@ describe('parseQualityContract', () => {
       },
     ],
     [
+      'check path enables Git pathspec magic',
+      (input: Record<string, any>) => {
+        input.checks.test.checks[0].paths = [':(exclude)src/**', '!docs/**', '^build/**'];
+      },
+    ],
+    [
       'unknown command field',
       (input: Record<string, any>) => {
         input.checks.test.checks[0].command.env = { TOKEN: 'x' };
@@ -629,6 +635,19 @@ describe('parseQualityContract', () => {
     const both = clone();
     both.checks.security = { checks: clone().checks.test.checks, notApplicable: 'no' };
     expect(parseQualityContract(both)).toMatchObject({ status: 'invalid' });
+  });
+
+  it('bounds the path plan before it reaches managed Git or generated workflow commands', () => {
+    const input = clone();
+    input.checks.test.checks[0].paths = Array.from(
+      { length: 64 },
+      (_value, index) => `packages/${'x'.repeat(170)}-${index}/**`,
+    );
+    const result = parseQualityContract(input);
+    expect(result.status).toBe('invalid');
+    if (result.status === 'invalid') {
+      expect(result.errors).toContain('checks paths 合计最多包含 10000 个字符');
+    }
   });
 
   it('requires at least one project check and validates every GitHub job setup command', () => {

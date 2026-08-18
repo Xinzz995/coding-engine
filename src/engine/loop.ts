@@ -1553,6 +1553,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 validationRoot,
                 undefined,
                 managedGate,
+                storyChangeManifest?.changeSelection,
               );
         if (rawOf(statePath) !== stateBeforeGate) {
           if (stateBeforeGate !== null) {
@@ -1574,8 +1575,33 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           'skipped' in gate && Array.isArray(gate.skipped)
             ? gate.skipped.filter((value): value is string => typeof value === 'string')
             : [];
-        if (skippedChecks.length > 0) {
-          console.log(`⏭️  当前系统不适用的质量检查：${skippedChecks.join('、')}`);
+        const skippedByPath =
+          'skippedByPath' in gate && Array.isArray(gate.skippedByPath)
+            ? gate.skippedByPath.filter((value): value is string => typeof value === 'string')
+            : [];
+        const gateSelectionMode =
+          'selectionMode' in gate &&
+          (gate.selectionMode === 'full' ||
+            gate.selectionMode === 'scoped' ||
+            gate.selectionMode === 'fallback-full')
+            ? gate.selectionMode
+            : undefined;
+        const gateSelectedCheckIds =
+          'selectedCheckIds' in gate && Array.isArray(gate.selectedCheckIds)
+            ? gate.selectedCheckIds.filter(
+                (value): value is string => typeof value === 'string',
+              )
+            : [];
+        const pathSkipped = new Set(skippedByPath);
+        const skippedByPlatform = skippedChecks.filter((value) => !pathSkipped.has(value));
+        if (skippedByPlatform.length > 0) {
+          console.log(`⏭️  当前系统不适用的质量检查：${skippedByPlatform.join('、')}`);
+        }
+        if (skippedByPath.length > 0) {
+          console.log(`⚡ 当前变更不适用的质量检查：${skippedByPath.join('、')}`);
+        }
+        if (gateSelectionMode === 'fallback-full') {
+          console.log('🛡️  变化范围无法完整分类，已保守回退本平台全量检查');
         }
         const gateDiagnostic = gate.failure
           ? clipEvidenceDiagnostic(gate.failure.outputTail).trim()
@@ -1602,6 +1628,13 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           total: gate.total,
           ran: gate.ran,
           ms: gate.ms,
+          ...(gateSelectionMode === undefined
+            ? {}
+            : {
+                selectionMode: gateSelectionMode,
+                selectedCheckIds: [...gateSelectedCheckIds],
+                skippedCheckIds: [...skippedChecks],
+              }),
           ...(gatePostconditionFailed ? { accepted: false as const } : {}),
           ...(gate.failure
             ? {
@@ -1735,12 +1768,28 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               defaultBranchGitHead,
               additionalRefs: proofPolicy.additionalRefs,
               referenceAliases: proofPolicy.referenceAliases,
+              ...(gateSelectionMode === 'scoped' && storyChangeManifest
+                ? {
+                    changeScope: {
+                      baseGitHead: storyChangeManifest.storyBaseGitHead,
+                      manifestDigest: storyChangeManifest.digest,
+                      selectedCheckIds: gateSelectedCheckIds,
+                    },
+                  }
+                : {}),
             },
             {
               ...gate,
               skipped: gate.skipped.filter(
                 (value): value is string => typeof value === 'string',
               ),
+              ...(gateSelectionMode === undefined
+                ? {}
+                : {
+                    selectionMode: gateSelectionMode,
+                    selectedCheckIds: gateSelectedCheckIds,
+                    skippedByPath,
+                  }),
             },
           );
         }

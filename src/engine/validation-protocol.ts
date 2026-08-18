@@ -180,7 +180,13 @@ export function createValidationRequest(
       engineQualityGate.gitHead !== target.gitHead ||
       engineQualityGate.status !== 'passed' ||
       engineQualityGate.ran !== engineQualityGate.total ||
-      engineQualityGate.checks.length !== engineQualityGate.total
+      engineQualityGate.checks.length !== engineQualityGate.total ||
+      (engineQualityGate.selectionMode === 'scoped' &&
+        (engineQualityGate.changeBaseGitHead !== target.storyBaseGitHead ||
+          engineQualityGate.changeManifestDigest !== target.changeManifestDigest)) ||
+      (engineQualityGate.selectionMode !== 'scoped' &&
+        (engineQualityGate.changeBaseGitHead !== null ||
+          engineQualityGate.changeManifestDigest !== null))
     ) {
       throw new Error('Validator 机械检查证明未绑定当前完整通过的目标');
     }
@@ -222,7 +228,7 @@ export function renderValidatorInstruction(base: string, request: ValidationRequ
 - 必须检查 request.storyBaseGitHead..request.gitHead 的完整变化；不得用 HEAD^、当前父提交或自行选择的基线缩窄范围。
 - 不得修改 state.json、prd.json 或项目源码。你只提交 Validator claim，最终状态由引擎写入。
 - 按 request.acceptanceCriteria 的顺序逐条验证；结果 checks 必须以 1..N 精确覆盖全部 AC。
-- request.engineQualityGate 若存在，是引擎在同一提交与冻结质量契约上刚完成的全量检查证明。只对其 checks 明确覆盖的机械 AC 直接引用该证明，禁止重复执行相同命令；代码语义、范围和未覆盖能力仍须独立验证。
+- request.engineQualityGate 若存在，是引擎在同一提交、冻结质量契约和绑定变化范围上刚完成的适用检查证明。只对其 checks 明确覆盖的机械 AC 直接引用该证明，禁止重复执行相同命令；代码语义、范围和未覆盖能力仍须独立验证。
 - 将单个 JSON 对象原子写入 request.resultPath；schema 必须匹配项目 validator 指令。
 - 即使验收失败也正常写入 verdict=failed 的结果；不要用进程退出码代替结构化结论。
 

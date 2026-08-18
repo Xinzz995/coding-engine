@@ -406,10 +406,16 @@ function renderGateHistory(records: EvidenceRecord[]): string {
     const result = !accepted
       ? `⚠️ 已执行，结果未采用（命令${r.ok ? '通过' : '未通过'}）`
       : r.ok ? '✅ 通过' : '❌ 未通过';
-    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${result}</td><td>${r.ran}/${r.total}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
+    const selection =
+      r.selectionMode === undefined
+        ? '旧记录未保存范围'
+        : `${r.selectionMode === 'scoped' ? '按变化范围' : r.selectionMode === 'fallback-full' ? '保守全量' : '全量'}` +
+          ` · 执行 ${text(r.selectedCheckIds?.join('、') || '—')}` +
+          ` · 跳过 ${text(r.skippedCheckIds?.join('、') || '—')}`;
+    return `<tr><td>${r.iteration}</td><td>${text(r.storyId ?? '—')}</td><td>${result}</td><td>${r.ran}/${r.total}</td><td>${selection}</td><td>${(r.ms / 1000).toFixed(1)}s</td><td>${stampOf(r.at)}</td><td>${failNote}</td></tr>`;
   }).join('');
   return `<div class="meta-line">门禁执行历史（engine 记录）：</div>` +
-    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<table class="evidence-table"><thead><tr><th>轮</th><th>story</th><th>结果</th><th>执行</th><th>范围</th><th>耗时</th><th>时刻</th><th>失败摘要</th></tr></thead><tbody>${rows}</tbody></table>` +
     `<p class="placeholder">engine 记录同处 agent 可写目录，防伪加固属后续评估——关键裁决请交叉核对 git 历史与工件。</p>`;
 }
 

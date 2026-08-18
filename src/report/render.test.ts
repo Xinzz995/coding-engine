@@ -481,10 +481,13 @@ describe('renderReportHtml evidence 增强', () => {
 
   it('gate-run 记录渲染执行历史表：通过与失败两态', () => {
     const html = renderReportHtml(data(ev([
-      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', ok: true, total: 2, ran: 2, ms: 8000 },
+      { type: 'gate-run', source: 'engine', at: '2026-07-08T06:00:00.000Z', iteration: 1, storyId: 'US-001', ok: true, total: 2, ran: 2, ms: 8000, selectionMode: 'scoped', selectedCheckIds: ['docs-health', 'format'], skippedCheckIds: ['tests'] },
       { type: 'gate-run', source: 'engine', at: '2026-07-08T06:10:00.000Z', iteration: 2, storyId: 'US-001', ok: false, total: 2, ran: 1, ms: 500, failedCommand: 'npm test', exitCode: 7, timedOut: false, diagnosticTail: 'FAIL test_x\n<b>expected 1</b>' },
     ])));
     expect(html).toContain('门禁执行历史');
+    expect(html).toContain('按变化范围');
+    expect(html).toContain('docs-health、format');
+    expect(html).toContain('跳过 tests');
     expect(html).toContain('✅ 通过');
     expect(html).toContain('❌ 未通过');
     expect(html).toContain('2/2');

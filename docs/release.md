@@ -123,6 +123,10 @@ coding-engine、Go 多模块合成试点和 Python Monorepo 合成试点都安�
 - Go 多模块项目运行自身 Go 检查，GitHub CI 不安装 Node 或 coding-x；
 - Python Monorepo 运行自身 Python 检查，GitHub CI 不安装 Node 或 coding-x。
 
+日常 PR/默认分支 Quality Gate 会按质量契约 `paths` 只运行当前净变化适用的检查；未知变化自动全量，
+每周与人工触发始终执行完整矩阵。这个调度优化不改变候选发布边界：候选构建仍要完成自身打包、三系统
+安装门禁和三仓当前证明，不能拿某次定时绿色或未命中的跳过项替代当前候选证据（ADR-030）。
+
 每个候选 PR 必须开放、非草稿、目标为该仓默认分支。对应仓库从该候选 CLI 显式运行：
 
 ```bash
