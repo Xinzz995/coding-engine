@@ -160,6 +160,10 @@ describe('instruction assets Validator artifact isolation contract', () => {
     expect(content).toContain('禁止递归枚举、读取、哈希或逐文件输出');
     expect(content).toContain('依赖目录、虚拟环境、缓存目录、构建输出');
     expect(content).toContain('只检查少量与当前 AC 明确相关的命名文件');
+    expect(content).toContain('背景文档只能先定位再分段读取');
+    expect(content).toContain('所有文本读取和差异命令');
+    expect(content).toContain('单次输出限制为最多 200 行、每行最多 2000 字符');
+    expect(content).toContain('按文件和行号分页读取');
     expect(content).toContain('session、cell、run ID');
     expect(content).toContain('轮询到终态');
     expect(content).toContain('显式终止并确认已经结束');

@@ -53,6 +53,8 @@ export interface IssueEngineEvidence {
   readonly reviewBindingDigest?: string;
   readonly storyValidationDigest?: string;
   readonly candidateProofDigest?: string;
+  readonly reusedFinalReview?: boolean;
+  readonly remoteRefreshDurationMs?: number;
 }
 
 export interface IssueEngineResult {
@@ -394,10 +396,25 @@ function parseIssueRunState(value: unknown): IssueRunState {
   const reviewBindingDigest = evidenceDigest('reviewBindingDigest');
   const storyValidationDigest = evidenceDigest('storyValidationDigest');
   const candidateProofDigest = evidenceDigest('candidateProofDigest');
+  const reusedFinalReview = evidenceValue.reusedFinalReview;
+  if (reusedFinalReview !== undefined && typeof reusedFinalReview !== 'boolean') {
+    throw new Error('Issue run evidence.reusedFinalReview 非法');
+  }
+  const remoteRefreshDurationMs = evidenceValue.remoteRefreshDurationMs;
+  if (
+    remoteRefreshDurationMs !== undefined &&
+    (!Number.isSafeInteger(remoteRefreshDurationMs) || (remoteRefreshDurationMs as number) < 0)
+  ) {
+    throw new Error('Issue run evidence.remoteRefreshDurationMs 非法');
+  }
   const evidence: IssueEngineEvidence = {
     ...(reviewBindingDigest === undefined ? {} : { reviewBindingDigest }),
     ...(storyValidationDigest === undefined ? {} : { storyValidationDigest }),
     ...(candidateProofDigest === undefined ? {} : { candidateProofDigest }),
+    ...(reusedFinalReview === undefined ? {} : { reusedFinalReview }),
+    ...(remoteRefreshDurationMs === undefined
+      ? {}
+      : { remoteRefreshDurationMs: remoteRefreshDurationMs as number }),
   };
   const lastExitCode = root.lastExitCode;
   if (lastExitCode !== null && !Number.isSafeInteger(lastExitCode)) {
@@ -802,6 +819,11 @@ export async function runReadyIssue(options: {
     readonly branch: string;
     readonly pullRequest: number;
   }) => Promise<IssueEngineResult>;
+  readonly refreshEngine?: (context: {
+    readonly workspace: string;
+    readonly branch: string;
+    readonly pullRequest: number;
+  }) => Promise<IssueEngineResult | null>;
   readonly executor?: IssueRunCommandExecutor;
   readonly now?: () => Date;
   /** @internal deterministic orchestration seam; production uses the safe workspace mutation. */
@@ -1199,12 +1221,15 @@ export async function runReadyIssue(options: {
   }
 
   let engine: IssueEngineResult;
+  const engineContext = {
+    workspace,
+    branch,
+    pullRequest: pullRequest.number,
+  };
   try {
-    engine = await options.runEngine({
-      workspace,
-      branch,
-      pullRequest: pullRequest.number,
-    });
+    engine =
+      (await options.refreshEngine?.(engineContext)) ??
+      (await options.runEngine(engineContext));
   } catch (error) {
     engine = {
       exitCode: 2,
@@ -1266,6 +1291,34 @@ export async function runReadyIssue(options: {
     const currentPullRequest = currentPullRequests[0];
     if (!pushed && currentPullRequest.headRefOid !== currentHead) {
       throw new Error('引擎运行后 PR 最新提交与已验证本地提交不一致');
+    }
+
+    if (engine.exitCode === 0 && !pushed && options.refreshEngine) {
+      const confirmation = await options.refreshEngine(engineContext);
+      if (confirmation === null) {
+        engine = {
+          exitCode: 6,
+          message: '最终信任前无法再次证明现有 Review 与 PR 上下文仍然有效',
+          evidence: engine.evidence,
+        };
+      } else {
+        const firstDuration = engine.evidence?.remoteRefreshDurationMs;
+        const confirmationDuration = confirmation.evidence?.remoteRefreshDurationMs;
+        const totalDuration =
+          firstDuration === undefined && confirmationDuration === undefined
+            ? undefined
+            : (firstDuration ?? 0) + (confirmationDuration ?? 0);
+        engine = {
+          ...confirmation,
+          evidence: {
+            ...engine.evidence,
+            ...confirmation.evidence,
+            ...(totalDuration === undefined
+              ? {}
+              : { remoteRefreshDurationMs: totalDuration }),
+          },
+        };
+      }
     }
 
     let phase: IssueRunState['phase'];

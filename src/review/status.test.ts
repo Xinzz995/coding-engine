@@ -477,6 +477,64 @@ describe('collectCurrentReviewStatus currentness binding', () => {
     expect(result.staleReasons).toContain('Runner 版本已变化');
   });
 
+  it('accepts an approval label present before refresh but rejects label drift during refresh', () => {
+    const workspace = temporaryDirectory('review-status-approval-label-');
+    const context = reviewContext();
+    writeBoundReview(workspace, context);
+    const approved = {
+      ...context,
+      pullRequest: {
+        ...context.pullRequest,
+        labels: ['quality-policy-approved'],
+      },
+    };
+    const common = {
+      workspace,
+      projectRoot: '/project',
+      codingXVersion: 'test-version',
+      storyValidationDigest: STORY_VALIDATION_DIGEST,
+      runnerVersionObservation: {
+        status: 'ready' as const,
+        runner: 'codex' as const,
+        version: 'codex 1.2.3',
+      },
+      preflight: () => ({ status: 'ready' as const, context: approved }),
+    };
+
+    expect(collectCurrentReviewStatus(common)).toMatchObject({ current: true, staleReasons: [] });
+
+    const ruleset = {
+      id: 1,
+      ...buildManagedRulesetPayload(null, [
+        { context: 'quality-gate', integration_id: GITHUB_ACTIONS_APP_ID },
+      ]),
+    };
+    const client = {
+      listRulesets: () => [ruleset],
+      listCheckRuns: () => [
+        {
+          id: 1,
+          name: 'quality-gate',
+          headSha: approved.headSha,
+          status: 'completed',
+          conclusion: 'success',
+          app: { id: GITHUB_ACTIONS_APP_ID, slug: 'github-actions', name: 'GitHub Actions' },
+        },
+      ],
+    } as unknown as GitHubQualityClient;
+    const raced = collectCurrentReviewStatus({
+      ...common,
+      client,
+      refreshRemote: true,
+      revalidate: () => ({ ok: false, message: '评审期间 PR 标签发生变化' }),
+    });
+    expect(raced).toMatchObject({
+      current: false,
+      staleReasons: ['评审期间 PR 标签发生变化'],
+    });
+    expect(raced).not.toHaveProperty('refreshedRemote');
+  });
+
   it('rebuilds reviewer-request escalation from saved primary axes without false staleness', () => {
     const workspace = temporaryDirectory('review-status-reviewer-risk-');
     const context = reviewContext();
