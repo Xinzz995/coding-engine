@@ -7,7 +7,11 @@ import {
   QUALITY_CONTRACT_RELATIVE_PATH,
   type QualityContract,
 } from '../quality/contract.js';
-import { parseGitHubPullRequest, parseGitHubRepository } from '../quality/github.js';
+import {
+  classifyCommandError,
+  parseGitHubPullRequest,
+  parseGitHubRepository,
+} from '../quality/github.js';
 import { environmentEntries, runManagedWorkspaceProcess } from '../workspace-safety/coordinator.js';
 import { inlineModuleArguments } from '../workspace-safety/inline-program.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
@@ -15,6 +19,7 @@ import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { normalizeText } from './common.js';
 import { confirmTemporaryUsesAfterSettledProcessFailure } from './managed-temporary-use.js';
 import { resolveReviewInfrastructureExecutable } from './managed-observation.js';
+import { runBoundedGitHubReadRetry } from './github-read-retry.js';
 import {
   allowedDirtyPath,
   completePullRequest,
@@ -735,7 +740,7 @@ function snapshotEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-export async function runReviewPreflightSnapshot(
+async function runReviewPreflightSnapshotAttempt(
   options: SnapshotOptions,
 ): Promise<ReviewPreflightResult> {
   const contextRoot = resolve(options.root);
@@ -823,5 +828,36 @@ export async function runReviewPreflightSnapshot(
     root: contextRoot,
     workspace: contextWorkspace,
     currentContract: options.currentContract,
+  });
+}
+
+export async function runReviewPreflightSnapshot(
+  options: SnapshotOptions,
+): Promise<ReviewPreflightResult> {
+  return await runBoundedGitHubReadRetry({
+    operationName: 'Review preflight snapshot 的 GitHub 读取',
+    attempt: async (attempt) => {
+      try {
+        return {
+          status: 'complete',
+          value: await runReviewPreflightSnapshotAttempt(options),
+        };
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!/(?:github-[a-z-]+|git-fetch):/u.test(detail)) throw error;
+        const failure = classifyCommandError(detail, attempt, !options.termination?.signal.aborted);
+        if (failure.kind !== 'transient' || !failure.retryable) throw failure;
+        return { status: 'retry', failure };
+      }
+    },
+    ...(options.termination
+      ? {
+          termination: {
+            signal: options.termination.signal,
+            error: () =>
+              new Error(`Review preflight snapshot 已被中断（${options.termination!.reason}）`),
+          },
+        }
+      : {}),
   });
 }

@@ -198,6 +198,39 @@ describe('managed Review preflight snapshot', () => {
     expect(legacyPreflight).toHaveBeenCalledOnce();
   });
 
+  it('retries a transient GitHub read inside the snapshot before exposing failure', async () => {
+    const project = temporary('coding-x-preflight-retry-project-');
+    const workspace = temporary('coding-x-preflight-retry-workspace-');
+    const result = (detail: string) => ({
+      verdict: 'root-failed' as const,
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      processTreeNotEmpty: false,
+      terminationReason: null,
+      durationMs: 1,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.from(detail),
+      leftover: false,
+    });
+    const managedProcess = vi
+      .fn()
+      .mockResolvedValueOnce(result('github-repository: unexpected EOF'))
+      .mockResolvedValueOnce(result('github-repository: authentication failed'));
+
+    await expect(
+      runReviewPreflightSnapshot({
+        session: {} as WorkspaceSession,
+        root: project,
+        workspace,
+        currentContract: contract(),
+        executablesForTests: { git: '/usr/bin/git', gh: '/usr/bin/gh' },
+        managedProcess,
+      }),
+    ).rejects.toThrow(/authentication failed/u);
+    expect(managedProcess).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects malformed or request-mismatched snapshot output', () => {
     expect(() => parseReviewPreflightSnapshotResult(Buffer.from('{}'), DIGEST('a'))).toThrow(
       /未知或缺失字段/u,
