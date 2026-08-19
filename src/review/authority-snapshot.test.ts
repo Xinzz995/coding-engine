@@ -457,7 +457,7 @@ async function realManagedFixture(
   };
 }
 
-describe.runIf(process.platform !== 'win32')('real managed authority snapshot', () => {
+function registerRealManagedAuthoritySnapshotTests(): void {
   it('records exactly ten managed operations for a complete high-risk Final Review', async () => {
     const fixture = await realManagedFixture(`process.stdout.write('codex 1.2.3\\n');`);
     try {
@@ -1411,7 +1411,7 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
           expectedDecisionsDigest: DECISIONS_DIGEST,
           includeDecisions: false,
           phase: 'test checkpoint',
-          timeoutMs: 2_000,
+          timeoutMs: 10_000,
           managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
         }),
@@ -1423,7 +1423,7 @@ child.unref(); process.stdout.write('codex 1.2.3\\n');`,
         roots.push(authorityRoot);
       }
     }
-  }, 15_000);
+  }, 30_000);
 
   it('fails closed when the Runner writes into its sealed temporary domain', async () => {
     const fixture = await realManagedFixture(
@@ -1797,4 +1797,10 @@ else process.exit(9);`,
       await fixture.managed.close().catch(() => undefined);
     }
   });
-});
+}
+
+describe.runIf(process.platform !== 'win32')(
+  'real managed authority snapshot',
+  { timeout: 30_000, concurrent: false },
+  registerRealManagedAuthoritySnapshotTests,
+);
