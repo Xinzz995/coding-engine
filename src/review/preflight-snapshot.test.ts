@@ -25,7 +25,10 @@ import {
   runReviewPreflightSnapshot,
   type ReviewPreflightSnapshotResult,
 } from './preflight-snapshot.js';
-import { runManagedStatusPreflightControlled } from './managed-status.js';
+import {
+  revalidateReviewContextFromPreflight,
+  runManagedStatusPreflightControlled,
+} from './managed-status.js';
 import { runUnmanagedReviewPreflight } from './unmanaged-preflight.js';
 
 const roots: string[] = [];
@@ -282,6 +285,39 @@ describe('managed Review preflight snapshot', () => {
         options,
       ),
     ).toMatchObject({ status: 'config-error', message: expect.stringContaining('未允许改动') });
+  });
+
+  it('uses a fresh complete snapshot to reject PR, label, head, and unavailable revalidation', () => {
+    const fixture = snapshotFixture();
+    const options = {
+      root: '/project',
+      workspace: '/workspace',
+      currentContract: contract(),
+    };
+    const initial = evaluateReviewPreflightSnapshot(fixture, options);
+    if (initial.status !== 'ready') throw new Error(initial.message);
+    expect(revalidateReviewContextFromPreflight(initial.context, initial)).toEqual({ ok: true });
+    expect(
+      revalidateReviewContextFromPreflight(initial.context, {
+        status: 'ready',
+        context: {
+          ...initial.context,
+          pullRequest: { ...initial.context.pullRequest, labels: ['changed'] },
+        },
+      }),
+    ).toMatchObject({ ok: false, message: expect.stringContaining('标签') });
+    expect(
+      revalidateReviewContextFromPreflight(initial.context, {
+        status: 'ready',
+        context: { ...initial.context, headSha: SHA('c') },
+      }),
+    ).toMatchObject({ ok: false, message: expect.stringContaining('HEAD') });
+    expect(
+      revalidateReviewContextFromPreflight(initial.context, {
+        status: 'remote-not-ready',
+        message: 'PR closed',
+      }),
+    ).toMatchObject({ ok: false, message: expect.stringContaining('PR closed') });
   });
 
   it.runIf(process.platform !== 'win32')(
