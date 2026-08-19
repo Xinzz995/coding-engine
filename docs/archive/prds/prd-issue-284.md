@@ -1,6 +1,6 @@
 ---
 title: "Issue #284: fix: 正确识别 init 的单个未暂存合法改动"
-status: active
+status: done
 updated: 2026-08-19
 scope: root
 ---
