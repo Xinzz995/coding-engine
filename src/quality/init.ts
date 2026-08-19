@@ -96,7 +96,7 @@ function git(root: string, args: string[]): string {
       cwd: root,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+    }).trimEnd();
   } catch (error) {
     throw new Error(
       `Git 检查失败（git ${args.join(' ')}）：${error instanceof Error ? error.message : String(error)}`,
@@ -118,6 +118,29 @@ function currentBranch(root: string): string {
   return branch;
 }
 
+function gitStatusPaths(root: string): string[] {
+  const entries = git(root, [
+    'status',
+    '--porcelain=v1',
+    '-z',
+    '--untracked-files=all',
+  ]).split('\0');
+  const paths: string[] = [];
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry) continue;
+    if (entry.length < 4) throw new Error('git status 返回非法记录');
+    paths.push(entry.slice(3));
+    if (entry[0] === 'R' || entry[0] === 'C' || entry[1] === 'R' || entry[1] === 'C') {
+      const previous = entries[index + 1];
+      if (!previous) throw new Error('git status rename 记录不完整');
+      paths.push(previous);
+      index += 1;
+    }
+  }
+  return [...new Set(paths)];
+}
+
 interface ContractSource {
   path: string;
   relativePath: string;
@@ -128,18 +151,13 @@ interface ContractSource {
 }
 
 function assertSafeWorktree(root: string, contractSource: ContractSource | undefined): void {
-  const lines = git(root, ['status', '--porcelain=v1', '--untracked-files=all'])
-    .split('\n')
-    .filter(Boolean);
+  const paths = gitStatusPaths(root);
   const allowed = new Set([
     QUALITY_CONTRACT_RELATIVE_PATH,
     ...(contractSource ? [contractSource.relativePath] : []),
     ...Object.keys(renderManagedGitHubFilesPlaceholder()),
   ]);
-  const unrelated = lines.filter((line) => {
-    const path = line.slice(3).split(' -> ').at(-1) ?? '';
-    return !allowed.has(path);
-  });
+  const unrelated = paths.filter((path) => !allowed.has(path));
   if (unrelated.length > 0) {
     throw new Error(`工作树含与初始化无关的改动，先提交或处理：${unrelated.join('、')}`);
   }
