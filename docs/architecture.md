@@ -140,7 +140,9 @@ GitHub Ruleset 详情可能按调用者权限省略 `bypass_actors`。普通 doc
 workspace 是运行边界：`workspace-safety.json` 与永久 `engine.lock/` 绑定目录身份；活动 writer 位于
 `engine.lock/lease/`。progress、evidence、Validator IPC、截图、Review 与报告的每次修改都属于当前
 owner 或一个明示 delegated child。Agent stdout/stderr 实时 tee，异常时只留有界尾部；operation
-只有取得与调用类型相符的收口证明且 delta 合法后才结算。普通项目命令在 POSIX 使用进程组证明，
+只有取得与调用类型相符的收口证明且 delta 合法后才结算。当前 owner 若丢失 DRAINED IPC 引用，
+只能从同一 canonical receipt 重建引用并重走完整 ACK/死亡/空集合校验；receipt 不含 RESULT，缺少
+根结果时安全结算后仍判调用不可验证。普通项目命令在 POSIX 使用进程组证明，
 Windows 使用 Job Object；受支持 AI Runner 在 POSIX 上可能正常创建独立 session，因此 START 后遇到
 timeout、用户中断、`parent-shutdown`、`output-failure`、自然 signal 或 `process-tree-not-empty` 时不采用
 外层进程组回执，而是永久 `operation-proof-missing`，不释放 workspace、不开始下一轮，也不宣称未知

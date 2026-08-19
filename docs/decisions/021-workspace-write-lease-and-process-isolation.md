@@ -153,6 +153,11 @@ START 发出后可能已经运行项目代码，所以恢复必须把 armed 当�
 或 running 落盘而宣称安全。drained receipt 绑定冻结的 armed 摘要，避免快速启动/退出与状态回写
 争抢同一个权威字节。receipt 还精确绑定 owner/protocol、delegation contract、containment、helper、
 supervisor identity、proof 与 `drainReason`；IPC DRAINED 只引用该 receipt 摘要，不复制裁决字段。
+当前 parent 仍持有同一精确 owner/lease 时，若 DRAINED 事件未到达但 canonical receipt 已原子安装，
+可以从 receipt 的 `operationId + digest + proof` 确定性重建同一引用，再走完全相同的 receipt 回读、
+ACK、supervisor 精确死亡、containment 空与原子 settlement。文件存在只用于触发，不能绕过既有
+字节绑定校验；receipt 没有记录 RESULT，因此 parent 未观察到根结果时只能安全结算 operation 并把
+本次调用判为不可验证，不能推断退出码或签发通过。
 
 POSIX 的 DATA 还在 START 前冻结内部 `process-group | opaque-runner` 结算策略。普通项目命令使用
 `process-group`；Developer、Validator 与真实 Final Review 这类受支持 AI Runner 使用
@@ -299,8 +304,9 @@ Issue #118 进一步收紧这些数字的含义：监督器生命周期只有准
 `ackExitMs` 和 `pollMs`，再显式翻译到 POSIX 与 Windows adapter。POSIX TERM 宽限是总终止预算内的
 平台私有子边界；Windows 不接收也不静默忽略 POSIX 专用公共字段。允许继续使用 workspace 的超时
 路径只有已经安装且严格绑定的 empty-containment receipt 可以作为证据；POSIX opaque Runner 已启动
-后的超时则明确不安装 receipt，并永久隔离。缺 DRAINED、ACK 后 supervisor 不退出、输出不关闭或
-最终身份无法确认都必须保留 operation 隔离并返回不可验证，不能把“已经发出 kill”当作收口成功。
+后的超时则明确不安装 receipt，并永久隔离。缺 DRAINED IPC 但当前 owner 能从同一 canonical receipt
+重建并完成原握手时不再单独构成隔离；缺 receipt、ACK 后 supervisor 不退出、输出不关闭或最终身份
+无法确认仍必须保留 operation 隔离并返回不可验证，不能把“已经发出 kill”当作收口成功。
 这里的有界保证要求操作系统调度与事件循环仍能推进；同步内核调用永久不返回、内核失效和断电仍
 属于本 ADR 已声明的不保证范围。
 

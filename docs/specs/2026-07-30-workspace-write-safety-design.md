@@ -443,6 +443,10 @@ POSIX、Windows v2 或 never-started，旧 Windows v1 只供恢复历史记录�
 receipt 精确字节及摘要的一部分。`process-tree-not-empty` 只能由 supervisor 在自然收口窗口结束后根据
 平台集合测量得出；parent 不能通过 TERMINATE 自报。IPC 的 DRAINED 只携带
 `operationId + receiptDigest + proof`，不复制 reason 或 `leftover`，避免出现两个可分叉的裁决来源。
+因此 DRAINED 是 canonical receipt 的严格引用而不是第二份权威。当前 parent 仍持有同一 owner/lease
+且观察到该引用缺失时，可从已安装 receipt 的精确字节重建同一引用；随后仍必须通过既有 core bytes、
+receipt、supervisor identity、containment 与最终 settlement 校验。若 parent 同时缺少 RESULT，receipt
+只能证明安全域已清空，operation 结算后本次命令仍返回不可验证。
 
 receipt 必须和当前 owner record、protocol、operation、active-child、delegated baseline 的精确字节
 摘要、固定 helper 及 supervisor identity 完全匹配。缺失、部分写入、旧 operation、helper 不匹配、当前 safety bytes 与
@@ -728,6 +732,10 @@ finally 只能请求这条 close 路径，不能旁路 rename。这样暂停在�
 | parent→supervisor | TERMINATE(operationId,reason)  | canonical armed；timeout/中断/断链 | 与 START 首到者获胜      |
 | supervisor→parent | DRAINED(receiptDigest,proof)   | 集合空、pipe EOF、receipt 已回读   | parent ack 后退出        |
 | parent→supervisor | ACK(operationId,receiptDigest) | DRAINED 与持久 receipt 已回读      | supervisor 可退出/关 Job |
+
+当前 owner 对 DRAINED 的磁盘重放只处理 IPC 引用缺失：canonical receipt 的严格校验、ACK、supervisor
+精确死亡与 containment 为空全部保持不变。重放不从 receipt 补造 STARTED/RESULT；缺失 RESULT 的调用
+必须在安全 settlement 后失败。
 
 START 必须携带 frozen active-child digest；supervisor 在运行/恢复 target 前从 canonical operation 重读并
 验证 owner、operation、containment 与该 digest。任一断链、重复、错 ID 或错 digest 都停止新启动。
