@@ -1,6 +1,6 @@
 ---
 title: "Issue #288: fix: Issue 续跑只刷新相同输入的远端状态"
-status: active
+status: done
 updated: 2026-08-19
 scope: root
 ---
