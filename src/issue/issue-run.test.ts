@@ -206,6 +206,8 @@ describe('ready Issue contract', () => {
       new Date('2026-08-15T00:15:00.000Z'),
       new Date('2026-08-15T00:16:00.000Z'),
       new Date('2026-08-15T00:17:00.000Z'),
+      new Date('2026-08-15T00:18:00.000Z'),
+      new Date('2026-08-15T00:19:00.000Z'),
     ];
     await expect(
       runReadyIssue({
@@ -240,6 +242,7 @@ describe('ready Issue contract', () => {
     expect(createPrCalls).toBe(2);
     expect(commentBody).toContain(ISSUE_RUN_COMMENT_MARKER);
 
+    let refreshCalls = 0;
     const second = await runReadyIssue({
       root,
       workspaceBase: '.workspace',
@@ -247,27 +250,65 @@ describe('ready Issue contract', () => {
       executor,
       now: () => times.shift()!,
       initializeWorkspace: async () => undefined,
-      refreshEngine: async () => ({
-        exitCode: 0,
-        message: 'refreshed ready',
-        evidence: {
-          reviewBindingDigest: `sha256:${'f'.repeat(64)}`,
-          reusedFinalReview: true,
-          remoteRefreshDurationMs: 42,
-        },
-      }),
+      refreshEngine: async () => {
+        refreshCalls += 1;
+        if (refreshCalls === 2) return null;
+        return {
+          exitCode: 0,
+          message: 'refreshed ready',
+          evidence: {
+            reviewBindingDigest: `sha256:${'f'.repeat(64)}`,
+            reusedFinalReview: true,
+            remoteRefreshDurationMs: 20,
+          },
+        };
+      },
       runEngine: async () => {
         throw new Error('full engine must not run after a reusable Review refresh');
       },
     });
-    expect(second.phase).toBe('trusted');
+    expect(second.phase).toBe('waiting-remote');
     expect(second.state).toMatchObject({
       continuations: 3,
       activeMs: 190_000,
-      readyToTrustedMs: 660_000,
-      waitingMs: 470_000,
+      evidence: { reusedFinalReview: true, remoteRefreshDurationMs: 20 },
+    });
+    expect(refreshCalls).toBe(2);
+    expect(draft).toBe(true);
+
+    refreshCalls = 0;
+    const third = await runReadyIssue({
+      root,
+      workspaceBase: '.workspace',
+      issueNumber: 42,
+      executor,
+      now: () => times.shift()!,
+      initializeWorkspace: async () => undefined,
+      refreshEngine: async () => {
+        refreshCalls += 1;
+        return {
+          exitCode: 0,
+          message: 'refreshed ready',
+          evidence: {
+            reviewBindingDigest: `sha256:${'f'.repeat(64)}`,
+            reusedFinalReview: true,
+            remoteRefreshDurationMs: refreshCalls === 1 ? 20 : 22,
+          },
+        };
+      },
+      runEngine: async () => {
+        throw new Error('full engine must not run after a reusable Review refresh');
+      },
+    });
+    expect(third.phase).toBe('trusted');
+    expect(third.state).toMatchObject({
+      continuations: 4,
+      activeMs: 250_000,
+      readyToTrustedMs: 780_000,
+      waitingMs: 530_000,
       evidence: { reusedFinalReview: true, remoteRefreshDurationMs: 42 },
     });
+    expect(refreshCalls).toBe(2);
     expect(createPrCalls).toBe(2);
     expect(draft).toBe(false);
     expect(calls.some((call) => call.args[0] === 'merge')).toBe(false);

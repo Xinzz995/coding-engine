@@ -1293,6 +1293,34 @@ export async function runReadyIssue(options: {
       throw new Error('引擎运行后 PR 最新提交与已验证本地提交不一致');
     }
 
+    if (engine.exitCode === 0 && !pushed && options.refreshEngine) {
+      const confirmation = await options.refreshEngine(engineContext);
+      if (confirmation === null) {
+        engine = {
+          exitCode: 6,
+          message: '最终信任前无法再次证明现有 Review 与 PR 上下文仍然有效',
+          evidence: engine.evidence,
+        };
+      } else {
+        const firstDuration = engine.evidence?.remoteRefreshDurationMs;
+        const confirmationDuration = confirmation.evidence?.remoteRefreshDurationMs;
+        const totalDuration =
+          firstDuration === undefined && confirmationDuration === undefined
+            ? undefined
+            : (firstDuration ?? 0) + (confirmationDuration ?? 0);
+        engine = {
+          ...confirmation,
+          evidence: {
+            ...engine.evidence,
+            ...confirmation.evidence,
+            ...(totalDuration === undefined
+              ? {}
+              : { remoteRefreshDurationMs: totalDuration }),
+          },
+        };
+      }
+    }
+
     let phase: IssueRunState['phase'];
     let exitCode = engine.exitCode;
     let message = engine.message;
