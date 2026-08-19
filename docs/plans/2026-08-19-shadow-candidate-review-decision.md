@@ -1,6 +1,6 @@
 ---
 title: Shadow 候选最终复核决定绑定修复
-status: active
+status: done
 updated: 2026-08-19
 scope: root
 issue: 278
@@ -62,3 +62,13 @@ issue: 278
 4. 同步 CLI 帮助、`commands/review-loop.md`、README 和发布手册。
 5. 按 `.coding-x/quality.json` 跑适用门禁，提交并经 PR 合并。
 6. 关闭旧候选 PR/证明，从新 `main` 构建候选并重做三仓验证。
+
+## 收口证据
+
+- Issue #278 由 PR #280 修复；合法、缺失、错候选、模式错配与正式兼容路径均已纳入回归。
+- 旧候选运行 `32139575460` 及其证明已作废；新候选运行 `32168637964` 重新生成唯一候选包。
+- 新候选分别通过 coding-engine PR #281、Go PR #37、Python PR #35 的独立验证；旧 Python finding 未复现。
+- 暂存运行 `32175922326` 只读取新三仓结果，并发布 npm 暂存编号
+  `f0c15e08-c2b3-45ac-9588-6a5b76f9c237`。
+- `v0.37.0` 标签发布运行 `32206585114` 成功；npm `latest`、`next`、Git 标签与不可变
+  GitHub Release 均绑定提交 `e00b645b5ee49302ac9a675078a434fc5ca55d0c`。
