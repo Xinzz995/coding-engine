@@ -4,6 +4,7 @@ import {
   encodeSupervisorAbortBeforeStart,
   encodeSupervisorAcknowledgement,
   encodeSupervisorData,
+  encodeSupervisorDrainedReference,
   encodeSupervisorStart,
   encodeSupervisorTerminate,
   parseDrainedReceipt,
@@ -140,6 +141,13 @@ describe('supervisor protocol', () => {
       containmentDigest: armed.containmentDigest,
     });
     expect(parseSupervisorDrained(drained.messageBytes).receiptDigest).toBe(drained.receiptDigest);
+    expect(
+      encodeSupervisorDrainedReference(
+        OPERATION_ID,
+        drained.receiptDigest,
+        'posix-group-empty-and-pipes-eof-v1',
+      ),
+    ).toEqual(drained.messageBytes);
 
     machine.acknowledge(encodeSupervisorAcknowledgement(OPERATION_ID, drained.receiptDigest));
     expect(machine.state).toBe('acknowledged');

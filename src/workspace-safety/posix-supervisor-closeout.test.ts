@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,9 +55,9 @@ async function setup(): Promise<{ workspace: string; session: WorkspaceSession }
   return { workspace, session: createWorkspaceSession(lease) };
 }
 
-function operationOptions(hooks: OperationHooks = {}) {
+function operationOptions(hooks: OperationHooks = {}, operationId = OPERATION_ID) {
   return {
-    operationId: OPERATION_ID,
+    operationId,
     kind: 'final-review' as const,
     delegation: 'read-only-v1' as const,
     platform: 'posix-process-group-v1' as const,
@@ -329,6 +330,223 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     expect(state.session.state).toBe('isolated');
     await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
   });
+
+  it('replays an installed receipt when the DRAINED event is lost', async () => {
+    const state = await setup();
+    const startedAt = performance.now();
+
+    const outcome = await runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+      runDarkPosixSupervisedOperation(operation, {
+        target: {
+          executable: process.execPath,
+          args: ['-e', 'process.exit(0)'],
+          cwd: state.workspace,
+          environment: [],
+        },
+        commandTimeoutMs: 60_000,
+        timeouts: {
+          handshakeMs: 2000,
+          naturalDrainMs: 100,
+          termMs: 50,
+          killMs: 300,
+          ackMs: 1000,
+          pollMs: 10,
+        },
+        hooks: {
+          onProtocolEvent: ({ type }) => (type === 'DRAINED' ? 'drop' : 'deliver'),
+        },
+      }),
+    );
+
+    expect(outcome).toMatchObject({ verdict: 'completed', code: 0, leftover: false });
+    expect(performance.now() - startedAt).toBeLessThan(2000);
+    expect(existsSync(operationPath(state.workspace))).toBe(false);
+    expect(
+      existsSync(join(settledOperationPath(state.workspace), DRAINED_RECEIPT_FILE)),
+    ).toBe(true);
+    const followUp = await runWorkspaceOperation(
+      state.session,
+      operationOptions({}, randomUUID()),
+      (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: {
+            executable: process.execPath,
+            args: ['-e', 'process.exit(0)'],
+            cwd: state.workspace,
+            environment: [],
+          },
+          commandTimeoutMs: 2000,
+          timeouts: {
+            handshakeMs: 2000,
+            naturalDrainMs: 100,
+            termMs: 50,
+            killMs: 300,
+            ackMs: 1000,
+            pollMs: 10,
+          },
+        }),
+    );
+    expect(followUp).toMatchObject({ verdict: 'completed', code: 0 });
+    await state.session.close();
+  });
+
+  it('settles safety but rejects the invocation when RESULT and DRAINED are both lost', async () => {
+    const state = await setup();
+    const startedAt = performance.now();
+
+    await expect(
+      runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: {
+            executable: process.execPath,
+            args: ['-e', 'process.exit(0)'],
+            cwd: state.workspace,
+            environment: [],
+          },
+          commandTimeoutMs: 60_000,
+          timeouts: {
+            handshakeMs: 2000,
+            naturalDrainMs: 100,
+            termMs: 50,
+            killMs: 300,
+            ackMs: 1000,
+            pollMs: 10,
+          },
+          hooks: {
+            onProtocolEvent: ({ type }) =>
+              type === 'RESULT' || type === 'DRAINED' ? 'drop' : 'deliver',
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'invalid',
+      message: expect.stringMatching(/RESULT.*missing|missing.*RESULT/u),
+    });
+
+    expect(performance.now() - startedAt).toBeLessThan(2000);
+    expect(state.session.state).toBe('open');
+    expect(existsSync(operationPath(state.workspace))).toBe(false);
+    expect(
+      existsSync(join(settledOperationPath(state.workspace), DRAINED_RECEIPT_FILE)),
+    ).toBe(true);
+    const followUp = await runWorkspaceOperation(
+      state.session,
+      operationOptions({}, randomUUID()),
+      (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: {
+            executable: process.execPath,
+            args: ['-e', 'process.exit(0)'],
+            cwd: state.workspace,
+            environment: [],
+          },
+          commandTimeoutMs: 2000,
+          timeouts: {
+            handshakeMs: 2000,
+            naturalDrainMs: 100,
+            termMs: 50,
+            killMs: 300,
+            ackMs: 1000,
+            pollMs: 10,
+          },
+        }),
+    );
+    expect(followUp).toMatchObject({ verdict: 'completed', code: 0 });
+    await state.session.close();
+  });
+
+  it('rejects a cross-operation receipt observed through the replay path', async () => {
+    const state = await setup();
+    let tampered = false;
+
+    await expect(
+      runWorkspaceOperation(state.session, operationOptions(), (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: {
+            executable: process.execPath,
+            args: ['-e', 'process.exit(0)'],
+            cwd: state.workspace,
+            environment: [],
+          },
+          commandTimeoutMs: 60_000,
+          timeouts: {
+            handshakeMs: 2000,
+            naturalDrainMs: 100,
+            termMs: 50,
+            killMs: 300,
+            ackMs: 1000,
+            pollMs: 10,
+          },
+          hooks: {
+            onProtocolEvent: ({ type }) => {
+              if (type !== 'DRAINED') return 'deliver';
+              const receiptPath = join(operationPath(state.workspace), DRAINED_RECEIPT_FILE);
+              const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as Record<
+                string,
+                unknown
+              >;
+              receipt.operationId = '00000000-0000-4000-8000-000000000099';
+              writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`);
+              tampered = true;
+              return 'drop';
+            },
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'invalid' });
+
+    expect(tampered).toBe(true);
+    expect(state.session.state).toBe('isolated');
+    expect(existsSync(operationPath(state.workspace))).toBe(true);
+    await expect(state.session.close()).rejects.toMatchObject({ code: 'isolated' });
+  });
+
+  it('closes repeated real short commands without an active operation or live process group', async () => {
+    const state = await setup();
+    const startedAt = performance.now();
+    const operationCount = 12;
+
+    for (let index = 0; index < operationCount; index += 1) {
+      const outcome = await runWorkspaceOperation(
+        state.session,
+        operationOptions({}, randomUUID()),
+        (operation) =>
+          runDarkPosixSupervisedOperation(operation, {
+            target: {
+              executable: process.execPath,
+              args: ['-e', `process.stdout.write(${JSON.stringify(`short-${index}`)})`],
+              cwd: state.workspace,
+              environment: [],
+            },
+            commandTimeoutMs: 60_000,
+            timeouts: {
+              handshakeMs: 2000,
+              naturalDrainMs: 100,
+              termMs: 50,
+              killMs: 300,
+              ackMs: 1000,
+              pollMs: 10,
+            },
+          }),
+      );
+      expect(outcome).toMatchObject({ verdict: 'completed', code: 0, leftover: false });
+      expect(outcome.stdout.toString('utf8')).toBe(`short-${index}`);
+      await expect(
+        waitForPosixProcessGroupEmpty(outcome.containment.pgid, 100, 10),
+      ).resolves.toBe(true);
+      expect(existsSync(operationPath(state.workspace))).toBe(false);
+    }
+
+    expect(performance.now() - startedAt).toBeLessThan(15_000);
+    const settledRoot = join(
+      state.workspace,
+      PROTOCOL_ROOT_DIR,
+      ACTIVE_LEASE_DIR,
+      'settled-operations',
+    );
+    expect(readdirSync(settledRoot)).toHaveLength(operationCount);
+    await state.session.close();
+  }, 20_000);
 
   it('fails within the shared closeout deadline when escaped output never reaches EOF', async () => {
     const state = await setup();

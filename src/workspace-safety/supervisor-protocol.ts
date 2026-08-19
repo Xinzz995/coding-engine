@@ -589,6 +589,17 @@ export function encodeSupervisorTerminate(
   );
 }
 
+export function encodeSupervisorDrainedReference(
+  operationId: string,
+  receiptDigest: string,
+  proof: DrainedProof,
+): Buffer {
+  return encodeAndCheck(
+    { schemaVersion: 1 as const, type: 'DRAINED' as const, operationId, receiptDigest, proof },
+    parseSupervisorDrained,
+  );
+}
+
 export function encodeSupervisorAbortBeforeStart(operationId: string): Buffer {
   return encodeAndCheck(
     { schemaVersion: 1 as const, type: 'ABORT_BEFORE_START' as const, operationId },

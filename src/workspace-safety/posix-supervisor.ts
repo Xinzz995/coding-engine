@@ -1,9 +1,12 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import type { DelegatedSemanticCandidate } from '../contracts/delegated-operation-contract.js';
 import { createSystemIdentityAdapter } from './identity.js';
-import type { WorkspaceOperationHandleControlled } from './operation.js';
+import {
+  DRAINED_RECEIPT_FILE,
+  type WorkspaceOperationHandleControlled,
+} from './operation.js';
 import {
   inspectPosixProcessPlacement,
   probePosixProcessGroup,
@@ -18,6 +21,7 @@ import {
   encodeSupervisorAcknowledgement,
   encodeSupervisorAbortBeforeStart,
   encodeSupervisorData,
+  encodeSupervisorDrainedReference,
   encodeSupervisorStart,
   encodeSupervisorTerminate,
   parseContainmentDescriptor,
@@ -63,6 +67,10 @@ interface ResolvedTimeouts {
 }
 
 export interface PosixSupervisorHooks {
+  /** @internal Deterministic fault-injection seam; production never drops protocol events. */
+  readonly onProtocolEvent?: (event: {
+    readonly type: ProtocolEvent['type'];
+  }) => 'deliver' | 'drop';
   readonly onBound?: (facts: {
     readonly supervisorPid: number;
     readonly placement: PosixProcessPlacement;
@@ -258,6 +266,57 @@ function posixDeadlineError(label: string): WorkspaceSafetyError {
   );
 }
 
+interface InstalledReceiptObserver {
+  readonly promise: Promise<DrainedEvent>;
+  dispose(): void;
+}
+
+function observeInstalledDrainedReceipt(
+  operation: WorkspaceOperationHandleControlled,
+  pollMs: number,
+): InstalledReceiptObserver {
+  const receiptPath = join(operation.operationPath, DRAINED_RECEIPT_FILE);
+  const intervalMs = Math.max(10, Math.min(250, pollMs * 10));
+  let disposed = false;
+  let timer: NodeJS.Timeout | undefined;
+  let resolveReceipt!: (event: DrainedEvent) => void;
+  let rejectReceipt!: (error: unknown) => void;
+  const promise = new Promise<DrainedEvent>((resolve, reject) => {
+    resolveReceipt = resolve;
+    rejectReceipt = reject;
+  });
+  const check = (): void => {
+    if (disposed) return;
+    if (!existsSync(receiptPath)) {
+      timer = setTimeout(check, intervalMs);
+      timer.unref();
+      return;
+    }
+    try {
+      const receiptBytes = readFileSync(receiptPath);
+      const receipt = parseDrainedReceipt(receiptBytes);
+      const messageBytes = encodeSupervisorDrainedReference(
+        receipt.operationId,
+        digestBytes(receiptBytes),
+        receipt.proof,
+      );
+      disposed = true;
+      resolveReceipt({ type: 'DRAINED', messageBytes });
+    } catch (error) {
+      disposed = true;
+      rejectReceipt(error);
+    }
+  };
+  queueMicrotask(check);
+  return {
+    promise,
+    dispose: () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    },
+  };
+}
+
 interface OperationDeadlineState {
   timedOut: boolean;
 }
@@ -425,6 +484,7 @@ class PosixSupervisorProcess {
     private readonly timeouts: ResolvedTimeouts,
     private readonly operationId: string,
     private readonly onOutput: RunDarkPosixSupervisedOperationOptions['onOutput'],
+    private readonly onProtocolEvent: PosixSupervisorHooks['onProtocolEvent'],
   ) {
     if (child.pid === undefined) isolated('supervisor spawn did not return a pid');
     this.pid = child.pid;
@@ -474,6 +534,12 @@ class PosixSupervisorProcess {
       this.#outputQueues[event.stream] = this.#outputQueues[event.stream]
         .then(() => this.#consumeOutput(event))
         .catch((error: unknown) => this.#fail(error));
+      return;
+    }
+    try {
+      if (this.onProtocolEvent?.({ type: event.type }) === 'drop') return;
+    } catch (error) {
+      this.#fail(error);
       return;
     }
     if (this.#waiter) {
@@ -550,6 +616,10 @@ class PosixSupervisorProcess {
     this.#waiter = undefined;
     if (waiter.timer) clearTimeout(waiter.timer);
     waiter.reject(error);
+  }
+
+  cancelPendingWaitForReceiptReplay(): void {
+    this.#cancelWait(new Error('installed receipt replay superseded the pending IPC wait'));
   }
 
   next<T extends ProtocolEvent['type']>(expected: T): Promise<Extract<ProtocolEvent, { type: T }>> {
@@ -769,6 +839,7 @@ function spawnSupervisor(
   timeouts: ResolvedTimeouts,
   operationId: string,
   onOutput: RunDarkPosixSupervisedOperationOptions['onOutput'],
+  onProtocolEvent: PosixSupervisorHooks['onProtocolEvent'],
 ): PosixSupervisorProcess {
   if (process.platform === 'win32') {
     throw new WorkspaceSafetyError('unsupported', 'POSIX supervisor is unavailable on Windows');
@@ -783,7 +854,7 @@ function spawnSupervisor(
       windowsHide: true,
     },
   );
-  return new PosixSupervisorProcess(child, timeouts, operationId, onOutput);
+  return new PosixSupervisorProcess(child, timeouts, operationId, onOutput, onProtocolEvent);
 }
 
 function validateSupervisorBound(
@@ -1037,6 +1108,7 @@ export async function runDarkPosixSupervisedOperation(
 ): Promise<PosixInvocationOutcome> {
   let terminationTrigger: TerminationTrigger | undefined;
   let processHandle: PosixSupervisorProcess | undefined;
+  let receiptObserver: InstalledReceiptObserver | undefined;
   let supervisorIdentity: string | undefined;
   let descriptor: BoundSupervisorDescriptor | undefined;
   let terminationAttempted = false;
@@ -1079,7 +1151,12 @@ export async function runDarkPosixSupervisedOperation(
     const prepareDeadline = MonotonicDeadline.after(timeouts.handshakeMs);
     const helperBytes = helperBundleBytes();
     const helperDigest = digestBytes(helperBytes);
-    processHandle = spawnSupervisor(timeouts, operation.operationId, options.onOutput);
+    processHandle = spawnSupervisor(
+      timeouts,
+      operation.operationId,
+      options.onOutput,
+      options.hooks?.onProtocolEvent,
+    );
     supervisorIdentity = processIdentity(processHandle.pid);
     throwIfPrestartInterrupted(terminationTrigger);
     const boundEvent = await processHandle.nextBefore(['BOUND'], prepareDeadline, 'prepare');
@@ -1206,25 +1283,41 @@ export async function runDarkPosixSupervisedOperation(
       terminationTrigger.promise,
       processHandle.outputFailure,
     ]);
+    receiptObserver = observeInstalledDrainedReceipt(operation, timeouts.pollMs);
+    const receiptReplay = receiptObserver.promise.then((event) => ({
+      kind: 'receipt' as const,
+      event,
+    }));
+    let replayedInstalledReceipt = false;
     let pendingEvent = processHandle.nextAny(['STARTED', 'RESULT', 'DRAINED'] as const, null);
     while (!drained) {
       if (terminationSent === undefined && terminationTrigger.reason !== undefined) {
         await sendTermination(terminationTrigger.reason);
       }
       const next = closeoutDeadline
-        ? await processHandle.racePendingBefore(
-            pendingEvent,
-            closeoutDeadline,
-            'termination and drain',
-            terminationSent === undefined ? anyTermination : undefined,
-          )
+        ? await Promise.race([
+            processHandle.racePendingBefore(
+              pendingEvent,
+              closeoutDeadline,
+              'termination and drain',
+              terminationSent === undefined ? anyTermination : undefined,
+            ),
+            receiptReplay,
+          ])
         : await Promise.race([
             pendingEvent.then((event) => ({ kind: 'event' as const, event })),
             anyTermination.then((reason) => ({
               kind: 'termination' as const,
               reason,
             })),
+            receiptReplay,
           ]);
+      if (next.kind === 'receipt') {
+        replayedInstalledReceipt = true;
+        processHandle.cancelPendingWaitForReceiptReplay();
+        drained = next.event;
+        break;
+      }
       if (next.kind === 'termination') {
         await sendTermination(next.reason);
         continue;
@@ -1278,6 +1371,7 @@ export async function runDarkPosixSupervisedOperation(
         pendingEvent = processHandle.nextAny(['STARTED', 'RESULT', 'DRAINED'] as const, null);
       }
     }
+    receiptObserver.dispose();
     terminationTrigger.dispose();
     const ackExitDeadline = MonotonicDeadline.after(timeouts.ackMs);
     failureCloseoutDeadline = ackExitDeadline;
@@ -1303,7 +1397,7 @@ export async function runDarkPosixSupervisedOperation(
       receipt.drainReason === 'output-failure';
     if (
       ((receipt.drainReason === 'natural' || receipt.drainReason === 'process-tree-not-empty') &&
-        (!startSent || !started || !result)) ||
+        !startSent) ||
       (receipt.proof === 'never-started-containment-empty-v1' &&
         (startSent || started !== undefined || result !== undefined)) ||
       (receipt.proof !== 'never-started-containment-empty-v1' && !startSent) ||
@@ -1351,6 +1445,17 @@ export async function runDarkPosixSupervisedOperation(
         }),
     );
     completed = true;
+    if (
+      result === undefined &&
+      (receipt.drainReason === 'natural' || receipt.drainReason === 'process-tree-not-empty')
+    ) {
+      throw new WorkspaceSafetyError(
+        'invalid',
+        `POSIX root RESULT event is missing after safety settlement${
+          replayedInstalledReceipt ? ' through installed receipt replay' : ''
+        }`,
+      );
+    }
     const leftover = receipt.drainReason === 'process-tree-not-empty';
     const terminationReason = externallyTerminated ? receipt.drainReason : null;
     return {
@@ -1444,6 +1549,7 @@ export async function runDarkPosixSupervisedOperation(
     }
     throw closeoutError ?? error;
   } finally {
+    receiptObserver?.dispose();
     terminationTrigger?.dispose();
     if (!completed && processHandle) {
       await processHandle.abort(failureCloseoutDeadline ?? MonotonicDeadline.after(0));
