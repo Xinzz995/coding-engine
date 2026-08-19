@@ -11,6 +11,7 @@ import {
 } from './managed-observation.js';
 import { evaluateCurrentReviewStatus, type CurrentReviewStatus } from './currentness.js';
 import { revalidateReviewContext, runReviewPreflight } from './preflight.js';
+import { runReviewPreflightSnapshot } from './preflight-snapshot.js';
 import { evaluateManagedReviewRemoteState } from './remote.js';
 import { readRunnerVersion } from './runner.js';
 import { readFinalReviewState, readReviewDecisions } from './state.js';
@@ -23,10 +24,14 @@ import type { FinalReviewState } from './types.js';
 
 interface ManagedStatusAdapters {
   observeStoryValidation: typeof observeStoryValidationCurrentness;
+  preflightSnapshot: typeof runReviewPreflightSnapshot;
+  legacyPreflight: typeof runReviewPreflight;
 }
 
 const MANAGED_STATUS_ADAPTERS: ManagedStatusAdapters = {
   observeStoryValidation: observeStoryValidationCurrentness,
+  preflightSnapshot: runReviewPreflightSnapshot,
+  legacyPreflight: runReviewPreflight,
 };
 
 export interface ManagedStatusQualityResult {
@@ -52,6 +57,28 @@ function stale(read: ReturnType<typeof readFinalReviewState>, reason: string): C
 
 function addReason(status: CurrentReviewStatus, reason: string): CurrentReviewStatus {
   return { ...status, current: false, staleReasons: [...status.staleReasons, reason] };
+}
+
+/** @internal Snapshot failure falls back only while the same session is still safe and open. */
+export async function runManagedStatusPreflightControlled(
+  options: Parameters<typeof runReviewPreflight>[0] & {
+    session: WorkspaceSession;
+    termination?: ManagedReviewTermination;
+  },
+  adapters: Pick<ManagedStatusAdapters, 'preflightSnapshot' | 'legacyPreflight'>,
+) {
+  try {
+    return await adapters.preflightSnapshot({
+      session: options.session,
+      root: options.root,
+      workspace: options.workspace,
+      currentContract: options.currentContract,
+      ...(options.termination === undefined ? {} : { termination: options.termination }),
+    });
+  } catch (error) {
+    if (options.session.state !== 'open') throw error;
+    return await adapters.legacyPreflight(options);
+  }
 }
 
 function sameStoryObservation(
@@ -204,12 +231,14 @@ export async function collectManagedStatusQuality(options: {
     root: options.projectRoot,
     ...(options.termination === undefined ? {} : { termination: options.termination }),
   });
-  const preflight = await runReviewPreflight({
+  const preflight = await runManagedStatusPreflightControlled({
+    session: options.session,
     root: options.projectRoot,
     workspace: options.workspace,
     currentContract: contract.contract,
     observation,
-  });
+    ...(options.termination === undefined ? {} : { termination: options.termination }),
+  }, adapters);
   if (preflight.status !== 'ready') {
     return {
       storyValidation: initialStory,
