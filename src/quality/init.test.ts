@@ -34,6 +34,10 @@ function git(root: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 }
 
+function gitOutput(root: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+}
+
 function codingEngineContract(): QualityContract {
   const result = readQualityContract(process.cwd());
   if (result.status !== 'ready') throw new Error(`root contract unavailable: ${result.status}`);
@@ -523,6 +527,87 @@ describe('runQualityInit', () => {
     client.corruptReadback = true;
     await expect(runQualityInit(options(root, client))).rejects.toThrow('回读核验失败');
     expect(existsSync(join(root, QUALITY_WORKFLOW_PATH))).toBe(false);
+  });
+
+  it('permits a sole unstaged quality contract change in the first status record', async () => {
+    const root = repositoryFixture();
+    const contractPath = join(root, '.coding-x/quality.json');
+    writeFileSync(contractPath, `${readFileSync(contractPath, 'utf8')}\n`);
+    expect(
+      gitOutput(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all'),
+    ).toBe(' M .coding-x/quality.json\0');
+
+    await expect(runQualityInit(options(root, new FakeGitHubClient()))).resolves.toMatchObject({
+      status: 'files-created',
+      exitCode: 6,
+    });
+  }, 15_000);
+
+  it.each([
+    {
+      label: 'unstaged',
+      path: 'README.md',
+      status: ' M README.md\0',
+      mutate: (root: string) => writeFileSync(join(root, 'README.md'), '# Changed\n'),
+    },
+    {
+      label: 'staged',
+      path: 'README.md',
+      status: 'M  README.md\0',
+      mutate: (root: string) => {
+        writeFileSync(join(root, 'README.md'), '# Changed\n');
+        git(root, 'add', 'README.md');
+      },
+    },
+    {
+      label: 'untracked',
+      path: 'untracked.txt',
+      status: '?? untracked.txt\0',
+      mutate: (root: string) => writeFileSync(join(root, 'untracked.txt'), 'do not mix\n'),
+    },
+  ])('rejects a first $label unrelated record and reports its path', async ({ path, status, mutate }) => {
+    const root = repositoryFixture();
+    mutate(root);
+    expect(
+      gitOutput(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all'),
+    ).toBe(status);
+
+    await expect(runQualityInit(options(root, new FakeGitHubClient()))).rejects.toThrow(
+      `工作树含与初始化无关的改动，先提交或处理：${path}`,
+    );
+  });
+
+  it('keeps multiple generated init files in the existing allowed set', async () => {
+    const root = repositoryFixture();
+    const client = new FakeGitHubClient();
+    const generated = await runQualityInit(options(root, client));
+    expect(generated.status).toBe('files-created');
+    expect(
+      gitOutput(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all')
+        .split('\0')
+        .filter(Boolean).length,
+    ).toBeGreaterThan(1);
+
+    await expect(runQualityInit(options(root, client))).resolves.toMatchObject({
+      status: 'waiting-for-pr',
+      exitCode: 6,
+    });
+  }, 15_000);
+
+  it('rejects a rename from an unrelated path into an allowed managed path', async () => {
+    const root = repositoryFixture();
+    mkdirSync(join(root, '.github/workflows'), { recursive: true });
+    git(root, 'config', 'status.renames', 'true');
+    git(root, 'mv', 'README.md', QUALITY_WORKFLOW_PATH);
+    expect(
+      gitOutput(root, 'status', '--porcelain=v1', '-z', '--untracked-files=all'),
+    ).toBe(`R  ${QUALITY_WORKFLOW_PATH}\0README.md\0`);
+    const client = new FakeGitHubClient();
+
+    await expect(runQualityInit(options(root, client))).rejects.toThrow(
+      '工作树含与初始化无关的改动，先提交或处理：README.md',
+    );
+    expect(client.events).toEqual([]);
   });
 
   it('refuses unrelated dirty files', async () => {
