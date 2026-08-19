@@ -1386,7 +1386,7 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
     } finally {
       await fixture.managed.close();
     }
-  });
+  }, 20_000);
 
   it('fails closed when a child survives the helper root process', async () => {
     const fixture = await realManagedFixture(

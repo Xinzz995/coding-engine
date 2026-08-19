@@ -247,11 +247,18 @@ describe('ready Issue contract', () => {
       executor,
       now: () => times.shift()!,
       initializeWorkspace: async () => undefined,
-      runEngine: async () => ({
+      refreshEngine: async () => ({
         exitCode: 0,
-        message: 'ready',
-        evidence: { reviewBindingDigest: `sha256:${'f'.repeat(64)}` },
+        message: 'refreshed ready',
+        evidence: {
+          reviewBindingDigest: `sha256:${'f'.repeat(64)}`,
+          reusedFinalReview: true,
+          remoteRefreshDurationMs: 42,
+        },
       }),
+      runEngine: async () => {
+        throw new Error('full engine must not run after a reusable Review refresh');
+      },
     });
     expect(second.phase).toBe('trusted');
     expect(second.state).toMatchObject({
@@ -259,6 +266,7 @@ describe('ready Issue contract', () => {
       activeMs: 190_000,
       readyToTrustedMs: 660_000,
       waitingMs: 470_000,
+      evidence: { reusedFinalReview: true, remoteRefreshDurationMs: 42 },
     });
     expect(createPrCalls).toBe(2);
     expect(draft).toBe(false);

@@ -65,6 +65,7 @@ import {
 import { publishCandidateProof } from './release/candidate-proof-publish.js';
 import { refreshCandidateDogfoodProof } from './release/candidate-proof-refresh.js';
 import { runReadyIssue } from './issue/issue-run.js';
+import { refreshReadyIssueReview } from './issue/issue-refresh.js';
 import { readFinalReviewState } from './review/state.js';
 import { digestReviewBinding } from './review/binding.js';
 
@@ -812,6 +813,11 @@ export async function main(argv: string[]): Promise<number> {
         root: process.cwd(),
         workspaceBase: cfg.workspace,
         issueNumber: cfg.issueNumber!,
+        refreshEngine: async ({ workspace }) =>
+          await refreshReadyIssueReview({
+            workspace,
+            projectRoot: process.cwd(),
+          }),
         runEngine: async ({ workspace }) => {
           const exitCode = await runLoop({
             kind: cfg.kind,
