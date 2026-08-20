@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3.0
 
-$ExpectedSdkVersion = '10.0.303'
+$ExpectedSdkVersion = '10.0.204'
 $ExecutableName = if ($Target -eq 'PathInspector') {
   'coding-x-windows-path-inspector.exe'
 } else {
