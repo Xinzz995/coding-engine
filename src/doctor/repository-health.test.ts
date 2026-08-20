@@ -105,10 +105,13 @@ describe('coding-engine repository mechanical health', () => {
     expect(codeqlPins.map(({ action }) => action)).toEqual(['init', 'analyze']);
     expect(new Set(codeqlPins.map(({ sha }) => sha)).size).toBe(1);
     expect(new Set(codeqlPins.map(({ version }) => version)).size).toBe(1);
-    expect(codeql).toContain("pull_request:\n    branches: [main]");
-    expect(codeql).toContain("push:\n    branches: [main]");
+    expect(codeql).toContain("pull_request:\n    branches: [main]\n  schedule:");
+    expect(codeql).toContain(
+      "push:\n    branches: [main]\n    paths-ignore:\n      - '**/*.md'\n      - 'docs/**'",
+    );
     expect(codeql).not.toContain("\n    paths:");
     expect(codeql).toContain("schedule:\n    - cron: '37 3 * * 1'");
+    expect(codeql).toContain('workflow_dispatch:');
 
     const dependabot = readFileSync(join(ROOT, '.github/dependabot.yml'), 'utf8');
     for (const group of ['production-dependencies', 'development-dependencies', 'actions']) {
