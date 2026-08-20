@@ -36,13 +36,16 @@ scope: root
 5. `paths` 是已知改动的最小检查映射，不是安全白名单。一个改动没有命中任何路径规则时不会零检查
    通过，而会全量运行。
 6. CodeQL 是否可按路径跳过由当前 Ruleset 实证裁决。PR #270 证明代码扫描保护要求当前 PR 有 CodeQL
-   结果：纯文档 head 没有分析时仍被阻止合并。因此 CodeQL 保持每个 PR/main push 运行；本 ADR
-   只收窄项目质量命令与平台矩阵，不削弱代码扫描保护。
+   结果：纯文档 head 没有分析时仍被阻止合并，因此 pull_request 保持每次运行且不接受路径过滤。
+   PR 已分析、合并只改变 Markdown 或 `docs/**` 时，main push 的代码树未变，可以跳过第二次扫描；
+   混合 push 仍完整运行。weekly schedule 与人工 workflow_dispatch 无路径过滤，继续发现扫描器、查询和
+   环境漂移。不上传自定义空 SARIF，也不削弱 Ruleset 的 CodeQL 工具或阈值。
 
 ## 后果
 
 - 普通文档 PR 只承担仓库健康等明确相关检查，不再启动完整测试、构建、依赖审计和多平台矩阵。
 - 代码、质量契约、构建配置、运行资产和未知文件继续触发相应检查或保守全量。
-- 合并不再重复运行项目 Quality Gate；默认分支治理漂移会被 doctor 拒绝，CodeQL 仍维护 main 扫描。
+- 合并不再重复运行项目 Quality Gate；纯文档 main push 也不重复 CodeQL。代码/混合 main push、每周
+  schedule 与人工 dispatch 仍维护默认分支完整扫描。
 - 每周 full 失败表示环境或依赖漂移，需要独立修复；它不 retroactively 伪造已有 PR 的结果。
 - 路径映射漏项首先表现为未知路径全量，代价是变慢而不是假绿；确认映射后才能进一步收窄。

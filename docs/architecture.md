@@ -100,8 +100,9 @@ status/report 不能把该命令显示为普通通过或普通失败。本地 ev
 同一 Git pathspec 语义计算检查集合，平台 job 与步骤只在适用时启动；聚合总闸只允许计划明确不适用
 的 job 为 skipped。PR 按变化运行；受管 Ruleset 无绕过、强制最新默认分支和必需检查，因此合并后不再
 重复运行项目 Quality Gate。每周 schedule 和人工 dispatch 始终执行完整平台矩阵，用来发现宿主镜像、
-依赖源和工具链漂移；无法固定比较 PR 提交时同样回退 full。CodeQL 仍在 PR 与默认分支运行
-（ADR-030）。
+依赖源和工具链漂移；无法固定比较 PR 提交时同样回退 full。CodeQL 在每个 PR 保持必需分析；只有
+已经分析且合并后代码树未变的 Markdown/`docs/**` main push 跳过重复扫描，代码/混合 push、weekly
+schedule 与人工 dispatch 仍完整运行（ADR-030）。
 
 coding-engine 的 GitHub 与暂存流程不运行候选版本的完整 doctor。它们运行仓库机械健康检查，
 只验证文档、契约结构和契约生成文件；完整 doctor 继续拒绝候选版本与固定版本不一致。
