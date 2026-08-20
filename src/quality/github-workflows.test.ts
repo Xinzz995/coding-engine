@@ -277,7 +277,7 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).toContain('PR_HEAD: ${{ github.event.pull_request.head.sha }}');
   });
 
-  it('runs the generated plan for docs, source, unknown paths, and scheduled full checks', () => {
+  it('runs only repository health for an ordinary docs change', () => {
     const contract = codingEngineContract();
     const docs = runGeneratedPlan(contract, 'docs/ordinary-note.md');
     expect(docs.get('full')).toBe('false');
@@ -288,7 +288,10 @@ describe('renderQualityGateWorkflow', () => {
     for (let index = 2; index <= contract.github.jobs.length; index += 1) {
       expect(docs.get(`job_${index}`)).toBe('false');
     }
+  });
 
+  it('runs the source checks and skips the native Windows job for a scoped source change', () => {
+    const contract = codingEngineContract();
     const source = runGeneratedPlan(contract, 'src/change-scoped-fixture.ts');
     expect(source.get('full')).toBe('false');
     expect(outputForCheck(contract, source, 'tests')).toBe('true');
@@ -297,7 +300,10 @@ describe('renderQualityGateWorkflow', () => {
     expect(source.get('job_1')).toBe('true');
     expect(source.get('job_6')).toBe('true');
     expect(source.get('job_7')).toBe('false');
+  });
 
+  it('selects checks from both sides of a rename', () => {
+    const contract = codingEngineContract();
     const renamed = runGeneratedPlan(
       contract,
       'docs/renamed-from-source.md',
@@ -307,13 +313,19 @@ describe('renderQualityGateWorkflow', () => {
     expect(renamed.get('full')).toBe('false');
     expect(outputForCheck(contract, renamed, 'tests')).toBe('true');
     expect(outputForCheck(contract, renamed, 'repository-health')).toBe('true');
+  });
 
+  it('fails closed to the full matrix for an unknown path', () => {
+    const contract = codingEngineContract();
     const unknown = runGeneratedPlan(contract, 'UNCLASSIFIED');
     expect(unknown.get('full')).toBe('true');
     for (let index = 1; index <= contract.github.jobs.length; index += 1) {
       expect(unknown.get(`job_${index}`)).toBe('true');
     }
+  });
 
+  it('runs the full matrix for a scheduled check even when the diff is docs-only', () => {
+    const contract = codingEngineContract();
     const scheduled = runGeneratedPlan(contract, 'docs/scheduled-note.md', 'schedule');
     expect(scheduled.get('full')).toBe('true');
     expect(outputForCheck(contract, scheduled, 'tests')).toBe('true');
