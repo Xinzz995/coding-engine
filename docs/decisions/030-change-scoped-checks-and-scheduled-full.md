@@ -1,7 +1,7 @@
 ---
 title: 030-change-scoped-checks-and-scheduled-full
 status: active
-updated: 2026-08-18
+updated: 2026-08-20
 scope: root
 ---
 

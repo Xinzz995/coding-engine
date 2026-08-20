@@ -1,6 +1,6 @@
 ---
 title: "Issue #291: POSIX 安全结束后的有界父进程收口"
-status: active
+status: done
 updated: 2026-08-20
 scope: root
 ---

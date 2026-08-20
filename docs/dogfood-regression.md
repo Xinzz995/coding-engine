@@ -1,7 +1,7 @@
 ---
 title: 引擎 dogfood 回归断言清单
 status: active
-updated: 2026-08-19
+updated: 2026-08-20
 scope: root
 ---
 
