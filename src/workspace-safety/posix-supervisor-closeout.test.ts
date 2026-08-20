@@ -505,8 +505,10 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     const state = await setup();
     const startedAt = performance.now();
     const operationCount = 12;
+    const operationDurations: number[] = [];
 
     for (let index = 0; index < operationCount; index += 1) {
+      const operationStartedAt = performance.now();
       const outcome = await runWorkspaceOperation(
         state.session,
         operationOptions({}, randomUUID()),
@@ -535,9 +537,13 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
         waitForPosixProcessGroupEmpty(outcome.containment.pgid, 100, 10),
       ).resolves.toBe(true);
       expect(existsSync(operationPath(state.workspace))).toBe(false);
+      operationDurations.push(performance.now() - operationStartedAt);
     }
 
-    expect(performance.now() - startedAt).toBeLessThan(15_000);
+    // 独立三轮约 7.4 秒；整套 macOS Node 24 重载曾达到 16.52 秒。继续用单次与
+    // 聚合双上限阻断原 60 秒长尾，但不把 12 次真实进程调度误固定为 15 秒。
+    expect(Math.max(...operationDurations)).toBeLessThan(10_000);
+    expect(performance.now() - startedAt).toBeLessThan(30_000);
     const settledRoot = join(
       state.workspace,
       PROTOCOL_ROOT_DIR,
@@ -546,7 +552,7 @@ describe.runIf(process.platform !== 'win32')('POSIX supervisor failure closeout'
     );
     expect(readdirSync(settledRoot)).toHaveLength(operationCount);
     await state.session.close();
-  }, 20_000);
+  }, 35_000);
 
   it('fails within the shared closeout deadline when escaped output never reaches EOF', async () => {
     const state = await setup();
