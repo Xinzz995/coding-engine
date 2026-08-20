@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
+  chmodSync,
   writeFileSync,
   rmSync,
   readFileSync,
@@ -32,6 +33,7 @@ import {
   validationReceiptFor,
   TEST_FORMAL_VALIDATION_ENVIRONMENT_DIGEST,
 } from './loop-test-support.js';
+import { ReviewTemporaryDirectory } from '../review/temporary-directory.js';
 
 interface OwnershipViolationScenario {
   readonly name: string;
@@ -543,6 +545,13 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(called)}, 'called');`,
     );
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    const originalCreate = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
+    let invocationRoot: string | undefined;
+    const createSpy = vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+      const temporary = originalCreate(options);
+      if (options.prefix === 'coding-x-agent-invocation-') invocationRoot = temporary.root;
+      return temporary;
+    });
     const errors: string[] = [];
     const originalError = console.error;
     console.error = (...args: unknown[]) => errors.push(args.join(' '));
@@ -556,9 +565,16 @@ describe('runLoop', { timeout: 30_000, concurrent: false }, () => {
       );
       expect(errors.some((line) => line.includes('workspace 安全执行失败'))).toBe(true);
       expect(existsSync(join(workspace, PROTOCOL_ROOT_DIR, ACTIVE_LEASE_DIR))).toBe(false);
+      expect(invocationRoot).toBeDefined();
+      expect(existsSync(invocationRoot!)).toBe(true);
     } finally {
+      createSpy.mockRestore();
       console.error = originalError;
       delete process.env.CODING_X_CLAUDE_BIN;
+      if (invocationRoot && existsSync(invocationRoot)) {
+        chmodSync(invocationRoot, 0o700);
+        rmSync(invocationRoot, { recursive: true, force: true });
+      }
     }
   });
 

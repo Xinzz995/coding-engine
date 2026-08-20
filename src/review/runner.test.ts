@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   existsSync,
@@ -36,6 +36,8 @@ import {
 } from './runner.js';
 
 const temporaryRoots: string[] = [];
+const createReviewTemporaryDirectory =
+  ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
 const MANAGED_WORKSPACE_TEST_TIMEOUT_MS = 30_000;
 const CODEX_CODE_MODE_DISABLED_DIAGNOSTIC =
   'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
@@ -60,6 +62,14 @@ function removeFixtureRoot(path: string): void {
   for (const name of readdirSync(path)) removeFixtureRoot(join(path, name));
   rmdirSync(path);
 }
+
+beforeEach(() => {
+  vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
+    const temporary = createReviewTemporaryDirectory(options);
+    temporaryRoots.push(temporary.root);
+    return temporary;
+  });
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -111,10 +121,9 @@ async function confirmedWorkspaceRejection(
 }
 
 function injectNextExactSealFailure(): () => string {
-  const createTemporary = ReviewTemporaryDirectory.create.bind(ReviewTemporaryDirectory);
   let root = '';
   vi.spyOn(ReviewTemporaryDirectory, 'create').mockImplementation((options) => {
-    const temporary = createTemporary(options);
+    const temporary = createReviewTemporaryDirectory(options);
     root = temporary.root;
     temporaryRoots.push(root);
     vi.spyOn(temporary, 'sealExactTree').mockImplementation(() => {
