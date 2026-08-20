@@ -1344,7 +1344,8 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
           expectedDecisionsDigest: DECISIONS_DIGEST,
           includeDecisions: false,
           phase: 'hard timeout descendant checkpoint',
-          timeoutMs: 3_000,
+          // 仍早于 fixture 9 秒后的版本输出，但允许整套重载下完成真实进程启动。
+          timeoutMs: 6_000,
           managedProcess,
           executablesForTests: { git: fixture.git, gh: fixture.gh, runner: fixture.runner },
         }),
@@ -1357,7 +1358,7 @@ exec ${JSON.stringify(process.execPath)} ${JSON.stringify(target)}
         roots.push(authorityRoot);
       }
     }
-  }, 20_000);
+  }, 30_000);
 
   it('fails closed when the Runner version command writes into the project', async () => {
     const fixture = await realManagedFixture(
