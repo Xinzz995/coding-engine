@@ -39,8 +39,9 @@ Shadow 验证和机器证明均须按顺序执行；本文不把它们记作已�
 只有当前 head 的全部 Story 凭证仍然有效、Shadow Final Review 已通过，并且该 head 的远端必需检查
 全部 ready 时，才允许由同一绝对候选 CLI 发布唯一 owner 机器证明。任一条件未满足时都不得发布证明。
 
-当前 PR 不合并，并保持开放，供 staging 读取和复核当前证明；本文不授权合并、npm staging、公开发布、
-移动标签或创建 GitHub Release。
+当前 PR 不合并，并保持开放。staging 只读取上述门槛满足后发布的唯一 owner 机器证明，不读取本文，
+也不把这份待执行说明当成已完成证明。本文不授权合并、npm staging、公开发布、移动标签或创建
+GitHub Release。
 
 ## 证明边界
 
