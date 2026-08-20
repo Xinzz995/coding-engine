@@ -1,6 +1,6 @@
 ---
 title: "Issue #294: 纯文档合并不重复 CodeQL"
-status: active
+status: done
 updated: 2026-08-20
 scope: root
 ---
@@ -43,13 +43,13 @@ scope: root
 
 #### Acceptance Criteria
 
-- [ ] `pull_request` 继续对 main 的每个 PR 运行 CodeQL，且没有 `paths`/`paths-ignore`。
-- [ ] `push: main` 仅在全部变化匹配 `**/*.md` 或 `docs/**` 时跳过；任一混合、workflow、质量规则、依赖、构建、源码或未知路径仍运行。
-- [ ] weekly schedule 和 `workflow_dispatch` 无路径过滤，始终执行完整 CodeQL。
-- [ ] repository-health 测试精确锁定上述触发器，拒绝把 pull_request 或更宽路径加入忽略范围。
-- [ ] Ruleset `19747271` 的 CodeQL 工具与阈值保持不变，无 bypass actor，不改为自定义 SARIF 或普通状态检查。
-- [ ] 用获批的 #288 PRD 物理归档 PR 实测：PR CodeQL 存在并通过、Quality Gate 只跑必要文档检查、PR 可正常合并；合并后的 main commit 不产生 CodeQL run。
-- [ ] 记录相对 #293 的 PR 等待和合并后收口时间变化，关闭 #294 前核对 main 与本地干净同步。
+- [x] `pull_request` 继续对 main 的每个 PR 运行 CodeQL，且没有 `paths`/`paths-ignore`。
+- [x] `push: main` 仅在全部变化匹配 `**/*.md` 或 `docs/**` 时跳过；任一混合、workflow、质量规则、依赖、构建、源码或未知路径仍运行。
+- [x] weekly schedule 和 `workflow_dispatch` 无路径过滤，始终执行完整 CodeQL。
+- [x] repository-health 测试精确锁定上述触发器，拒绝把 pull_request 或更宽路径加入忽略范围。
+- [x] Ruleset `19747271` 的 CodeQL 工具与阈值保持不变，无 bypass actor，不改为自定义 SARIF 或普通状态检查。
+- [x] 用获批的 #288 PRD 物理归档 PR 实测：PR CodeQL 存在并通过、Quality Gate 只跑必要文档检查、PR 可正常合并；合并后的 main commit 不产生 CodeQL run。
+- [x] 记录相对 #293 的 PR 等待和合并后收口时间变化，关闭 #294 前核对 main 与本地干净同步。
 
 ## Delivery Boundary
 

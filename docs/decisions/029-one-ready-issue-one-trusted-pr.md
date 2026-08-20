@@ -1,7 +1,7 @@
 ---
 title: 029-one-ready-issue-one-trusted-pr
 status: active
-updated: 2026-08-19
+updated: 2026-08-20
 scope: root
 ---
 

@@ -1,6 +1,6 @@
 ---
 title: "Issue #292: 相同输入可信 PR 的批量受管刷新"
-status: active
+status: done
 updated: 2026-08-20
 scope: root
 ---
@@ -50,7 +50,7 @@ scope: root
 - [x] managed status 继续在远端慢读取前后重复 Story、Runner、PR 与本地当前性核对；Issue 可信标记前仍调用第二次独立 managed status，不复用第一次结果。
 - [x] 确定性测试记录快照路径与回退路径的外层 managed operation 次数，证明典型 preflight 从随文件增长的多次 operation 降为一次。
 - [x] 在 coding-engine 同一提交、同一环境连续实跑至少三次，记录单次确认、完整双确认、外层 operation 数和是否调用 Builder/Validator/项目检查/Reviewer；单次确认目标低于 60 秒。
-- [ ] 按完整改动范围判定的本地与远端检查全部通过，结论绑定 #292 的 PR 最新提交。
+- [x] 按完整改动范围判定的本地与远端检查全部通过，结论绑定 #292 的 PR 最新提交。
 
 ## Delivery Boundary
 
