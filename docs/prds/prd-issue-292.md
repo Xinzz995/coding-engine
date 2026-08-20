@@ -15,7 +15,7 @@ scope: root
 
 真实基线：远端未就绪时命令总耗时 237.07 秒、状态刷新 208718 ms；远端已就绪时两次确认合计 421929 ms、命令总耗时 449.06 秒。现场在约 3 分 25 秒时已产生 102 个 settled operation。源码取证表明，完整 Review preflight 会按变更文件分别读取 base/head、存在性和 submodule，managed status 又重复 Story、Runner 与 PR 当前性观察，而每条 git/gh/runner 命令都单独建立 supervisor operation。
 
-新增一个包内固定、只读、输出有界的 preflight snapshot helper：它在一个受管 operation 内启动受限的真实 git/gh 子命令，批量返回构建 ReviewPreflightContext 所需的完整原始事实。父进程继续使用现有质量契约、PR、二进制/LFS/submodule、来源文档、风险与 binding 逻辑独立解析和裁决；helper 不返回“通过”结论。典型输入使用快照，快照输出超界、命令失败、结构异常或任何对账不一致时回退现有逐命令受管 preflight，不降低旧路径能力。
+新增一个包内固定、只读、输出有界的 preflight snapshot helper：它在一个受管 operation 内启动受限的真实 git/gh 子命令，批量返回构建 ReviewPreflightContext 所需的完整原始事实。父进程继续使用现有质量契约、PR、二进制/LFS/submodule、来源文档、风险与 binding 逻辑独立解析和裁决；helper 不返回“通过”结论。典型输入使用快照；快照执行、解析或输出预算不可用且 session 仍安全时回退现有逐命令受管 preflight，已返回事实与契约/路径对账不一致时直接失败关闭，不降低旧路径能力。
 
 ## Non-Goals
 
@@ -27,7 +27,7 @@ scope: root
 
 ## Risk
 
-主要风险是批量 helper 与现有 preflight 产生语义分叉。helper 只收集原始字节和命令结果；父进程必须重新计算路径集合、解析契约与 PR、核对完整文件集合并调用现有风险/currentness 逻辑。任何缺字段、额外字段、截断、重复路径、命令数量异常或前后状态变化都使快照不可用，并回退旧路径或失败关闭。
+主要风险是批量 helper 与现有 preflight 产生语义分叉。helper 只收集原始字节和命令结果；父进程必须重新计算路径集合、解析契约与 PR、核对完整文件集合并调用现有风险/currentness 逻辑。缺字段、额外字段、截断或执行失败使快照不可用并回退旧路径；重复/错误路径、事实矛盾或前后状态变化直接失败关闭。
 
 ## 黄金原则逐项对照
 
@@ -43,13 +43,13 @@ scope: root
 
 #### Acceptance Criteria
 
-- [ ] 典型 PR 的 managed status 使用一个固定受管 preflight snapshot operation，返回的完整 context 与现有逐命令 preflight 在 branch、base/head、PR、契约、changed files、逐文件 base/head、diff、Spec、工程规范、history 和 PR sections 上完全等价。
-- [ ] helper 的可执行文件来自项目目录外，使用固定最小环境、逐子命令超时、总输出上限、严格 JSON schema 和固定子命令数量/路径集合；项目内容不能改变 helper 程序或注入命令参数。
-- [ ] 二进制 diff、LFS、submodule、缺失/截断文件、脏工作树、PR/head/base/标签变化、非法契约或来源路径不一致继续产生与旧路径相同的不可验证结论。
-- [ ] 快照不可用或输出超界时只回退现有逐命令受管 preflight；不得因快照失败直接复用旧 Review 或跳过检查。
-- [ ] managed status 继续在远端慢读取前后重复 Story、Runner、PR 与本地当前性核对；Issue 可信标记前仍调用第二次独立 managed status，不复用第一次结果。
-- [ ] 确定性测试记录快照路径与回退路径的外层 managed operation 次数，证明典型 preflight 从随文件增长的多次 operation 降为一次。
-- [ ] 在 coding-engine 同一提交、同一环境连续实跑至少三次，记录单次确认、完整双确认、外层 operation 数和是否调用 Builder/Validator/项目检查/Reviewer；单次确认目标低于 60 秒。
+- [x] 典型 PR 的 managed status 使用一个固定受管 preflight snapshot operation，返回的完整 context 与现有逐命令 preflight 在 branch、base/head、PR、契约、changed files、逐文件 base/head、diff、Spec、工程规范、history 和 PR sections 上完全等价。
+- [x] helper 的可执行文件来自项目目录外，使用固定最小环境、逐子命令超时、总输出上限、严格 JSON schema 和固定子命令数量/路径集合；项目内容不能改变 helper 程序或注入命令参数。
+- [x] 二进制 diff、LFS、submodule、缺失/截断文件、脏工作树、PR/head/base/标签变化、非法契约或来源路径不一致继续产生与旧路径相同的不可验证结论。
+- [x] 快照执行/解析不可用或输出超界时只回退现有逐命令受管 preflight；已返回事实与契约对账矛盾时失败关闭。两者都不得直接复用旧 Review 或跳过检查。
+- [x] managed status 继续在远端慢读取前后重复 Story、Runner、PR 与本地当前性核对；Issue 可信标记前仍调用第二次独立 managed status，不复用第一次结果。
+- [x] 确定性测试记录快照路径与回退路径的外层 managed operation 次数，证明典型 preflight 从随文件增长的多次 operation 降为一次。
+- [x] 在 coding-engine 同一提交、同一环境连续实跑至少三次，记录单次确认、完整双确认、外层 operation 数和是否调用 Builder/Validator/项目检查/Reviewer；单次确认目标低于 60 秒。
 - [ ] 按完整改动范围判定的本地与远端检查全部通过，结论绑定 #292 的 PR 最新提交。
 
 ## Delivery Boundary
