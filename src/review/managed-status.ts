@@ -3,6 +3,7 @@ import type { QualityContract } from '../quality/contract.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
 import { WorkspaceSafetyError } from '../workspace-safety/types.js';
 import { digestReviewBinding } from './binding.js';
+import { normalizeText } from './common.js';
 import { currentBlockingDecisionProof, validateP1DeferralIssue } from './decisions.js';
 import {
   createManagedReviewObservation,
@@ -10,7 +11,13 @@ import {
   type ManagedReviewTermination,
 } from './managed-observation.js';
 import { evaluateCurrentReviewStatus, type CurrentReviewStatus } from './currentness.js';
-import { revalidateReviewContext, runReviewPreflight } from './preflight.js';
+import {
+  runReviewPreflight,
+  type ReviewContextRevalidation,
+  type ReviewPreflightContext,
+  type ReviewPreflightResult,
+} from './preflight.js';
+import { runReviewPreflightSnapshot } from './preflight-snapshot.js';
 import { evaluateManagedReviewRemoteState } from './remote.js';
 import { readRunnerVersion } from './runner.js';
 import { readFinalReviewState, readReviewDecisions } from './state.js';
@@ -23,10 +30,14 @@ import type { FinalReviewState } from './types.js';
 
 interface ManagedStatusAdapters {
   observeStoryValidation: typeof observeStoryValidationCurrentness;
+  preflightSnapshot: typeof runReviewPreflightSnapshot;
+  legacyPreflight: typeof runReviewPreflight;
 }
 
 const MANAGED_STATUS_ADAPTERS: ManagedStatusAdapters = {
   observeStoryValidation: observeStoryValidationCurrentness,
+  preflightSnapshot: runReviewPreflightSnapshot,
+  legacyPreflight: runReviewPreflight,
 };
 
 export interface ManagedStatusQualityResult {
@@ -52,6 +63,81 @@ function stale(read: ReturnType<typeof readFinalReviewState>, reason: string): C
 
 function addReason(status: CurrentReviewStatus, reason: string): CurrentReviewStatus {
   return { ...status, current: false, staleReasons: [...status.staleReasons, reason] };
+}
+
+/** @internal Snapshot failure falls back only while the same session is still safe and open. */
+export async function runManagedStatusPreflightControlled(
+  options: Parameters<typeof runReviewPreflight>[0] & {
+    session: WorkspaceSession;
+    termination?: ManagedReviewTermination;
+  },
+  adapters: Pick<ManagedStatusAdapters, 'preflightSnapshot' | 'legacyPreflight'>,
+) {
+  try {
+    return await adapters.preflightSnapshot({
+      session: options.session,
+      root: options.root,
+      workspace: options.workspace,
+      currentContract: options.currentContract,
+      ...(options.termination === undefined ? {} : { termination: options.termination }),
+    });
+  } catch (error) {
+    if (options.session.state !== 'open') throw error;
+    return await adapters.legacyPreflight(options);
+  }
+}
+
+function sortedLabels(value: readonly string[]): string[] {
+  return value.map((label) => normalizeText(label)).sort((left, right) => left.localeCompare(right));
+}
+
+/** @internal A fresh full preflight must preserve every mutable fact checked by revalidation. */
+export function revalidateReviewContextFromPreflight(
+  expected: ReviewPreflightContext,
+  observed: ReviewPreflightResult,
+): ReviewContextRevalidation {
+  if (observed.status !== 'ready') {
+    return { ok: false, message: `评审期间完整当前性快照不可用：${observed.message}` };
+  }
+  const current = observed.context;
+  if (current.branch !== expected.branch) {
+    return { ok: false, message: '评审期间本地功能分支身份发生变化' };
+  }
+  if (
+    current.baseContract.repository.fullName !== expected.baseContract.repository.fullName ||
+    current.baseContract.repository.defaultBranch !== expected.baseContract.repository.defaultBranch
+  ) {
+    return { ok: false, message: '评审期间 GitHub 仓库或默认分支身份发生变化' };
+  }
+  if (current.baseSha !== expected.baseSha) {
+    return { ok: false, message: '评审期间默认分支 base SHA 发生变化' };
+  }
+  if (current.headSha !== expected.headSha) {
+    return { ok: false, message: '评审期间本地 HEAD 发生变化' };
+  }
+  if (current.pullRequest.number !== expected.pullRequest.number) {
+    return { ok: false, message: '评审期间绑定的开放 PR 消失或编号发生变化' };
+  }
+  if (
+    current.pullRequest.headSha !== expected.pullRequest.headSha ||
+    current.pullRequest.baseSha !== expected.pullRequest.baseSha ||
+    current.pullRequest.baseBranch !== expected.pullRequest.baseBranch
+  ) {
+    return { ok: false, message: '评审期间 PR 的 head、base 或目标分支发生变化' };
+  }
+  if (
+    normalizeText(current.pullRequest.title) !== normalizeText(expected.pullRequest.title) ||
+    normalizeText(current.pullRequest.body) !== normalizeText(expected.pullRequest.body)
+  ) {
+    return { ok: false, message: '评审期间 PR 标题或正文发生变化' };
+  }
+  if (
+    JSON.stringify(sortedLabels(current.pullRequest.labels)) !==
+    JSON.stringify(sortedLabels(expected.pullRequest.labels))
+  ) {
+    return { ok: false, message: '评审期间 PR 标签发生变化' };
+  }
+  return { ok: true };
 }
 
 function sameStoryObservation(
@@ -204,12 +290,14 @@ export async function collectManagedStatusQuality(options: {
     root: options.projectRoot,
     ...(options.termination === undefined ? {} : { termination: options.termination }),
   });
-  const preflight = await runReviewPreflight({
+  const preflight = await runManagedStatusPreflightControlled({
+    session: options.session,
     root: options.projectRoot,
     workspace: options.workspace,
     currentContract: contract.contract,
     observation,
-  });
+    ...(options.termination === undefined ? {} : { termination: options.termination }),
+  }, adapters);
   if (preflight.status !== 'ready') {
     return {
       storyValidation: initialStory,
@@ -223,6 +311,21 @@ export async function collectManagedStatusQuality(options: {
   }
 
   const context = preflight.context;
+  const revalidateContext = async (): Promise<ReviewContextRevalidation> =>
+    revalidateReviewContextFromPreflight(
+      context,
+      await runManagedStatusPreflightControlled(
+        {
+          session: options.session,
+          root: options.projectRoot,
+          workspace: options.workspace,
+          currentContract: contract.contract,
+          observation,
+          ...(options.termination === undefined ? {} : { termination: options.termination }),
+        },
+        adapters,
+      ),
+    );
   let finalRunner = await runnerObservation({
     session: options.session,
     projectRoot: options.projectRoot,
@@ -252,7 +355,7 @@ export async function collectManagedStatusQuality(options: {
         client: observation.github,
       })
     : undefined;
-  const firstRevalidation = await revalidateReviewContext(context, options.workspace, observation);
+  const firstRevalidation = await revalidateContext();
   let finalStory = await adapters.observeStoryValidation(storyOptions);
   finalRunner = await runnerObservation({
     session: options.session,
@@ -311,11 +414,7 @@ export async function collectManagedStatusQuality(options: {
     }
     // P1 Issue、Runner 与 Story 都可能是慢观察。完整 PR/base/head/标签必须最后夹取，
     // 否则这些观察期间发生的远端变化仍可能被当成当前绿色结果。
-    const finalRevalidation = await revalidateReviewContext(
-      context,
-      options.workspace,
-      observation,
-    );
+    const finalRevalidation = await revalidateContext();
     if (!finalRevalidation.ok) status = addReason(status, finalRevalidation.message);
   }
 
