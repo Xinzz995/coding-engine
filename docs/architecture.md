@@ -123,14 +123,20 @@ Story 凭证与最终 Review 的证明；维护者命令再次核对当前 owner
 一次三仓，要求结果未变后才执行 `npm stage publish`。registry 验证、移动 `latest`、建标签和 Release
 仍是后续独立边界，不能由三仓通过替代（ADR-018、019、024、027）。
 
-`issue run` 是单用户优先的最小任务入口：只接受开放、带 `ready-for-agent` 且字段完整的 Issue；
-一个 Issue 固定映射一个运行身份、`codex/issue-<number>` 分支、源 PRD、隔离 workspace 和草稿 PR。
+`issue run` 是单用户优先的最小任务入口：只接受开放、带 `ready-for-agent` 且执行合同完整的 Issue。
+schema v1 合同把 Story 语义、本地检查、远端交付与运行度量分开；入口在任何分支切换、源 PRD 提交或
+Agent 调用前，把稳定 check id、scoped/full 模式、当前平台、可信 Validator runner、固定网络边界、引擎/GitHub 证据源和
+Ruleset 能力与质量契约逐项对账，不从自然语言或命令猜检查。规范化合同摘要同时进入 Issue run
+identity、源 PRD 与运行 PRD；任一字段变化都会拒绝旧运行。一个 Issue 固定映射一个运行身份、
+`codex/issue-<number>` 分支、源 PRD、隔离 workspace 和草稿 PR。
 命令创建或继续同一运行；切分支和建 PR 前先写预备状态，首次推送/建 PR、工作区准备、运行、等待或
 收口失败都更新同一条 owner 评论，PR 建立后把原评论升级为完整状态。远端门禁未完成时退出，由人
 再次运行同一命令；已有正式 Review 时先复用受管 status 当前性观察，全部本地输入仍一致才只刷新
 GitHub 状态并记录耗时；标记可信前再执行一次同样的完整当前性观察，任何缺失或漂移都保持等待或
 回到完整引擎路径。引擎结束后还会回读 PR，只有它仍开放、
-目标和最新提交未变才可标为可信并把草稿改为 ready。入口不轮询、不排队、不合并、不发布。指标从最新 ready 标签事件开始，累计实际运行
+目标和最新提交未变才可标为可信并把草稿改为 ready。Story Validator 只接收合同中的语义标准与引擎
+已完成的本地检查证明；显式本地 id 与路径选择取并集且证明绑定逐项原因，显式远端 id 同样并入该
+Issue 当前 PR 的 GitHub 执行计划，再由当前 head 的检查和 Ruleset 裁决。入口不轮询、不排队、不合并、不发布。指标从最新 ready 标签事件开始，累计实际运行
 时间，并把其余时间记为等待，从而直接衡量“ready Issue 到当前 head 可信 PR”的总时间（ADR-029）。
 
 GitHub Ruleset 详情可能按调用者权限省略 `bypass_actors`。普通 doctor/status 与受管 Review 都先

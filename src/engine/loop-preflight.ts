@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { permissionWarning, type AgentKind } from './agent.js';
 import { appendEvidenceWithWriter, clipEvidenceDiagnostic } from './evidence.js';
 import type { ManagedGateContext } from './gate.js';
@@ -43,6 +43,17 @@ import {
 import { invalidateFinalReviewState, readFinalReviewState } from '../review/state.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
+import {
+  parseIssueExecutionContract,
+  qualityPlatformForNode,
+  reconcileIssueExecutionContract,
+  type IssueExecutionContractCapabilities,
+} from './issue-execution-contract.js';
+import { consumeReadyIssueRunAuthority } from './issue-run-authority.js';
+import {
+  issueWorkspaceIdentityMatchesPrd,
+  readIssueWorkspaceIdentity,
+} from './issue-workspace-identity.js';
 
 type QualityReader = NonNullable<LoopConfig['qualityContractReader']>;
 type ReadyQualityContract = Extract<QualityContractReadResult, { status: 'ready' }>;
@@ -65,6 +76,7 @@ export type LoopPreflightResult =
       validatorBase: string | null;
       modelPreflight: ModelPreflightResult;
       frozenQualityChecks: FrozenQualityChecks;
+      issueExecutionCapabilities: IssueExecutionContractCapabilities | null;
       runKind: AgentKind;
       gitHead: string;
       validationEnvironmentDigest: string;
@@ -134,11 +146,92 @@ export async function runLoopPreflight(
   }
 
   const bootPrd = (await guard.read()).prd;
+  const persistentIssueIdentityRead = readIssueWorkspaceIdentity(workspace);
+  if (persistentIssueIdentityRead.status === 'invalid') {
+    console.error(
+      `❌ Issue workspace 持久身份不可用：${persistentIssueIdentityRead.error}；不得降级为普通运行`,
+    );
+    return { status: 'failed', exitCode: 2 };
+  }
+  const persistentIssueIdentity =
+    persistentIssueIdentityRead.status === 'ready'
+      ? persistentIssueIdentityRead.identity
+      : null;
+  if (persistentIssueIdentity !== null && !bootPrd) {
+    console.error('❌ Issue workspace 持久身份仍存在，但 prd.json 缺失或损坏；不得降级为普通运行');
+    return { status: 'failed', exitCode: 2 };
+  }
+  let issueExecutionCapabilities: IssueExecutionContractCapabilities | null = null;
+  let issueRunAuthorityClaims: ReturnType<typeof consumeReadyIssueRunAuthority> = null;
   if (bootPrd) {
     const storySet = validatePrdStorySet(bootPrd);
     if (!storySet.valid) {
       console.error(`❌ PRD Story 集合无效：${storySet.message}`);
       return { status: 'failed', exitCode: 2 };
+    }
+    const hasExecutionContract = bootPrd.executionContract !== undefined;
+    const hasExecutionDigest = bootPrd.executionContractDigest !== undefined;
+    if (persistentIssueIdentity !== null && (!hasExecutionContract || !hasExecutionDigest)) {
+      console.error(
+        '❌ Issue workspace 的持久身份仍存在，prd.json 不得删除执行合同后降级为普通运行',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
+    if (hasExecutionContract !== hasExecutionDigest) {
+      console.error(
+        '❌ ready Issue 执行合同与摘要必须同时存在；请从当前 Issue 重新建立运行 workspace',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
+    if (hasExecutionContract) {
+      issueRunAuthorityClaims = consumeReadyIssueRunAuthority(cfg.readyIssueRunAuthority);
+      if (issueRunAuthorityClaims === null) {
+        console.error(
+          '❌ ready Issue workspace 只能通过 coding-x issue run 继续；普通 run 不具备实时 Issue、PR 与发布保护授权',
+        );
+        return { status: 'failed', exitCode: 2 };
+      }
+      const parsedExecution = parseIssueExecutionContract(bootPrd.executionContract);
+      if (!parsedExecution.ok) {
+        console.error(`❌ ready Issue 执行合同无效：${parsedExecution.errors.join('；')}`);
+        return { status: 'failed', exitCode: 2 };
+      }
+      if (parsedExecution.digest !== bootPrd.executionContractDigest) {
+        console.error(
+          `❌ ready Issue 执行合同摘要不一致：期望 ${parsedExecution.digest}，` +
+            `收到 ${String(bootPrd.executionContractDigest)}；旧运行身份已失效`,
+        );
+        return { status: 'failed', exitCode: 2 };
+      }
+      if (
+        bootPrd.userStories.length !== 1 ||
+        bootPrd.userStories[0].acceptanceCriteria.length !==
+          parsedExecution.contract.storyAcceptance.criteria.length ||
+        bootPrd.userStories[0].acceptanceCriteria.some(
+          (criterion, index) =>
+            criterion !== parsedExecution.contract.storyAcceptance.criteria[index],
+        )
+      ) {
+        console.error(
+          '❌ ready Issue 的 Story 验收标准与冻结执行合同不一致；不得把检查或度量混入 Validator 标准',
+        );
+        return { status: 'failed', exitCode: 2 };
+      }
+      const platform = qualityPlatformForNode(process.platform);
+      if (platform === null) {
+        console.error(`❌ 当前平台 ${process.platform} 不受 ready Issue 执行合同支持`);
+        return { status: 'failed', exitCode: 2 };
+      }
+      const reconciliation = reconcileIssueExecutionContract(
+        parsedExecution.contract,
+        qualityRead.contract,
+        platform,
+      );
+      if (!reconciliation.ok) {
+        console.error(`❌ ready Issue 执行合同无法启动：${reconciliation.errors.join('；')}`);
+        return { status: 'failed', exitCode: 2 };
+      }
+      issueExecutionCapabilities = reconciliation.capabilities;
     }
   }
   // 正式运行必须先绑定一个非空提交身份。这个检查发生在 state 创建/迁移、模型目录读取
@@ -147,6 +240,51 @@ export async function runLoopPreflight(
   if (!bootGitHead) {
     console.error('❌ 无法读取当前 Git HEAD；正式运行必须在至少有一个提交的 Git 仓库中执行');
     return { status: 'failed', exitCode: 2 };
+  }
+  if (issueRunAuthorityClaims !== null && bootPrd) {
+    const runIdMatches = [
+      ...bootPrd.description.matchAll(/^Issue-Run-ID:\s*(sha256:[0-9a-f]{64})\s*$/gmu),
+    ];
+    const expectedSourcePrd = `docs/prds/prd-issue-${issueRunAuthorityClaims.issueNumber}.md`;
+    let canonicalProjectRoot: string;
+    try {
+      canonicalProjectRoot = realpathSync(projectRoot);
+    } catch {
+      canonicalProjectRoot = projectRoot;
+    }
+    if (
+      issueRunAuthorityClaims.projectRoot !== canonicalProjectRoot ||
+      issueRunAuthorityClaims.workspaceIdentity !== session.lease.workspace.identity ||
+      issueRunAuthorityClaims.repository !== bootPrd.project ||
+      issueRunAuthorityClaims.branch !== bootPrd.branchName ||
+      issueRunAuthorityClaims.executionContractDigest !== bootPrd.executionContractDigest ||
+      issueRunAuthorityClaims.gitHead !== bootGitHead ||
+      bootPrd.sourcePrd !== expectedSourcePrd ||
+      runIdMatches.length !== 1 ||
+      runIdMatches[0][1] !== issueRunAuthorityClaims.runId
+    ) {
+      console.error(
+        '❌ ready Issue 实时授权与当前项目、workspace、提交或运行身份不一致；请重新执行 coding-x issue run',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
+    if (
+      persistentIssueIdentity !== null &&
+      (issueRunAuthorityClaims.repository !== persistentIssueIdentity.repository ||
+        issueRunAuthorityClaims.issueNumber !== persistentIssueIdentity.issueNumber ||
+        issueRunAuthorityClaims.bodyDigest !== persistentIssueIdentity.bodyDigest ||
+        issueRunAuthorityClaims.branch !== persistentIssueIdentity.branch ||
+        issueRunAuthorityClaims.pullRequest !== persistentIssueIdentity.pullRequest ||
+        issueRunAuthorityClaims.runId !== persistentIssueIdentity.runId ||
+        issueRunAuthorityClaims.executionContractDigest !==
+          persistentIssueIdentity.executionContractDigest ||
+        !issueWorkspaceIdentityMatchesPrd(persistentIssueIdentity, bootPrd))
+    ) {
+      console.error(
+        '❌ ready Issue 实时授权、持久 workspace 身份与当前 PRD 不一致；请重新执行 coding-x issue run',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
   }
   if (!cfg.qualityContractReader) {
     const trackedQuality = await readTrackedQualityContractAtHead({
@@ -342,6 +480,17 @@ export async function runLoopPreflight(
     }
     throw err;
   }
+  if (
+    issueExecutionCapabilities !== null &&
+    !cfg.validatorRunnerBindingForTests &&
+    modelPreflight.runner !== 'codex'
+  ) {
+    console.error(
+      `❌ ready Issue 当前只能使用 codex 完成可信 Validator 闭环；` +
+        `${modelPreflight.runner} 不得先运行 Builder 再报告无法签发凭证`,
+    );
+    return { status: 'failed', exitCode: 2 };
+  }
   // 生产最终 Review 必须绑定一个明确模型；测试可注入不调用模型的评审器。
   // 在任何 Story agent 启动前拒绝，避免实现全部完成后才发现结果无法签发。
   if (!modelPreflight.review.model && !cfg.finalReviewRunner) {
@@ -427,6 +576,7 @@ export async function runLoopPreflight(
     validatorBase: instructions.validator,
     modelPreflight,
     frozenQualityChecks,
+    issueExecutionCapabilities,
     runKind,
     gitHead: bootGitHead,
     validationEnvironmentDigest: currentValidationEnvironmentDigest,

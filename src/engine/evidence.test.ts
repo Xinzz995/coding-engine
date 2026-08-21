@@ -60,15 +60,27 @@ describe('appendEvidence / readEvidence 往返', () => {
       selectionMode: 'scoped',
       selectedCheckIds: ['docs-health', 'format'],
       skippedCheckIds: ['tests'],
+      selectionRequirement: { mode: 'scoped', checkIds: ['format'] },
+      selectionReasons: [
+        { checkId: 'docs-health', sources: ['path'] },
+        { checkId: 'format', sources: ['always', 'explicit'] },
+      ],
     };
     appendEvidence(dir, scoped);
     writeFileSync(
       join(dir, EVIDENCE_FILE),
       `${JSON.stringify(scoped)}\n` +
         `${JSON.stringify({ ...scoped, selectedCheckIds: ['docs-health'] })}\n` +
-        `${JSON.stringify({ ...scoped, skippedCheckIds: ['tests', 'docs-health'] })}\n`,
+        `${JSON.stringify({ ...scoped, skippedCheckIds: ['tests', 'docs-health'] })}\n` +
+        `${JSON.stringify({
+          ...scoped,
+          selectionReasons: [
+            { checkId: 'docs-health', sources: ['path'] },
+            { checkId: 'format', sources: ['always'] },
+          ],
+        })}\n`,
     );
-    expect(readEvidence(dir)).toEqual({ records: [scoped], skippedLines: 2 });
+    expect(readEvidence(dir)).toEqual({ records: [scoped], skippedLines: 3 });
   });
 
   it('文件不存在返回空且零跳过', () => {

@@ -87,7 +87,7 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 最短可用路线是：**`coding-x init` → 已有清楚需求和健康文档 → `prd-generate` → `prd-to-json` → `doctor` → `npx coding-x` → `status` 返回 0 → 人工合并**。只有最终 Review 返回待人工处理的 finding 时，才运行 `/review-loop`，处理后重新运行 `coding-x`。`scenario-alignment`、`technical-alignment`、`/planning` 和 `/compound-docs` 都有明确的可选条件，不需要为了“走全流程”机械执行。
 
 已经用 GitHub Issue 管理清楚任务时，可以走更短的显式入口：用仓库的“Agent 执行任务”模板填写
-目标、非目标、列表式验收标准和风险，人工确认后添加 `ready-for-agent` 标签，再运行
+目标、非目标、版本化执行合同和风险，人工确认后添加 `ready-for-agent` 标签，再运行
 `npx coding-x issue run <编号> codex --validator-model <模型 ID>`。它只创建并继续该 Issue 唯一的
 `codex/issue-<编号>` 分支、workspace、草稿 PR 和状态评论；推送最新提交后停止等待远端，不轮询、
 不排队、不自动合并。分支和 PR 建立前就先写预备状态，因此首次推送、建 PR 或工作区准备失败也会
@@ -95,6 +95,25 @@ coding-x 自身的 npm 发布不属于普通下游使用流程。维护者必须
 PR 意图、规则、验收凭证和正式最终 Review 仍完全一致，只刷新当前远端状态，不重跑 Builder、
 Validator、项目检查或 Reviewer；任一输入变化仍走完整路径。最终 Issue 评论会给出 ready 到可信 PR
 的总时间、实际运行时间、等待时间和本次远端刷新耗时。
+当前可信 Issue 入口固定使用 `codex`；选择 Claude 或 Cursor 会在任何 Agent 前停止，因为它们目前只能
+承担 Builder，不能签发正式 Validator 凭证。
+
+执行合同把四类责任分开，不能再把“完整测试通过”“CI 通过”或“记录总耗时”写进 Story 语义标准：
+
+- `storyAcceptance.criteria` 只写用户可观察的功能结果，由断网 Validator 逐条判断；
+- `localChecks` 由引擎在当前主机执行。`scoped` 保留按改动范围选择，并把 `checkIds` 作为必须补跑的
+  稳定检查；`full` 运行质量契约中当前平台的全部检查，此时 `checkIds` 必须为空；
+- `remoteDelivery` 只接受质量契约中有 GitHub job 的稳定检查 id；显式 id 会并入该 Issue 当前 PR 的
+  远端执行计划，由最新提交的 GitHub 检查和 Ruleset 提供唯一交付事实，不会交给 Validator。当前 PR 入口只支持远端 `scoped`；
+  `full` 无法由一次 PR 事件强制取得完整矩阵，会在 Agent 前拒绝；
+- `runMetrics` 由引擎时钟固定记录，不属于实现验收。
+
+检查 id 只从 `.coding-x/quality.json` 的 `checks.*.checks[].id` 选择，不填写命令。入口会在切分支、创建
+实现提交或启动 Agent 前核对当前平台、实际 Ruleset 和 GitHub 证据能力。比如 `dependency-audit` 只支持 Linux 时，
+macOS 运行不得把它放进 `localChecks`；需要远端负责时放进 `remoteDelivery`。合同任一字段变化都会建立
+新的运行身份。尚未启动的旧 Issue 可用当前模板补齐并重新添加 ready 标签；已经留下运行评论、分支或
+PR 的旧 Issue 必须保留原现场并新建 Issue，不能把新身份塞回旧运行。
+完整字段和可复制示例见 [ADR-031](docs/decisions/031-ready-issue-responsibility-contract.md)。
 
 ### 首次运行前的安全红线
 
@@ -751,7 +770,7 @@ GitHub 状态给出。
 | 位置参数 `config path\|init\|validate`          | —            | 查看全局配置路径、排他创建空模板或只读严格校验；均不启动 runner，不获取 workspace 锁                                                                                                                                                                                       |
 | 位置参数 `models [claude\|codex\|cursor]`       | —            | 只读查询全局模型目录；不启动 runner、不检查认证、不访问网络；可配 `--json`                                                                                                                                                                                                 |
 | 位置参数 `hooks cursor install\|status\|remove` | —            | 在当前 Git 项目安全安装、只读检查或卸载 Cursor TDD 提交前检查；只管理 `.cursor/` 中 coding-x 拥有的内容，不改 Git hooks、索引或提交。install/remove 成功与 status 健康返回 0；缺失、冲突或过期返回 1                                                                       |
-| 位置参数 `issue run <编号> [runner]`            | —            | 只接受当前带 `ready-for-agent` 的受管 Issue；首次建立唯一 `codex/issue-<编号>` 分支、源 PRD、隔离 workspace、草稿 PR 和 owner 状态评论，后续只继续同一运行。已有正式 Review 的全部输入仍一致时只刷新远端状态并记录耗时，否则走完整路径；可以推送当前分支并把可信草稿标为 ready，但不轮询、不排队、不合并、不发布 |
+| 位置参数 `issue run <编号> [runner]`            | `codex`      | 只接受当前带 `ready-for-agent` 的受管 Issue；首次建立唯一 `codex/issue-<编号>` 分支、源 PRD、隔离 workspace、草稿 PR 和 owner 状态评论，后续只继续同一运行。当前可信入口只接受 Codex；已有正式 Review 的全部输入仍一致时只刷新远端状态并记录耗时，否则走完整路径；可以推送当前分支并把可信草稿标为 ready，但不轮询、不排队、不合并、不发布 |
 | 位置参数 `candidate publish-proof`              | —            | 候选 Dogfood 专用；带同一 `--candidate-evidence` 时重新核对候选运行文件、已有 Story/Review/Runner/PR 绑定，只刷新远端检查并在 ready 后补签，再创建或更新唯一 PR 证明评论；不带证据时只发布 workspace 中已有证明，不产生新结论                                             |
 | 位置参数 `repair`                               | —            | 获取短租约，修复 `<workspace>/` 下的 prd.json 与 state.json 后退出；活动租约或未完成恢复会拒绝                                                                                                                                                                             |
 | 位置参数 `dashboard`                            | —            | 不跑循环，仅启动仪表盘离线查看 workspace 状态；state 文件缺失兼容旧格式，存在但损坏时全部按未验证显示并警告                                                                                                                                                                |

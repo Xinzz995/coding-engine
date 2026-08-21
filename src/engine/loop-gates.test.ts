@@ -3,9 +3,19 @@ import { writeFileSync, rmSync, readFileSync, existsSync, realpathSync } from 'n
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readEvidence } from './evidence.js';
-import { runLoop as runProductionLoop } from './loop.js';
+import { runLoop as runProductionLoop, type LoopConfig } from './loop.js';
 import type { QualityContract } from '../quality/contract.js';
 import { digest } from '../review/common.js';
+import {
+  digestIssueExecutionContract,
+  type IssueExecutionContract,
+} from './issue-execution-contract.js';
+import { withReadyIssueRunAuthority } from './issue-run-authority.js';
+import { readReadyWorkspaceRecords } from '../workspace-safety/lease.js';
+import {
+  ISSUE_WORKSPACE_IDENTITY_FILE,
+  renderIssueWorkspaceIdentity,
+} from './issue-workspace-identity.js';
 import {
   setup,
   story,
@@ -19,7 +29,75 @@ import {
   TEST_QUALITY_CONTRACT,
 } from './loop-test-support.js';
 
+const READY_ISSUE_RUN_ID = `sha256:${'a'.repeat(64)}`;
+const READY_ISSUE_BODY_DIGEST = `sha256:${'b'.repeat(64)}`;
+const READY_ISSUE_PROJECT = 'owner/repository';
+const READY_ISSUE_BRANCH = 'codex/issue-42';
+const READY_ISSUE_SOURCE = 'docs/prds/prd-issue-42.md';
+
+function readyIssuePrdFields(): Record<string, unknown> {
+  return {
+    project: READY_ISSUE_PROJECT,
+    branchName: READY_ISSUE_BRANCH,
+    description: `ready Issue fixture\n\nIssue-Run-ID: ${READY_ISSUE_RUN_ID}`,
+    sourcePrd: READY_ISSUE_SOURCE,
+  };
+}
+
+async function runAuthorizedReadyIssue(
+  config: LoopConfig,
+  input: {
+    projectRoot: string;
+    workspace: string;
+    gitHead: string;
+    executionContractDigest: string;
+  },
+): Promise<number> {
+  const workspaceRecords = await readReadyWorkspaceRecords(input.workspace);
+  return await withReadyIssueRunAuthority(
+    {
+      projectRoot: realpathSync(input.projectRoot),
+      workspaceIdentity: workspaceRecords.workspace.identity,
+      repository: READY_ISSUE_PROJECT,
+      issueNumber: 42,
+      bodyDigest: READY_ISSUE_BODY_DIGEST,
+      branch: READY_ISSUE_BRANCH,
+      pullRequest: 7,
+      runId: READY_ISSUE_RUN_ID,
+      executionContractDigest: input.executionContractDigest,
+      gitHead: input.gitHead,
+    },
+    async (authority) => await runProductionLoop({ ...config, readyIssueRunAuthority: authority }),
+  );
+}
+
 describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
+  it('does not let a persistent Issue workspace become an ordinary run after contract removal', async () => {
+    const { workspace, instructionsDir } = setup([story()], readyIssuePrdFields());
+    writeFileSync(
+      join(workspace, ISSUE_WORKSPACE_IDENTITY_FILE),
+      renderIssueWorkspaceIdentity({
+        schemaVersion: 1,
+        repository: READY_ISSUE_PROJECT,
+        issueNumber: 42,
+        bodyDigest: READY_ISSUE_BODY_DIGEST,
+        branch: READY_ISSUE_BRANCH,
+        pullRequest: 7,
+        runId: READY_ISSUE_RUN_ID,
+        sourcePrd: READY_ISSUE_SOURCE,
+        executionContractDigest: `sha256:${'c'.repeat(64)}`,
+      }),
+    );
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(2);
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('validation-only clears the candidate only when a project command explicitly fails', async () => {
     const { workspace, instructionsDir, head } = setup([story()], {
       qualityChecks: ['node -e "process.exit(7)"'],
@@ -271,6 +349,220 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         ran: 1,
         checks: [{ category: 'test', id: 'passing-check', module: 'root' }],
       });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('sends only semantic criteria while binding explicit local reasons and leaving remote checks out', async () => {
+    const base = qualityContractWithNodeScript('process.exit(0)', 'passing-check');
+    const passingPolicy = base.checks.test;
+    if (!('checks' in passingPolicy)) throw new Error('fixture requires a test check');
+    passingPolicy.checks[0].paths = ['source.txt'];
+    const contract = {
+      ...base,
+      checks: {
+        ...base.checks,
+        security: {
+          checks: [
+            {
+              id: 'dependency-audit',
+              module: 'root',
+              paths: ['package.json', 'package-lock.json'],
+              command: {
+                executable: process.execPath,
+                args: ['-e', 'process.exit(0)'],
+                cwd: '.',
+                platforms: ['linux'],
+                timeoutMs: 5_000,
+              },
+            },
+          ],
+        },
+      },
+      github: {
+        jobs: [
+          {
+            id: 'linux',
+            platform: 'linux',
+            toolchains: [],
+            setup: [],
+            checkIds: ['passing-check', 'dependency-audit'],
+          },
+          {
+            id: 'macos',
+            platform: 'macos',
+            toolchains: [],
+            setup: [],
+            checkIds: ['passing-check'],
+          },
+          {
+            id: 'windows',
+            platform: 'windows',
+            toolchains: [],
+            setup: [],
+            checkIds: ['passing-check'],
+          },
+        ],
+        requiredChecks: ['quality-gate'],
+      },
+    } as QualityContract;
+    const executionContract: IssueExecutionContract = {
+      schemaVersion: 1,
+      storyAcceptance: {
+        evidenceSource: 'validator',
+        network: 'disabled',
+        criteria: ['返回结果符合语义要求'],
+      },
+      localChecks: {
+        evidenceSource: 'engine',
+        network: 'current-host',
+        mode: 'scoped',
+        checkIds: ['passing-check'],
+      },
+      remoteDelivery: {
+        evidenceSource: 'github',
+        network: 'github-actions',
+        mode: 'scoped',
+        checkIds: ['dependency-audit'],
+        ruleset: 'required',
+      },
+      runMetrics: {
+        evidenceSource: 'engine-clock',
+        metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
+      },
+    };
+    const contractDigest = digest(contract);
+    const executionContractDigest = digestIssueExecutionContract(executionContract);
+    const { projectRoot, workspace, instructionsDir, head } = setup(
+      [story({ acceptanceCriteria: ['返回结果符合语义要求'] })],
+      {
+        ...readyIssuePrdFields(),
+        qualityContractDigest: contractDigest,
+        qualityChecks: contract.checks,
+        executionContract,
+        executionContractDigest,
+      },
+    );
+    const promptMarker = join(resolve(workspace, '..'), 'responsibility-validator-prompt.txt');
+    const fake = fakeBoundValidator(workspace, 'passed', {
+      validatorPromptMarker: promptMarker,
+    });
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      const config: LoopConfig = {
+        ...strictConfig(workspace, instructionsDir),
+        qualityContractReader: () => readyQualityContract(contract, contractDigest),
+        storyChangeManifestForTests: () => ({
+          digest: `sha256:${'f'.repeat(64)}`,
+          changedPathCount: 1,
+          changeSelection: {
+            matchedPathCheckIds: ['passing-check'],
+            allChangedPathsMatched: true,
+          },
+        }),
+      };
+      expect(await runProductionLoop(config)).toBe(2);
+      expect(existsSync(promptMarker)).toBe(false);
+      expect(
+        await runAuthorizedReadyIssue(config, {
+          projectRoot,
+          workspace,
+          gitHead: head(),
+          executionContractDigest,
+        }),
+      ).toBe(0);
+      const prompt = readFileSync(promptMarker, 'utf8');
+      const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+      const jsonAt = prompt.indexOf('{', markerAt);
+      const fenceAt = prompt.indexOf('\n```', jsonAt);
+      const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+      expect(request.acceptanceCriteria).toEqual(['返回结果符合语义要求']);
+      expect(request.engineQualityGate).toMatchObject({
+        checks: [{ id: 'passing-check' }],
+        skippedCheckIds: ['dependency-audit'],
+        selectionRequirement: { mode: 'scoped', checkIds: ['passing-check'] },
+        selectionReasons: [
+          { checkId: 'passing-check', sources: ['path', 'explicit'] },
+        ],
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('rejects a non-Codex ready Issue workspace before any Agent starts', async () => {
+    const contract = {
+      ...TEST_QUALITY_CONTRACT,
+      github: {
+        jobs: [
+          {
+            id: 'fixture',
+            platform: 'linux',
+            toolchains: [],
+            setup: [],
+            checkIds: ['fixture-pass'],
+          },
+        ],
+        requiredChecks: ['quality-gate'],
+      },
+    } as QualityContract;
+    const contractDigest = digest(contract);
+    const executionContract: IssueExecutionContract = {
+      schemaVersion: 1,
+      storyAcceptance: {
+        evidenceSource: 'validator',
+        network: 'disabled',
+        criteria: ['行为成立'],
+      },
+      localChecks: {
+        evidenceSource: 'engine',
+        network: 'current-host',
+        mode: 'scoped',
+        checkIds: [],
+      },
+      remoteDelivery: {
+        evidenceSource: 'github',
+        network: 'github-actions',
+        mode: 'scoped',
+        checkIds: [],
+        ruleset: 'required',
+      },
+      runMetrics: {
+        evidenceSource: 'engine-clock',
+        metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
+      },
+    };
+    const executionContractDigest = digestIssueExecutionContract(executionContract);
+    const { projectRoot, workspace, instructionsDir, head } = setup(
+      [story({ acceptanceCriteria: ['行为成立'] })],
+      {
+        ...readyIssuePrdFields(),
+        qualityContractDigest: contractDigest,
+        qualityChecks: contract.checks,
+        executionContract,
+        executionContractDigest,
+      },
+    );
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(
+        await runAuthorizedReadyIssue(
+          {
+            ...strictConfig(workspace, instructionsDir),
+            validatorRunnerBindingForTests: undefined,
+            qualityContractReader: () => readyQualityContract(contract, contractDigest),
+          },
+          {
+            projectRoot,
+            workspace,
+            gitHead: head(),
+            executionContractDigest,
+          },
+        ),
+      ).toBe(2);
+      expect(existsSync(calls)).toBe(false);
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;
     }

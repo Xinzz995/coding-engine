@@ -187,6 +187,14 @@ export type EvidenceRecord =
       selectionMode?: 'full' | 'scoped' | 'fallback-full';
       selectedCheckIds?: string[];
       skippedCheckIds?: string[];
+      selectionRequirement?: {
+        mode: 'scoped' | 'full';
+        checkIds: string[];
+      };
+      selectionReasons?: Array<{
+        checkId: string;
+        sources: Array<'always' | 'path' | 'explicit' | 'full' | 'fallback-full'>;
+      }>;
       /** 检查流程已结束，但 HEAD 复核失败，结果未进入裁决；旧记录缺省表示已采用。 */
       accepted?: false;
       failedCommand?: string;
@@ -410,7 +418,13 @@ function hasValidOptionalChangeBinding(v: Record<string, unknown>): boolean {
 }
 
 function hasValidOptionalGateSelection(v: Record<string, unknown>): boolean {
-  const values = [v.selectionMode, v.selectedCheckIds, v.skippedCheckIds];
+  const values = [
+    v.selectionMode,
+    v.selectedCheckIds,
+    v.skippedCheckIds,
+    v.selectionRequirement,
+    v.selectionReasons,
+  ];
   if (values.every((value) => value === undefined)) return true;
   if (
     (v.selectionMode !== 'full' &&
@@ -424,7 +438,83 @@ function hasValidOptionalGateSelection(v: Record<string, unknown>): boolean {
     return false;
   }
   const selected = new Set(v.selectedCheckIds);
+  const selectedCheckIds = v.selectedCheckIds as unknown[];
   const skipped = new Set(v.skippedCheckIds);
+  const requirement = v.selectionRequirement;
+  if (requirement !== undefined) {
+    if (
+      !isRec(requirement) ||
+      (requirement.mode !== 'scoped' && requirement.mode !== 'full') ||
+      !Array.isArray(requirement.checkIds) ||
+      !requirement.checkIds.every((id) => typeof id === 'string' && id.length > 0) ||
+      new Set(requirement.checkIds).size !== requirement.checkIds.length ||
+      (requirement.mode === 'full' && requirement.checkIds.length > 0)
+    ) {
+      return false;
+    }
+  }
+  const selectionSources = new Set([
+    'always',
+    'path',
+    'explicit',
+    'full',
+    'fallback-full',
+  ]);
+  if (
+    v.selectionReasons !== undefined &&
+    (!Array.isArray(v.selectionReasons) ||
+      v.selectionReasons.length !== selectedCheckIds.length ||
+      !v.selectionReasons.every(
+        (reason, index) =>
+          isRec(reason) &&
+          reason.checkId === selectedCheckIds[index] &&
+          Array.isArray(reason.sources) &&
+          reason.sources.length > 0 &&
+          new Set(reason.sources).size === reason.sources.length &&
+          reason.sources.every(
+            (source) => typeof source === 'string' && selectionSources.has(source),
+          ),
+      ))
+  ) {
+    return false;
+  }
+  const selectionReasons = (v.selectionReasons ?? []) as Array<Record<string, unknown>>;
+  const explicitCheckIds = new Set(
+    selectionReasons
+      .filter(
+        (reason) =>
+          Array.isArray(reason.sources) && reason.sources.includes('explicit'),
+      )
+      .map((reason) => reason.checkId as string),
+  );
+  if (requirement === undefined) {
+    if (explicitCheckIds.size > 0) return false;
+  } else {
+    const requiredCheckIds = new Set(requirement.checkIds as string[]);
+    if (requirement.mode === 'full') {
+      if (
+        selectionReasons.some(
+          (reason) =>
+            !Array.isArray(reason.sources) ||
+            !reason.sources.includes('full') ||
+            reason.sources.includes('explicit'),
+        )
+      ) {
+        return false;
+      }
+    } else if (
+      [...requiredCheckIds].some((id) => !selected.has(id)) ||
+      selectionReasons.some(
+        (reason) =>
+          explicitCheckIds.has(reason.checkId as string) !==
+          requiredCheckIds.has(reason.checkId as string),
+      ) ||
+      explicitCheckIds.size !== requiredCheckIds.size
+    ) {
+      return false;
+    }
+  }
+  if (requirement !== undefined && v.selectionReasons === undefined) return false;
   return (
     selected.size === v.selectedCheckIds.length &&
     skipped.size === v.skippedCheckIds.length &&

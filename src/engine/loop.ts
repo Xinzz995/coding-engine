@@ -33,6 +33,8 @@ import {
   abortDesc,
   applyValidatorFailure,
   applyValidatorSuccess,
+  type QualityCheckSelectionRequirement,
+  type QualityCheckSelectionReason,
 } from './gate.js';
 import { resolveBuilderModel, resolveValidatorModel } from './models.js';
 import type { ModelCatalogResult } from './model-catalog.js';
@@ -119,6 +121,7 @@ import {
   engineQualityGateEvidence,
   type FullGateProof,
 } from './full-gate-proof.js';
+import type { ReadyIssueRunAuthority } from './issue-run-authority.js';
 
 export { renderInstruction } from './loop-instructions.js';
 
@@ -155,6 +158,8 @@ export interface LoopConfig {
   actualVersion?: string;
   /** 已逐文件核对的候选包身份；只有 shadow Dogfood 可以绑定。 */
   candidateIdentity?: VerifiedCandidateIdentity;
+  /** @internal One-shot authority issued by `issue run` after live Issue/PR/policy checks. */
+  readyIssueRunAuthority?: ReadyIssueRunAuthority;
   /** 项目根；生产缺省当前目录，测试/嵌入环境可显式指定。 */
   projectRoot?: string;
   /** 只供隔离测试注入；生产始终读取项目根 .coding-x/quality.json。 */
@@ -165,7 +170,8 @@ export interface LoopConfig {
   storyChangeManifestForTests?: (
     storyBaseGitHead: string,
     gitHead: string,
-  ) => Pick<StoryChangeManifest, 'digest' | 'changedPathCount'>;
+  ) => Pick<StoryChangeManifest, 'digest' | 'changedPathCount'> &
+    Partial<Pick<StoryChangeManifest, 'changeSelection'>>;
   /** 测试/嵌入注入；生产缺省执行真实本地三层 Review。 */
   finalReviewRunner?: (options: {
     root: string;
@@ -179,6 +185,7 @@ export interface LoopConfig {
     timeoutMs: number;
     storyValidationDigest: string;
     reusableFullGate?: FullGateProof;
+    qualityCheckRequirement?: QualityCheckSelectionRequirement;
     observeStoryValidation: () =>
       StoryValidationBindingObservation | Promise<StoryValidationBindingObservation>;
     termination?: {
@@ -240,6 +247,39 @@ function readRunState(statePath: string, prd: Prd): RunState {
     '⚠️  state.json 缺失或不可读，本轮按全部 story 未开始处理；若文件损坏请运行 npx coding-x repair',
   );
   return blankStateFor(prd);
+}
+
+function observedQualityRequirement(value: unknown): QualityCheckSelectionRequirement | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    (record.mode !== 'scoped' && record.mode !== 'full') ||
+    !Array.isArray(record.checkIds)
+  ) {
+    return undefined;
+  }
+  return {
+    mode: record.mode,
+    checkIds: record.checkIds.filter((id): id is string => typeof id === 'string'),
+  };
+}
+
+function observedQualityReasons(value: unknown): QualityCheckSelectionReason[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): QualityCheckSelectionReason[] => {
+    if (typeof entry !== 'object' || entry === null) return [];
+    const record = entry as Record<string, unknown>;
+    if (typeof record.checkId !== 'string' || !Array.isArray(record.sources)) return [];
+    const sources = record.sources.filter(
+      (source): source is QualityCheckSelectionReason['sources'][number] =>
+        source === 'always' ||
+        source === 'path' ||
+        source === 'explicit' ||
+        source === 'full' ||
+        source === 'fallback-full',
+    );
+    return [{ checkId: record.checkId, sources }];
+  });
 }
 
 // 收敛出口单源：两个 allStoriesResolved 出口（no-op 快路径/轮末完成判定）共用，
@@ -321,12 +361,20 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
       validatorBase,
       modelPreflight: preflight,
       frozenQualityChecks,
+      issueExecutionCapabilities,
       runKind,
       bootResolved,
       validationEnvironmentDigest: bootValidationEnvironmentDigest,
       validationRuntimeIdentity,
       defaultBranchGitHead,
     } = startup;
+    const issueQualityCheckRequirement: QualityCheckSelectionRequirement | undefined =
+      issueExecutionCapabilities === null
+        ? undefined
+        : {
+            mode: issueExecutionCapabilities.localMode,
+            checkIds: [...issueExecutionCapabilities.localCheckIds],
+          };
     await session.writer.removeFile(CANDIDATE_PROOF_FILE);
     const agentCwd = projectRoot;
     const storyValidationEnvironmentAt = (headSha: string): string =>
@@ -659,6 +707,9 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
         timeoutMs: cfg.valTimeoutMs,
         storyValidationDigest: initialDigest,
         reusableFullGate,
+        ...(issueQualityCheckRequirement
+          ? { qualityCheckRequirement: issueQualityCheckRequirement }
+          : {}),
         observeStoryValidation,
         termination: commandSignals.termination,
       });
@@ -1501,6 +1552,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
           gitHead: verificationHead,
           digest: injected.digest,
           changedPathCount: injected.changedPathCount,
+          ...(injected.changeSelection ? { changeSelection: injected.changeSelection } : {}),
         };
       }
       const legacyChecks =
@@ -1554,6 +1606,7 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 undefined,
                 managedGate,
                 storyChangeManifest?.changeSelection,
+                issueQualityCheckRequirement,
               );
         if (rawOf(statePath) !== stateBeforeGate) {
           if (stateBeforeGate !== null) {
@@ -1592,6 +1645,12 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 (value): value is string => typeof value === 'string',
               )
             : [];
+        const gateSelectionRequirement = observedQualityRequirement(
+          'selectionRequirement' in gate ? gate.selectionRequirement : undefined,
+        );
+        const gateSelectionReasons = observedQualityReasons(
+          'selectionReasons' in gate ? gate.selectionReasons : undefined,
+        );
         const pathSkipped = new Set(skippedByPath);
         const skippedByPlatform = skippedChecks.filter((value) => !pathSkipped.has(value));
         if (skippedByPlatform.length > 0) {
@@ -1634,6 +1693,22 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                 selectionMode: gateSelectionMode,
                 selectedCheckIds: [...gateSelectedCheckIds],
                 skippedCheckIds: [...skippedChecks],
+                ...(gateSelectionRequirement
+                  ? {
+                      selectionRequirement: {
+                        mode: gateSelectionRequirement.mode,
+                        checkIds: [...gateSelectionRequirement.checkIds],
+                      },
+                    }
+                  : {}),
+                ...(gateSelectionReasons.length > 0
+                  ? {
+                      selectionReasons: gateSelectionReasons.map((reason) => ({
+                        checkId: reason.checkId,
+                        sources: [...reason.sources],
+                      })),
+                    }
+                  : {}),
               }),
           ...(gatePostconditionFailed ? { accepted: false as const } : {}),
           ...(gate.failure
@@ -1768,12 +1843,15 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
               defaultBranchGitHead,
               additionalRefs: proofPolicy.additionalRefs,
               referenceAliases: proofPolicy.referenceAliases,
-              ...(gateSelectionMode === 'scoped' && storyChangeManifest
+              ...(gateSelectionRequirement ? { selectionRequirement: gateSelectionRequirement } : {}),
+              ...((gateSelectionMode === 'scoped' || gateSelectionRequirement !== undefined) &&
+              storyChangeManifest
                 ? {
                     changeScope: {
                       baseGitHead: storyChangeManifest.storyBaseGitHead,
                       manifestDigest: storyChangeManifest.digest,
                       selectedCheckIds: gateSelectedCheckIds,
+                      selectionReasons: gateSelectionReasons,
                     },
                   }
                 : {}),
@@ -1789,6 +1867,10 @@ export async function runLoop(cfg: LoopConfig): Promise<number> {
                     selectionMode: gateSelectionMode,
                     selectedCheckIds: gateSelectedCheckIds,
                     skippedByPath,
+                    ...(gateSelectionRequirement
+                      ? { selectionRequirement: gateSelectionRequirement }
+                      : {}),
+                    selectionReasons: gateSelectionReasons,
                   }),
             },
           );

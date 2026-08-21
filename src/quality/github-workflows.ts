@@ -158,6 +158,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
   const declared = allChecks(contract);
   const checksById = new Map(declared.map((check) => [check.id, check]));
   const checkIndex = new Map(declared.map((check, index) => [check.id, index + 1]));
+  const githubCheckIds = new Set(contract.github.jobs.flatMap((job) => job.checkIds));
   if (contract.github.jobs.length === 0) throw new Error('质量契约没有 GitHub jobs');
 
   const lines = [
@@ -204,6 +205,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     '          EVENT_NAME: ${{ github.event_name }}',
     '          PR_BASE: ${{ github.event.pull_request.base.sha }}',
     '          PR_HEAD: ${{ github.event.pull_request.head.sha }}',
+    '          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}',
     '        run: |',
     '          set -euo pipefail',
     '          full=0',
@@ -281,6 +283,182 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
       '          fi',
     );
   });
+  lines.push(
+    '          if [ "$EVENT_NAME" = pull_request ] && [[ "$PR_HEAD_REF" =~ ^codex/issue-([1-9][0-9]*)$ ]]; then',
+    '            issue_number="${BASH_REMATCH[1]}"',
+    '            source_path="docs/prds/prd-issue-${issue_number}.md"',
+    '            if ! source_size=$(git cat-file -s "${PR_HEAD}:${source_path}" 2>/dev/null); then',
+    '              echo "::error::ready Issue branch is missing ${source_path} at the PR head"',
+    '              exit 1',
+    '            fi',
+    '            if ! [[ "$source_size" =~ ^[0-9]+$ ]] || [ "$source_size" -gt 2097152 ]; then',
+    '              echo "::error::ready Issue source is empty, oversized, or has an invalid size"',
+    '              exit 1',
+    '            fi',
+    '            if ! source_body=$(git show "${PR_HEAD}:${source_path}" 2>/dev/null); then',
+    '              echo "::error::ready Issue source cannot be read from the PR head"',
+    '              exit 1',
+    '            fi',
+    '            execution_header_count=$(grep -c \'^> Issue-Execution-Contract-Digest:\' <<< "$source_body" || true)',
+    '            if [ "$execution_header_count" -ne 1 ]; then',
+    '              echo "::error::ready Issue source must contain one execution contract digest; legacy runs need a new Issue"',
+    '              exit 1',
+    '            fi',
+    '            mode_header_count=$(grep -c \'^> Issue-Remote-Check-Mode:\' <<< "$source_body" || true)',
+    '            ids_header_count=$(grep -c \'^> Issue-Remote-Check-IDs:\' <<< "$source_body" || true)',
+    '            if [ "$mode_header_count" -ne 1 ] || [ "$ids_header_count" -ne 1 ]; then',
+    '              echo "::error::ready Issue remote check headers must appear exactly once"',
+    '              exit 1',
+    '            fi',
+    '            execution_digest=$(sed -n \'s/^> Issue-Execution-Contract-Digest: //p\' <<< "$source_body")',
+    '            remote_mode=$(sed -n \'s/^> Issue-Remote-Check-Mode: //p\' <<< "$source_body")',
+    '            remote_checks=$(sed -n \'s/^> Issue-Remote-Check-IDs: //p\' <<< "$source_body")',
+    '            if ! [[ "$execution_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then',
+    '              echo "::error::ready Issue execution contract digest is invalid"',
+    '              exit 1',
+    '            fi',
+    '            python3 - "$PR_HEAD" "$source_path" "$execution_digest" "$remote_mode" "$remote_checks" <<\'PY\'',
+    '          import hashlib',
+    '          import json',
+    '          import re',
+    '          import subprocess',
+    '          import sys',
+    '',
+    '          head, source_path, expected_digest, expected_mode, expected_ids = sys.argv[1:]',
+    '          source = subprocess.check_output(',
+    '              ["git", "show", f"{head}:{source_path}"], text=True, encoding="utf-8"',
+    '          )',
+    '          blocks = re.findall(',
+    '              r"^#### Execution Contract\\s*\\r?\\n+```json\\s*\\r?\\n([\\s\\S]+?)\\r?\\n```",',
+    '              source,',
+    '              re.MULTILINE,',
+    '          )',
+    '          if len(blocks) != 1:',
+    '              raise SystemExit("ready Issue source must contain one execution contract block")',
+    '          try:',
+    '              raw = json.loads(blocks[0])',
+    '          except json.JSONDecodeError as error:',
+    '              raise SystemExit(f"ready Issue execution contract is invalid JSON: {error}")',
+    '',
+    '          def exact(value, keys, label):',
+    '              if not isinstance(value, dict) or set(value) != set(keys):',
+    '                  raise SystemExit(f"{label} has an invalid shape")',
+    '              return value',
+    '',
+    '          def ids(value, label):',
+    '              if (',
+    '                  not isinstance(value, list)',
+    '                  or any(not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", item) for item in value)',
+    '                  or len(set(value)) != len(value)',
+    '              ):',
+    '                  raise SystemExit(f"{label} has invalid check ids")',
+    '              return value',
+    '',
+    '          JS_WHITESPACE = "\\u0009\\u000a\\u000b\\u000c\\u000d\\u0020\\u00a0\\u1680\\u2000\\u2001\\u2002\\u2003\\u2004\\u2005\\u2006\\u2007\\u2008\\u2009\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff"',
+    '',
+    '          def js_trim(value):',
+    '              return value.strip(JS_WHITESPACE)',
+    '',
+    '          def utf16_length(value):',
+    '              return len(value.encode("utf-16-le", errors="surrogatepass")) // 2',
+    '',
+    '          def has_unpaired_surrogate(value):',
+    '              return any(0xD800 <= ord(character) <= 0xDFFF for character in value)',
+    '',
+    '          root = exact(',
+    '              raw,',
+    '              ["schemaVersion", "storyAcceptance", "localChecks", "remoteDelivery", "runMetrics"],',
+    '              "execution contract",',
+    '          )',
+    '          if type(root["schemaVersion"]) is not int or root["schemaVersion"] != 1:',
+    '              raise SystemExit("ready Issue execution contract schemaVersion is invalid")',
+    '          story = exact(root["storyAcceptance"], ["evidenceSource", "network", "criteria"], "storyAcceptance")',
+    '          criteria = story["criteria"]',
+    '          if (',
+    '              story["evidenceSource"] != "validator"',
+    '              or story["network"] != "disabled"',
+    '              or not isinstance(criteria, list)',
+    '              or not criteria',
+    '              or any(not isinstance(item, str) or not item or item != js_trim(item) or "\\0" in item or has_unpaired_surrogate(item) or utf16_length(item) > 4000 for item in criteria)',
+    '              or len(set(criteria)) != len(criteria)',
+    '          ):',
+    '              raise SystemExit("ready Issue storyAcceptance is invalid")',
+    '          local = exact(root["localChecks"], ["evidenceSource", "network", "mode", "checkIds"], "localChecks")',
+    '          local_ids = ids(local["checkIds"], "localChecks")',
+    '          if (',
+    '              local["evidenceSource"] != "engine"',
+    '              or local["network"] != "current-host"',
+    '              or local["mode"] not in ["scoped", "full"]',
+    '              or (local["mode"] == "full" and local_ids)',
+    '          ):',
+    '              raise SystemExit("ready Issue localChecks is invalid")',
+    '          remote = exact(root["remoteDelivery"], ["evidenceSource", "network", "mode", "checkIds", "ruleset"], "remoteDelivery")',
+    '          remote_ids = ids(remote["checkIds"], "remoteDelivery")',
+    '          if (',
+    '              remote["evidenceSource"] != "github"',
+    '              or remote["network"] != "github-actions"',
+    '              or remote["mode"] not in ["scoped", "full"]',
+    '              or (remote["mode"] == "full" and remote_ids)',
+    '              or remote["ruleset"] != "required"',
+    '          ):',
+    '              raise SystemExit("ready Issue remoteDelivery is invalid")',
+    '          metrics = exact(root["runMetrics"], ["evidenceSource", "metrics"], "runMetrics")',
+    '          expected_metrics = ["ready-to-trusted", "active", "waiting", "continuations"]',
+    '          if metrics["evidenceSource"] != "engine-clock" or metrics["metrics"] != expected_metrics:',
+    '              raise SystemExit("ready Issue runMetrics is invalid")',
+    '',
+    '          normalized = {',
+    '              "schemaVersion": 1,',
+    '              "storyAcceptance": {"evidenceSource": "validator", "network": "disabled", "criteria": criteria},',
+    '              "localChecks": {"evidenceSource": "engine", "network": "current-host", "mode": local["mode"], "checkIds": local_ids},',
+    '              "remoteDelivery": {"evidenceSource": "github", "network": "github-actions", "mode": remote["mode"], "checkIds": remote_ids, "ruleset": "required"},',
+    '              "runMetrics": {"evidenceSource": "engine-clock", "metrics": expected_metrics},',
+    '          }',
+    '          payload = json.dumps(',
+    '              {"domain": "coding-x-ready-issue-execution-v1", "contract": normalized},',
+    '              ensure_ascii=False,',
+    '              separators=(",", ":"),',
+    '          ).encode("utf-8")',
+    '          actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()',
+    '          actual_ids = ",".join(remote_ids) if remote_ids else "-"',
+    '          if actual_digest != expected_digest or remote["mode"] != expected_mode or actual_ids != expected_ids:',
+    '              raise SystemExit("ready Issue remote headers do not match the execution contract")',
+    '          PY',
+    '            if [ "$remote_mode" != scoped ]; then',
+    '              echo "::error::ready Issue remote mode must be scoped for a pull request"',
+    '              exit 1',
+    '            fi',
+    '            if [ "$remote_checks" != - ]; then',
+    '              if ! [[ "$remote_checks" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then',
+    '                echo "::error::ready Issue remote check ids are invalid"',
+    '                exit 1',
+    '              fi',
+    '              IFS=\',\' read -r -a remote_check_ids <<< "$remote_checks"',
+    '              seen_remote_check_ids=,',
+    '              for remote_check_id in "${remote_check_ids[@]}"; do',
+    '                case "$seen_remote_check_ids" in',
+    '                  *",${remote_check_id},"*)',
+    '                    echo "::error::ready Issue remote check id ${remote_check_id} is duplicated"',
+    '                    exit 1',
+    '                    ;;',
+    '                esac',
+    '                seen_remote_check_ids="${seen_remote_check_ids}${remote_check_id},"',
+    '                case "$remote_check_id" in',
+    ...declared
+      .filter((check) => githubCheckIds.has(check.id))
+      .map(
+        (check) =>
+          `                  ${check.id}) check_${String(checkIndex.get(check.id))}=true ;;`,
+      ),
+    '                  *)',
+    '                    echo "::error::ready Issue remote check ${remote_check_id} has no declared GitHub job"',
+    '                    exit 1',
+    '                    ;;',
+    '                esac',
+    '              done',
+    '            fi',
+    '          fi',
+  );
   contract.github.jobs.forEach((job, index) => {
     const variables = job.checkIds.map((id) => `\$check_${checkIndex.get(id)}`).join('" = true ] || [ "');
     lines.push(`          job_${index + 1}=false`);
@@ -612,7 +790,7 @@ title: ''
 body:
   - type: markdown
     attributes:
-      value: '填写并人工确认后再添加 ready-for-agent 标签；创建 Issue 本身不会启动运行。'
+      value: '填写并人工确认后再添加 ready-for-agent 标签；创建 Issue 本身不会启动运行。当前可信入口只支持 codex。'
   - type: textarea
     id: goal
     attributes:
@@ -628,11 +806,38 @@ body:
     validations:
       required: true
   - type: textarea
-    id: acceptance
+    id: execution-contract
     attributes:
-      label: 验收标准
-      description: 每行一个可判定条目，使用 Markdown 列表
-      placeholder: '- 第一个可判定结果'
+      label: 执行合同
+      description: 只填写 Story 语义标准、稳定 check id 与模式；本地可 scoped/full，远端当前只支持 scoped；固定责任字段不得改写
+      value: |
+        \`\`\`json
+        {
+          "schemaVersion": 1,
+          "storyAcceptance": {
+            "evidenceSource": "validator",
+            "network": "disabled",
+            "criteria": []
+          },
+          "localChecks": {
+            "evidenceSource": "engine",
+            "network": "current-host",
+            "mode": "scoped",
+            "checkIds": []
+          },
+          "remoteDelivery": {
+            "evidenceSource": "github",
+            "network": "github-actions",
+            "mode": "scoped",
+            "checkIds": [],
+            "ruleset": "required"
+          },
+          "runMetrics": {
+            "evidenceSource": "engine-clock",
+            "metrics": ["ready-to-trusted", "active", "waiting", "continuations"]
+          }
+        }
+        \`\`\`
     validations:
       required: true
   - type: textarea

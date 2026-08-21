@@ -5,7 +5,7 @@ export const VALIDATION_RECEIPT_SCHEMA_VERSION = 4 as const;
 export const VALIDATION_RESULT_FILE = 'validation-result.json';
 export const VALIDATION_RESULT_MAX_BYTES = 64 * 1024;
 export const VALIDATION_TEXT_MAX_CHARS = 2000;
-export const ENGINE_QUALITY_GATE_EVIDENCE_SCHEMA_VERSION = 2 as const;
+export const ENGINE_QUALITY_GATE_EVIDENCE_SCHEMA_VERSION = 3 as const;
 
 export type ContractParseResult<T> =
   { ok: true; value: T } | { ok: false; code: string; diagnostic: string };
@@ -51,11 +51,19 @@ export interface EngineQualityGateEvidence {
   ran: number;
   checks: EngineQualityGateCheckEvidence[];
   skippedCheckIds: string[];
-  /** scoped 时绑定 Story 起点；全量与保守回退时为 null。 */
+  /** scoped 或 ready Issue 显式责任存在时绑定 Story 起点，否则为 null。 */
   changeBaseGitHead: string | null;
-  /** scoped 时绑定完整变化摘要；全量与保守回退时为 null。 */
+  /** scoped 或 ready Issue 显式责任存在时绑定完整变化摘要，否则为 null。 */
   changeManifestDigest: string | null;
   selectionMode: 'full' | 'scoped' | 'fallback-full';
+  selectionRequirement: {
+    mode: 'scoped' | 'full';
+    checkIds: string[];
+  } | null;
+  selectionReasons: Array<{
+    checkId: string;
+    sources: Array<'always' | 'path' | 'explicit' | 'full' | 'fallback-full'>;
+  }>;
 }
 
 export interface ValidationCheck {

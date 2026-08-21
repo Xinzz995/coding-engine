@@ -4,6 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readGitHead } from '../engine/validation-protocol.js';
+import {
+  digestIssueExecutionContract,
+  type IssueExecutionContract,
+} from '../engine/issue-execution-contract.js';
+import {
+  ensureIssueWorkspaceIdentity,
+  ISSUE_WORKSPACE_IDENTITY_FILE,
+} from '../engine/issue-workspace-identity.js';
 import { readQualityContract } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
 import { digestBytes } from './filesystem.js';
@@ -217,6 +225,135 @@ describe('fixed apply-prd-v1 product mutation', () => {
     )).rejects.toThrow(/qualityChecks/u);
     expect(readFileSync(join(root, 'prd.json'))).toEqual(originalPrd);
     await expect(session.close()).resolves.toContain('released-');
+  });
+
+  it('accepts only a fully bound ready Issue execution contract in the workspace PRD', async () => {
+    const executionContract: IssueExecutionContract = {
+      schemaVersion: 1,
+      storyAcceptance: {
+        evidenceSource: 'validator',
+        network: 'disabled',
+        criteria: ['行为成立'],
+      },
+      localChecks: {
+        evidenceSource: 'engine',
+        network: 'current-host',
+        mode: 'scoped',
+        checkIds: [],
+      },
+      remoteDelivery: {
+        evidenceSource: 'github',
+        network: 'github-actions',
+        mode: 'scoped',
+        checkIds: [],
+        ruleset: 'required',
+      },
+      runMetrics: {
+        evidenceSource: 'engine-clock',
+        metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
+      },
+    };
+    const executionContractDigest = digestIssueExecutionContract(executionContract);
+    const runId = `sha256:${'1'.repeat(64)}`;
+    const runtimePrd = prd('codex/issue-42', `ready Issue\n\nIssue-Run-ID: ${runId}`, {
+      project: 'fixture/repository',
+      sourcePrd: 'source.txt',
+      executionContract,
+      executionContractDigest,
+      userStories: [
+        {
+          id: 'US-001',
+          title: 'ready Issue',
+          description: 'fixture',
+          acceptanceCriteria: ['行为成立'],
+          priority: 1,
+        },
+      ],
+    });
+    const accepted = await fixture('apply-prd');
+    await ensureIssueWorkspaceIdentity(accepted.session, {
+      schemaVersion: 1,
+      repository: 'fixture/repository',
+      issueNumber: 42,
+      bodyDigest: `sha256:${'2'.repeat(64)}`,
+      branch: 'codex/issue-42',
+      pullRequest: 7,
+      runId,
+      sourcePrd: 'source.txt',
+      executionContractDigest,
+    });
+    await expect(
+      runApplyPrdV1Mutation(
+        accepted.session,
+        applyRequest('replace-feature', {
+          prd: runtimePrd,
+          state: null,
+          progress: Buffer.from('# Progress\n'),
+        }),
+        APPLY_OPTIONS,
+      ),
+    ).resolves.toMatchObject({ state: { phase: 'committed' } });
+    expect(existsSync(join(accepted.root, ISSUE_WORKSPACE_IDENTITY_FILE))).toBe(true);
+    await expect(
+      runApplyPrdV1Mutation(
+        accepted.session,
+        applyRequest('rederive-feature', {
+          prd: prd('codex/issue-42', 'downgraded ordinary PRD'),
+          state: null,
+          progress: null,
+        }),
+        APPLY_OPTIONS,
+      ),
+    ).rejects.toThrow(/cannot be removed or rebound/u);
+    expect(readFileSync(join(accepted.root, 'prd.json'))).toEqual(runtimePrd);
+    await expect(accepted.session.close()).resolves.toContain('released-');
+
+    const damagedPrd = JSON.parse(runtimePrd.toString('utf8')) as Record<string, unknown>;
+    delete damagedPrd.executionContract;
+    const damagedBytes = Buffer.from(`${JSON.stringify(damagedPrd, null, 2)}\n`, 'utf8');
+    writeFileSync(join(accepted.root, 'prd.json'), damagedBytes);
+    const repairIdentity = createIdentityProbe().current();
+    const repairLease = await acquireWorkspaceLease({
+      workspacePath: accepted.root,
+      identity: repairIdentity,
+      command: 'repair',
+    });
+    const repairSession = createWorkspaceSession(repairLease);
+    await expect(
+      runRepairV1Mutation(repairSession, {
+        schemaVersion: 1,
+        source: { prdDigest: digestBytes(damagedBytes), stateDigest: null },
+        candidate: { prd: runtimePrd, state: null },
+      }),
+    ).resolves.toMatchObject({ state: { phase: 'committed' } });
+    expect(readFileSync(join(accepted.root, 'prd.json'))).toEqual(runtimePrd);
+    await expect(repairSession.close()).resolves.toContain('released-');
+
+    const rejected = await fixture('apply-prd');
+    await expect(
+      runApplyPrdV1Mutation(
+        rejected.session,
+        applyRequest('replace-feature', {
+          prd: prd('codex/issue-43', 'ready Issue', {
+            executionContract,
+            executionContractDigest: `sha256:${'0'.repeat(64)}`,
+            userStories: [
+              {
+                id: 'US-001',
+                title: 'ready Issue',
+                description: 'fixture',
+                acceptanceCriteria: ['行为成立'],
+                priority: 1,
+              },
+            ],
+          }),
+          state: null,
+          progress: Buffer.from('# Progress\n'),
+        }),
+        APPLY_OPTIONS,
+      ),
+    ).rejects.toThrow(/executionContractDigest/u);
+    await expect(rejected.session.close()).resolves.toContain('released-');
   });
 
   it('archives a complete old feature, resets its run material, and never archives an unlisted file', async () => {

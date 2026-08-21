@@ -1,6 +1,7 @@
 import type { AgentKind } from './agent.js';
 import type { FrozenQualityChecks } from '../quality/contract.js';
 import { readStableFile } from '../workspace-safety/stable-file.js';
+import type { IssueExecutionContract } from './issue-execution-contract.js';
 
 export type StoryDifficulty = 'low' | 'medium' | 'high';
 
@@ -56,6 +57,10 @@ export interface Prd {
    * string[] 只为读取 0.29 及更早的历史 workspace，正式模式会拒绝。
    */
   qualityChecks?: FrozenQualityChecks | string[];
+  /** ready Issue 专用的责任分层合同；普通 PRD 不需要此字段。 */
+  executionContract?: IssueExecutionContract;
+  /** 规范化 executionContract 的冻结摘要；任一字段变化都会使旧运行失效。 */
+  executionContractDigest?: string;
   /** 可验证 TDD 政策；字段一旦出现即严格校验，非法时 fail closed。 */
   tdd?: TddConfig;
   /** 模型路由；缺失时只使用 CLI 临时覆盖或 runner 默认模型。 */

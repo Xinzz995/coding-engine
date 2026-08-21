@@ -175,18 +175,70 @@ export function createValidationRequest(
 ): ValidationRequest {
   const criteria = [...story.acceptanceCriteria];
   if (engineQualityGate !== undefined) {
+    const selectionRequirement = engineQualityGate.selectionRequirement;
+    const selectionSources = new Set([
+      'always',
+      'path',
+      'explicit',
+      'full',
+      'fallback-full',
+    ]);
+    const selectionReasonsValid =
+      engineQualityGate.selectionReasons.length === engineQualityGate.checks.length &&
+      engineQualityGate.selectionReasons.every(
+        (reason, index) =>
+          reason.checkId === engineQualityGate.checks[index]?.id &&
+          reason.sources.length > 0 &&
+          new Set(reason.sources).size === reason.sources.length &&
+          reason.sources.every((source) => selectionSources.has(source)),
+      );
+    const requirementValid =
+      selectionRequirement === null ||
+      ((selectionRequirement.mode === 'scoped' || selectionRequirement.mode === 'full') &&
+        new Set(selectionRequirement.checkIds).size === selectionRequirement.checkIds.length &&
+        (selectionRequirement.mode !== 'full' || selectionRequirement.checkIds.length === 0));
+    const selectedCheckIds = new Set(engineQualityGate.checks.map((check) => check.id));
+    const requiredCheckIds = new Set(selectionRequirement?.checkIds ?? []);
+    const explicitCheckIds = new Set(
+      engineQualityGate.selectionReasons
+        .filter((reason) => reason.sources.includes('explicit'))
+        .map((reason) => reason.checkId),
+    );
+    const requirementSelectionValid =
+      selectionRequirement === null
+        ? explicitCheckIds.size === 0
+        : selectionRequirement.mode === 'full'
+          ? engineQualityGate.selectionReasons.every(
+              (reason) =>
+                reason.sources.includes('full') && !reason.sources.includes('explicit'),
+            )
+          : [...requiredCheckIds].every((id) => selectedCheckIds.has(id)) &&
+            engineQualityGate.selectionReasons.every(
+              (reason) =>
+                explicitCheckIds.has(reason.checkId) === requiredCheckIds.has(reason.checkId),
+            ) &&
+            explicitCheckIds.size === requiredCheckIds.size;
+    const hasChangeScope =
+      engineQualityGate.changeBaseGitHead !== null &&
+      engineQualityGate.changeManifestDigest !== null;
     if (
       target.gitHead === null ||
       engineQualityGate.gitHead !== target.gitHead ||
       engineQualityGate.status !== 'passed' ||
       engineQualityGate.ran !== engineQualityGate.total ||
       engineQualityGate.checks.length !== engineQualityGate.total ||
-      (engineQualityGate.selectionMode === 'scoped' &&
-        (engineQualityGate.changeBaseGitHead !== target.storyBaseGitHead ||
-          engineQualityGate.changeManifestDigest !== target.changeManifestDigest)) ||
+      !selectionReasonsValid ||
+      !requirementValid ||
+      !requirementSelectionValid ||
+      (engineQualityGate.changeBaseGitHead === null) !==
+        (engineQualityGate.changeManifestDigest === null) ||
+      (engineQualityGate.selectionMode === 'scoped' && !hasChangeScope) ||
       (engineQualityGate.selectionMode !== 'scoped' &&
-        (engineQualityGate.changeBaseGitHead !== null ||
-          engineQualityGate.changeManifestDigest !== null))
+        hasChangeScope &&
+        selectionRequirement === null) ||
+      (hasChangeScope &&
+        (engineQualityGate.changeBaseGitHead !== target.storyBaseGitHead ||
+          engineQualityGate.changeManifestDigest !== target.changeManifestDigest))
     ) {
       throw new Error('Validator 机械检查证明未绑定当前完整通过的目标');
     }
@@ -207,6 +259,17 @@ export function createValidationRequest(
             ...engineQualityGate,
             checks: engineQualityGate.checks.map((check) => ({ ...check })),
             skippedCheckIds: [...engineQualityGate.skippedCheckIds],
+            selectionRequirement:
+              engineQualityGate.selectionRequirement === null
+                ? null
+                : {
+                    mode: engineQualityGate.selectionRequirement.mode,
+                    checkIds: [...engineQualityGate.selectionRequirement.checkIds],
+                  },
+            selectionReasons: engineQualityGate.selectionReasons.map((reason) => ({
+              checkId: reason.checkId,
+              sources: [...reason.sources],
+            })),
           },
         }
       : {}),

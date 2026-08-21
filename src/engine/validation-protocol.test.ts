@@ -45,7 +45,7 @@ const story: Story = {
 
 function gateEvidence(): EngineQualityGateEvidence {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     source: 'engine-effective-gate',
     status: 'passed',
     inputDigest: `sha256:${'d'.repeat(64)}`,
@@ -60,6 +60,11 @@ function gateEvidence(): EngineQualityGateEvidence {
       { category: 'static', id: 'typecheck', module: 'root' },
     ],
     skippedCheckIds: ['windows-native'],
+    selectionRequirement: null,
+    selectionReasons: [
+      { checkId: 'tests', sources: ['full'] },
+      { checkId: 'typecheck', sources: ['full'] },
+    ],
     changeBaseGitHead: null,
     changeManifestDigest: null,
     selectionMode: 'full',
@@ -259,6 +264,30 @@ describe('validation request', () => {
         'request-scoped-mismatch',
         undefined,
         scoped,
+      ),
+    ).toThrow('未绑定当前完整通过的目标');
+
+    const missingExplicitReason: EngineQualityGateEvidence = {
+      ...scoped,
+      selectionRequirement: { mode: 'scoped', checkIds: ['tests'] },
+      selectionReasons: [
+        { checkId: 'tests', sources: ['path'] },
+        { checkId: 'typecheck', sources: ['path'] },
+      ],
+    };
+    expect(() =>
+      createValidationRequest(
+        story,
+        dir,
+        {
+          gitHead: 'a'.repeat(40),
+          storyBaseGitHead: 'b'.repeat(40),
+          changeManifestDigest: `sha256:${'c'.repeat(64)}`,
+          changedPathCount: 2,
+        },
+        'request-missing-explicit-reason',
+        undefined,
+        missingExplicitReason,
       ),
     ).toThrow('未绑定当前完整通过的目标');
   });

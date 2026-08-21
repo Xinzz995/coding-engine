@@ -17,15 +17,39 @@ import {
   deriveQualityChecks,
   readQualityContract,
   type QualityContract,
+  type QualityContractReadResult,
+  type QualityPlatform,
 } from '../quality/contract.js';
+import { GhGitHubQualityClient } from '../quality/github-unmanaged.js';
+import {
+  QUALITY_WORKFLOW_PATH,
+  renderQualityGateWorkflow,
+} from '../quality/github-workflows.js';
 import type { Prd } from '../engine/prd.js';
+import type { AgentKind } from '../engine/agent.js';
 import { tryReadPrd } from '../engine/prd.js';
+import {
+  parseIssueExecutionContract,
+  qualityPlatformForNode,
+  reconcileIssueExecutionContract,
+  reconcileIssueRemoteAuthority,
+  type IssueExecutionContract,
+} from '../engine/issue-execution-contract.js';
+import {
+  withReadyIssueRunAuthority,
+  type ReadyIssueRunAuthority,
+} from '../engine/issue-run-authority.js';
+import {
+  ensureIssueWorkspaceIdentity,
+  type IssueWorkspaceIdentity,
+} from '../engine/issue-workspace-identity.js';
 
 export const READY_FOR_AGENT_LABEL = 'ready-for-agent' as const;
 export const ISSUE_RUN_COMMENT_MARKER = '<!-- coding-x-issue-run-v1 -->' as const;
 export const ISSUE_RUN_BOOTSTRAP_COMMENT_MARKER =
   '<!-- coding-x-issue-run-bootstrap-v1 -->' as const;
 export const ISSUE_RUN_SCHEMA_VERSION = 1 as const;
+const ISSUE_RUN_ID_DOMAIN = 'coding-x-issue-run-v2' as const;
 const MAX_ISSUE_SOURCE_BYTES = 2 * 1024 * 1024;
 
 export interface IssueRunCommandInvocation {
@@ -44,6 +68,8 @@ export interface ReadyIssue {
   readonly goal: string;
   readonly nonGoals: string;
   readonly acceptanceCriteria: string[];
+  readonly executionContract: IssueExecutionContract;
+  readonly executionContractDigest: string;
   readonly risk: string;
   readonly readyAt: string;
   readonly bodyDigest: string;
@@ -107,6 +133,8 @@ interface PullRequestObservation {
   readonly headRefOid: string;
   readonly baseRefName: string;
   readonly url: string;
+  readonly title: string;
+  readonly body: string;
 }
 
 interface IssueComment {
@@ -242,24 +270,60 @@ function visibleSection(value: string): string {
   return visible.trim();
 }
 
-function issueSections(body: string): Map<string, string> {
+const READY_ISSUE_SECTION_NAMES = [
+  '本次目标',
+  '明确的非目标',
+  '执行合同',
+  '风险说明',
+] as const;
+const ISSUE_PR_SECTION_NAMES = [
+  '本次目标',
+  '明确的非目标',
+  'Spec 与验收标准来源',
+  '验证方式',
+  '风险说明',
+  '深度评审',
+  '延期与政策例外',
+] as const;
+
+function issueSections(body: string, names: readonly string[]): Map<string, string> {
   const sections = new Map<string, string>();
-  const matches = [...body.matchAll(/^#{2,3}\s+(.+?)\s*$/gmu)];
+  const expected = new Set(names);
+  const matches = [...body.matchAll(/^#{2,3}\s+(.+?)\s*$/gmu)].filter((match) =>
+    expected.has(match[1].trim()),
+  );
   for (const [index, match] of matches.entries()) {
+    const title = match[1].trim();
+    if (sections.has(title)) throw new Error(`ready Issue 包含重复章节：${title}`);
     const start = (match.index ?? 0) + match[0].length;
     const end = matches[index + 1]?.index ?? body.length;
-    sections.set(match[1].trim(), visibleSection(body.slice(start, end)));
+    sections.set(title, visibleSection(body.slice(start, end)));
   }
   return sections;
 }
 
-function criteria(value: string): string[] {
-  return value
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter((line) => /^[-*]\s+/u.test(line))
-    .map((line) => line.replace(/^[-*]\s+(?:\[[ xX]\]\s*)?/u, '').trim())
-    .filter(Boolean);
+function executionContract(value: string): {
+  contract: IssueExecutionContract;
+  digest: string;
+} {
+  if (value === '') {
+    throw new Error(
+      'ready Issue 缺少版本化执行合同；未启动的旧 Issue 可按当前模板补齐并重新添加 ready-for-agent 标签；已有运行评论、分支或 PR 的旧 Issue 必须保留原现场并新建 Issue，不能冒充同一运行迁移',
+    );
+  }
+  const match = /^```json\s*\r?\n([\s\S]+?)\r?\n```$/u.exec(value);
+  if (!match) throw new Error('ready Issue 执行合同必须是唯一一个 JSON fenced block');
+  let raw: unknown;
+  try {
+    raw = JSON.parse(match[1]) as unknown;
+  } catch (error) {
+    throw new Error(
+      `ready Issue 执行合同不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const parsed = parseIssueExecutionContract(raw);
+  if (!parsed.ok) throw new Error(`ready Issue 执行合同无效：${parsed.errors.join('；')}`);
+  return { contract: parsed.contract, digest: parsed.digest };
 }
 
 function currentReadyAt(events: unknown): string | null {
@@ -298,15 +362,15 @@ export function parseReadyIssue(issueValue: unknown, eventValue: unknown): Ready
   const readyAt = currentReadyAt(eventValue);
   if (readyAt === null) throw new Error(`无法确认当前 ${READY_FOR_AGENT_LABEL} 标签事件`);
   const body = typeof issue.body === 'string' ? issue.body : '';
-  const sections = issueSections(body);
+  const sections = issueSections(body, READY_ISSUE_SECTION_NAMES);
   const goal = sections.get('本次目标') ?? '';
   const nonGoals = sections.get('明确的非目标') ?? '';
   const risk = sections.get('风险说明') ?? '';
-  const acceptanceCriteria = criteria(sections.get('验收标准') ?? '');
+  const parsedExecution = executionContract(sections.get('执行合同') ?? '');
+  const acceptanceCriteria = [...parsedExecution.contract.storyAcceptance.criteria];
   const missing = [
     ...(goal ? [] : ['本次目标']),
     ...(nonGoals ? [] : ['明确的非目标']),
-    ...(acceptanceCriteria.length > 0 ? [] : ['验收标准']),
     ...(risk ? [] : ['风险说明']),
   ];
   if (missing.length > 0) throw new Error(`ready Issue 缺少可执行内容：${missing.join('、')}`);
@@ -318,6 +382,8 @@ export function parseReadyIssue(issueValue: unknown, eventValue: unknown): Ready
     goal,
     nonGoals,
     acceptanceCriteria,
+    executionContract: parsedExecution.contract,
+    executionContractDigest: parsedExecution.digest,
     risk,
     readyAt,
     bodyDigest: digest({ domain: 'coding-x-ready-issue-body-v1', body }),
@@ -326,11 +392,12 @@ export function parseReadyIssue(issueValue: unknown, eventValue: unknown): Ready
 
 export function issueRunId(repository: string, issue: ReadyIssue): string {
   return digest({
-    domain: 'coding-x-issue-run-v1',
+    domain: ISSUE_RUN_ID_DOMAIN,
     repository,
     issueNumber: issue.number,
     readyAt: issue.readyAt,
     bodyDigest: issue.bodyDigest,
+    executionContractDigest: issue.executionContractDigest,
   });
 }
 
@@ -358,8 +425,34 @@ function parsePullRequests(value: unknown): PullRequestObservation[] {
       headRefOid: text(root.headRefOid, `GitHub PR[${index}] head`),
       baseRefName: text(root.baseRefName, `GitHub PR[${index}] base`),
       url: text(root.url, `GitHub PR[${index}] URL`),
+      title: text(root.title, `GitHub PR[${index}] title`),
+      body: typeof root.body === 'string' ? root.body : '',
     };
   });
+}
+
+function normalizedIdentityText(value: string): string {
+  return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
+}
+
+function assertPullRequestIntent(
+  pullRequest: PullRequestObservation,
+  issue: ReadyIssue,
+  sourcePath: string,
+): void {
+  if (pullRequest.title !== issue.title) throw new Error('Issue PR 标题已偏离冻结 Issue 标题');
+  const sections = issueSections(pullRequest.body, ISSUE_PR_SECTION_NAMES);
+  const expected = new Map<string, string>([
+    ['本次目标', issue.goal],
+    ['明确的非目标', issue.nonGoals],
+    ['Spec 与验收标准来源', `${sourcePath}\n\nCloses #${issue.number}`],
+    ['风险说明', issue.risk],
+  ]);
+  for (const [name, value] of expected) {
+    if (normalizedIdentityText(sections.get(name) ?? '') !== normalizedIdentityText(value)) {
+      throw new Error(`Issue PR 的“${name}”已偏离冻结 Issue 意图`);
+    }
+  }
 }
 
 function parseComments(value: unknown): IssueComment[] {
@@ -580,6 +673,9 @@ scope: root
 > GitHub Issue: ${issue.url}
 > Issue-Run-ID: ${options.runId}
 > Issue-Body-Digest: ${issue.bodyDigest}
+> Issue-Execution-Contract-Digest: ${issue.executionContractDigest}
+> Issue-Remote-Check-Mode: ${issue.executionContract.remoteDelivery.mode}
+> Issue-Remote-Check-IDs: ${issue.executionContract.remoteDelivery.checkIds.join(',') || '-'}
 > Ready-At: ${issue.readyAt}
 
 ## Goals
@@ -599,6 +695,12 @@ ${issue.risk}
 ### US-001: 完成 Issue #${issue.number}
 
 ${issue.goal}
+
+#### Execution Contract
+
+\`\`\`json
+${JSON.stringify(issue.executionContract, null, 2)}
+\`\`\`
 
 #### Acceptance Criteria
 
@@ -627,6 +729,8 @@ function renderPrdJson(options: {
     sourcePrd: options.sourcePath,
     qualityContractDigest: options.contractDigest,
     qualityChecks: deriveQualityChecks(options.contract),
+    executionContract: structuredClone(options.issue.executionContract),
+    executionContractDigest: options.issue.executionContractDigest,
     userStories: [
       {
         id: 'US-001',
@@ -663,11 +767,56 @@ function renderPullRequestBody(issue: ReadyIssue, sourcePath: string): string {
   ].join('\n\n');
 }
 
-function sourceBindings(source: string): { runId: string; bodyDigest: string } {
+function sourceBindings(source: string): {
+  runId: string;
+  bodyDigest: string;
+  executionContractDigest: string;
+} {
   const runId = /^> Issue-Run-ID:\s*(sha256:[0-9a-f]{64})\s*$/mu.exec(source)?.[1];
   const bodyDigest = /^> Issue-Body-Digest:\s*(sha256:[0-9a-f]{64})\s*$/mu.exec(source)?.[1];
-  if (!runId || !bodyDigest) throw new Error('Issue 源 PRD 缺少运行身份绑定');
-  return { runId, bodyDigest };
+  const executionContractDigest =
+    /^> Issue-Execution-Contract-Digest:\s*(sha256:[0-9a-f]{64})\s*$/mu.exec(source)?.[1];
+  if (!runId || !bodyDigest || !executionContractDigest) {
+    throw new Error('Issue 源 PRD 缺少运行身份绑定');
+  }
+  const remoteModes = source
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith('> Issue-Remote-Check-Mode: '))
+    .map((line) => line.slice('> Issue-Remote-Check-Mode: '.length));
+  const remoteCheckIds = source
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith('> Issue-Remote-Check-IDs: '))
+    .map((line) => line.slice('> Issue-Remote-Check-IDs: '.length));
+  if (remoteModes.length !== 1 || remoteCheckIds.length !== 1) {
+    throw new Error('Issue 源 PRD 的远端检查绑定必须各出现一次');
+  }
+  const contractMatches = [
+    ...source.matchAll(
+      /^#### Execution Contract\s*\r?\n+```json\s*\r?\n([\s\S]+?)\r?\n```/gmu,
+    ),
+  ];
+  if (contractMatches.length !== 1) throw new Error('Issue 源 PRD 必须包含唯一执行合同快照');
+  const contractJson = contractMatches[0][1];
+  let contractValue: unknown;
+  try {
+    contractValue = JSON.parse(contractJson) as unknown;
+  } catch (error) {
+    throw new Error(
+      `Issue 源 PRD 执行合同不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const parsedContract = parseIssueExecutionContract(contractValue);
+  if (!parsedContract.ok || parsedContract.digest !== executionContractDigest) {
+    throw new Error('Issue 源 PRD 执行合同与冻结摘要不一致');
+  }
+  const expectedRemoteIds = parsedContract.contract.remoteDelivery.checkIds.join(',') || '-';
+  if (
+    remoteModes[0] !== parsedContract.contract.remoteDelivery.mode ||
+    remoteCheckIds[0] !== expectedRemoteIds
+  ) {
+    throw new Error('Issue 源 PRD 的远端检查绑定与执行合同不一致');
+  }
+  return { runId, bodyDigest, executionContractDigest };
 }
 
 function readIssueSource(path: string): Buffer {
@@ -697,28 +846,13 @@ async function initializeIssueWorkspace(options: {
   issue: ReadyIssue;
   runId: string;
   branch: string;
+  pullRequest: number;
   sourcePath: string;
-}): Promise<void> {
+}): Promise<string> {
   await bootstrapWorkspace({ workspacePath: options.workspace });
-  const existing = tryReadPrd(join(options.workspace, 'prd.json'));
-  if (existing !== null) {
-    if (
-      existing.branchName !== options.branch ||
-      existing.sourcePrd !== options.sourcePath ||
-      !existing.description.includes(`Issue-Run-ID: ${options.runId}`)
-    ) {
-      throw new Error('Issue workspace 已绑定其他运行，拒绝接管');
-    }
-    return;
-  }
   const quality = readQualityContract(options.root);
   if (quality.status !== 'ready') throw new Error(`质量契约不可用：${quality.status}`);
-  const source = readIssueSource(join(options.root, options.sourcePath));
-  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
-    cwd: options.root,
-    encoding: 'utf8',
-  }).trim();
-  const prd = renderPrdJson({
+  const expectedPrd = renderPrdJson({
     repository: options.repository,
     issue: options.issue,
     runId: options.runId,
@@ -727,33 +861,71 @@ async function initializeIssueWorkspace(options: {
     contract: quality.contract,
     contractDigest: quality.digest,
   });
-  const candidate: ApplyPrdV1Candidate = {
-    prd: `${JSON.stringify(prd, null, 2)}\n`,
-    state: null,
-    progress: '# Progress\n',
-  };
-  const request: ApplyPrdV1Request = {
+  const existing = tryReadPrd(join(options.workspace, 'prd.json'));
+  if (existing !== null) {
+    const parsedExecution = parseIssueExecutionContract(existing.executionContract);
+    if (
+      existing.branchName !== options.branch ||
+      existing.sourcePrd !== options.sourcePath ||
+      !existing.description.includes(`Issue-Run-ID: ${options.runId}`) ||
+      existing.executionContractDigest !== options.issue.executionContractDigest ||
+      !parsedExecution.ok ||
+      parsedExecution.digest !== options.issue.executionContractDigest ||
+      JSON.stringify(existing) !== JSON.stringify(expectedPrd)
+    ) {
+      throw new Error('Issue workspace 已绑定其他运行，拒绝接管');
+    }
+  }
+  const identity: IssueWorkspaceIdentity = {
     schemaVersion: 1,
-    mode: 'replace-feature',
-    source: { bytes: source, digest: digestBytes(source) },
-    git: { expectedHead: head, currentHead: head },
-    quality: { expectedDigest: quality.digest, currentDigest: quality.digest },
-    candidate: {
-      ...candidate,
-      digest: applyPrdV1CandidateDigest('replace-feature', candidate),
-    },
+    repository: options.repository,
+    issueNumber: options.issue.number,
+    bodyDigest: options.issue.bodyDigest,
+    branch: options.branch,
+    pullRequest: options.pullRequest,
+    runId: options.runId,
+    sourcePrd: options.sourcePath,
+    executionContractDigest: options.issue.executionContractDigest,
   };
   const lease = await acquireWorkspaceLease({
     workspacePath: options.workspace,
     command: 'apply-prd',
   });
   const session = createWorkspaceSession(lease);
+  const workspaceIdentity = session.lease.workspace.identity;
   try {
+    await ensureIssueWorkspaceIdentity(session, identity);
+    if (existing !== null) {
+      await session.close();
+      return workspaceIdentity;
+    }
+    const source = readIssueSource(join(options.root, options.sourcePath));
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: options.root,
+      encoding: 'utf8',
+    }).trim();
+    const candidate: ApplyPrdV1Candidate = {
+      prd: `${JSON.stringify(expectedPrd, null, 2)}\n`,
+      state: null,
+      progress: '# Progress\n',
+    };
+    const request: ApplyPrdV1Request = {
+      schemaVersion: 1,
+      mode: 'replace-feature',
+      source: { bytes: source, digest: digestBytes(source) },
+      git: { expectedHead: head, currentHead: head },
+      quality: { expectedDigest: quality.digest, currentDigest: quality.digest },
+      candidate: {
+        ...candidate,
+        digest: applyPrdV1CandidateDigest('replace-feature', candidate),
+      },
+    };
     await runApplyPrdV1Mutation(session, request, {
       projectRoot: options.root,
       runtimeMode: 'formal',
     });
     await session.close();
+    return workspaceIdentity;
   } catch (error) {
     if (session.state === 'open') await session.close();
     throw error;
@@ -781,6 +953,20 @@ function statusPaths(output: string): string[] {
 function remoteHead(output: string): string | null {
   const match = /^([0-9a-f]{40})\s+refs\/heads\//u.exec(output.trim());
   return match?.[1] ?? null;
+}
+
+function currentQualityPlatform(platform: NodeJS.Platform = process.platform): QualityPlatform {
+  const qualityPlatform = qualityPlatformForNode(platform);
+  if (qualityPlatform === null) {
+    throw new Error(`当前平台 ${platform} 不受 ready Issue 执行合同支持`);
+  }
+  return qualityPlatform;
+}
+
+function qualityReadDiagnostic(read: Exclude<QualityContractReadResult, { status: 'ready' }>): string {
+  if (read.status === 'missing') return '质量契约不存在';
+  if (read.status === 'invalid') return read.errors.join('；');
+  return read.error;
 }
 
 function issueRunComment(comments: IssueComment[], login: string): IssueRunComment | null {
@@ -814,10 +1000,13 @@ export async function runReadyIssue(options: {
   readonly root: string;
   readonly workspaceBase: string;
   readonly issueNumber: number;
+  /** production CLI always passes the selected runner; tests default to the only trusted runner. */
+  readonly runner?: AgentKind;
   readonly runEngine: (context: {
     readonly workspace: string;
     readonly branch: string;
     readonly pullRequest: number;
+    readonly authority: ReadyIssueRunAuthority;
   }) => Promise<IssueEngineResult>;
   readonly refreshEngine?: (context: {
     readonly workspace: string;
@@ -826,6 +1015,20 @@ export async function runReadyIssue(options: {
   }) => Promise<IssueEngineResult | null>;
   readonly executor?: IssueRunCommandExecutor;
   readonly now?: () => Date;
+  /** @internal Deterministic contract/platform seam; production reads the current repository. */
+  readonly qualityContractReader?: (root: string) => QualityContractReadResult;
+  /** @internal Deterministic live Ruleset seam; production reads GitHub before any Agent starts. */
+  readonly remoteAuthorityReader?: (input: {
+    readonly repository: string;
+    readonly contract: QualityContract;
+  }) => readonly string[];
+  /** @internal Deterministic managed-workflow seam; production compares the current branch file. */
+  readonly managedWorkflowReader?: (input: {
+    readonly root: string;
+    readonly contract: QualityContract;
+  }) => readonly string[];
+  /** @internal Deterministic platform seam; production uses process.platform. */
+  readonly platform?: QualityPlatform;
   /** @internal deterministic orchestration seam; production uses the safe workspace mutation. */
   readonly initializeWorkspace?: typeof initializeIssueWorkspace;
 }): Promise<IssueRunResult> {
@@ -846,25 +1049,45 @@ export async function runReadyIssue(options: {
   if (login.toLowerCase() !== owner.toLowerCase()) {
     throw new Error(`Issue 入口当前只允许仓库 owner ${owner} 运行，当前用户为 ${login}`);
   }
-  const issue = parseReadyIssue(
-    json(
-      run('gh', ['api', `repos/${repository.nameWithOwner}/issues/${options.issueNumber}`]),
-      'GitHub Issue',
-    ),
-    json(
-      run('gh', [
-        'api',
-        '--paginate',
-        '--slurp',
-        `repos/${repository.nameWithOwner}/issues/${options.issueNumber}/events?per_page=100`,
-      ]),
-      'GitHub Issue events',
-    ),
-  );
+  const readCurrentIssue = (): ReadyIssue =>
+    parseReadyIssue(
+      json(
+        run('gh', ['api', `repos/${repository.nameWithOwner}/issues/${options.issueNumber}`]),
+        'GitHub Issue',
+      ),
+      json(
+        run('gh', [
+          'api',
+          '--paginate',
+          '--slurp',
+          `repos/${repository.nameWithOwner}/issues/${options.issueNumber}/events?per_page=100`,
+        ]),
+        'GitHub Issue events',
+      ),
+    );
+  const issue = readCurrentIssue();
   if (issue.number !== options.issueNumber) throw new Error('GitHub 返回了错误的 Issue');
   const runId = issueRunId(repository.nameWithOwner, issue);
+  const assertIssueIdentityCurrent = (): void => {
+    const current = readCurrentIssue();
+    if (
+      current.number !== issue.number ||
+      issueRunId(repository.nameWithOwner, current) !== runId ||
+      current.bodyDigest !== issue.bodyDigest ||
+      current.executionContractDigest !== issue.executionContractDigest ||
+      current.readyAt !== issue.readyAt
+    ) {
+      throw new Error('Issue 内容或标签事件已变化；旧运行身份已失效');
+    }
+  };
   const branch = `codex/issue-${issue.number}`;
   const sourcePath = `docs/prds/prd-issue-${issue.number}.md`;
+  const expectedSourcePrd = renderSourcePrd({
+    issue,
+    runId,
+    branch,
+    date: issue.readyAt.slice(0, 10),
+  });
   const workspace = workspaceInsideRoot(root, join(options.workspaceBase, `issue-${issue.number}`));
   const readComments = () =>
     parseComments(
@@ -1001,10 +1224,96 @@ export async function runReadyIssue(options: {
 
   let pullRequest: PullRequestObservation | undefined;
   const sourceAbsolute = join(root, sourcePath);
+  const assertSourceCurrent = (): void => {
+    const source = readIssueSource(sourceAbsolute).toString('utf8');
+    if (normalizedIdentityText(source) !== normalizedIdentityText(expectedSourcePrd)) {
+      throw new Error('Issue 源 PRD 正文已偏离冻结 Issue 意图');
+    }
+    const bindings = sourceBindings(source);
+    if (
+      bindings.runId !== runId ||
+      bindings.bodyDigest !== issue.bodyDigest ||
+      bindings.executionContractDigest !== issue.executionContractDigest
+    ) {
+      throw new Error('Issue 源 PRD 已变化；旧运行身份已失效');
+    }
+  };
+  const remoteAuthorityReader =
+    options.remoteAuthorityReader ??
+    ((input: { readonly repository: string; readonly contract: QualityContract }) => {
+      const client = new GhGitHubQualityClient();
+      const errors = reconcileIssueRemoteAuthority(
+        input.contract,
+        client.listRulesets(input.repository),
+      );
+      const workflow = record(
+        json(
+          run('gh', [
+            'api',
+            `repos/${input.repository}/actions/workflows/quality-gate.yml`,
+          ]),
+          'GitHub Quality Gate workflow',
+        ),
+        'GitHub Quality Gate workflow',
+      );
+      if (workflow.state !== 'active') errors.push('GitHub Quality Gate workflow 未启用');
+      if (workflow.path !== QUALITY_WORKFLOW_PATH) {
+        errors.push('GitHub Quality Gate workflow 路径与受管路径不一致');
+      }
+      return errors;
+    });
+  const managedWorkflowReader =
+    options.managedWorkflowReader ??
+    ((input: { readonly root: string; readonly contract: QualityContract }) => {
+      const actual = readStableFile(join(input.root, QUALITY_WORKFLOW_PATH), {
+        label: '受管 Quality Gate workflow',
+        maxBytes: 2 * 1024 * 1024,
+      });
+      if (actual.status !== 'ready') {
+        return ['当前分支缺少可稳定读取的受管 Quality Gate workflow'];
+      }
+      return normalizedIdentityText(actual.bytes.toString('utf8')) ===
+        normalizedIdentityText(renderQualityGateWorkflow(input.contract))
+        ? []
+        : ['当前分支 Quality Gate workflow 与质量契约生成结果不一致'];
+    });
+  const assertExecutionContractCapability = (readRemoteAuthority: boolean): void => {
+    if ((options.runner ?? 'codex') !== 'codex') {
+      throw new Error(
+        `ready Issue 当前只能使用 codex 完成可信 Validator 闭环；${options.runner} 只能开发，拒绝在 Builder 后才发现无法签发凭证`,
+      );
+    }
+    const quality = (options.qualityContractReader ?? readQualityContract)(root);
+    if (quality.status !== 'ready') {
+      throw new Error(`执行合同无法对账：${qualityReadDiagnostic(quality)}`);
+    }
+    const reconciliation = reconcileIssueExecutionContract(
+      issue.executionContract,
+      quality.contract,
+      options.platform ?? currentQualityPlatform(),
+    );
+    if (!reconciliation.ok) {
+      throw new Error(`执行合同无法启动：${reconciliation.errors.join('；')}`);
+    }
+    const workflowErrors = managedWorkflowReader({ root, contract: quality.contract });
+    if (workflowErrors.length > 0) {
+      throw new Error(`执行合同远端工作流不可用：${workflowErrors.join('；')}`);
+    }
+    if (readRemoteAuthority) {
+      const remoteErrors = remoteAuthorityReader({
+        repository: repository.nameWithOwner,
+        contract: quality.contract,
+      });
+      if (remoteErrors.length > 0) {
+        throw new Error(`执行合同远端权威来源不可用：${remoteErrors.join('；')}`);
+      }
+    }
+  };
   try {
     if (initialStatus !== '') {
       throw new Error('Issue 入口要求干净工作树；请先提交或处理现有改动');
     }
+    assertExecutionContractCapability(true);
     const currentBranch = run('git', ['branch', '--show-current']);
     if (currentBranch !== repository.defaultBranch && currentBranch !== branch) {
       throw new Error(`Issue 入口只能从 ${repository.defaultBranch} 或 ${branch} 运行`);
@@ -1033,6 +1342,8 @@ export async function runReadyIssue(options: {
         run('git', ['switch', '-c', branch]);
       }
     }
+    // 目标分支可能已有不同质量契约；在任何源 PRD 提交或 Agent 前按切换后的实际内容再核对。
+    assertExecutionContractCapability(false);
 
     let pullRequests = parsePullRequests(
       json(
@@ -1046,7 +1357,7 @@ export async function runReadyIssue(options: {
           '--state',
           'all',
           '--json',
-          'number,state,isDraft,headRefOid,baseRefName,url',
+          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
         ]),
         'GitHub PR 列表',
       ),
@@ -1069,10 +1380,7 @@ export async function runReadyIssue(options: {
         throw new Error(`Issue 源 PRD 不可稳定读取：${existingSource.diagnostic}`);
       }
       if (existingSource.status === 'ready') {
-        const existingBindings = sourceBindings(existingSource.bytes.toString('utf8'));
-        if (existingBindings.runId !== runId || existingBindings.bodyDigest !== issue.bodyDigest) {
-          throw new Error('同名 Issue 分支已有不同运行身份的源 PRD');
-        }
+        assertSourceCurrent();
         const tracked = run('git', ['ls-files', '--', sourcePath]);
         if (tracked !== sourcePath) throw new Error('已有 Issue 源 PRD 尚未提交，拒绝自动接管');
       } else {
@@ -1118,7 +1426,7 @@ export async function runReadyIssue(options: {
             '--state',
             'open',
             '--json',
-            'number,state,isDraft,headRefOid,baseRefName,url',
+            'number,state,isDraft,headRefOid,baseRefName,url,title,body',
           ]),
           '新建 PR 回读',
         ),
@@ -1131,6 +1439,53 @@ export async function runReadyIssue(options: {
     throw error;
   }
   if (!pullRequest) throw new Error('Issue PR 不可用');
+  assertPullRequestIntent(pullRequest, issue, sourcePath);
+  const pullRequestNumber = pullRequest.number;
+  const readBoundPullRequest = (
+    label: string,
+    requireLocalContainsRemote = false,
+  ): PullRequestObservation => {
+    const observed = parsePullRequests(
+      json(
+        run('gh', [
+          'pr',
+          'list',
+          '--repo',
+          repository.nameWithOwner,
+          '--head',
+          branch,
+          '--state',
+          'all',
+          '--json',
+          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
+        ]),
+        label,
+      ),
+    );
+    if (
+      observed.length !== 1 ||
+      observed[0].number !== pullRequestNumber ||
+      observed[0].state !== 'OPEN' ||
+      observed[0].baseRefName !== repository.defaultBranch
+    ) {
+      throw new Error(`${label}：PR 已关闭、消失、重复或改变目标分支`);
+    }
+    assertPullRequestIntent(observed[0], issue, sourcePath);
+    if (requireLocalContainsRemote) {
+      run('git', [
+        'fetch',
+        '--quiet',
+        'origin',
+        `refs/heads/${branch}:refs/remotes/origin/${branch}`,
+      ]);
+      const localHead = run('git', ['rev-parse', 'HEAD']);
+      const mergeBase = run('git', ['merge-base', localHead, observed[0].headRefOid]);
+      if (mergeBase !== observed[0].headRefOid) {
+        throw new Error(`${label}：本地 Issue 分支落后于或分叉于 PR 最新提交`);
+      }
+    }
+    return observed[0];
+  };
   const headBefore = run('git', ['rev-parse', 'HEAD']);
   if (
     comment &&
@@ -1176,21 +1531,23 @@ export async function runReadyIssue(options: {
     evidence: previousEvidence,
   });
 
+  let workspaceIdentity: string;
   try {
-    const source = readIssueSource(sourceAbsolute).toString('utf8');
-    const bindings = sourceBindings(source);
-    if (bindings.runId !== runId || bindings.bodyDigest !== issue.bodyDigest) {
-      throw new Error('ready Issue 内容或标签事件已变化；旧分支不能冒充新运行');
-    }
-    await (options.initializeWorkspace ?? initializeIssueWorkspace)({
+    assertSourceCurrent();
+    workspaceIdentity = await (options.initializeWorkspace ?? initializeIssueWorkspace)({
       root,
       workspace,
       repository: repository.nameWithOwner,
       issue,
       runId,
       branch,
+      pullRequest: pullRequest.number,
       sourcePath,
     });
+    assertIssueIdentityCurrent();
+    assertExecutionContractCapability(true);
+    assertSourceCurrent();
+    readBoundPullRequest('Agent 启动前 PR 回读', true);
     comment = publish({
       ...comment.state,
       phase: 'running',
@@ -1227,9 +1584,30 @@ export async function runReadyIssue(options: {
     pullRequest: pullRequest.number,
   };
   try {
+    const refreshed = await options.refreshEngine?.(engineContext);
+    if (refreshed === null) {
+      assertIssueIdentityCurrent();
+      assertExecutionContractCapability(true);
+      assertSourceCurrent();
+      readBoundPullRequest('完整引擎启动前 PR 回读', true);
+    }
     engine =
-      (await options.refreshEngine?.(engineContext)) ??
-      (await options.runEngine(engineContext));
+      refreshed ??
+      (await withReadyIssueRunAuthority(
+        {
+          projectRoot: root,
+          workspaceIdentity,
+          repository: repository.nameWithOwner,
+          issueNumber: issue.number,
+          bodyDigest: issue.bodyDigest,
+          branch,
+          pullRequest: pullRequest.number,
+          runId,
+          executionContractDigest: issue.executionContractDigest,
+          gitHead: run('git', ['rev-parse', 'HEAD']),
+        },
+        async (authority) => await options.runEngine({ ...engineContext, authority }),
+      ));
   } catch (error) {
     engine = {
       exitCode: 2,
@@ -1238,6 +1616,8 @@ export async function runReadyIssue(options: {
   }
   let currentHead = headBefore;
   try {
+    assertIssueIdentityCurrent();
+    assertSourceCurrent();
     const currentBranchAfter = run('git', ['branch', '--show-current']);
     if (currentBranchAfter !== branch) throw new Error('引擎运行后当前分支发生变化，拒绝推送');
     const dirty = statusPaths(
@@ -1263,32 +1643,7 @@ export async function runReadyIssue(options: {
       run('git', ['push', 'origin', `HEAD:refs/heads/${branch}`]);
       pushed = true;
     }
-    const currentPullRequests = parsePullRequests(
-      json(
-        run('gh', [
-          'pr',
-          'list',
-          '--repo',
-          repository.nameWithOwner,
-          '--head',
-          branch,
-          '--state',
-          'all',
-          '--json',
-          'number,state,isDraft,headRefOid,baseRefName,url',
-        ]),
-        '引擎运行后 PR 回读',
-      ),
-    );
-    if (
-      currentPullRequests.length !== 1 ||
-      currentPullRequests[0].number !== pullRequest.number ||
-      currentPullRequests[0].state !== 'OPEN' ||
-      currentPullRequests[0].baseRefName !== repository.defaultBranch
-    ) {
-      throw new Error('引擎运行后 PR 已关闭、消失、重复或改变目标分支');
-    }
-    const currentPullRequest = currentPullRequests[0];
+    let currentPullRequest = readBoundPullRequest('引擎运行后 PR 回读');
     if (!pushed && currentPullRequest.headRefOid !== currentHead) {
       throw new Error('引擎运行后 PR 最新提交与已验证本地提交不一致');
     }
@@ -1325,6 +1680,11 @@ export async function runReadyIssue(options: {
     let exitCode = engine.exitCode;
     let message = engine.message;
     if (engine.exitCode === 0 && !pushed) {
+      assertIssueIdentityCurrent();
+      currentPullRequest = readBoundPullRequest('可信标记前 PR 回读');
+      if (currentPullRequest.headRefOid !== currentHead) {
+        throw new Error('可信标记前 PR 的最新提交已变化');
+      }
       phase = 'trusted';
       if (currentPullRequest.isDraft) {
         run('gh', ['pr', 'ready', String(pullRequest.number), '--repo', repository.nameWithOwner]);

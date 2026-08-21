@@ -1,7 +1,7 @@
 ---
 title: 领域词汇表
 status: active
-updated: 2026-08-13
+updated: 2026-08-21
 scope: root
 ---
 
@@ -65,6 +65,10 @@ validation request → Validator claim → engine protocol verdict/receipt 的 r
 **质量契约**
 项目受 Git 管理的 `.coding-x/quality.json`：统一声明测试、构建、静态检查、安全检查、适用范围、风险来源和远端必需检查。它是项目检查唯一人工维护来源；PRD 只保存由它派生的摘要和结构化快照，不能另写一套规则。
 禁用：质量配置、PRD 门禁命令（统一用「质量契约」）
+
+**ready Issue 执行合同**
+ready Issue 中版本化的责任分层：分别声明 Story 语义、本地检查、远端交付和运行度量由谁提供证据。检查只引用质量契约的稳定 id 或 scoped/full 模式；合同摘要属于运行身份，不能从自然语言验收文字反推。
+禁用：Issue 验收清单、Validator 全包标准（会重新混淆责任层）
 
 **shadow（影子运行）**
 候选 coding-x 对真实项目执行的非交付验证模式。它可以暴露失败，但即使全部成功也固定返回影子结局，不能给候选版本自身签发正式通过。

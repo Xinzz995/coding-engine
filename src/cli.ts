@@ -158,7 +158,7 @@ runner:
   hooks cursor install|status|remove
                                  安装、检查或移除当前项目的 Cursor TDD 提交前检查
   candidate publish-proof        可刷新晚到远端检查并补签，再发布候选 Dogfood 机器证明
-  issue run <编号> [runner]       从 ready-for-agent Issue 继续唯一分支与 PR
+  issue run <编号> [runner]       从 ready-for-agent Issue 继续唯一分支与 PR（默认 codex）
   help                           显示本帮助
 
 选项:
@@ -471,7 +471,15 @@ export function parseCliArgs(argv: string[]): CliConfig {
     throw new Error('❌ models 不接受 runner 以外的额外位置参数');
   }
   const kind: AgentKind =
-    runnerPositional === 'codex' ? 'codex' : runnerPositional === 'cursor' ? 'cursor' : 'claude';
+    runnerPositional === 'codex'
+      ? 'codex'
+      : runnerPositional === 'cursor'
+        ? 'cursor'
+        : runnerPositional === 'claude'
+          ? 'claude'
+          : command === 'issue'
+            ? 'codex'
+            : 'claude';
   const kindExplicit =
     runnerPositional === 'claude' || runnerPositional === 'codex' || runnerPositional === 'cursor';
   const min = (s: string | undefined, d: number) => (s ? Number(s) : d) * 60 * 1000;
@@ -813,12 +821,13 @@ export async function main(argv: string[]): Promise<number> {
         root: process.cwd(),
         workspaceBase: cfg.workspace,
         issueNumber: cfg.issueNumber!,
+        runner: cfg.kind,
         refreshEngine: async ({ workspace }) =>
           await refreshReadyIssueReview({
             workspace,
             projectRoot: process.cwd(),
           }),
-        runEngine: async ({ workspace }) => {
+        runEngine: async ({ workspace, authority }) => {
           const exitCode = await runLoop({
             kind: cfg.kind,
             kindExplicit: cfg.kindExplicit,
@@ -836,6 +845,7 @@ export async function main(argv: string[]): Promise<number> {
             stallLimit: cfg.stallLimit,
             shadow: false,
             actualVersion: CODING_X_VERSION,
+            readyIssueRunAuthority: authority,
           });
           const review = readFinalReviewState(workspace);
           const evidence =
