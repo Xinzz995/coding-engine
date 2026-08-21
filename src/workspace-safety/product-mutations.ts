@@ -564,7 +564,7 @@ function assertLegacyIssueIdentityPreserved(
 function assertPersistentIssueIdentity(
   session: WorkspaceSession,
   candidate: Record<string, unknown>,
-): void {
+): boolean {
   const identity = readIssueWorkspaceIdentity(session.lease.workspace.path);
   if (identity.status === 'invalid') {
     throw mutationInvalid(`Issue workspace identity is invalid: ${identity.error}`);
@@ -575,6 +575,7 @@ function assertPersistentIssueIdentity(
   ) {
     throw mutationInvalid('Issue workspace identity cannot be removed or rebound by PRD mutation');
   }
+  return identity.status === 'ready';
 }
 
 async function assertApplyMode(
@@ -582,9 +583,9 @@ async function assertApplyMode(
   mode: ApplyPrdV1Mode,
   candidate: Record<string, unknown>,
 ): Promise<void> {
-  assertPersistentIssueIdentity(session, candidate);
+  const hasPersistentIssueIdentity = assertPersistentIssueIdentity(session, candidate);
   const current = await currentPrdRecord(session);
-  assertLegacyIssueIdentityPreserved(current, candidate);
+  if (!hasPersistentIssueIdentity) assertLegacyIssueIdentityPreserved(current, candidate);
   const currentBranch =
     current === null ? null : nonEmptyString(current.branchName, 'current prd.json branchName');
   const candidateBranch = nonEmptyString(candidate.branchName, 'candidate prd.json branchName');
@@ -875,7 +876,10 @@ export async function runRepairV1Mutation(
   }
   throwIfInterrupted(options);
   const normalized = normalizeRepairRequest(request);
-  assertPersistentIssueIdentity(session, normalized.prdRecord);
+  const hasPersistentIssueIdentity = assertPersistentIssueIdentity(
+    session,
+    normalized.prdRecord,
+  );
   const currentPrd = await readMutationFileSnapshot(session.lease.workspace.path, 'prd.json');
   if (currentPrd.snapshot.kind !== 'file' || currentPrd.snapshot.digest !== normalized.prdDigest) {
     throw mutationInvalid('repair-v1 source prd digest does not bind current prd.json');
@@ -888,7 +892,7 @@ export async function runRepairV1Mutation(
     // persistent identity checked above; an unbranded malformed legacy file has no safe identity
     // to infer and must remain repairable.
   }
-  if (currentRecord !== null) {
+  if (currentRecord !== null && !hasPersistentIssueIdentity) {
     assertLegacyIssueIdentityPreserved(currentRecord, normalized.prdRecord);
   }
   const currentState = await readMutationFileSnapshot(session.lease.workspace.path, 'state.json');

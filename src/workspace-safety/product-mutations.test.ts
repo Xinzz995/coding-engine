@@ -308,6 +308,27 @@ describe('fixed apply-prd-v1 product mutation', () => {
     expect(readFileSync(join(accepted.root, 'prd.json'))).toEqual(runtimePrd);
     await expect(accepted.session.close()).resolves.toContain('released-');
 
+    const damagedPrd = JSON.parse(runtimePrd.toString('utf8')) as Record<string, unknown>;
+    delete damagedPrd.executionContract;
+    const damagedBytes = Buffer.from(`${JSON.stringify(damagedPrd, null, 2)}\n`, 'utf8');
+    writeFileSync(join(accepted.root, 'prd.json'), damagedBytes);
+    const repairIdentity = createIdentityProbe().current();
+    const repairLease = await acquireWorkspaceLease({
+      workspacePath: accepted.root,
+      identity: repairIdentity,
+      command: 'repair',
+    });
+    const repairSession = createWorkspaceSession(repairLease);
+    await expect(
+      runRepairV1Mutation(repairSession, {
+        schemaVersion: 1,
+        source: { prdDigest: digestBytes(damagedBytes), stateDigest: null },
+        candidate: { prd: runtimePrd, state: null },
+      }),
+    ).resolves.toMatchObject({ state: { phase: 'committed' } });
+    expect(readFileSync(join(accepted.root, 'prd.json'))).toEqual(runtimePrd);
+    await expect(repairSession.close()).resolves.toContain('released-');
+
     const rejected = await fixture('apply-prd');
     await expect(
       runApplyPrdV1Mutation(
