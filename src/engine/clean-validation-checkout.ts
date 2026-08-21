@@ -31,10 +31,9 @@ import {
   InlineProgramTransportError,
 } from '../workspace-safety/inline-program.js';
 import {
-  ExternalFileLinkSnapshotBudget,
   ExternalFileLinkSnapshotBudgetError,
   sameExternalFileLinkIdentity,
-  snapshotManagedExternalFileLinks,
+  snapshotManagedExternalFileLinksWithAdaptiveBudget,
   type ExternalFileLinkIdentity,
   type ManagedExternalFileLinkSnapshot,
 } from './external-file-link-identity.js';
@@ -63,7 +62,6 @@ const MAX_GIT_HISTORY_REFS = 16;
 const MAX_EXTERNAL_LINK_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_EXTERNAL_LINKS = 1024;
 const MAX_EXTERNAL_LINK_TARGET_BYTES = 1024 * 1024 * 1024;
-const EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS = 30_000;
 
 export type CleanValidationCheckoutErrorCode =
   | 'invalid-source'
@@ -226,18 +224,18 @@ function pathInside(parent: string, candidate: string): boolean {
 async function observeManagedFileLinks(
   links: readonly { readonly target: string; readonly path: string }[],
   context: string,
-  budget: ExternalFileLinkSnapshotBudget,
   managed: ManagedGateContext,
   checkoutRoot: string,
   sourceRoot: string,
 ): Promise<ManagedExternalFileLinkSnapshot[]> {
   try {
-    return await snapshotManagedExternalFileLinks({
+    return await snapshotManagedExternalFileLinksWithAdaptiveBudget({
       linkPaths: links.map(({ target }) => target),
       checkoutRoot,
       sourceRoot,
       maxFileBytes: MAX_EXTERNAL_LINK_FILE_BYTES,
-      budget,
+      maxLinks: MAX_EXTERNAL_LINKS,
+      maxTargetReadBytes: MAX_EXTERNAL_LINK_TARGET_BYTES,
       session: managed.session,
       kind: managed.kind,
       cwd: checkoutRoot,
@@ -1445,24 +1443,12 @@ async function assertSafeArtifactTopology(
       `${context}无法在 ${initialBackingFileSystem.description} 上证明 hard link 组可信`,
     );
   }
-  const externalLinkBudget =
-    managedLinks.length === 0
-      ? null
-      : new ExternalFileLinkSnapshotBudget(
-          {
-            maxLinks: MAX_EXTERNAL_LINKS,
-            maxTargetReadBytes: MAX_EXTERNAL_LINK_TARGET_BYTES,
-            deadlineMs: EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS,
-          },
-          options.signal,
-        );
   const managedObservations =
     managedLinks.length === 0
       ? []
       : await observeManagedFileLinks(
           managedLinks,
           context,
-          externalLinkBudget!,
           options.managed,
           root,
           sourceRoot,
@@ -1510,7 +1496,6 @@ async function assertSafeArtifactTopology(
     }
   }
   try {
-    externalLinkBudget?.assertDarwinMountTableCurrent();
     const finalBackingFileSystem = assertNoMountPoints();
     options.beforeFinalTopologyScanForTests?.(root, context);
     const finalHardLinkProof = snapshotCleanValidationHardLinks({

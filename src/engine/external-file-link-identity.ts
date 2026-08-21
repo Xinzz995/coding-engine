@@ -29,10 +29,18 @@ export interface ExternalFileLinkIdentity {
   readonly targetDigest: string;
 }
 
+export interface ExternalFileLinkSnapshotWorkload {
+  readonly linkCount: number;
+  readonly distinctTargets: number;
+  readonly distinctTargetBytes: number;
+}
+
 export interface ExternalFileLinkSnapshotLimits {
   readonly maxLinks: number;
   readonly maxTargetReadBytes: number;
   readonly deadlineMs: number;
+  /** 已由受管元数据核对建立的工作量；缺失时仍按调用方逐条计数。 */
+  readonly workload?: ExternalFileLinkSnapshotWorkload;
 }
 
 export class ExternalFileLinkSnapshotBudgetError extends Error {
@@ -80,6 +88,12 @@ const DARWIN_ORDINARY_LOCAL_FILE_SYSTEMS = new Set([
 const POSIX_FILE_TYPE_MASK = 0o170000n;
 const POSIX_REGULAR_FILE = 0o100000n;
 const POSIX_SYMBOLIC_LINK = 0o120000n;
+const EXTERNAL_LINK_SNAPSHOT_BASE_BUDGET_MS = 30_000;
+const EXTERNAL_LINK_SNAPSHOT_MAX_BUDGET_MS = 180_000;
+const EXTERNAL_LINK_SNAPSHOT_PER_LINK_MS = 20;
+const EXTERNAL_LINK_SNAPSHOT_BYTES_PER_SECOND = 8 * 1024 * 1024;
+const EXTERNAL_LINK_SNAPSHOT_MAX_LINKS = 1024;
+const EXTERNAL_LINK_SNAPSHOT_MAX_TARGET_READ_BYTES = 1024 * 1024 * 1024;
 
 /** @internal 导出给平台 magic 回归测试；Darwin 数字类型一律不能作为放行依据。 */
 export function isExternalFileSystemMagicOrRemote(
@@ -95,15 +109,64 @@ function digestDarwinMountTable(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function assertExternalFileLinkSnapshotWorkload(
+  workload: Pick<ExternalFileLinkSnapshotWorkload, 'linkCount' | 'distinctTargetBytes'>,
+  limits: Pick<ExternalFileLinkSnapshotLimits, 'maxLinks' | 'maxTargetReadBytes'>,
+): void {
+  if (
+    !Number.isSafeInteger(workload.linkCount) ||
+    !Number.isSafeInteger(workload.distinctTargetBytes) ||
+    workload.linkCount < 0 ||
+    workload.distinctTargetBytes < 0
+  ) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对工作量非法');
+  }
+  if (
+    workload.linkCount > limits.maxLinks ||
+    workload.distinctTargetBytes > limits.maxTargetReadBytes
+  ) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对工作量超过上限');
+  }
+}
+
+function externalFileLinkSnapshotBudgetMs(
+  workload: Pick<ExternalFileLinkSnapshotWorkload, 'linkCount' | 'distinctTargetBytes'>,
+  limits: Pick<ExternalFileLinkSnapshotLimits, 'maxLinks' | 'maxTargetReadBytes'>,
+): number {
+  assertExternalFileLinkSnapshotWorkload(workload, limits);
+  return Math.min(
+    EXTERNAL_LINK_SNAPSHOT_MAX_BUDGET_MS,
+    EXTERNAL_LINK_SNAPSHOT_BASE_BUDGET_MS +
+      workload.linkCount * EXTERNAL_LINK_SNAPSHOT_PER_LINK_MS +
+      Math.ceil(workload.distinctTargetBytes / EXTERNAL_LINK_SNAPSHOT_BYTES_PER_SECOND) * 1000,
+  );
+}
+
+/** @internal 固定公式边界回归；生产调用始终使用受管元数据建立的工作量。 */
+export function externalFileLinkSnapshotBudgetMsForTests(
+  linkCount: number,
+  distinctTargetBytes: number,
+): number {
+  return externalFileLinkSnapshotBudgetMs(
+    { linkCount, distinctTargetBytes },
+    {
+      maxLinks: EXTERNAL_LINK_SNAPSHOT_MAX_LINKS,
+      maxTargetReadBytes: EXTERNAL_LINK_SNAPSHOT_MAX_TARGET_READ_BYTES,
+    },
+  );
+}
+
 /**
  * 一次拓扑核对共用一个预算。每条链接都计数量；每个受管 reader 只获得同一个绝对期限
  * 和实际读取字节上限的剩余额度。同批稳定目标只读取一次，跨批重复目标保守地再次计费。
  */
 export class ExternalFileLinkSnapshotBudget {
+  readonly #startedAt: number;
   readonly #deadline: number;
   readonly #targets = new Map<string, { readonly bytes: number; readonly digest?: string }>();
   #darwinMountTableDigest: string | undefined;
   #links = 0;
+  #completedLinks = 0;
   #targetReadBytes = 0;
   #readerBatchActive = false;
 
@@ -111,6 +174,7 @@ export class ExternalFileLinkSnapshotBudget {
     private readonly limits: ExternalFileLinkSnapshotLimits,
     private readonly signal?: AbortSignal,
     now: () => number = () => performance.now(),
+    startedAt?: number,
   ) {
     if (
       !Number.isSafeInteger(limits.maxLinks) ||
@@ -123,11 +187,46 @@ export class ExternalFileLinkSnapshotBudget {
       throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对预算配置非法');
     }
     this.now = now;
-    this.#deadline = now() + limits.deadlineMs;
+    this.#startedAt = startedAt ?? now();
+    if (!Number.isFinite(this.#startedAt)) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对起始时钟非法');
+    }
+    if (limits.workload !== undefined) {
+      assertExternalFileLinkSnapshotWorkload(limits.workload, limits);
+      if (
+        !Number.isSafeInteger(limits.workload.distinctTargets) ||
+        limits.workload.distinctTargets < 0 ||
+        limits.workload.distinctTargets > limits.workload.linkCount
+      ) {
+        throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对目标数量非法');
+      }
+    }
+    this.#deadline = this.#startedAt + limits.deadlineMs;
   }
 
   private readonly now: () => number;
   #poisoned = false;
+
+  timeoutError(): ExternalFileLinkSnapshotBudgetError {
+    const elapsed = Math.max(0, Math.floor(this.now() - this.#startedAt));
+    const workload = this.limits.workload;
+    const unavailable = 'unavailable';
+    const remainingBytes =
+      workload === undefined
+        ? unavailable
+        : String(Math.max(0, workload.distinctTargetBytes - this.#targetReadBytes));
+    return new ExternalFileLinkSnapshotBudgetError(
+      '外部普通文件链接核对超过统一期限（' +
+        `budgetMs=${workload === undefined ? unavailable : this.limits.deadlineMs}, ` +
+        `elapsedMs=${elapsed}, ` +
+        `links=${workload === undefined ? this.#links : workload.linkCount}, ` +
+        `distinctTargets=${workload === undefined ? unavailable : workload.distinctTargets}, ` +
+        `completedLinks=${this.#completedLinks}, ` +
+        `completedTargets=${this.#targets.size}, ` +
+        `readBytes=${this.#targetReadBytes}, ` +
+        `remainingBytes=${remainingBytes}）`,
+    );
+  }
 
   checkpoint(): void {
     if (this.#poisoned) {
@@ -137,7 +236,7 @@ export class ExternalFileLinkSnapshotBudget {
       throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对被中断');
     }
     if (this.now() >= this.#deadline) {
-      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对超过统一期限');
+      throw this.timeoutError();
     }
   }
 
@@ -146,7 +245,7 @@ export class ExternalFileLinkSnapshotBudget {
     this.checkpoint();
     const remaining = Math.floor(this.#deadline - this.now());
     if (remaining < 1) {
-      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对超过统一期限');
+      throw this.timeoutError();
     }
     return remaining;
   }
@@ -193,6 +292,31 @@ export class ExternalFileLinkSnapshotBudget {
       throw new ExternalFileLinkSnapshotBudgetError(
         `外部普通文件链接超过 ${this.limits.maxLinks} 条`,
       );
+    }
+  }
+
+  completeLinks(count: number): void {
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接完成数量非法');
+    }
+    const maximum = this.limits.workload?.linkCount ?? this.limits.maxLinks;
+    if (this.#completedLinks + count > maximum) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接完成数量超过已建立工作量');
+    }
+    this.#completedLinks += count;
+    this.checkpoint();
+  }
+
+  assertCompletedWorkload(): void {
+    this.checkpoint();
+    const workload = this.limits.workload;
+    if (
+      workload !== undefined &&
+      (this.#completedLinks !== workload.linkCount ||
+        this.#targets.size !== workload.distinctTargets ||
+        this.#targetReadBytes !== workload.distinctTargetBytes)
+    ) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对进度或工作量不完整');
     }
   }
 
@@ -275,6 +399,27 @@ export type ManagedExternalFileLinkSnapshot =
       readonly identity: ExternalFileLinkIdentity;
     };
 
+export interface ExternalFileLinkMetadataIdentity {
+  readonly resolvedPath: string;
+  readonly link: ExternalFileStatIdentity;
+  readonly linkTargetDigest: string;
+  readonly target: ExternalFileStatIdentity;
+}
+
+export type ManagedExternalFileLinkMetadata =
+  | {
+      readonly scope: 'internal';
+      readonly resolvedPath: string;
+    }
+  | {
+      readonly scope: 'source';
+      readonly resolvedPath: string;
+    }
+  | {
+      readonly scope: 'external';
+      readonly identity: ExternalFileLinkMetadataIdentity;
+    };
+
 export interface ManagedExternalFileLinkSnapshotOptions {
   readonly linkPath: string;
   readonly checkoutRoot: string;
@@ -290,6 +435,8 @@ export interface ManagedExternalFileLinkSnapshotOptions {
   };
   /** @internal 仅用于证明阻塞 reader 受统一期限约束；生产调用不得提供。 */
   readonly readerProgramForTests?: string;
+  /** @internal 自适应复核只在最终元数据阶段完成链接进度；常规入口保持逐批计数。 */
+  readonly trackProgress?: boolean;
 }
 
 export type ManagedExternalFileLinkBatchSnapshotOptions = Omit<
@@ -297,6 +444,16 @@ export type ManagedExternalFileLinkBatchSnapshotOptions = Omit<
   'linkPath'
 > & {
   readonly linkPaths: readonly string[];
+};
+
+export type ManagedExternalFileLinkBatchMetadataOptions = Omit<
+  ManagedExternalFileLinkBatchSnapshotOptions,
+  'trackProgress'
+> & {
+  /** 元数据预扫已在调用方完成数量校验时，不得再次把同一链接计入预算。 */
+  readonly countLinks?: boolean;
+  /** 只有最终元数据复核能把链接标记为完成。 */
+  readonly trackProgress?: boolean;
 };
 
 const EXTERNAL_FILE_LINK_READER = String.raw`
@@ -711,6 +868,31 @@ try {
 }
 `;
 
+const EXTERNAL_FILE_LINK_METADATA_READER = (() => {
+  const startMarker = String.raw`  const targetKey = [resolvedPath, ...Object.values(identity(targetBefore))].join('\0');`;
+  const endMarker = '\n  } finally {';
+  const start = EXTERNAL_FILE_LINK_READER.indexOf(startMarker);
+  const end = EXTERNAL_FILE_LINK_READER.indexOf(endMarker, start);
+  if (start < 0 || end < 0) {
+    throw new Error('external file link metadata reader derivation failed');
+  }
+  return (
+    EXTERNAL_FILE_LINK_READER.slice(0, start) +
+    `  assertLinkProof(linkPath, proof, darwinMounts, request.checkoutRoot);
+  return {
+    result: {
+      scope: 'external',
+      resolvedPath,
+      link: proof.link,
+      linkTargetDigest: proof.linkTargetDigest,
+      target: proof.target,
+    },
+    proof,
+  };` +
+    EXTERNAL_FILE_LINK_READER.slice(end)
+  );
+})();
+
 /** @internal 只供在生产 reader 上注入确定性竞态的回归测试。 */
 export function externalFileLinkReaderProgramForTests(): string {
   return EXTERNAL_FILE_LINK_READER;
@@ -836,6 +1018,80 @@ function parseExternalFileLinkSnapshotValue(
   };
 }
 
+function parseExternalFileLinkMetadataValue(
+  value: unknown,
+  options: {
+    readonly expectedIndex: number;
+    readonly checkoutRoot: string;
+    readonly sourceRoot: string;
+    readonly maxFileBytes: number;
+  },
+): ManagedExternalFileLinkMetadata {
+  if (!value || typeof value !== 'object') {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果形状非法');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    record.index !== options.expectedIndex ||
+    typeof record.resolvedPath !== 'string' ||
+    record.resolvedPath.length < 1 ||
+    record.resolvedPath.length > 32_767 ||
+    record.resolvedPath.includes('\0') ||
+    !isAbsolute(record.resolvedPath)
+  ) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果缺少身份');
+  }
+  const insideCheckout = lexicalPathInside(options.checkoutRoot, record.resolvedPath);
+  const insideSource = lexicalPathInside(options.sourceRoot, record.resolvedPath);
+  if (record.scope === 'internal' || record.scope === 'source') {
+    if (
+      !hasOnlyKeys(record, ['index', 'scope', 'resolvedPath']) ||
+      (record.scope === 'internal' ? !insideCheckout : insideCheckout || !insideSource)
+    ) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据 scope 与路径不一致');
+    }
+    return { scope: record.scope, resolvedPath: record.resolvedPath };
+  }
+  const link = parsedStatIdentity(record.link);
+  const target = parsedStatIdentity(record.target);
+  if (
+    record.scope !== 'external' ||
+    !hasOnlyKeys(record, [
+      'index',
+      'scope',
+      'resolvedPath',
+      'link',
+      'linkTargetDigest',
+      'target',
+    ]) ||
+    insideCheckout ||
+    insideSource ||
+    !link ||
+    !target ||
+    link.nlink !== 1n ||
+    (link.mode & POSIX_FILE_TYPE_MASK) !== POSIX_SYMBOLIC_LINK ||
+    target.nlink < 1n ||
+    (target.mode & POSIX_FILE_TYPE_MASK) !== POSIX_REGULAR_FILE ||
+    target.size > BigInt(options.maxFileBytes) ||
+    target.size > BigInt(Number.MAX_SAFE_INTEGER) ||
+    typeof record.linkTargetDigest !== 'string' ||
+    !/^[0-9a-f]{64}$/u.test(record.linkTargetDigest)
+  ) {
+    throw new ExternalFileLinkSnapshotBudgetError(
+      '外部普通文件链接元数据结果未证明身份和受界普通文件',
+    );
+  }
+  return {
+    scope: 'external',
+    identity: {
+      resolvedPath: record.resolvedPath,
+      link,
+      linkTargetDigest: record.linkTargetDigest,
+      target,
+    },
+  };
+}
+
 function parseExternalFileLinkBatchSnapshot(
   bytes: Buffer,
   options: {
@@ -878,6 +1134,56 @@ function parseExternalFileLinkBatchSnapshot(
   }
   return record.items.map((item, offset) =>
     parseExternalFileLinkSnapshotValue(item, {
+      expectedIndex: options.firstIndex + offset,
+      checkoutRoot: options.checkoutRoot,
+      sourceRoot: options.sourceRoot,
+      maxFileBytes: options.maxFileBytes,
+    }),
+  );
+}
+
+function parseExternalFileLinkBatchMetadata(
+  bytes: Buffer,
+  options: {
+    readonly requestDigest: string;
+    readonly firstIndex: number;
+    readonly count: number;
+    readonly checkoutRoot: string;
+    readonly sourceRoot: string;
+    readonly maxFileBytes: number;
+  },
+): ManagedExternalFileLinkMetadata[] {
+  if (bytes.length < 1 || bytes.length > 16 * 1024 * 1024) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果大小非法');
+  }
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text, 'utf8').equals(bytes)) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果不是有效 UTF-8');
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果无法解析');
+  }
+  if (!value || typeof value !== 'object') {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果形状非法');
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !hasOnlyKeys(record, ['schemaVersion', 'requestDigest', 'ok', 'items']) ||
+    record.schemaVersion !== 2 ||
+    record.requestDigest !== options.requestDigest ||
+    record.ok !== true ||
+    !Array.isArray(record.items) ||
+    record.items.length !== options.count
+  ) {
+    throw new ExternalFileLinkSnapshotBudgetError(
+      '外部普通文件链接元数据结果数量、版本或请求摘要非法',
+    );
+  }
+  return record.items.map((item, offset) =>
+    parseExternalFileLinkMetadataValue(item, {
       expectedIndex: options.firstIndex + offset,
       checkoutRoot: options.checkoutRoot,
       sourceRoot: options.sourceRoot,
@@ -1083,15 +1389,14 @@ export async function snapshotManagedExternalFileLinks(
         result.processTreeNotEmpty ||
         result.stderr.length !== 0
       ) {
+        if (result.timedOut) throw options.budget.timeoutError();
         const diagnostic = Buffer.concat([result.stdout, result.stderr])
           .toString('utf8')
           .slice(-500);
         throw new ExternalFileLinkSnapshotBudgetError(
-          result.timedOut
-            ? '外部普通文件链接核对超过统一期限'
-            : `外部普通文件链接批次 ${index + 1}/${batches.length} 核对失败${
-                diagnostic ? `：${diagnostic}` : ''
-              }`,
+          `外部普通文件链接批次 ${index + 1}/${batches.length} 核对失败${
+            diagnostic ? `：${diagnostic}` : ''
+          }`,
         );
       }
       const parsed = parseExternalFileLinkBatchSnapshot(result.stdout, {
@@ -1138,6 +1443,7 @@ export async function snapshotManagedExternalFileLinks(
           snapshot.identity.targetDigest,
         );
       }
+      if (options.trackProgress !== false) options.budget.completeLinks(parsed.length);
       snapshots.push(...parsed);
     } catch (error) {
       if (budgetGranted) options.budget.poisonReaderBatch();
@@ -1147,6 +1453,299 @@ export async function snapshotManagedExternalFileLinks(
   if (snapshots.length !== options.linkPaths.length) {
     throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接批量核对结果不完整');
   }
+  return snapshots;
+}
+
+/**
+ * 元数据 reader 与内容 reader 使用同一套受管解析和前后身份复核；它不读取文件内容，
+ * 只为在内容读取前机械建立受界工作量。调用方必须在内容阶段重新比对这些身份。
+ */
+export async function snapshotManagedExternalFileLinkMetadata(
+  options: ManagedExternalFileLinkBatchMetadataOptions,
+): Promise<ManagedExternalFileLinkMetadata[]> {
+  if (!canSnapshotExternalFileLinks(process.platform)) {
+    throw new ExternalFileLinkSnapshotBudgetError(
+      `当前平台 ${process.platform} 尚未完成普通文件链接可信绑定验证`,
+    );
+  }
+  if (!Number.isSafeInteger(options.maxFileBytes) || options.maxFileBytes < 0) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接单文件上限非法');
+  }
+  if (options.linkPaths.length < 1 || options.linkPaths.length > 1024) {
+    throw new ExternalFileLinkSnapshotBudgetError('受管普通文件链接批量数量必须在 1 到 1024 之间');
+  }
+  const checkoutRoot = resolve(options.checkoutRoot);
+  const sourceRoot = resolve(options.sourceRoot);
+  const relativePaths = options.linkPaths.map((path) =>
+    managedLinkRelativePath(checkoutRoot, path),
+  );
+  if (new Set(relativePaths).size !== relativePaths.length) {
+    throw new ExternalFileLinkSnapshotBudgetError('受管普通文件链接批量路径重复');
+  }
+  if (options.countLinks !== false) {
+    for (const _path of relativePaths) options.budget.countLink();
+  }
+  const readerProgram = options.readerProgramForTests ?? EXTERNAL_FILE_LINK_METADATA_READER;
+  const batches = managedExternalFileLinkBatches({
+    readerProgram,
+    relativePaths,
+    checkoutRoot,
+    sourceRoot,
+    maxFileBytes: options.maxFileBytes,
+    maxTargetReadBytes: 0,
+    darwinMountTableDigest: options.budget.darwinMountTableDigest(),
+  });
+  const metadata: ManagedExternalFileLinkMetadata[] = [];
+  for (let index = 0; index < batches.length; index += 1) {
+    const batch = batches[index];
+    const request = managedExternalFileLinkRequest({
+      readerProgram,
+      links: batch.links,
+      checkoutRoot,
+      sourceRoot,
+      maxFileBytes: options.maxFileBytes,
+      maxTargetReadBytes: 0,
+      darwinMountTableDigest: options.budget.darwinMountTableDigest(),
+    });
+    const result = await runManagedWorkspaceProcess(options.session, {
+      kind: options.kind,
+      delegation: 'read-only-v1',
+      executable: process.execPath,
+      args: request.args,
+      cwd: options.cwd,
+      environment: [],
+      timeoutMs: options.budget.remainingMs(),
+      ...(options.termination ? { termination: options.termination } : {}),
+    });
+    options.budget.checkpoint();
+    if (
+      result.verdict !== 'completed' ||
+      result.exitCode !== 0 ||
+      result.timedOut ||
+      result.processTreeNotEmpty ||
+      result.stderr.length !== 0
+    ) {
+      if (result.timedOut) throw options.budget.timeoutError();
+      const diagnostic = Buffer.concat([result.stdout, result.stderr])
+        .toString('utf8')
+        .slice(-500);
+      throw new ExternalFileLinkSnapshotBudgetError(
+        `外部普通文件链接元数据批次 ${index + 1}/${batches.length} 核对失败${
+          diagnostic ? `：${diagnostic}` : ''
+        }`,
+      );
+    }
+    const parsed = parseExternalFileLinkBatchMetadata(result.stdout, {
+      requestDigest: request.requestDigest,
+      firstIndex: batch.firstIndex,
+      count: batch.count,
+      checkoutRoot,
+      sourceRoot,
+      maxFileBytes: options.maxFileBytes,
+    });
+    if (options.trackProgress) options.budget.completeLinks(parsed.length);
+    metadata.push(...parsed);
+  }
+  if (metadata.length !== options.linkPaths.length) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果不完整');
+  }
+  return metadata;
+}
+
+function sameExternalFileLinkMetadataIdentity(
+  left: ExternalFileLinkMetadataIdentity,
+  right: ExternalFileLinkMetadataIdentity,
+): boolean {
+  return (
+    left.resolvedPath === right.resolvedPath &&
+    sameExternalFileStatIdentity(left.link, right.link) &&
+    left.linkTargetDigest === right.linkTargetDigest &&
+    sameExternalFileStatIdentity(left.target, right.target)
+  );
+}
+
+function sameManagedExternalFileLinkMetadata(
+  left: ManagedExternalFileLinkMetadata,
+  right: ManagedExternalFileLinkMetadata,
+): boolean {
+  if (left.scope !== right.scope) return false;
+  if (left.scope === 'external' && right.scope === 'external') {
+    return sameExternalFileLinkMetadataIdentity(left.identity, right.identity);
+  }
+  return left.scope !== 'external' && right.scope !== 'external' && left.resolvedPath === right.resolvedPath;
+}
+
+interface ResolvedExternalFileLinkSnapshotWorkload {
+  readonly workload: ExternalFileLinkSnapshotWorkload;
+  readonly representativeIndexes: readonly number[];
+}
+
+function resolveExternalFileLinkSnapshotWorkload(
+  metadata: readonly ManagedExternalFileLinkMetadata[],
+  limits: Pick<ExternalFileLinkSnapshotLimits, 'maxLinks' | 'maxTargetReadBytes'>,
+): ResolvedExternalFileLinkSnapshotWorkload {
+  const targetByResolvedPath = new Map<string, ExternalFileStatIdentity>();
+  const distinctTargets = new Map<string, { readonly bytes: number; readonly index: number }>();
+  let distinctTargetBytes = 0;
+  for (let index = 0; index < metadata.length; index += 1) {
+    const observation = metadata[index];
+    if (observation.scope !== 'external') continue;
+    const previousAtPath = targetByResolvedPath.get(observation.identity.resolvedPath);
+    if (
+      previousAtPath !== undefined &&
+      !sameExternalFileStatIdentity(previousAtPath, observation.identity.target)
+    ) {
+      throw new ExternalFileLinkSnapshotBudgetError(
+        '外部普通文件链接元数据预扫期间同一目标身份或大小发生变化',
+      );
+    }
+    targetByResolvedPath.set(observation.identity.resolvedPath, observation.identity.target);
+    const key = externalFileTargetIdentityKey(
+      observation.identity.resolvedPath,
+      observation.identity.target,
+    );
+    const bytes = Number(observation.identity.target.size);
+    const previous = distinctTargets.get(key);
+    if (previous !== undefined) {
+      if (previous.bytes !== bytes) {
+        throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接重复目标大小冲突');
+      }
+      continue;
+    }
+    if (!Number.isSafeInteger(distinctTargetBytes + bytes)) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接去重读取量非法');
+    }
+    distinctTargetBytes += bytes;
+    distinctTargets.set(key, { bytes, index });
+  }
+  const workload = {
+    linkCount: metadata.length,
+    distinctTargets: distinctTargets.size,
+    distinctTargetBytes,
+  } satisfies ExternalFileLinkSnapshotWorkload;
+  assertExternalFileLinkSnapshotWorkload(workload, limits);
+  return {
+    workload,
+    representativeIndexes: [...distinctTargets.values()].map((target) => target.index),
+  };
+}
+
+export type ManagedAdaptiveExternalFileLinkSnapshotOptions = Omit<
+  ManagedExternalFileLinkBatchSnapshotOptions,
+  'budget' | 'trackProgress'
+> & {
+  readonly maxLinks: number;
+  readonly maxTargetReadBytes: number;
+  /** @internal 受控时钟只用于回归；生产始终使用单调 performance.now。 */
+  readonly nowForTests?: () => number;
+  /** @internal 只用于断言受管元数据建立的工作量。 */
+  readonly onWorkloadForTests?: (workload: ExternalFileLinkSnapshotWorkload) => void;
+  /** @internal 只用于在元数据与内容读取之间制造确定性身份漂移。 */
+  readonly afterMetadataForTests?: () => void;
+};
+
+/**
+ * 受管元数据先建立工作量；随后所有内容读取和最终元数据复核都共享从预扫开始计算的
+ * 自适应绝对期限。内容只读取每个稳定目标的一条代表链接，最终再核对全部链接身份。
+ */
+export async function snapshotManagedExternalFileLinksWithAdaptiveBudget(
+  options: ManagedAdaptiveExternalFileLinkSnapshotOptions,
+): Promise<ManagedExternalFileLinkSnapshot[]> {
+  const now = options.nowForTests ?? (() => performance.now());
+  const startedAt = now();
+  const limits = {
+    maxLinks: options.maxLinks,
+    maxTargetReadBytes: options.maxTargetReadBytes,
+  };
+  const maximumBudget = new ExternalFileLinkSnapshotBudget(
+    { ...limits, deadlineMs: EXTERNAL_LINK_SNAPSHOT_MAX_BUDGET_MS },
+    options.termination?.signal,
+    now,
+    startedAt,
+  );
+  const initialMetadata = await snapshotManagedExternalFileLinkMetadata({
+    ...options,
+    budget: maximumBudget,
+  });
+  maximumBudget.assertDarwinMountTableCurrent();
+  const resolved = resolveExternalFileLinkSnapshotWorkload(initialMetadata, limits);
+  options.onWorkloadForTests?.(resolved.workload);
+  options.afterMetadataForTests?.();
+  const budget = new ExternalFileLinkSnapshotBudget(
+    {
+      ...limits,
+      deadlineMs: externalFileLinkSnapshotBudgetMs(resolved.workload, limits),
+      workload: resolved.workload,
+    },
+    options.termination?.signal,
+    now,
+    startedAt,
+  );
+  budget.checkpoint();
+
+  const targetDigests = new Map<string, string>();
+  if (resolved.representativeIndexes.length > 0) {
+    const content = await snapshotManagedExternalFileLinks({
+      ...options,
+      linkPaths: resolved.representativeIndexes.map((index) => options.linkPaths[index]),
+      budget,
+      trackProgress: false,
+    });
+    for (let offset = 0; offset < content.length; offset += 1) {
+      const initial = initialMetadata[resolved.representativeIndexes[offset]];
+      const observed = content[offset];
+      if (
+        initial.scope !== 'external' ||
+        observed.scope !== 'external' ||
+        !sameExternalFileLinkMetadataIdentity(initial.identity, observed.identity)
+      ) {
+        throw new ExternalFileLinkSnapshotBudgetError(
+          '外部普通文件链接元数据与内容读取身份不一致',
+        );
+      }
+      const key = externalFileTargetIdentityKey(
+        observed.identity.resolvedPath,
+        observed.identity.target,
+      );
+      const previous = targetDigests.get(key);
+      if (previous !== undefined && previous !== observed.identity.targetDigest) {
+        throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接重复目标摘要冲突');
+      }
+      targetDigests.set(key, observed.identity.targetDigest);
+    }
+  }
+
+  const finalMetadata = await snapshotManagedExternalFileLinkMetadata({
+    ...options,
+    budget,
+    countLinks: false,
+    trackProgress: true,
+  });
+  if (finalMetadata.length !== initialMetadata.length) {
+    throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接最终元数据结果不完整');
+  }
+  const snapshots = finalMetadata.map((observation, index) => {
+    if (!sameManagedExternalFileLinkMetadata(initialMetadata[index], observation)) {
+      throw new ExternalFileLinkSnapshotBudgetError(
+        '外部普通文件链接元数据在内容读取期间发生变化',
+      );
+    }
+    if (observation.scope !== 'external') return observation;
+    const key = externalFileTargetIdentityKey(
+      observation.identity.resolvedPath,
+      observation.identity.target,
+    );
+    const targetDigest = targetDigests.get(key);
+    if (targetDigest === undefined) {
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接缺少稳定目标内容摘要');
+    }
+    return {
+      scope: 'external' as const,
+      identity: { ...observation.identity, targetDigest },
+    };
+  });
+  budget.assertCompletedWorkload();
+  budget.assertDarwinMountTableCurrent();
   return snapshots;
 }
 
