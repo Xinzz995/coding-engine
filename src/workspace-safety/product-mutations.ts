@@ -3,6 +3,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseRunStateValue } from '../contracts/run-state-contract.js';
 import { readModelRouting } from '../engine/models.js';
 import type { Prd } from '../engine/prd.js';
+import { parseIssueExecutionContract } from '../engine/issue-execution-contract.js';
 import { readTddConfig, runTddGate } from '../engine/tdd-gate.js';
 import { readGitHead } from '../engine/validation-protocol.js';
 import {
@@ -204,7 +205,7 @@ function validateApplyPrdCandidate(record: Record<string, unknown>): Prd {
       'qualityChecks',
       'userStories',
     ],
-    ['sourcePrd', 'tdd', 'models'],
+    ['sourcePrd', 'tdd', 'models', 'executionContract', 'executionContractDigest'],
     'apply-prd-v1 candidate.prd',
   );
   nonEmptyString(record.project, 'apply-prd-v1 candidate.prd.project');
@@ -246,6 +247,37 @@ function validateApplyPrdCandidate(record: Record<string, unknown>): Prd {
   }
 
   const prd = record as unknown as Prd;
+  const hasExecutionContract = record.executionContract !== undefined;
+  const hasExecutionDigest = record.executionContractDigest !== undefined;
+  if (hasExecutionContract !== hasExecutionDigest) {
+    throw mutationInvalid(
+      'apply-prd-v1 candidate executionContract and executionContractDigest must coexist',
+    );
+  }
+  if (hasExecutionContract) {
+    const parsedExecution = parseIssueExecutionContract(record.executionContract);
+    if (!parsedExecution.ok) {
+      throw mutationInvalid(
+        `apply-prd-v1 candidate executionContract is invalid: ${parsedExecution.errors[0]}`,
+      );
+    }
+    if (record.executionContractDigest !== parsedExecution.digest) {
+      throw mutationInvalid('apply-prd-v1 candidate executionContractDigest does not match');
+    }
+    if (
+      prd.userStories.length !== 1 ||
+      prd.userStories[0].acceptanceCriteria.length !==
+        parsedExecution.contract.storyAcceptance.criteria.length ||
+      prd.userStories[0].acceptanceCriteria.some(
+        (criterion, index) =>
+          criterion !== parsedExecution.contract.storyAcceptance.criteria[index],
+      )
+    ) {
+      throw mutationInvalid(
+        'apply-prd-v1 candidate Story criteria do not match the execution contract',
+      );
+    }
+  }
   const routing = readModelRouting(prd);
   if (routing.status === 'invalid') {
     throw mutationInvalid(`apply-prd-v1 candidate model routing is invalid: ${routing.errors[0]}`);

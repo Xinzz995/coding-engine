@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { permissionWarning, type AgentKind } from './agent.js';
 import { appendEvidenceWithWriter, clipEvidenceDiagnostic } from './evidence.js';
 import type { ManagedGateContext } from './gate.js';
@@ -49,6 +49,7 @@ import {
   reconcileIssueExecutionContract,
   type IssueExecutionContractCapabilities,
 } from './issue-execution-contract.js';
+import { consumeReadyIssueRunAuthority } from './issue-run-authority.js';
 
 type QualityReader = NonNullable<LoopConfig['qualityContractReader']>;
 type ReadyQualityContract = Extract<QualityContractReadResult, { status: 'ready' }>;
@@ -142,6 +143,7 @@ export async function runLoopPreflight(
 
   const bootPrd = (await guard.read()).prd;
   let issueExecutionCapabilities: IssueExecutionContractCapabilities | null = null;
+  let issueRunAuthorityClaims: ReturnType<typeof consumeReadyIssueRunAuthority> = null;
   if (bootPrd) {
     const storySet = validatePrdStorySet(bootPrd);
     if (!storySet.valid) {
@@ -157,6 +159,13 @@ export async function runLoopPreflight(
       return { status: 'failed', exitCode: 2 };
     }
     if (hasExecutionContract) {
+      issueRunAuthorityClaims = consumeReadyIssueRunAuthority(cfg.readyIssueRunAuthority);
+      if (issueRunAuthorityClaims === null) {
+        console.error(
+          '❌ ready Issue workspace 只能通过 coding-x issue run 继续；普通 run 不具备实时 Issue、PR 与发布保护授权',
+        );
+        return { status: 'failed', exitCode: 2 };
+      }
       const parsedExecution = parseIssueExecutionContract(bootPrd.executionContract);
       if (!parsedExecution.ok) {
         console.error(`❌ ready Issue 执行合同无效：${parsedExecution.errors.join('；')}`);
@@ -206,6 +215,34 @@ export async function runLoopPreflight(
   if (!bootGitHead) {
     console.error('❌ 无法读取当前 Git HEAD；正式运行必须在至少有一个提交的 Git 仓库中执行');
     return { status: 'failed', exitCode: 2 };
+  }
+  if (issueRunAuthorityClaims !== null && bootPrd) {
+    const runIdMatches = [
+      ...bootPrd.description.matchAll(/^Issue-Run-ID:\s*(sha256:[0-9a-f]{64})\s*$/gmu),
+    ];
+    const expectedSourcePrd = `docs/prds/prd-issue-${issueRunAuthorityClaims.issueNumber}.md`;
+    let canonicalProjectRoot: string;
+    try {
+      canonicalProjectRoot = realpathSync(projectRoot);
+    } catch {
+      canonicalProjectRoot = projectRoot;
+    }
+    if (
+      issueRunAuthorityClaims.projectRoot !== canonicalProjectRoot ||
+      issueRunAuthorityClaims.workspace !== workspace ||
+      issueRunAuthorityClaims.repository !== bootPrd.project ||
+      issueRunAuthorityClaims.branch !== bootPrd.branchName ||
+      issueRunAuthorityClaims.executionContractDigest !== bootPrd.executionContractDigest ||
+      issueRunAuthorityClaims.gitHead !== bootGitHead ||
+      bootPrd.sourcePrd !== expectedSourcePrd ||
+      runIdMatches.length !== 1 ||
+      runIdMatches[0][1] !== issueRunAuthorityClaims.runId
+    ) {
+      console.error(
+        '❌ ready Issue 实时授权与当前项目、workspace、提交或运行身份不一致；请重新执行 coding-x issue run',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
   }
   if (!cfg.qualityContractReader) {
     const trackedQuality = await readTrackedQualityContractAtHead({

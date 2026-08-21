@@ -121,6 +121,7 @@ import {
   engineQualityGateEvidence,
   type FullGateProof,
 } from './full-gate-proof.js';
+import type { ReadyIssueRunAuthority } from './issue-run-authority.js';
 
 export { renderInstruction } from './loop-instructions.js';
 
@@ -157,6 +158,8 @@ export interface LoopConfig {
   actualVersion?: string;
   /** 已逐文件核对的候选包身份；只有 shadow Dogfood 可以绑定。 */
   candidateIdentity?: VerifiedCandidateIdentity;
+  /** @internal One-shot authority issued by `issue run` after live Issue/PR/policy checks. */
+  readyIssueRunAuthority?: ReadyIssueRunAuthority;
   /** 项目根；生产缺省当前目录，测试/嵌入环境可显式指定。 */
   projectRoot?: string;
   /** 只供隔离测试注入；生产始终读取项目根 .coding-x/quality.json。 */

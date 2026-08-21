@@ -3,13 +3,14 @@ import { writeFileSync, rmSync, readFileSync, existsSync, realpathSync } from 'n
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readEvidence } from './evidence.js';
-import { runLoop as runProductionLoop } from './loop.js';
+import { runLoop as runProductionLoop, type LoopConfig } from './loop.js';
 import type { QualityContract } from '../quality/contract.js';
 import { digest } from '../review/common.js';
 import {
   digestIssueExecutionContract,
   type IssueExecutionContract,
 } from './issue-execution-contract.js';
+import { withReadyIssueRunAuthority } from './issue-run-authority.js';
 import {
   setup,
   story,
@@ -22,6 +23,45 @@ import {
   strictConfig,
   TEST_QUALITY_CONTRACT,
 } from './loop-test-support.js';
+
+const READY_ISSUE_RUN_ID = `sha256:${'a'.repeat(64)}`;
+const READY_ISSUE_PROJECT = 'owner/repository';
+const READY_ISSUE_BRANCH = 'codex/issue-42';
+const READY_ISSUE_SOURCE = 'docs/prds/prd-issue-42.md';
+
+function readyIssuePrdFields(): Record<string, unknown> {
+  return {
+    project: READY_ISSUE_PROJECT,
+    branchName: READY_ISSUE_BRANCH,
+    description: `ready Issue fixture\n\nIssue-Run-ID: ${READY_ISSUE_RUN_ID}`,
+    sourcePrd: READY_ISSUE_SOURCE,
+  };
+}
+
+async function runAuthorizedReadyIssue(
+  config: LoopConfig,
+  input: {
+    projectRoot: string;
+    workspace: string;
+    gitHead: string;
+    executionContractDigest: string;
+  },
+): Promise<number> {
+  return await withReadyIssueRunAuthority(
+    {
+      projectRoot: realpathSync(input.projectRoot),
+      workspace: realpathSync(input.workspace),
+      repository: READY_ISSUE_PROJECT,
+      issueNumber: 42,
+      branch: READY_ISSUE_BRANCH,
+      pullRequest: 7,
+      runId: READY_ISSUE_RUN_ID,
+      executionContractDigest: input.executionContractDigest,
+      gitHead: input.gitHead,
+    },
+    async (authority) => await runProductionLoop({ ...config, readyIssueRunAuthority: authority }),
+  );
+}
 
 describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
   it('validation-only clears the candidate only when a project command explicitly fails', async () => {
@@ -359,13 +399,15 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
       },
     };
     const contractDigest = digest(contract);
-    const { workspace, instructionsDir } = setup(
+    const executionContractDigest = digestIssueExecutionContract(executionContract);
+    const { projectRoot, workspace, instructionsDir, head } = setup(
       [story({ acceptanceCriteria: ['返回结果符合语义要求'] })],
       {
+        ...readyIssuePrdFields(),
         qualityContractDigest: contractDigest,
         qualityChecks: contract.checks,
         executionContract,
-        executionContractDigest: digestIssueExecutionContract(executionContract),
+        executionContractDigest,
       },
     );
     const promptMarker = join(resolve(workspace, '..'), 'responsibility-validator-prompt.txt');
@@ -374,18 +416,26 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
     });
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
+      const config: LoopConfig = {
+        ...strictConfig(workspace, instructionsDir),
+        qualityContractReader: () => readyQualityContract(contract, contractDigest),
+        storyChangeManifestForTests: () => ({
+          digest: `sha256:${'f'.repeat(64)}`,
+          changedPathCount: 1,
+          changeSelection: {
+            matchedPathCheckIds: ['passing-check'],
+            allChangedPathsMatched: true,
+          },
+        }),
+      };
+      expect(await runProductionLoop(config)).toBe(2);
+      expect(existsSync(promptMarker)).toBe(false);
       expect(
-        await runProductionLoop({
-          ...strictConfig(workspace, instructionsDir),
-          qualityContractReader: () => readyQualityContract(contract, contractDigest),
-          storyChangeManifestForTests: () => ({
-            digest: `sha256:${'f'.repeat(64)}`,
-            changedPathCount: 1,
-            changeSelection: {
-              matchedPathCheckIds: ['passing-check'],
-              allChangedPathsMatched: true,
-            },
-          }),
+        await runAuthorizedReadyIssue(config, {
+          projectRoot,
+          workspace,
+          gitHead: head(),
+          executionContractDigest,
         }),
       ).toBe(0);
       const prompt = readFileSync(promptMarker, 'utf8');
@@ -449,21 +499,34 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
       },
     };
-    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['行为成立'] })], {
-      qualityContractDigest: contractDigest,
-      qualityChecks: contract.checks,
-      executionContract,
-      executionContractDigest: digestIssueExecutionContract(executionContract),
-    });
+    const executionContractDigest = digestIssueExecutionContract(executionContract);
+    const { projectRoot, workspace, instructionsDir, head } = setup(
+      [story({ acceptanceCriteria: ['行为成立'] })],
+      {
+        ...readyIssuePrdFields(),
+        qualityContractDigest: contractDigest,
+        qualityChecks: contract.checks,
+        executionContract,
+        executionContractDigest,
+      },
+    );
     const { fake, calls } = fakeCounting(workspace);
     process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
     try {
       expect(
-        await runProductionLoop({
-          ...strictConfig(workspace, instructionsDir),
-          validatorRunnerBindingForTests: undefined,
-          qualityContractReader: () => readyQualityContract(contract, contractDigest),
-        }),
+        await runAuthorizedReadyIssue(
+          {
+            ...strictConfig(workspace, instructionsDir),
+            validatorRunnerBindingForTests: undefined,
+            qualityContractReader: () => readyQualityContract(contract, contractDigest),
+          },
+          {
+            projectRoot,
+            workspace,
+            gitHead: head(),
+            executionContractDigest,
+          },
+        ),
       ).toBe(2);
       expect(existsSync(calls)).toBe(false);
     } finally {

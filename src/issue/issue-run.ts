@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   applyPrdV1CandidateDigest,
@@ -35,6 +35,10 @@ import {
   reconcileIssueRemoteAuthority,
   type IssueExecutionContract,
 } from '../engine/issue-execution-contract.js';
+import {
+  withReadyIssueRunAuthority,
+  type ReadyIssueRunAuthority,
+} from '../engine/issue-run-authority.js';
 
 export const READY_FOR_AGENT_LABEL = 'ready-for-agent' as const;
 export const ISSUE_RUN_COMMENT_MARKER = '<!-- coding-x-issue-run-v1 -->' as const;
@@ -980,6 +984,7 @@ export async function runReadyIssue(options: {
     readonly workspace: string;
     readonly branch: string;
     readonly pullRequest: number;
+    readonly authority: ReadyIssueRunAuthority;
   }) => Promise<IssueEngineResult>;
   readonly refreshEngine?: (context: {
     readonly workspace: string;
@@ -1562,7 +1567,22 @@ export async function runReadyIssue(options: {
       assertSourceCurrent();
       readBoundPullRequest('完整引擎启动前 PR 回读', true);
     }
-    engine = refreshed ?? (await options.runEngine(engineContext));
+    engine =
+      refreshed ??
+      (await withReadyIssueRunAuthority(
+        {
+          projectRoot: root,
+          workspace: existsSync(workspace) ? realpathSync(workspace) : workspace,
+          repository: repository.nameWithOwner,
+          issueNumber: issue.number,
+          branch,
+          pullRequest: pullRequest.number,
+          runId,
+          executionContractDigest: issue.executionContractDigest,
+          gitHead: run('git', ['rev-parse', 'HEAD']),
+        },
+        async (authority) => await options.runEngine({ ...engineContext, authority }),
+      ));
   } catch (error) {
     engine = {
       exitCode: 2,

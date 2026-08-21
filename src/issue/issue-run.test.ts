@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { QualityContract } from '../quality/contract.js';
+import { consumeReadyIssueRunAuthority } from '../engine/issue-run-authority.js';
 import {
   ISSUE_RUN_BOOTSTRAP_COMMENT_MARKER,
   ISSUE_RUN_COMMENT_MARKER,
@@ -531,7 +532,13 @@ describe('ready Issue contract', () => {
       executor,
       now: () => times.shift()!,
       initializeWorkspace: async () => undefined,
-      runEngine: async () => {
+      runEngine: async ({ authority }) => {
+        expect(consumeReadyIssueRunAuthority(authority)).toMatchObject({
+          repository: 'Xinzz995/example',
+          issueNumber: 42,
+          branch: 'codex/issue-42',
+          pullRequest: 7,
+        });
         head = 'c'.repeat(40);
         return { exitCode: 6, message: '等待远端' };
       },

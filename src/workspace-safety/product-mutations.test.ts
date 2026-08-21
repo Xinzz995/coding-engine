@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readGitHead } from '../engine/validation-protocol.js';
+import {
+  digestIssueExecutionContract,
+  type IssueExecutionContract,
+} from '../engine/issue-execution-contract.js';
 import { readQualityContract } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
 import { digestBytes } from './filesystem.js';
@@ -217,6 +221,86 @@ describe('fixed apply-prd-v1 product mutation', () => {
     )).rejects.toThrow(/qualityChecks/u);
     expect(readFileSync(join(root, 'prd.json'))).toEqual(originalPrd);
     await expect(session.close()).resolves.toContain('released-');
+  });
+
+  it('accepts only a fully bound ready Issue execution contract in the workspace PRD', async () => {
+    const executionContract: IssueExecutionContract = {
+      schemaVersion: 1,
+      storyAcceptance: {
+        evidenceSource: 'validator',
+        network: 'disabled',
+        criteria: ['行为成立'],
+      },
+      localChecks: {
+        evidenceSource: 'engine',
+        network: 'current-host',
+        mode: 'scoped',
+        checkIds: [],
+      },
+      remoteDelivery: {
+        evidenceSource: 'github',
+        network: 'github-actions',
+        mode: 'scoped',
+        checkIds: [],
+        ruleset: 'required',
+      },
+      runMetrics: {
+        evidenceSource: 'engine-clock',
+        metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
+      },
+    };
+    const runtimePrd = prd('codex/issue-42', 'ready Issue', {
+      executionContract,
+      executionContractDigest: digestIssueExecutionContract(executionContract),
+      userStories: [
+        {
+          id: 'US-001',
+          title: 'ready Issue',
+          description: 'fixture',
+          acceptanceCriteria: ['行为成立'],
+          priority: 1,
+        },
+      ],
+    });
+    const accepted = await fixture('apply-prd');
+    await expect(
+      runApplyPrdV1Mutation(
+        accepted.session,
+        applyRequest('replace-feature', {
+          prd: runtimePrd,
+          state: null,
+          progress: Buffer.from('# Progress\n'),
+        }),
+        APPLY_OPTIONS,
+      ),
+    ).resolves.toMatchObject({ state: { phase: 'committed' } });
+    await expect(accepted.session.close()).resolves.toContain('released-');
+
+    const rejected = await fixture('apply-prd');
+    await expect(
+      runApplyPrdV1Mutation(
+        rejected.session,
+        applyRequest('replace-feature', {
+          prd: prd('codex/issue-43', 'ready Issue', {
+            executionContract,
+            executionContractDigest: `sha256:${'0'.repeat(64)}`,
+            userStories: [
+              {
+                id: 'US-001',
+                title: 'ready Issue',
+                description: 'fixture',
+                acceptanceCriteria: ['行为成立'],
+                priority: 1,
+              },
+            ],
+          }),
+          state: null,
+          progress: Buffer.from('# Progress\n'),
+        }),
+        APPLY_OPTIONS,
+      ),
+    ).rejects.toThrow(/executionContractDigest/u);
+    await expect(rejected.session.close()).resolves.toContain('released-');
   });
 
   it('archives a complete old feature, resets its run material, and never archives an unlisted file', async () => {

@@ -827,7 +827,7 @@ export async function main(argv: string[]): Promise<number> {
             workspace,
             projectRoot: process.cwd(),
           }),
-        runEngine: async ({ workspace }) => {
+        runEngine: async ({ workspace, authority }) => {
           const exitCode = await runLoop({
             kind: cfg.kind,
             kindExplicit: cfg.kindExplicit,
@@ -845,6 +845,7 @@ export async function main(argv: string[]): Promise<number> {
             stallLimit: cfg.stallLimit,
             shadow: false,
             actualVersion: CODING_X_VERSION,
+            readyIssueRunAuthority: authority,
           });
           const review = readFinalReviewState(workspace);
           const evidence =
