@@ -401,6 +401,17 @@ export async function runLoopPreflight(
     }
     throw err;
   }
+  if (
+    issueExecutionCapabilities !== null &&
+    !cfg.validatorRunnerBindingForTests &&
+    modelPreflight.runner !== 'codex'
+  ) {
+    console.error(
+      `❌ ready Issue 当前只能使用 codex 完成可信 Validator 闭环；` +
+        `${modelPreflight.runner} 不得先运行 Builder 再报告无法签发凭证`,
+    );
+    return { status: 'failed', exitCode: 2 };
+  }
   // 生产最终 Review 必须绑定一个明确模型；测试可注入不调用模型的评审器。
   // 在任何 Story agent 启动前拒绝，避免实现全部完成后才发现结果无法签发。
   if (!modelPreflight.review.model && !cfg.finalReviewRunner) {

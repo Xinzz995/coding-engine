@@ -158,6 +158,13 @@ describe('ready Issue execution contract', () => {
         expect.stringContaining('localChecks.command 是未知字段'),
       ]),
     });
+
+    const invalidUnicode = rawContract();
+    invalidUnicode.storyAcceptance.criteria = ['\ud800x'];
+    expect(parseIssueExecutionContract(invalidUnicode)).toMatchObject({
+      ok: false,
+      errors: expect.arrayContaining([expect.stringContaining('非空字符串')]),
+    });
   });
 
   it('reproduces #207 by rejecting a Linux-only local check on macOS before accepting remote ownership', () => {

@@ -80,6 +80,7 @@ function runGeneratedPlan(
     contractRemoteCheckIds?: string[];
     remoteMode?: 'scoped' | 'full';
     legacy?: boolean;
+    criterion?: string;
   },
 ): Map<string, string> {
   const root = mkdtempSync(join(tmpdir(), 'coding-x-workflow-plan-'));
@@ -112,7 +113,7 @@ function runGeneratedPlan(
         storyAcceptance: {
           evidenceSource: 'validator',
           network: 'disabled',
-          criteria: ['fixture behavior'],
+          criteria: [readyIssue.criterion ?? 'fixture behavior'],
         },
         localChecks: {
           evidenceSource: 'engine',
@@ -372,6 +373,14 @@ describe('renderQualityGateWorkflow', () => {
     expect(required.get('full')).toBe('false');
     expect(outputForCheck(contract, required, 'dependency-audit')).toBe('true');
     expect(outputForCheck(contract, required, 'tests')).toBe('false');
+
+    expect(() =>
+      runGeneratedPlan(contract, 'docs/rare-unicode.md', 'pull_request', undefined, {
+        number: 44,
+        remoteCheckIds: [],
+        criterion: '\u001c仍是有效文字',
+      }),
+    ).not.toThrow();
 
     expect(() =>
       runGeneratedPlan(contract, 'docs/legacy-note.md', 'pull_request', undefined, {

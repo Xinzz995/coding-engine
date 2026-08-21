@@ -21,6 +21,10 @@ import {
   type QualityPlatform,
 } from '../quality/contract.js';
 import { GhGitHubQualityClient } from '../quality/github-unmanaged.js';
+import {
+  QUALITY_WORKFLOW_PATH,
+  renderQualityGateWorkflow,
+} from '../quality/github-workflows.js';
 import type { Prd } from '../engine/prd.js';
 import type { AgentKind } from '../engine/agent.js';
 import { tryReadPrd } from '../engine/prd.js';
@@ -258,9 +262,28 @@ function visibleSection(value: string): string {
   return visible.trim();
 }
 
-function issueSections(body: string): Map<string, string> {
+const READY_ISSUE_SECTION_NAMES = [
+  '本次目标',
+  '明确的非目标',
+  '执行合同',
+  '风险说明',
+] as const;
+const ISSUE_PR_SECTION_NAMES = [
+  '本次目标',
+  '明确的非目标',
+  'Spec 与验收标准来源',
+  '验证方式',
+  '风险说明',
+  '深度评审',
+  '延期与政策例外',
+] as const;
+
+function issueSections(body: string, names: readonly string[]): Map<string, string> {
   const sections = new Map<string, string>();
-  const matches = [...body.matchAll(/^#{2,3}\s+(.+?)\s*$/gmu)];
+  const expected = new Set(names);
+  const matches = [...body.matchAll(/^#{2,3}\s+(.+?)\s*$/gmu)].filter((match) =>
+    expected.has(match[1].trim()),
+  );
   for (const [index, match] of matches.entries()) {
     const title = match[1].trim();
     if (sections.has(title)) throw new Error(`ready Issue 包含重复章节：${title}`);
@@ -331,7 +354,7 @@ export function parseReadyIssue(issueValue: unknown, eventValue: unknown): Ready
   const readyAt = currentReadyAt(eventValue);
   if (readyAt === null) throw new Error(`无法确认当前 ${READY_FOR_AGENT_LABEL} 标签事件`);
   const body = typeof issue.body === 'string' ? issue.body : '';
-  const sections = issueSections(body);
+  const sections = issueSections(body, READY_ISSUE_SECTION_NAMES);
   const goal = sections.get('本次目标') ?? '';
   const nonGoals = sections.get('明确的非目标') ?? '';
   const risk = sections.get('风险说明') ?? '';
@@ -410,7 +433,7 @@ function assertPullRequestIntent(
   sourcePath: string,
 ): void {
   if (pullRequest.title !== issue.title) throw new Error('Issue PR 标题已偏离冻结 Issue 标题');
-  const sections = issueSections(pullRequest.body);
+  const sections = issueSections(pullRequest.body, ISSUE_PR_SECTION_NAMES);
   const expected = new Map<string, string>([
     ['本次目标', issue.goal],
     ['明确的非目标', issue.nonGoals],
@@ -818,6 +841,17 @@ async function initializeIssueWorkspace(options: {
   sourcePath: string;
 }): Promise<void> {
   await bootstrapWorkspace({ workspacePath: options.workspace });
+  const quality = readQualityContract(options.root);
+  if (quality.status !== 'ready') throw new Error(`质量契约不可用：${quality.status}`);
+  const expectedPrd = renderPrdJson({
+    repository: options.repository,
+    issue: options.issue,
+    runId: options.runId,
+    branch: options.branch,
+    sourcePath: options.sourcePath,
+    contract: quality.contract,
+    contractDigest: quality.digest,
+  });
   const existing = tryReadPrd(join(options.workspace, 'prd.json'));
   if (existing !== null) {
     const parsedExecution = parseIssueExecutionContract(existing.executionContract);
@@ -827,30 +861,20 @@ async function initializeIssueWorkspace(options: {
       !existing.description.includes(`Issue-Run-ID: ${options.runId}`) ||
       existing.executionContractDigest !== options.issue.executionContractDigest ||
       !parsedExecution.ok ||
-      parsedExecution.digest !== options.issue.executionContractDigest
+      parsedExecution.digest !== options.issue.executionContractDigest ||
+      JSON.stringify(existing) !== JSON.stringify(expectedPrd)
     ) {
       throw new Error('Issue workspace 已绑定其他运行，拒绝接管');
     }
     return;
   }
-  const quality = readQualityContract(options.root);
-  if (quality.status !== 'ready') throw new Error(`质量契约不可用：${quality.status}`);
   const source = readIssueSource(join(options.root, options.sourcePath));
   const head = execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: options.root,
     encoding: 'utf8',
   }).trim();
-  const prd = renderPrdJson({
-    repository: options.repository,
-    issue: options.issue,
-    runId: options.runId,
-    branch: options.branch,
-    sourcePath: options.sourcePath,
-    contract: quality.contract,
-    contractDigest: quality.digest,
-  });
   const candidate: ApplyPrdV1Candidate = {
-    prd: `${JSON.stringify(prd, null, 2)}\n`,
+    prd: `${JSON.stringify(expectedPrd, null, 2)}\n`,
     state: null,
     progress: '# Progress\n',
   };
@@ -969,6 +993,11 @@ export async function runReadyIssue(options: {
   /** @internal Deterministic live Ruleset seam; production reads GitHub before any Agent starts. */
   readonly remoteAuthorityReader?: (input: {
     readonly repository: string;
+    readonly contract: QualityContract;
+  }) => readonly string[];
+  /** @internal Deterministic managed-workflow seam; production compares the current branch file. */
+  readonly managedWorkflowReader?: (input: {
+    readonly root: string;
     readonly contract: QualityContract;
   }) => readonly string[];
   /** @internal Deterministic platform seam; production uses process.platform. */
@@ -1186,10 +1215,40 @@ export async function runReadyIssue(options: {
     options.remoteAuthorityReader ??
     ((input: { readonly repository: string; readonly contract: QualityContract }) => {
       const client = new GhGitHubQualityClient();
-      return reconcileIssueRemoteAuthority(
+      const errors = reconcileIssueRemoteAuthority(
         input.contract,
         client.listRulesets(input.repository),
       );
+      const workflow = record(
+        json(
+          run('gh', [
+            'api',
+            `repos/${input.repository}/actions/workflows/quality-gate.yml`,
+          ]),
+          'GitHub Quality Gate workflow',
+        ),
+        'GitHub Quality Gate workflow',
+      );
+      if (workflow.state !== 'active') errors.push('GitHub Quality Gate workflow 未启用');
+      if (workflow.path !== QUALITY_WORKFLOW_PATH) {
+        errors.push('GitHub Quality Gate workflow 路径与受管路径不一致');
+      }
+      return errors;
+    });
+  const managedWorkflowReader =
+    options.managedWorkflowReader ??
+    ((input: { readonly root: string; readonly contract: QualityContract }) => {
+      const actual = readStableFile(join(input.root, QUALITY_WORKFLOW_PATH), {
+        label: '受管 Quality Gate workflow',
+        maxBytes: 2 * 1024 * 1024,
+      });
+      if (actual.status !== 'ready') {
+        return ['当前分支缺少可稳定读取的受管 Quality Gate workflow'];
+      }
+      return normalizedIdentityText(actual.bytes.toString('utf8')) ===
+        normalizedIdentityText(renderQualityGateWorkflow(input.contract))
+        ? []
+        : ['当前分支 Quality Gate workflow 与质量契约生成结果不一致'];
     });
   const assertExecutionContractCapability = (readRemoteAuthority: boolean): void => {
     if ((options.runner ?? 'codex') !== 'codex') {
@@ -1208,6 +1267,10 @@ export async function runReadyIssue(options: {
     );
     if (!reconciliation.ok) {
       throw new Error(`执行合同无法启动：${reconciliation.errors.join('；')}`);
+    }
+    const workflowErrors = managedWorkflowReader({ root, contract: quality.contract });
+    if (workflowErrors.length > 0) {
+      throw new Error(`执行合同远端工作流不可用：${workflowErrors.join('；')}`);
     }
     if (readRemoteAuthority) {
       const remoteErrors = remoteAuthorityReader({
@@ -1350,6 +1413,52 @@ export async function runReadyIssue(options: {
   }
   if (!pullRequest) throw new Error('Issue PR 不可用');
   assertPullRequestIntent(pullRequest, issue, sourcePath);
+  const pullRequestNumber = pullRequest.number;
+  const readBoundPullRequest = (
+    label: string,
+    requireLocalContainsRemote = false,
+  ): PullRequestObservation => {
+    const observed = parsePullRequests(
+      json(
+        run('gh', [
+          'pr',
+          'list',
+          '--repo',
+          repository.nameWithOwner,
+          '--head',
+          branch,
+          '--state',
+          'all',
+          '--json',
+          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
+        ]),
+        label,
+      ),
+    );
+    if (
+      observed.length !== 1 ||
+      observed[0].number !== pullRequestNumber ||
+      observed[0].state !== 'OPEN' ||
+      observed[0].baseRefName !== repository.defaultBranch
+    ) {
+      throw new Error(`${label}：PR 已关闭、消失、重复或改变目标分支`);
+    }
+    assertPullRequestIntent(observed[0], issue, sourcePath);
+    if (requireLocalContainsRemote) {
+      run('git', [
+        'fetch',
+        '--quiet',
+        'origin',
+        `refs/heads/${branch}:refs/remotes/origin/${branch}`,
+      ]);
+      const localHead = run('git', ['rev-parse', 'HEAD']);
+      const mergeBase = run('git', ['merge-base', localHead, observed[0].headRefOid]);
+      if (mergeBase !== observed[0].headRefOid) {
+        throw new Error(`${label}：本地 Issue 分支落后于或分叉于 PR 最新提交`);
+      }
+    }
+    return observed[0];
+  };
   const headBefore = run('git', ['rev-parse', 'HEAD']);
   if (
     comment &&
@@ -1409,32 +1518,7 @@ export async function runReadyIssue(options: {
     assertIssueIdentityCurrent();
     assertExecutionContractCapability(true);
     assertSourceCurrent();
-    const beforeAgentPullRequests = parsePullRequests(
-      json(
-        run('gh', [
-          'pr',
-          'list',
-          '--repo',
-          repository.nameWithOwner,
-          '--head',
-          branch,
-          '--state',
-          'all',
-          '--json',
-          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
-        ]),
-        'Agent 启动前 PR 回读',
-      ),
-    );
-    if (
-      beforeAgentPullRequests.length !== 1 ||
-      beforeAgentPullRequests[0].number !== pullRequest.number ||
-      beforeAgentPullRequests[0].state !== 'OPEN' ||
-      beforeAgentPullRequests[0].baseRefName !== repository.defaultBranch
-    ) {
-      throw new Error('Agent 启动前 PR 的状态或目标分支已变化');
-    }
-    assertPullRequestIntent(beforeAgentPullRequests[0], issue, sourcePath);
+    readBoundPullRequest('Agent 启动前 PR 回读', true);
     comment = publish({
       ...comment.state,
       phase: 'running',
@@ -1471,9 +1555,14 @@ export async function runReadyIssue(options: {
     pullRequest: pullRequest.number,
   };
   try {
-    engine =
-      (await options.refreshEngine?.(engineContext)) ??
-      (await options.runEngine(engineContext));
+    const refreshed = await options.refreshEngine?.(engineContext);
+    if (refreshed === null) {
+      assertIssueIdentityCurrent();
+      assertExecutionContractCapability(true);
+      assertSourceCurrent();
+      readBoundPullRequest('完整引擎启动前 PR 回读', true);
+    }
+    engine = refreshed ?? (await options.runEngine(engineContext));
   } catch (error) {
     engine = {
       exitCode: 2,
@@ -1509,33 +1598,7 @@ export async function runReadyIssue(options: {
       run('git', ['push', 'origin', `HEAD:refs/heads/${branch}`]);
       pushed = true;
     }
-    const currentPullRequests = parsePullRequests(
-      json(
-        run('gh', [
-          'pr',
-          'list',
-          '--repo',
-          repository.nameWithOwner,
-          '--head',
-          branch,
-          '--state',
-          'all',
-          '--json',
-          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
-        ]),
-        '引擎运行后 PR 回读',
-      ),
-    );
-    if (
-      currentPullRequests.length !== 1 ||
-      currentPullRequests[0].number !== pullRequest.number ||
-      currentPullRequests[0].state !== 'OPEN' ||
-      currentPullRequests[0].baseRefName !== repository.defaultBranch
-    ) {
-      throw new Error('引擎运行后 PR 已关闭、消失、重复或改变目标分支');
-    }
-    let currentPullRequest = currentPullRequests[0];
-    assertPullRequestIntent(currentPullRequest, issue, sourcePath);
+    let currentPullRequest = readBoundPullRequest('引擎运行后 PR 回读');
     if (!pushed && currentPullRequest.headRefOid !== currentHead) {
       throw new Error('引擎运行后 PR 最新提交与已验证本地提交不一致');
     }
@@ -1573,34 +1636,10 @@ export async function runReadyIssue(options: {
     let message = engine.message;
     if (engine.exitCode === 0 && !pushed) {
       assertIssueIdentityCurrent();
-      const finalPullRequests = parsePullRequests(
-        json(
-          run('gh', [
-            'pr',
-            'list',
-            '--repo',
-            repository.nameWithOwner,
-            '--head',
-            branch,
-            '--state',
-            'all',
-            '--json',
-            'number,state,isDraft,headRefOid,baseRefName,url,title,body',
-          ]),
-          '可信标记前 PR 回读',
-        ),
-      );
-      if (
-        finalPullRequests.length !== 1 ||
-        finalPullRequests[0].number !== pullRequest.number ||
-        finalPullRequests[0].state !== 'OPEN' ||
-        finalPullRequests[0].baseRefName !== repository.defaultBranch ||
-        finalPullRequests[0].headRefOid !== currentHead
-      ) {
-        throw new Error('可信标记前 PR 的状态、目标或最新提交已变化');
+      currentPullRequest = readBoundPullRequest('可信标记前 PR 回读');
+      if (currentPullRequest.headRefOid !== currentHead) {
+        throw new Error('可信标记前 PR 的最新提交已变化');
       }
-      currentPullRequest = finalPullRequests[0];
-      assertPullRequestIntent(currentPullRequest, issue, sourcePath);
       phase = 'trusted';
       if (currentPullRequest.isDraft) {
         run('gh', ['pr', 'ready', String(pullRequest.number), '--repo', repository.nameWithOwner]);

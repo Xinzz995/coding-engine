@@ -109,6 +109,20 @@ function mode(value: unknown, path: string, errors: string[]): value is IssueChe
   return true;
 }
 
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const current = value.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function nonEmptyStrings(value: unknown, path: string, errors: string[]): string[] | null {
   if (!Array.isArray(value) || value.length === 0) {
     errors.push(`${path} 必须是非空字符串数组`);
@@ -121,6 +135,7 @@ function nonEmptyStrings(value: unknown, path: string, errors: string[]): string
       entry.trim() === '' ||
       entry !== entry.trim() ||
       entry.includes('\0') ||
+      hasUnpairedSurrogate(entry) ||
       entry.length > 4_000
     ) {
       errors.push(`${path}[${index}] 必须是首尾无空白且不超过 4000 字的非空字符串`);

@@ -407,6 +407,70 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
     }
   });
 
+  it('rejects a non-Codex ready Issue workspace before any Agent starts', async () => {
+    const contract = {
+      ...TEST_QUALITY_CONTRACT,
+      github: {
+        jobs: [
+          {
+            id: 'fixture',
+            platform: 'linux',
+            toolchains: [],
+            setup: [],
+            checkIds: ['fixture-pass'],
+          },
+        ],
+        requiredChecks: ['quality-gate'],
+      },
+    } as QualityContract;
+    const contractDigest = digest(contract);
+    const executionContract: IssueExecutionContract = {
+      schemaVersion: 1,
+      storyAcceptance: {
+        evidenceSource: 'validator',
+        network: 'disabled',
+        criteria: ['行为成立'],
+      },
+      localChecks: {
+        evidenceSource: 'engine',
+        network: 'current-host',
+        mode: 'scoped',
+        checkIds: [],
+      },
+      remoteDelivery: {
+        evidenceSource: 'github',
+        network: 'github-actions',
+        mode: 'scoped',
+        checkIds: [],
+        ruleset: 'required',
+      },
+      runMetrics: {
+        evidenceSource: 'engine-clock',
+        metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
+      },
+    };
+    const { workspace, instructionsDir } = setup([story({ acceptanceCriteria: ['行为成立'] })], {
+      qualityContractDigest: contractDigest,
+      qualityChecks: contract.checks,
+      executionContract,
+      executionContractDigest: digestIssueExecutionContract(executionContract),
+    });
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
+          validatorRunnerBindingForTests: undefined,
+          qualityContractReader: () => readyQualityContract(contract, contractDigest),
+        }),
+      ).toBe(2);
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('warns and disables the gate on malformed qualityChecks without touching state', async () => {
     const { workspace, instructionsDir } = setup([story()], { qualityChecks: 'npm test' });
     const { fake, calls } = fakeCounting(workspace);

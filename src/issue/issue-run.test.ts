@@ -67,6 +67,7 @@ function issueRunPreflight() {
   return {
     platform: 'macos' as const,
     remoteAuthorityReader: () => [] as string[],
+    managedWorkflowReader: () => [] as string[],
     qualityContractReader: () => ({
       status: 'ready' as const,
       path: '/fixture/.coding-x/quality.json',
@@ -196,6 +197,15 @@ describe('ready Issue contract', () => {
       .split('\n\n## 风险说明')[0];
     duplicate.body += `\n\n## 执行合同\n\n${duplicatedContract}`;
     expect(() => parseReadyIssue(duplicate, events())).toThrow('重复章节');
+
+    const nested = issue();
+    nested.body = nested.body.replace(
+      '完成一个可恢复入口。',
+      '完成一个可恢复入口。\n\n### 不可遗漏的子目标\n\n保留这段具体要求。',
+    );
+    expect(parseReadyIssue(nested, events()).goal).toContain(
+      '### 不可遗漏的子目标\n\n保留这段具体要求。',
+    );
   });
 
   it('requires the current ready label event and all executable sections', () => {
@@ -277,6 +287,7 @@ describe('ready Issue contract', () => {
           digest: `sha256:${'a'.repeat(64)}`,
           contract: issue207QualityContract(),
         }),
+        managedWorkflowReader: () => [],
         runEngine: async () => {
           engineCalls += 1;
           return { exitCode: 0, message: 'must not run' };
@@ -304,6 +315,7 @@ describe('ready Issue contract', () => {
           contract: issue207QualityContract(),
         }),
         remoteAuthorityReader: () => ['没有 coding-x 管理的默认分支 Ruleset'],
+        managedWorkflowReader: () => [],
         runEngine: async () => {
           engineCalls += 1;
           return { exitCode: 0, message: 'must not run' };
@@ -356,6 +368,7 @@ describe('ready Issue contract', () => {
     let currentIssue = issue();
     let prTitle = currentIssue.title;
     let prBody = '';
+    let mergeBaseOverride: string | null = null;
     const calls: IssueRunCommandInvocation[] = [];
     const executor = (invocation: IssueRunCommandInvocation): string => {
       calls.push(invocation);
@@ -371,6 +384,7 @@ describe('ready Issue contract', () => {
           return remoteHead ? `${remoteHead}\trefs/heads/codex/issue-42` : '';
         }
         if (args[0] === 'fetch') return '';
+        if (args[0] === 'merge-base') return mergeBaseOverride ?? remoteHead ?? head;
         if (joined === 'rev-parse HEAD') return head;
         if (joined === 'rev-parse refs/remotes/origin/main') return 'a'.repeat(40);
         if (joined === 'switch -c codex/issue-42') {
@@ -480,6 +494,8 @@ describe('ready Issue contract', () => {
       new Date('2026-08-15T00:23:00.000Z'),
       new Date('2026-08-15T00:24:00.000Z'),
       new Date('2026-08-15T00:25:00.000Z'),
+      new Date('2026-08-15T00:26:00.000Z'),
+      new Date('2026-08-15T00:27:00.000Z'),
     ];
     let remoteAuthorityReads = 0;
     const preflight = {
@@ -677,6 +693,28 @@ describe('ready Issue contract', () => {
     expect(changedDuringEngine.state.message).toContain('Issue 内容或标签事件已变化');
 
     currentIssue = issue();
+    remoteHead = 'e'.repeat(40);
+    mergeBaseOverride = head;
+    let staleBranchEngineCalls = 0;
+    const staleBranch = await runReadyIssue({
+      ...preflight,
+      root,
+      workspaceBase: '.workspace',
+      issueNumber: 42,
+      executor,
+      now: () => times.shift()!,
+      initializeWorkspace: async () => undefined,
+      runEngine: async () => {
+        staleBranchEngineCalls += 1;
+        return { exitCode: 0, message: 'must not run from stale branch' };
+      },
+    });
+    expect(staleBranch).toMatchObject({ exitCode: 2, phase: 'failed' });
+    expect(staleBranch.state.message).toContain('本地 Issue 分支落后于或分叉于 PR 最新提交');
+    expect(staleBranchEngineCalls).toBe(0);
+    remoteHead = head;
+    mergeBaseOverride = null;
+
     const sourceChangedDuringEngine = await runReadyIssue({
       ...preflight,
       root,

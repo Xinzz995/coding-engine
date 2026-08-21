@@ -326,6 +326,17 @@ jobs:
                   raise SystemExit(f"{label} has invalid check ids")
               return value
 
+          JS_WHITESPACE = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+          def js_trim(value):
+              return value.strip(JS_WHITESPACE)
+
+          def utf16_length(value):
+              return len(value.encode("utf-16-le", errors="surrogatepass")) // 2
+
+          def has_unpaired_surrogate(value):
+              return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+
           root = exact(
               raw,
               ["schemaVersion", "storyAcceptance", "localChecks", "remoteDelivery", "runMetrics"],
@@ -340,7 +351,7 @@ jobs:
               or story["network"] != "disabled"
               or not isinstance(criteria, list)
               or not criteria
-              or any(not isinstance(item, str) or not item or item != item.strip() or len(item) > 4000 for item in criteria)
+              or any(not isinstance(item, str) or not item or item != js_trim(item) or "\0" in item or has_unpaired_surrogate(item) or utf16_length(item) > 4000 for item in criteria)
               or len(set(criteria)) != len(criteria)
           ):
               raise SystemExit("ready Issue storyAcceptance is invalid")

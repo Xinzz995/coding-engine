@@ -230,7 +230,7 @@ describe('parseCliArgs', () => {
       workspace: '.runs',
     });
     expect(parseCliArgs(['issue', 'run', '42'])).toMatchObject({
-      kind: 'claude',
+      kind: 'codex',
       kindExplicit: false,
     });
     expect(() => parseCliArgs(['issue', 'run'])).toThrow('Issue 编号');
