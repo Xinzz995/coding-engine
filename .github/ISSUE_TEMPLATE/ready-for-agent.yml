@@ -21,11 +21,38 @@ body:
     validations:
       required: true
   - type: textarea
-    id: acceptance
+    id: execution-contract
     attributes:
-      label: 验收标准
-      description: 每行一个可判定条目，使用 Markdown 列表
-      placeholder: '- 第一个可判定结果'
+      label: 执行合同
+      description: 只填写 Story 语义标准、稳定 check id 与模式；本地可 scoped/full，远端当前只支持 scoped；固定责任字段不得改写
+      value: |
+        ```json
+        {
+          "schemaVersion": 1,
+          "storyAcceptance": {
+            "evidenceSource": "validator",
+            "network": "disabled",
+            "criteria": []
+          },
+          "localChecks": {
+            "evidenceSource": "engine",
+            "network": "current-host",
+            "mode": "scoped",
+            "checkIds": []
+          },
+          "remoteDelivery": {
+            "evidenceSource": "github",
+            "network": "github-actions",
+            "mode": "scoped",
+            "checkIds": [],
+            "ruleset": "required"
+          },
+          "runMetrics": {
+            "evidenceSource": "engine-clock",
+            "metrics": ["ready-to-trusted", "active", "waiting", "continuations"]
+          }
+        }
+        ```
     validations:
       required: true
   - type: textarea

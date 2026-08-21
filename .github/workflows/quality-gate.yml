@@ -53,6 +53,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           full=0
@@ -253,6 +254,78 @@ jobs:
             if [ "$status" -ne 1 ]; then
               echo "::warning::Git check scope could not be classified; falling back to full"
               full=1
+            fi
+          fi
+          if [ "$EVENT_NAME" = pull_request ] && [[ "$PR_HEAD_REF" =~ ^codex/issue-([1-9][0-9]*)$ ]]; then
+            issue_number="${BASH_REMATCH[1]}"
+            source_path="docs/prds/prd-issue-${issue_number}.md"
+            if ! source_size=$(git cat-file -s "${PR_HEAD}:${source_path}" 2>/dev/null); then
+              echo "::error::ready Issue branch is missing ${source_path} at the PR head"
+              exit 1
+            fi
+            if ! [[ "$source_size" =~ ^[0-9]+$ ]] || [ "$source_size" -gt 2097152 ]; then
+              echo "::error::ready Issue source is empty, oversized, or has an invalid size"
+              exit 1
+            fi
+            if ! source_body=$(git show "${PR_HEAD}:${source_path}" 2>/dev/null); then
+              echo "::error::ready Issue source cannot be read from the PR head"
+              exit 1
+            fi
+            execution_header_count=$(grep -c '^> Issue-Execution-Contract-Digest:' <<< "$source_body" || true)
+            if [ "$execution_header_count" -gt 0 ]; then
+              mode_header_count=$(grep -c '^> Issue-Remote-Check-Mode:' <<< "$source_body" || true)
+              ids_header_count=$(grep -c '^> Issue-Remote-Check-IDs:' <<< "$source_body" || true)
+              if [ "$execution_header_count" -ne 1 ] || [ "$mode_header_count" -ne 1 ] || [ "$ids_header_count" -ne 1 ]; then
+                echo "::error::ready Issue remote check headers must appear exactly once"
+                exit 1
+              fi
+              execution_digest=$(sed -n 's/^> Issue-Execution-Contract-Digest: //p' <<< "$source_body")
+              remote_mode=$(sed -n 's/^> Issue-Remote-Check-Mode: //p' <<< "$source_body")
+              remote_checks=$(sed -n 's/^> Issue-Remote-Check-IDs: //p' <<< "$source_body")
+              if ! [[ "$execution_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::ready Issue execution contract digest is invalid"
+                exit 1
+              fi
+              if [ "$remote_mode" != scoped ]; then
+                echo "::error::ready Issue remote mode must be scoped for a pull request"
+                exit 1
+              fi
+              if [ "$remote_checks" != - ]; then
+                if ! [[ "$remote_checks" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then
+                  echo "::error::ready Issue remote check ids are invalid"
+                  exit 1
+                fi
+                IFS=',' read -r -a remote_check_ids <<< "$remote_checks"
+                seen_remote_check_ids=,
+                for remote_check_id in "${remote_check_ids[@]}"; do
+                  case "$seen_remote_check_ids" in
+                    *",${remote_check_id},"*)
+                      echo "::error::ready Issue remote check id ${remote_check_id} is duplicated"
+                      exit 1
+                      ;;
+                  esac
+                  seen_remote_check_ids="${seen_remote_check_ids}${remote_check_id},"
+                  case "$remote_check_id" in
+                    tests) check_1=true ;;
+                    linux-mount-proof) check_2=true ;;
+                    legacy-compatibility) check_3=true ;;
+                    windows-native-proof) check_4=true ;;
+                    build) check_5=true ;;
+                    windows-supervisor-reproducibility) check_6=true ;;
+                    windows-path-inspector-reproducibility) check_7=true ;;
+                    cli-smoke) check_8=true ;;
+                    format) check_9=true ;;
+                    lint) check_10=true ;;
+                    typecheck) check_11=true ;;
+                    repository-health) check_12=true ;;
+                    dependency-audit) check_13=true ;;
+                    *)
+                      echo "::error::ready Issue remote check ${remote_check_id} has no declared GitHub job"
+                      exit 1
+                      ;;
+                  esac
+                done
+              fi
             fi
           fi
           job_1=false

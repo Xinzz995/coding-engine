@@ -44,6 +44,14 @@ export interface ReviewMechanicalEvidence {
   selectedCheckIds: string[];
   skippedCheckIds: string[];
   changeManifestDigest: string | null;
+  selectionRequirement: {
+    mode: 'scoped' | 'full';
+    checkIds: string[];
+  } | null;
+  selectionReasons: Array<{
+    checkId: string;
+    sources: Array<'always' | 'path' | 'explicit' | 'full' | 'fallback-full'>;
+  }>;
 }
 
 function assertMechanicalEvidence(
@@ -59,6 +67,20 @@ function assertMechanicalEvidence(
     },
   );
   const observed = new Set([...evidence.selectedCheckIds, ...evidence.skippedCheckIds]);
+  const requirement = evidence.selectionRequirement;
+  const requiredCheckIds = new Set(requirement?.checkIds ?? []);
+  const explicitCheckIds = new Set(
+    evidence.selectionReasons
+      .filter((reason) => reason.sources.includes('explicit'))
+      .map((reason) => reason.checkId),
+  );
+  const selectionSources = new Set([
+    'always',
+    'path',
+    'explicit',
+    'full',
+    'fallback-full',
+  ]);
   if (
     evidence.status !== 'passed' ||
     evidence.headSha !== context.headSha ||
@@ -74,9 +96,35 @@ function assertMechanicalEvidence(
     evidence.selectedCheckIds.some((id) => skipped.has(id)) ||
     observed.size !== declaredCheckIds.length ||
     declaredCheckIds.some((id) => !observed.has(id)) ||
-    (evidence.selectionMode === 'scoped') !==
+    ((evidence.selectionMode === 'scoped' || requirement !== null) !==
       (typeof evidence.changeManifestDigest === 'string' &&
-        /^sha256:[0-9a-f]{64}$/u.test(evidence.changeManifestDigest))
+        /^sha256:[0-9a-f]{64}$/u.test(evidence.changeManifestDigest))) ||
+    (requirement !== null &&
+      ((requirement.mode !== 'scoped' && requirement.mode !== 'full') ||
+        new Set(requirement.checkIds).size !== requirement.checkIds.length ||
+        requirement.checkIds.some((id) => !declaredCheckIds.includes(id)) ||
+        (requirement.mode === 'full' && requirement.checkIds.length > 0))) ||
+    (requirement === null
+      ? explicitCheckIds.size > 0
+      : requirement.mode === 'full'
+        ? evidence.selectionReasons.some(
+            (reason) =>
+              !reason.sources.includes('full') || reason.sources.includes('explicit'),
+          )
+        : [...requiredCheckIds].some((id) => !selected.has(id)) ||
+          evidence.selectionReasons.some(
+            (reason) =>
+              explicitCheckIds.has(reason.checkId) !== requiredCheckIds.has(reason.checkId),
+          ) ||
+          explicitCheckIds.size !== requiredCheckIds.size) ||
+    evidence.selectionReasons.length !== evidence.selectedCheckIds.length ||
+    evidence.selectionReasons.some(
+      (reason, index) =>
+        reason.checkId !== evidence.selectedCheckIds[index] ||
+        reason.sources.length === 0 ||
+        new Set(reason.sources).size !== reason.sources.length ||
+        reason.sources.some((source) => !selectionSources.has(source)),
+    )
   ) {
     throw new Error('前置机械检查证据未绑定当前 Review 上下文');
   }

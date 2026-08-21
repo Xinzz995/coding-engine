@@ -4,6 +4,7 @@ import {
   type ContractGateResult,
   type ManagedGateContext,
   type QualityChangeSelection,
+  type QualityCheckSelectionRequirement,
 } from '../engine/gate.js';
 import type { AgentKind } from '../engine/agent.js';
 import { CODING_X_VERSION } from '../version.js';
@@ -194,6 +195,8 @@ export async function runFinalReview(options: {
   ) => Promise<ContractGateResult>;
   /** 同一 loop 内由引擎签发；输入不完全一致时静默放弃并重新运行。 */
   reusableFullGate?: FullGateProof;
+  /** ready Issue 的显式本地检查责任；普通 PRD 缺省。 */
+  qualityCheckRequirement?: QualityCheckSelectionRequirement;
   probe?: typeof probeRunnerIsolation;
   axisRunner?: AxisRunner;
   runnerVersion?: string;
@@ -389,6 +392,9 @@ export async function runFinalReview(options: {
     defaultBranchGitHead: context.baseSha,
     additionalRefs: mechanicalPolicy.additionalRefs,
     referenceAliases: mechanicalPolicy.referenceAliases,
+    ...(options.qualityCheckRequirement
+      ? { selectionRequirement: options.qualityCheckRequirement }
+      : {}),
   }, context.baseSha);
   try {
     if (reused) {
@@ -432,6 +438,7 @@ export async function runFinalReview(options: {
                 }
               : managedGate,
             mechanicalChangeSelection,
+            options.qualityCheckRequirement,
           ));
     }
     if (mechanicalCheckout) {
@@ -481,13 +488,24 @@ export async function runFinalReview(options: {
   const defaultSelection =
     platform === null
       ? null
-      : selectContractQualityChecks(context.baseContract.checks, platform);
+      : selectContractQualityChecks(
+          context.baseContract.checks,
+          platform,
+          undefined,
+          options.qualityCheckRequirement,
+        );
   const selectedCheckIds =
     gate.selectedCheckIds ?? defaultSelection?.applicable.map((check) => check.id) ?? [];
   const skippedCheckIds =
     gate.selectedCheckIds === undefined
       ? (defaultSelection?.skippedByPlatform ?? [])
       : [...gate.skipped];
+  const selectionRequirement = gate.selectionRequirement ?? options.qualityCheckRequirement ?? null;
+  const selectionReasons =
+    gate.selectionReasons ??
+    (reused ? options.reusableFullGate?.selectionReasons : undefined) ??
+    defaultSelection?.reasons ??
+    [];
   const mechanicalEvidence = {
     status: 'passed' as const,
     headSha: context.headSha,
@@ -498,7 +516,20 @@ export async function runFinalReview(options: {
     selectedCheckIds,
     skippedCheckIds,
     changeManifestDigest:
-      gate.selectionMode === 'scoped' ? mechanicalChangeManifestDigest : null,
+      gate.selectionMode === 'scoped' || selectionRequirement
+        ? mechanicalChangeManifestDigest
+        : null,
+    selectionRequirement:
+      selectionRequirement === null
+        ? null
+        : {
+            mode: selectionRequirement.mode,
+            checkIds: [...selectionRequirement.checkIds],
+          },
+    selectionReasons: selectionReasons.map((reason) => ({
+      checkId: reason.checkId,
+      sources: [...reason.sources],
+    })),
   };
   const preModelStoryError = await verifyStoryValidationBinding('机械检查结束后、模型调用前：');
   if (preModelStoryError) return { exitCode: 5, message: preModelStoryError };

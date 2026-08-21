@@ -54,6 +54,8 @@ function fullMechanicalEvidence(ctx: ReviewPreflightContext): ReviewMechanicalEv
     selectedCheckIds,
     skippedCheckIds: [],
     changeManifestDigest: null,
+    selectionRequirement: null,
+    selectionReasons: selectedCheckIds.map((checkId) => ({ checkId, sources: ['full'] })),
   };
 }
 
@@ -143,6 +145,18 @@ describe('createReviewPackage', () => {
     expect(() => create({
       scope: 'different-scope' as 'all-current-change-applicable-contract-checks',
     })).toThrow('未绑定当前 Review 上下文');
+    const full = fullMechanicalEvidence(ctx);
+    expect(() =>
+      create({
+        selectionMode: 'scoped',
+        changeManifestDigest: `sha256:${'1'.repeat(64)}`,
+        selectionRequirement: { mode: 'scoped', checkIds: [full.selectedCheckIds[0]] },
+        selectionReasons: full.selectedCheckIds.map((checkId) => ({
+          checkId,
+          sources: ['path'],
+        })),
+      }),
+    ).toThrow('未绑定当前 Review 上下文');
   });
 
   it.each(['afterInputWrite', 'beforePermissions'] as const)(

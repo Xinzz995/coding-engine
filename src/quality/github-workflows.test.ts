@@ -73,6 +73,12 @@ function runGeneratedPlan(
   changedPath: string,
   eventName: 'pull_request' | 'schedule' = 'pull_request',
   renameFrom?: string,
+  readyIssue?: {
+    number: number;
+    remoteCheckIds: string[];
+    remoteMode?: 'scoped' | 'full';
+    legacy?: boolean;
+  },
 ): Map<string, string> {
   const root = mkdtempSync(join(tmpdir(), 'coding-x-workflow-plan-'));
   try {
@@ -96,6 +102,24 @@ function runGeneratedPlan(
     } else {
       execFileSync('git', ['mv', renameFrom, changedPath], { cwd: root });
     }
+    if (readyIssue !== undefined) {
+      const source = join(root, 'docs', 'prds', `prd-issue-${readyIssue.number}.md`);
+      mkdirSync(dirname(source), { recursive: true });
+      writeFileSync(
+        source,
+        readyIssue.legacy === true
+          ? '# Legacy ready Issue source\n'
+          : [
+              '# Ready Issue source',
+              '',
+              `> Issue-Execution-Contract-Digest: sha256:${'a'.repeat(64)}`,
+              `> Issue-Remote-Check-Mode: ${readyIssue.remoteMode ?? 'scoped'}`,
+              `> Issue-Remote-Check-IDs: ${readyIssue.remoteCheckIds.join(',') || '-'}`,
+              '',
+            ].join('\n'),
+      );
+      execFileSync('git', ['add', source], { cwd: root });
+    }
     execFileSync('git', ['commit', '-q', '-m', 'change'], { cwd: root });
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
     const output = join(root, 'plan.out');
@@ -108,6 +132,10 @@ function runGeneratedPlan(
         EVENT_NAME: eventName,
         PR_BASE: eventName === 'pull_request' ? base : '',
         PR_HEAD: eventName === 'pull_request' ? head : '',
+        PR_HEAD_REF:
+          eventName === 'pull_request' && readyIssue !== undefined
+            ? `codex/issue-${readyIssue.number}`
+            : 'feature/fixture',
         GITHUB_OUTPUT: output,
       },
       stdio: 'pipe',
@@ -275,6 +303,7 @@ describe('renderQualityGateWorkflow', () => {
     expect(yaml).not.toContain('${!EXPECTED_@}');
     expect(yaml).toContain('github.event_name }}-${{ github.event.pull_request.number || github.ref');
     expect(yaml).toContain('PR_HEAD: ${{ github.event.pull_request.head.sha }}');
+    expect(yaml).toContain('PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}');
   });
 
   it('runs only repository health for an ordinary docs change', () => {
@@ -288,6 +317,46 @@ describe('renderQualityGateWorkflow', () => {
     for (let index = 2; index <= contract.github.jobs.length; index += 1) {
       expect(docs.get(`job_${index}`)).toBe('false');
     }
+  });
+
+  it('forces ready Issue remote check ids into the PR plan and keeps legacy sources compatible', () => {
+    const contract = codingEngineContract();
+    const required = runGeneratedPlan(
+      contract,
+      'docs/ordinary-note.md',
+      'pull_request',
+      undefined,
+      { number: 42, remoteCheckIds: ['dependency-audit'] },
+    );
+    expect(required.get('full')).toBe('false');
+    expect(outputForCheck(contract, required, 'dependency-audit')).toBe('true');
+    expect(outputForCheck(contract, required, 'tests')).toBe('false');
+
+    const legacy = runGeneratedPlan(
+      contract,
+      'docs/legacy-note.md',
+      'pull_request',
+      undefined,
+      { number: 43, remoteCheckIds: [], legacy: true },
+    );
+    expect(outputForCheck(contract, legacy, 'dependency-audit')).toBe('false');
+  });
+
+  it('fails the remote plan for unknown check ids or an unsupported full request', () => {
+    const contract = codingEngineContract();
+    expect(() =>
+      runGeneratedPlan(contract, 'docs/unknown-check.md', 'pull_request', undefined, {
+        number: 42,
+        remoteCheckIds: ['not-declared'],
+      }),
+    ).toThrow();
+    expect(() =>
+      runGeneratedPlan(contract, 'docs/full-remote.md', 'pull_request', undefined, {
+        number: 42,
+        remoteCheckIds: [],
+        remoteMode: 'full',
+      }),
+    ).toThrow();
   });
 
   it('runs the source checks and skips the native Windows job for a scoped source change', () => {
@@ -486,7 +555,11 @@ describe('renderManagedGitHubFiles', () => {
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 到期日');
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 跟进事项');
     expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('label: 本次目标');
-    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('label: 验收标准');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('label: 执行合同');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('"storyAcceptance"');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('"localChecks"');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('"remoteDelivery"');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('"runMetrics"');
     expect(files[READY_ISSUE_TEMPLATE_PATH]).not.toContain("labels:\n  - 'ready-for-agent'");
   });
 

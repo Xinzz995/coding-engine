@@ -91,12 +91,33 @@ export interface ContractGateResult extends GateResult {
   selectionMode?: 'full' | 'scoped' | 'fallback-full';
   /** 本轮按契约顺序实际选择的 check id。 */
   selectedCheckIds?: string[];
+  /** ready Issue 显式要求；缺省表示普通 PRD 仅按变化范围选择。 */
+  selectionRequirement?: QualityCheckSelectionRequirement;
+  /** 每个已选检查的机械选择原因，顺序与 selectedCheckIds 一致。 */
+  selectionReasons?: QualityCheckSelectionReason[];
 }
 
 /** 干净 Git helper 对固定 Story 变化范围计算的路径检查命中结果。 */
 export interface QualityChangeSelection {
   readonly matchedPathCheckIds: readonly string[];
   readonly allChangedPathsMatched: boolean;
+}
+
+export interface QualityCheckSelectionRequirement {
+  readonly mode: 'scoped' | 'full';
+  readonly checkIds: readonly string[];
+}
+
+export type QualityCheckSelectionSource =
+  | 'always'
+  | 'path'
+  | 'explicit'
+  | 'full'
+  | 'fallback-full';
+
+export interface QualityCheckSelectionReason {
+  readonly checkId: string;
+  readonly sources: readonly QualityCheckSelectionSource[];
 }
 
 /**
@@ -311,6 +332,9 @@ interface SelectedContractChecks {
   readonly skippedByPlatform: string[];
   readonly skippedByPath: string[];
   readonly mode: 'full' | 'scoped' | 'fallback-full';
+  readonly requirement?: QualityCheckSelectionRequirement;
+  readonly reasons: QualityCheckSelectionReason[];
+  readonly error?: string;
 }
 
 /**
@@ -321,14 +345,85 @@ export function selectContractQualityChecks(
   snapshot: FrozenQualityChecks,
   platform: QualityPlatform,
   changeSelection?: QualityChangeSelection,
+  requirement?: QualityCheckSelectionRequirement,
 ): SelectedContractChecks {
   const declared = allFrozenChecks(snapshot);
   const platformChecks = declared.filter((check) => check.command.platforms.includes(platform));
   const skippedByPlatform = declared
     .filter((check) => !check.command.platforms.includes(platform))
     .map((check) => check.id);
+  const normalizedRequirement = requirement
+    ? { mode: requirement.mode, checkIds: [...requirement.checkIds] }
+    : undefined;
+  if (normalizedRequirement) {
+    const required = new Set(normalizedRequirement.checkIds);
+    const declaredById = new Map(declared.map((check) => [check.id, check]));
+    if (
+      new Set(normalizedRequirement.checkIds).size !== normalizedRequirement.checkIds.length ||
+      (normalizedRequirement.mode === 'full' && normalizedRequirement.checkIds.length > 0)
+    ) {
+      return {
+        applicable: [],
+        skippedByPlatform,
+        skippedByPath: [],
+        mode: 'fallback-full',
+        requirement: normalizedRequirement,
+        reasons: [],
+        error: 'ready Issue 本地检查要求包含重复 id，或 full 同时列出了显式 id',
+      };
+    }
+    for (const id of required) {
+      const check = declaredById.get(id);
+      if (!check) {
+        return {
+          applicable: [],
+          skippedByPlatform,
+          skippedByPath: [],
+          mode: 'fallback-full',
+          requirement: normalizedRequirement,
+          reasons: [],
+          error: `ready Issue 本地检查 ${id} 不存在于冻结质量契约`,
+        };
+      }
+      if (!check.command.platforms.includes(platform)) {
+        return {
+          applicable: [],
+          skippedByPlatform,
+          skippedByPath: [],
+          mode: 'fallback-full',
+          requirement: normalizedRequirement,
+          reasons: [],
+          error: `ready Issue 本地检查 ${id} 不支持当前平台 ${platform}`,
+        };
+      }
+    }
+    if (normalizedRequirement.mode === 'full') {
+      return {
+        applicable: platformChecks,
+        skippedByPlatform,
+        skippedByPath: [],
+        mode: 'full',
+        requirement: normalizedRequirement,
+        reasons: platformChecks.map((check) => ({ checkId: check.id, sources: ['full'] })),
+      };
+    }
+  }
   if (changeSelection === undefined) {
-    return { applicable: platformChecks, skippedByPlatform, skippedByPath: [], mode: 'full' };
+    const source = normalizedRequirement ? 'fallback-full' : 'full';
+    return {
+      applicable: platformChecks,
+      skippedByPlatform,
+      skippedByPath: [],
+      mode: normalizedRequirement ? 'fallback-full' : 'full',
+      ...(normalizedRequirement ? { requirement: normalizedRequirement } : {}),
+      reasons: platformChecks.map((check) => ({
+        checkId: check.id,
+        sources: [
+          source,
+          ...(normalizedRequirement?.checkIds.includes(check.id) ? (['explicit'] as const) : []),
+        ],
+      })),
+    };
   }
 
   const pathCheckIds = new Set(
@@ -342,8 +437,9 @@ export function selectContractQualityChecks(
     if (matched.has(id) || !pathCheckIds.has(id)) valid = false;
     matched.add(id);
   }
+  const explicit = new Set(normalizedRequirement?.checkIds ?? []);
   const scoped = platformChecks.filter(
-    (check) => check.paths === undefined || matched.has(check.id),
+    (check) => check.paths === undefined || matched.has(check.id) || explicit.has(check.id),
   );
   if (!valid || !changeSelection.allChangedPathsMatched || scoped.length === 0) {
     return {
@@ -351,6 +447,14 @@ export function selectContractQualityChecks(
       skippedByPlatform,
       skippedByPath: [],
       mode: 'fallback-full',
+      ...(normalizedRequirement ? { requirement: normalizedRequirement } : {}),
+      reasons: platformChecks.map((check) => ({
+        checkId: check.id,
+        sources: [
+          'fallback-full',
+          ...(explicit.has(check.id) ? (['explicit'] as const) : []),
+        ],
+      })),
     };
   }
   const selected = new Set(scoped.map((check) => check.id));
@@ -361,7 +465,16 @@ export function selectContractQualityChecks(
     applicable: scoped,
     skippedByPlatform,
     skippedByPath,
-    mode: skippedByPath.length === 0 ? 'full' : 'scoped',
+    mode: normalizedRequirement ? 'scoped' : skippedByPath.length === 0 ? 'full' : 'scoped',
+    ...(normalizedRequirement ? { requirement: normalizedRequirement } : {}),
+    reasons: scoped.map((check) => ({
+      checkId: check.id,
+      sources: [
+        ...(check.paths === undefined ? (['always'] as const) : []),
+        ...(matched.has(check.id) ? (['path'] as const) : []),
+        ...(explicit.has(check.id) ? (['explicit'] as const) : []),
+      ],
+    })),
   };
 }
 
@@ -494,6 +607,7 @@ export async function runContractQualityChecks(
   platform: QualityPlatform | null | undefined,
   managed: ManagedGateContext,
   changeSelection?: QualityChangeSelection,
+  requirement?: QualityCheckSelectionRequirement,
 ): Promise<ContractGateResult> {
   const started = Date.now();
   platform ??= nodeQualityPlatform(process.platform);
@@ -512,9 +626,29 @@ export async function runContractQualityChecks(
       skipped: [],
     };
   }
-  const selection = selectContractQualityChecks(checks, platform, changeSelection);
+  const selection = selectContractQualityChecks(checks, platform, changeSelection, requirement);
   const applicable = selection.applicable;
   const skipped = [...selection.skippedByPlatform, ...selection.skippedByPath];
+  if (selection.error) {
+    return {
+      ok: false,
+      failure: {
+        command: '[quality-checks:requirements]',
+        exitCode: null,
+        timedOut: false,
+        outputTail: selection.error,
+      },
+      total: 0,
+      ran: 0,
+      ms: Date.now() - started,
+      skipped,
+      skippedByPath: [...selection.skippedByPath],
+      selectionMode: selection.mode,
+      selectedCheckIds: [],
+      ...(selection.requirement ? { selectionRequirement: selection.requirement } : {}),
+      selectionReasons: [],
+    };
+  }
   if (applicable.length === 0) {
     return {
       ok: false,
@@ -531,6 +665,8 @@ export async function runContractQualityChecks(
       skippedByPath: [...selection.skippedByPath],
       selectionMode: selection.mode,
       selectedCheckIds: [],
+      ...(selection.requirement ? { selectionRequirement: selection.requirement } : {}),
+      selectionReasons: [],
     };
   }
   let ran = 0;
@@ -555,6 +691,8 @@ export async function runContractQualityChecks(
         skippedByPath: [...selection.skippedByPath],
         selectionMode: selection.mode,
         selectedCheckIds: applicable.map((check) => check.id),
+        ...(selection.requirement ? { selectionRequirement: selection.requirement } : {}),
+        selectionReasons: selection.reasons,
       };
     }
     const spec = commandSpec(check.command, cwd, `[${check.id}]`);
@@ -570,6 +708,8 @@ export async function runContractQualityChecks(
         skippedByPath: [...selection.skippedByPath],
         selectionMode: selection.mode,
         selectedCheckIds: applicable.map((check) => check.id),
+        ...(selection.requirement ? { selectionRequirement: selection.requirement } : {}),
+        selectionReasons: selection.reasons,
       };
     }
   }
@@ -583,6 +723,8 @@ export async function runContractQualityChecks(
     skippedByPath: [...selection.skippedByPath],
     selectionMode: selection.mode,
     selectedCheckIds: applicable.map((check) => check.id),
+    ...(selection.requirement ? { selectionRequirement: selection.requirement } : {}),
+    selectionReasons: selection.reasons,
   };
 }
 

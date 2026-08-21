@@ -7,6 +7,10 @@ import { runLoop as runProductionLoop } from './loop.js';
 import type { QualityContract } from '../quality/contract.js';
 import { digest } from '../review/common.js';
 import {
+  digestIssueExecutionContract,
+  type IssueExecutionContract,
+} from './issue-execution-contract.js';
+import {
   setup,
   story,
   runLoop,
@@ -270,6 +274,133 @@ describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
         total: 1,
         ran: 1,
         checks: [{ category: 'test', id: 'passing-check', module: 'root' }],
+      });
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
+  it('sends only semantic criteria while binding explicit local reasons and leaving remote checks out', async () => {
+    const base = qualityContractWithNodeScript('process.exit(0)', 'passing-check');
+    const passingPolicy = base.checks.test;
+    if (!('checks' in passingPolicy)) throw new Error('fixture requires a test check');
+    passingPolicy.checks[0].paths = ['source.txt'];
+    const contract = {
+      ...base,
+      checks: {
+        ...base.checks,
+        security: {
+          checks: [
+            {
+              id: 'dependency-audit',
+              module: 'root',
+              paths: ['package.json', 'package-lock.json'],
+              command: {
+                executable: process.execPath,
+                args: ['-e', 'process.exit(0)'],
+                cwd: '.',
+                platforms: ['linux'],
+                timeoutMs: 5_000,
+              },
+            },
+          ],
+        },
+      },
+      github: {
+        jobs: [
+          {
+            id: 'linux',
+            platform: 'linux',
+            toolchains: [],
+            setup: [],
+            checkIds: ['passing-check', 'dependency-audit'],
+          },
+          {
+            id: 'macos',
+            platform: 'macos',
+            toolchains: [],
+            setup: [],
+            checkIds: ['passing-check'],
+          },
+          {
+            id: 'windows',
+            platform: 'windows',
+            toolchains: [],
+            setup: [],
+            checkIds: ['passing-check'],
+          },
+        ],
+        requiredChecks: ['quality-gate'],
+      },
+    } as QualityContract;
+    const executionContract: IssueExecutionContract = {
+      schemaVersion: 1,
+      storyAcceptance: {
+        evidenceSource: 'validator',
+        network: 'disabled',
+        criteria: ['返回结果符合语义要求'],
+      },
+      localChecks: {
+        evidenceSource: 'engine',
+        network: 'current-host',
+        mode: 'scoped',
+        checkIds: ['passing-check'],
+      },
+      remoteDelivery: {
+        evidenceSource: 'github',
+        network: 'github-actions',
+        mode: 'scoped',
+        checkIds: ['dependency-audit'],
+        ruleset: 'required',
+      },
+      runMetrics: {
+        evidenceSource: 'engine-clock',
+        metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
+      },
+    };
+    const contractDigest = digest(contract);
+    const { workspace, instructionsDir } = setup(
+      [story({ acceptanceCriteria: ['返回结果符合语义要求'] })],
+      {
+        qualityContractDigest: contractDigest,
+        qualityChecks: contract.checks,
+        executionContract,
+        executionContractDigest: digestIssueExecutionContract(executionContract),
+      },
+    );
+    const promptMarker = join(resolve(workspace, '..'), 'responsibility-validator-prompt.txt');
+    const fake = fakeBoundValidator(workspace, 'passed', {
+      validatorPromptMarker: promptMarker,
+    });
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(
+        await runProductionLoop({
+          ...strictConfig(workspace, instructionsDir),
+          qualityContractReader: () => readyQualityContract(contract, contractDigest),
+          storyChangeManifestForTests: () => ({
+            digest: `sha256:${'f'.repeat(64)}`,
+            changedPathCount: 1,
+            changeSelection: {
+              matchedPathCheckIds: ['passing-check'],
+              allChangedPathsMatched: true,
+            },
+          }),
+        }),
+      ).toBe(0);
+      const prompt = readFileSync(promptMarker, 'utf8');
+      const markerAt = prompt.indexOf('<!-- ENGINE-BOUND VALIDATION REQUEST');
+      const jsonAt = prompt.indexOf('{', markerAt);
+      const fenceAt = prompt.indexOf('\n```', jsonAt);
+      const request = JSON.parse(prompt.slice(jsonAt, fenceAt));
+      expect(request.acceptanceCriteria).toEqual(['返回结果符合语义要求']);
+      expect(request.engineQualityGate).toMatchObject({
+        checks: [{ id: 'passing-check' }],
+        skippedCheckIds: ['dependency-audit'],
+        selectionRequirement: { mode: 'scoped', checkIds: ['passing-check'] },
+        selectionReasons: [
+          { checkId: 'passing-check', sources: ['path', 'explicit'] },
+        ],
       });
     } finally {
       delete process.env.CODING_X_CLAUDE_BIN;

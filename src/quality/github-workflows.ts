@@ -158,6 +158,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
   const declared = allChecks(contract);
   const checksById = new Map(declared.map((check) => [check.id, check]));
   const checkIndex = new Map(declared.map((check, index) => [check.id, index + 1]));
+  const githubCheckIds = new Set(contract.github.jobs.flatMap((job) => job.checkIds));
   if (contract.github.jobs.length === 0) throw new Error('质量契约没有 GitHub jobs');
 
   const lines = [
@@ -204,6 +205,7 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
     '          EVENT_NAME: ${{ github.event_name }}',
     '          PR_BASE: ${{ github.event.pull_request.base.sha }}',
     '          PR_HEAD: ${{ github.event.pull_request.head.sha }}',
+    '          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}',
     '        run: |',
     '          set -euo pipefail',
     '          full=0',
@@ -281,6 +283,73 @@ export function renderQualityGateWorkflow(contract: QualityContract): string {
       '          fi',
     );
   });
+  lines.push(
+    '          if [ "$EVENT_NAME" = pull_request ] && [[ "$PR_HEAD_REF" =~ ^codex/issue-([1-9][0-9]*)$ ]]; then',
+    '            issue_number="${BASH_REMATCH[1]}"',
+    '            source_path="docs/prds/prd-issue-${issue_number}.md"',
+    '            if ! source_size=$(git cat-file -s "${PR_HEAD}:${source_path}" 2>/dev/null); then',
+    '              echo "::error::ready Issue branch is missing ${source_path} at the PR head"',
+    '              exit 1',
+    '            fi',
+    '            if ! [[ "$source_size" =~ ^[0-9]+$ ]] || [ "$source_size" -gt 2097152 ]; then',
+    '              echo "::error::ready Issue source is empty, oversized, or has an invalid size"',
+    '              exit 1',
+    '            fi',
+    '            if ! source_body=$(git show "${PR_HEAD}:${source_path}" 2>/dev/null); then',
+    '              echo "::error::ready Issue source cannot be read from the PR head"',
+    '              exit 1',
+    '            fi',
+    '            execution_header_count=$(grep -c \'^> Issue-Execution-Contract-Digest:\' <<< "$source_body" || true)',
+    '            if [ "$execution_header_count" -gt 0 ]; then',
+    '              mode_header_count=$(grep -c \'^> Issue-Remote-Check-Mode:\' <<< "$source_body" || true)',
+    '              ids_header_count=$(grep -c \'^> Issue-Remote-Check-IDs:\' <<< "$source_body" || true)',
+    '              if [ "$execution_header_count" -ne 1 ] || [ "$mode_header_count" -ne 1 ] || [ "$ids_header_count" -ne 1 ]; then',
+    '                echo "::error::ready Issue remote check headers must appear exactly once"',
+    '                exit 1',
+    '              fi',
+    '              execution_digest=$(sed -n \'s/^> Issue-Execution-Contract-Digest: //p\' <<< "$source_body")',
+    '              remote_mode=$(sed -n \'s/^> Issue-Remote-Check-Mode: //p\' <<< "$source_body")',
+    '              remote_checks=$(sed -n \'s/^> Issue-Remote-Check-IDs: //p\' <<< "$source_body")',
+    '              if ! [[ "$execution_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then',
+    '                echo "::error::ready Issue execution contract digest is invalid"',
+    '                exit 1',
+    '              fi',
+    '              if [ "$remote_mode" != scoped ]; then',
+    '                echo "::error::ready Issue remote mode must be scoped for a pull request"',
+    '                exit 1',
+    '              fi',
+    '              if [ "$remote_checks" != - ]; then',
+    '                if ! [[ "$remote_checks" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then',
+    '                  echo "::error::ready Issue remote check ids are invalid"',
+    '                  exit 1',
+    '                fi',
+    '                IFS=\',\' read -r -a remote_check_ids <<< "$remote_checks"',
+    '                seen_remote_check_ids=,',
+    '                for remote_check_id in "${remote_check_ids[@]}"; do',
+    '                  case "$seen_remote_check_ids" in',
+    '                    *",${remote_check_id},"*)',
+    '                      echo "::error::ready Issue remote check id ${remote_check_id} is duplicated"',
+    '                      exit 1',
+    '                      ;;',
+    '                  esac',
+    '                  seen_remote_check_ids="${seen_remote_check_ids}${remote_check_id},"',
+    '                  case "$remote_check_id" in',
+    ...declared
+      .filter((check) => githubCheckIds.has(check.id))
+      .map(
+        (check) =>
+          `                    ${check.id}) check_${String(checkIndex.get(check.id))}=true ;;`,
+      ),
+    '                    *)',
+    '                      echo "::error::ready Issue remote check ${remote_check_id} has no declared GitHub job"',
+    '                      exit 1',
+    '                      ;;',
+    '                  esac',
+    '                done',
+    '              fi',
+    '            fi',
+    '          fi',
+  );
   contract.github.jobs.forEach((job, index) => {
     const variables = job.checkIds.map((id) => `\$check_${checkIndex.get(id)}`).join('" = true ] || [ "');
     lines.push(`          job_${index + 1}=false`);
@@ -628,11 +697,38 @@ body:
     validations:
       required: true
   - type: textarea
-    id: acceptance
+    id: execution-contract
     attributes:
-      label: 验收标准
-      description: 每行一个可判定条目，使用 Markdown 列表
-      placeholder: '- 第一个可判定结果'
+      label: 执行合同
+      description: 只填写 Story 语义标准、稳定 check id 与模式；本地可 scoped/full，远端当前只支持 scoped；固定责任字段不得改写
+      value: |
+        \`\`\`json
+        {
+          "schemaVersion": 1,
+          "storyAcceptance": {
+            "evidenceSource": "validator",
+            "network": "disabled",
+            "criteria": []
+          },
+          "localChecks": {
+            "evidenceSource": "engine",
+            "network": "current-host",
+            "mode": "scoped",
+            "checkIds": []
+          },
+          "remoteDelivery": {
+            "evidenceSource": "github",
+            "network": "github-actions",
+            "mode": "scoped",
+            "checkIds": [],
+            "ruleset": "required"
+          },
+          "runMetrics": {
+            "evidenceSource": "engine-clock",
+            "metrics": ["ready-to-trusted", "active", "waiting", "continuations"]
+          }
+        }
+        \`\`\`
     validations:
       required: true
   - type: textarea

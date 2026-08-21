@@ -43,6 +43,12 @@ import {
 import { invalidateFinalReviewState, readFinalReviewState } from '../review/state.js';
 import { CODING_X_VERSION } from '../version.js';
 import type { WorkspaceSession } from '../workspace-safety/session.js';
+import {
+  parseIssueExecutionContract,
+  qualityPlatformForNode,
+  reconcileIssueExecutionContract,
+  type IssueExecutionContractCapabilities,
+} from './issue-execution-contract.js';
 
 type QualityReader = NonNullable<LoopConfig['qualityContractReader']>;
 type ReadyQualityContract = Extract<QualityContractReadResult, { status: 'ready' }>;
@@ -65,6 +71,7 @@ export type LoopPreflightResult =
       validatorBase: string | null;
       modelPreflight: ModelPreflightResult;
       frozenQualityChecks: FrozenQualityChecks;
+      issueExecutionCapabilities: IssueExecutionContractCapabilities | null;
       runKind: AgentKind;
       gitHead: string;
       validationEnvironmentDigest: string;
@@ -134,11 +141,63 @@ export async function runLoopPreflight(
   }
 
   const bootPrd = (await guard.read()).prd;
+  let issueExecutionCapabilities: IssueExecutionContractCapabilities | null = null;
   if (bootPrd) {
     const storySet = validatePrdStorySet(bootPrd);
     if (!storySet.valid) {
       console.error(`❌ PRD Story 集合无效：${storySet.message}`);
       return { status: 'failed', exitCode: 2 };
+    }
+    const hasExecutionContract = bootPrd.executionContract !== undefined;
+    const hasExecutionDigest = bootPrd.executionContractDigest !== undefined;
+    if (hasExecutionContract !== hasExecutionDigest) {
+      console.error(
+        '❌ ready Issue 执行合同与摘要必须同时存在；请从当前 Issue 重新建立运行 workspace',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
+    if (hasExecutionContract) {
+      const parsedExecution = parseIssueExecutionContract(bootPrd.executionContract);
+      if (!parsedExecution.ok) {
+        console.error(`❌ ready Issue 执行合同无效：${parsedExecution.errors.join('；')}`);
+        return { status: 'failed', exitCode: 2 };
+      }
+      if (parsedExecution.digest !== bootPrd.executionContractDigest) {
+        console.error(
+          `❌ ready Issue 执行合同摘要不一致：期望 ${parsedExecution.digest}，` +
+            `收到 ${String(bootPrd.executionContractDigest)}；旧运行身份已失效`,
+        );
+        return { status: 'failed', exitCode: 2 };
+      }
+      if (
+        bootPrd.userStories.length !== 1 ||
+        bootPrd.userStories[0].acceptanceCriteria.length !==
+          parsedExecution.contract.storyAcceptance.criteria.length ||
+        bootPrd.userStories[0].acceptanceCriteria.some(
+          (criterion, index) =>
+            criterion !== parsedExecution.contract.storyAcceptance.criteria[index],
+        )
+      ) {
+        console.error(
+          '❌ ready Issue 的 Story 验收标准与冻结执行合同不一致；不得把检查或度量混入 Validator 标准',
+        );
+        return { status: 'failed', exitCode: 2 };
+      }
+      const platform = qualityPlatformForNode(process.platform);
+      if (platform === null) {
+        console.error(`❌ 当前平台 ${process.platform} 不受 ready Issue 执行合同支持`);
+        return { status: 'failed', exitCode: 2 };
+      }
+      const reconciliation = reconcileIssueExecutionContract(
+        parsedExecution.contract,
+        qualityRead.contract,
+        platform,
+      );
+      if (!reconciliation.ok) {
+        console.error(`❌ ready Issue 执行合同无法启动：${reconciliation.errors.join('；')}`);
+        return { status: 'failed', exitCode: 2 };
+      }
+      issueExecutionCapabilities = reconciliation.capabilities;
     }
   }
   // 正式运行必须先绑定一个非空提交身份。这个检查发生在 state 创建/迁移、模型目录读取
@@ -427,6 +486,7 @@ export async function runLoopPreflight(
     validatorBase: instructions.validator,
     modelPreflight,
     frozenQualityChecks,
+    issueExecutionCapabilities,
     runKind,
     gitHead: bootGitHead,
     validationEnvironmentDigest: currentValidationEnvironmentDigest,

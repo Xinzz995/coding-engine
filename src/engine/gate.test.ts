@@ -26,7 +26,7 @@ import {
   abortDesc,
 } from './gate.js';
 import type { GateFailure } from './gate.js';
-import type { QualityChangeSelection } from './gate.js';
+import type { QualityChangeSelection, QualityCheckSelectionRequirement } from './gate.js';
 import type { RunState } from './state.js';
 import type { Prd } from './prd.js';
 import type {
@@ -57,13 +57,14 @@ async function runManagedContractQualityChecks(
   projectRoot: string,
   platform?: 'linux' | 'macos' | 'windows' | null,
   changeSelection?: QualityChangeSelection,
+  requirement?: QualityCheckSelectionRequirement,
 ): ReturnType<typeof runContractQualityChecks> {
   const fixture = await createManagedProcessTestSession();
   try {
     return await runContractQualityChecks(checks, projectRoot, platform, {
       session: fixture.session,
       kind: 'quality-check',
-    }, changeSelection);
+    }, changeSelection, requirement);
   } finally {
     await fixture.close();
   }
@@ -533,6 +534,98 @@ describe('runContractQualityChecks', { timeout: 30_000, concurrent: false }, () 
     expect(selected.mode).toBe('scoped');
     expect(selected.applicable.map((check) => check.id)).toEqual(['docs-health', 'always']);
     expect(selected.skippedByPath).toEqual(['tests']);
+  });
+
+  it('unions explicit ready Issue checks with the path scope once and records each reason', () => {
+    const checks = contractWith({
+      checks: [
+        {
+          id: 'tests',
+          module: 'root',
+          paths: ['src/**'],
+          command: {
+            executable: 'node',
+            args: [],
+            cwd: '.',
+            platforms: ['macos'],
+            timeoutMs: 5_000,
+          },
+        },
+        {
+          id: 'docs-health',
+          module: 'root',
+          paths: ['docs/**'],
+          command: {
+            executable: 'node',
+            args: [],
+            cwd: '.',
+            platforms: ['macos'],
+            timeoutMs: 5_000,
+          },
+        },
+      ],
+    });
+    const selected = selectContractQualityChecks(
+      checks,
+      'macos',
+      { matchedPathCheckIds: ['docs-health'], allChangedPathsMatched: true },
+      { mode: 'scoped', checkIds: ['tests', 'docs-health'] },
+    );
+    expect(selected).toMatchObject({
+      mode: 'scoped',
+      applicable: [{ id: 'tests' }, { id: 'docs-health' }],
+      skippedByPath: [],
+      reasons: [
+        { checkId: 'tests', sources: ['explicit'] },
+        { checkId: 'docs-health', sources: ['path', 'explicit'] },
+      ],
+    });
+  });
+
+  it('keeps full requirements platform-bounded and rejects cross-platform explicit ids', () => {
+    const checks = contractWith({
+      checks: [
+        {
+          id: 'portable',
+          module: 'root',
+          command: {
+            executable: 'node',
+            args: [],
+            cwd: '.',
+            platforms: ['macos'],
+            timeoutMs: 5_000,
+          },
+        },
+        {
+          id: 'linux-only',
+          module: 'root',
+          command: {
+            executable: 'node',
+            args: [],
+            cwd: '.',
+            platforms: ['linux'],
+            timeoutMs: 5_000,
+          },
+        },
+      ],
+    });
+    expect(
+      selectContractQualityChecks(checks, 'macos', undefined, { mode: 'full', checkIds: [] }),
+    ).toMatchObject({
+      mode: 'full',
+      applicable: [{ id: 'portable' }],
+      skippedByPlatform: ['linux-only'],
+      reasons: [{ checkId: 'portable', sources: ['full'] }],
+    });
+    expect(
+      selectContractQualityChecks(checks, 'macos', undefined, {
+        mode: 'scoped',
+        checkIds: ['linux-only'],
+      }),
+    ).toMatchObject({
+      applicable: [],
+      error: expect.stringContaining('不支持当前平台 macos'),
+    });
   });
 
   it.each([

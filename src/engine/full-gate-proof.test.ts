@@ -159,12 +159,109 @@ describe('full gate proof', () => {
       reusableFullGateResult(proof, { ...scoped, changeScope: undefined }, 'd'.repeat(40)),
     ).toBeNull();
     expect(engineQualityGateEvidence(proof)).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       selectionMode: 'scoped',
       changeBaseGitHead: 'b'.repeat(40),
       changeManifestDigest: `sha256:${'c'.repeat(64)}`,
       checks: [{ id: 'docs-health' }],
       skippedCheckIds: ['tests'],
     });
+  });
+
+  it('does not reuse the same check ids when the ready Issue selection reason changes', () => {
+    const original = input({
+      selectionRequirement: { mode: 'scoped', checkIds: ['tests'] },
+      changeScope: {
+        baseGitHead: 'b'.repeat(40),
+        manifestDigest: `sha256:${'c'.repeat(64)}`,
+        selectedCheckIds: ['tests'],
+        selectionReasons: [{ checkId: 'tests', sources: ['path', 'explicit'] }],
+      },
+    });
+    const declared = (['test', 'build', 'static', 'security'] as const).flatMap((category) => {
+      const policy = original.contract.checks[category];
+      return 'checks' in policy ? policy.checks : [];
+    });
+    const skippedByPlatform = declared
+      .filter((check) => !check.command.platforms.includes('linux'))
+      .map((check) => check.id);
+    const skippedByPath = declared
+      .filter((check) => check.command.platforms.includes('linux') && check.id !== 'tests')
+      .map((check) => check.id);
+    const skipped = [...skippedByPlatform, ...skippedByPath];
+    const result: ContractGateResult = {
+      ok: true,
+      failure: null,
+      total: 1,
+      ran: 1,
+      ms: 10,
+      skipped,
+      skippedByPath,
+      selectionMode: 'scoped',
+      selectedCheckIds: ['tests'],
+      selectionRequirement: { mode: 'scoped', checkIds: ['tests'] },
+      selectionReasons: [{ checkId: 'tests', sources: ['path', 'explicit'] }],
+    };
+    const proof = createFullGateProof(original, result);
+    expect(
+      reusableFullGateResult(
+        proof,
+        { ...original, changeScope: undefined },
+        'b'.repeat(40),
+      ),
+    ).toEqual(result);
+    expect(
+      reusableFullGateResult(
+        proof,
+        {
+          ...original,
+          selectionRequirement: { mode: 'scoped', checkIds: [] },
+          changeScope: undefined,
+        },
+        'b'.repeat(40),
+      ),
+    ).toBeNull();
+  });
+
+  it('rejects a proof that names an explicit requirement without selecting it explicitly', () => {
+    const original = input();
+    const policy = original.contract.checks.test;
+    if (!('checks' in policy) || policy.checks.length < 2) {
+      throw new Error('fixture requires at least two test checks');
+    }
+    const selected = policy.checks[0].id;
+    const required = policy.checks[1].id;
+    const skipped = (['test', 'build', 'static', 'security'] as const)
+      .flatMap((category) => {
+        const group = original.contract.checks[category];
+        return 'checks' in group ? group.checks : [];
+      })
+      .filter((check) => check.id !== selected)
+      .map((check) => check.id);
+    const bound: FullGateInput = {
+      ...original,
+      selectionRequirement: { mode: 'scoped', checkIds: [required] },
+      changeScope: {
+        baseGitHead: 'b'.repeat(40),
+        manifestDigest: `sha256:${'c'.repeat(64)}`,
+        selectedCheckIds: [selected],
+        selectionReasons: [{ checkId: selected, sources: ['path'] }],
+      },
+    };
+    expect(() =>
+      createFullGateProof(bound, {
+        ok: true,
+        failure: null,
+        total: 1,
+        ran: 1,
+        ms: 1,
+        skipped,
+        skippedByPath: skipped,
+        selectionMode: 'scoped',
+        selectedCheckIds: [selected],
+        selectionRequirement: { mode: 'scoped', checkIds: [required] },
+        selectionReasons: [{ checkId: selected, sources: ['path'] }],
+      }),
+    ).toThrow('显式检查要求');
   });
 });
