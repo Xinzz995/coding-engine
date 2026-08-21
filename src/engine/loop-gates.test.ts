@@ -11,6 +11,7 @@ import {
   type IssueExecutionContract,
 } from './issue-execution-contract.js';
 import { withReadyIssueRunAuthority } from './issue-run-authority.js';
+import { readReadyWorkspaceRecords } from '../workspace-safety/lease.js';
 import {
   ISSUE_WORKSPACE_IDENTITY_FILE,
   renderIssueWorkspaceIdentity,
@@ -52,10 +53,11 @@ async function runAuthorizedReadyIssue(
     executionContractDigest: string;
   },
 ): Promise<number> {
+  const workspaceRecords = await readReadyWorkspaceRecords(input.workspace);
   return await withReadyIssueRunAuthority(
     {
       projectRoot: realpathSync(input.projectRoot),
-      workspace: realpathSync(input.workspace),
+      workspaceIdentity: workspaceRecords.workspace.identity,
       repository: READY_ISSUE_PROJECT,
       issueNumber: 42,
       bodyDigest: READY_ISSUE_BODY_DIGEST,

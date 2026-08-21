@@ -14,6 +14,8 @@ import {
 } from './issue-run.js';
 
 const roots: string[] = [];
+const TEST_WORKSPACE_IDENTITY = `sha256:${'9'.repeat(64)}`;
+const initializeWorkspace = async (): Promise<string> => TEST_WORKSPACE_IDENTITY;
 afterEach(() => {
   while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
 });
@@ -514,7 +516,7 @@ describe('ready Issue contract', () => {
         issueNumber: 42,
         executor,
         now: () => times.shift()!,
-        initializeWorkspace: async () => undefined,
+        initializeWorkspace,
         runEngine: async () => {
           throw new Error('engine must not run before PR exists');
         },
@@ -533,9 +535,11 @@ describe('ready Issue contract', () => {
       now: () => times.shift()!,
       initializeWorkspace: async ({ pullRequest }) => {
         expect(pullRequest).toBe(7);
+        return TEST_WORKSPACE_IDENTITY;
       },
       runEngine: async ({ authority }) => {
         expect(consumeReadyIssueRunAuthority(authority)).toMatchObject({
+          workspaceIdentity: TEST_WORKSPACE_IDENTITY,
           repository: 'Xinzz995/example',
           issueNumber: 42,
           branch: 'codex/issue-42',
@@ -563,7 +567,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       refreshEngine: async () => {
         refreshCalls += 1;
         if (refreshCalls === 2) return null;
@@ -598,7 +602,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       refreshEngine: async () => {
         refreshCalls += 1;
         return {
@@ -636,7 +640,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       runEngine: async () => {
         head = 'd'.repeat(40);
         return { exitCode: 6, message: '等待远端' };
@@ -674,7 +678,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       runEngine: async () => {
         prState = 'CLOSED';
         return { exitCode: 0, message: 'stale ready' };
@@ -692,7 +696,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       runEngine: async () => {
         currentIssue.body = currentIssue.body.replace('结果写回 Issue', '结果改写到别处');
         return { exitCode: 0, message: 'stale Issue identity' };
@@ -712,7 +716,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       runEngine: async () => {
         staleBranchEngineCalls += 1;
         return { exitCode: 0, message: 'must not run from stale branch' };
@@ -731,7 +735,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       runEngine: async () => {
         const sourcePath = join(root, 'docs/prds/prd-issue-42.md');
         writeFileSync(
@@ -753,7 +757,7 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace,
       runEngine: async () => {
         prBody = prBody.replace('完成一个可恢复入口。', '弱化后的 PR 目标。');
         return { exitCode: 0, message: 'stale PR intent' };

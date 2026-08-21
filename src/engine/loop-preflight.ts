@@ -254,7 +254,7 @@ export async function runLoopPreflight(
     }
     if (
       issueRunAuthorityClaims.projectRoot !== canonicalProjectRoot ||
-      issueRunAuthorityClaims.workspace !== workspace ||
+      issueRunAuthorityClaims.workspaceIdentity !== session.lease.workspace.identity ||
       issueRunAuthorityClaims.repository !== bootPrd.project ||
       issueRunAuthorityClaims.branch !== bootPrd.branchName ||
       issueRunAuthorityClaims.executionContractDigest !== bootPrd.executionContractDigest ||

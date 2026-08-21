@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   applyPrdV1CandidateDigest,
@@ -848,7 +848,7 @@ async function initializeIssueWorkspace(options: {
   branch: string;
   pullRequest: number;
   sourcePath: string;
-}): Promise<void> {
+}): Promise<string> {
   await bootstrapWorkspace({ workspacePath: options.workspace });
   const quality = readQualityContract(options.root);
   if (quality.status !== 'ready') throw new Error(`质量契约不可用：${quality.status}`);
@@ -892,11 +892,12 @@ async function initializeIssueWorkspace(options: {
     command: 'apply-prd',
   });
   const session = createWorkspaceSession(lease);
+  const workspaceIdentity = session.lease.workspace.identity;
   try {
     await ensureIssueWorkspaceIdentity(session, identity);
     if (existing !== null) {
       await session.close();
-      return;
+      return workspaceIdentity;
     }
     const source = readIssueSource(join(options.root, options.sourcePath));
     const head = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -924,6 +925,7 @@ async function initializeIssueWorkspace(options: {
       runtimeMode: 'formal',
     });
     await session.close();
+    return workspaceIdentity;
   } catch (error) {
     if (session.state === 'open') await session.close();
     throw error;
@@ -1529,9 +1531,10 @@ export async function runReadyIssue(options: {
     evidence: previousEvidence,
   });
 
+  let workspaceIdentity: string;
   try {
     assertSourceCurrent();
-    await (options.initializeWorkspace ?? initializeIssueWorkspace)({
+    workspaceIdentity = await (options.initializeWorkspace ?? initializeIssueWorkspace)({
       root,
       workspace,
       repository: repository.nameWithOwner,
@@ -1593,7 +1596,7 @@ export async function runReadyIssue(options: {
       (await withReadyIssueRunAuthority(
         {
           projectRoot: root,
-          workspace: existsSync(workspace) ? realpathSync(workspace) : workspace,
+          workspaceIdentity,
           repository: repository.nameWithOwner,
           issueNumber: issue.number,
           bodyDigest: issue.bodyDigest,
