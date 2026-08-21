@@ -10,6 +10,9 @@ scope: root
 > GitHub Issue: https://github.com/Xinzz995/coding-engine/issues/319
 > Issue-Run-ID: sha256:8068022e259dc7fe6a92a3595190c4c0309a774b9f9a50d965f0a0143d32012d
 > Issue-Body-Digest: sha256:627ebe7dfd3592a240d313a8f9deaebc6d4458074e8e79415be149a7fbefde2c
+> Issue-Execution-Contract-Digest: sha256:51e67f7d71abab7800bcb4ed6437cec9ca1e1e44f926bd1dc5b30359cb0707df
+> Issue-Remote-Check-Mode: scoped
+> Issue-Remote-Check-IDs: dependency-audit
 > Ready-At: 2026-08-21T07:49:37Z
 
 ## Goals
@@ -39,17 +42,58 @@ scope: root
 
 为 ready Issue 增加版本化、机器可读的责任分层与检查要求。任何 Agent 启动前，引擎必须确认每项要求由哪一层负责、对应检查是否存在、当前运行是否有能力取得证据；无法满足时立即拒绝启动，并给出明确缺口。不得从自然语言猜检查名称。
 
+#### Execution Contract
+
+```json
+{
+  "schemaVersion": 1,
+  "storyAcceptance": {
+    "evidenceSource": "validator",
+    "network": "disabled",
+    "criteria": [
+      "ready Issue 用版本化字段分别声明 Story 语义、本地检查、远端交付和运行度量，合同变化会使旧运行身份失效",
+      "要求放错责任层、检查不存在、当前平台或 Runner 无法取得凭证、真实 Ruleset 不可用时，在任何 Agent 前明确停止",
+      "显式本地检查与路径选择取并集且只运行一次，证明绑定当前提交、变化范围、合同和逐项选择原因",
+      "Validator 只收到 Story 语义标准与已完成的本地证明，不接收远端条件或运行度量",
+      "显式远端检查强制进入当前 Issue PR 的 GitHub 计划，最终可信状态只读取当前提交的检查和 Ruleset",
+      "普通 scoped Issue 继续保持唯一分支、唯一 PR、唯一状态评论与相同输入复用"
+    ]
+  },
+  "localChecks": {
+    "evidenceSource": "engine",
+    "network": "current-host",
+    "mode": "scoped",
+    "checkIds": []
+  },
+  "remoteDelivery": {
+    "evidenceSource": "github",
+    "network": "github-actions",
+    "mode": "scoped",
+    "checkIds": [
+      "dependency-audit"
+    ],
+    "ruleset": "required"
+  },
+  "runMetrics": {
+    "evidenceSource": "engine-clock",
+    "metrics": [
+      "ready-to-trusted",
+      "active",
+      "waiting",
+      "continuations"
+    ]
+  }
+}
+```
+
 #### Acceptance Criteria
 
-- [ ] ready Issue 的执行合同把“Story 语义验收”“本地机械检查要求”“远端交付条件”“运行度量”分成独立、版本化、机器可读的字段；字段格式进入文档、类型、解析和冻结摘要，后续修改会使旧运行身份失效。
-- [ ] 检查要求只接受质量契约中真实存在的稳定 check id 或明确的 scoped/full 模式；不得从验收文字、命令字符串或模型判断中提取检查意图。
-- [ ] 在第一个 Builder 启动前，入口逐项核对责任层、检查 id、平台可运行性、所需网络边界和证据来源。要求放错层、检查不存在、当前流程无法取得凭证或远端条件没有对应权威来源时，以清楚错误停止，且不创建实现提交、不启动 Agent。
-- [ ] Story Validator 只接收它负责的语义标准和引擎已取得的本地机械证明；未选择、仅远端运行或尚未完成的检查不得塞给断网 Validator 补跑。
-- [ ] 显式要求的本地检查与按路径选择结果取并集并由引擎运行一次；full 仍受平台和质量契约约束。执行结果必须绑定当前提交、变化范围、契约摘要和选择原因，输入不一致不得复用。
-- [ ] 远端交付条件只由当前 PR 最新提交的 GitHub 检查与 Ruleset 结果裁决；它们不阻塞本地 Validator 写语义结论，但缺失时最终状态保持等待远端，不得返回可信。
-- [ ] 用 #207 的真实矛盾做回归：macOS 上把仅 Linux/远端负责的 dependency-audit 写进本地 Story 要求时，必须在 Builder 前拒绝；把它放进远端交付条件时，本地 Validator 不重复运行，最终状态等待并读取远端结果。
-- [ ] 保留现有普通 scoped Issue 的快速路径、相同输入检查复用、唯一分支/唯一 PR/唯一状态评论和失败关闭语义；完整测试、类型、格式、静态检查、构建及适用安全检查通过。
-- [ ] 文档明确给出 Issue 作者如何选择责任层和检查模式，并记录 #318 为什么失败，避免以后用“所有检查通过”这类无法归责的句子重新制造死锁。
+- [ ] ready Issue 用版本化字段分别声明 Story 语义、本地检查、远端交付和运行度量，合同变化会使旧运行身份失效。
+- [ ] 要求放错责任层、检查不存在、当前平台或 Runner 无法取得凭证、真实 Ruleset 不可用时，在任何 Agent 前明确停止。
+- [ ] 显式本地检查与路径选择取并集且只运行一次，证明绑定当前提交、变化范围、合同和逐项选择原因。
+- [ ] Validator 只收到 Story 语义标准与已完成的本地证明，不接收远端条件或运行度量。
+- [ ] 显式远端检查强制进入当前 Issue PR 的 GitHub 计划，最终可信状态只读取当前提交的检查和 Ruleset。
+- [ ] 普通 scoped Issue 继续保持唯一分支、唯一 PR、唯一状态评论与相同输入复用。
 
 ## Delivery Boundary
 

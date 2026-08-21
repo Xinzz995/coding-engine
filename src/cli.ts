@@ -813,6 +813,7 @@ export async function main(argv: string[]): Promise<number> {
         root: process.cwd(),
         workspaceBase: cfg.workspace,
         issueNumber: cfg.issueNumber!,
+        runner: cfg.kind,
         refreshEngine: async ({ workspace }) =>
           await refreshReadyIssueReview({
             workspace,

@@ -125,7 +125,7 @@ Story 凭证与最终 Review 的证明；维护者命令再次核对当前 owner
 
 `issue run` 是单用户优先的最小任务入口：只接受开放、带 `ready-for-agent` 且执行合同完整的 Issue。
 schema v1 合同把 Story 语义、本地检查、远端交付与运行度量分开；入口在任何分支切换、源 PRD 提交或
-Agent 调用前，把稳定 check id、scoped/full 模式、当前平台、固定网络边界、引擎/GitHub 证据源和
+Agent 调用前，把稳定 check id、scoped/full 模式、当前平台、可信 Validator runner、固定网络边界、引擎/GitHub 证据源和
 Ruleset 能力与质量契约逐项对账，不从自然语言或命令猜检查。规范化合同摘要同时进入 Issue run
 identity、源 PRD 与运行 PRD；任一字段变化都会拒绝旧运行。一个 Issue 固定映射一个运行身份、
 `codex/issue-<number>` 分支、源 PRD、隔离 workspace 和草稿 PR。

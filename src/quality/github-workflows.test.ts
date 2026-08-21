@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -76,6 +77,7 @@ function runGeneratedPlan(
   readyIssue?: {
     number: number;
     remoteCheckIds: string[];
+    contractRemoteCheckIds?: string[];
     remoteMode?: 'scoped' | 'full';
     legacy?: boolean;
   },
@@ -105,6 +107,39 @@ function runGeneratedPlan(
     if (readyIssue !== undefined) {
       const source = join(root, 'docs', 'prds', `prd-issue-${readyIssue.number}.md`);
       mkdirSync(dirname(source), { recursive: true });
+      const executionContract = {
+        schemaVersion: 1,
+        storyAcceptance: {
+          evidenceSource: 'validator',
+          network: 'disabled',
+          criteria: ['fixture behavior'],
+        },
+        localChecks: {
+          evidenceSource: 'engine',
+          network: 'current-host',
+          mode: 'scoped',
+          checkIds: [],
+        },
+        remoteDelivery: {
+          evidenceSource: 'github',
+          network: 'github-actions',
+          mode: readyIssue.remoteMode ?? 'scoped',
+          checkIds: readyIssue.contractRemoteCheckIds ?? readyIssue.remoteCheckIds,
+          ruleset: 'required',
+        },
+        runMetrics: {
+          evidenceSource: 'engine-clock',
+          metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
+        },
+      };
+      const executionDigest = `sha256:${createHash('sha256')
+        .update(
+          JSON.stringify({
+            domain: 'coding-x-ready-issue-execution-v1',
+            contract: executionContract,
+          }),
+        )
+        .digest('hex')}`;
       writeFileSync(
         source,
         readyIssue.legacy === true
@@ -112,9 +147,15 @@ function runGeneratedPlan(
           : [
               '# Ready Issue source',
               '',
-              `> Issue-Execution-Contract-Digest: sha256:${'a'.repeat(64)}`,
+              `> Issue-Execution-Contract-Digest: ${executionDigest}`,
               `> Issue-Remote-Check-Mode: ${readyIssue.remoteMode ?? 'scoped'}`,
               `> Issue-Remote-Check-IDs: ${readyIssue.remoteCheckIds.join(',') || '-'}`,
+              '',
+              '#### Execution Contract',
+              '',
+              '```json',
+              JSON.stringify(executionContract, null, 2),
+              '```',
               '',
             ].join('\n'),
       );
@@ -319,7 +360,7 @@ describe('renderQualityGateWorkflow', () => {
     }
   });
 
-  it('forces ready Issue remote check ids into the PR plan and keeps legacy sources compatible', () => {
+  it('forces ready Issue remote check ids into the PR plan and rejects legacy sources', () => {
     const contract = codingEngineContract();
     const required = runGeneratedPlan(
       contract,
@@ -332,14 +373,13 @@ describe('renderQualityGateWorkflow', () => {
     expect(outputForCheck(contract, required, 'dependency-audit')).toBe('true');
     expect(outputForCheck(contract, required, 'tests')).toBe('false');
 
-    const legacy = runGeneratedPlan(
-      contract,
-      'docs/legacy-note.md',
-      'pull_request',
-      undefined,
-      { number: 43, remoteCheckIds: [], legacy: true },
-    );
-    expect(outputForCheck(contract, legacy, 'dependency-audit')).toBe('false');
+    expect(() =>
+      runGeneratedPlan(contract, 'docs/legacy-note.md', 'pull_request', undefined, {
+        number: 43,
+        remoteCheckIds: [],
+        legacy: true,
+      }),
+    ).toThrow();
   });
 
   it('fails the remote plan for unknown check ids or an unsupported full request', () => {
@@ -355,6 +395,13 @@ describe('renderQualityGateWorkflow', () => {
         number: 42,
         remoteCheckIds: [],
         remoteMode: 'full',
+      }),
+    ).toThrow();
+    expect(() =>
+      runGeneratedPlan(contract, 'docs/header-contract-mismatch.md', 'pull_request', undefined, {
+        number: 42,
+        remoteCheckIds: ['dependency-audit'],
+        contractRemoteCheckIds: [],
       }),
     ).toThrow();
   });
@@ -555,6 +602,7 @@ describe('renderManagedGitHubFiles', () => {
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 到期日');
     expect(files[POLICY_ISSUE_TEMPLATE_PATH]).toContain('label: 跟进事项');
     expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('label: 本次目标');
+    expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('当前可信入口只支持 codex');
     expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('label: 执行合同');
     expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('"storyAcceptance"');
     expect(files[READY_ISSUE_TEMPLATE_PATH]).toContain('"localChecks"');

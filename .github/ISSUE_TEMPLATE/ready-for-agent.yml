@@ -5,7 +5,7 @@ title: ''
 body:
   - type: markdown
     attributes:
-      value: '填写并人工确认后再添加 ready-for-agent 标签；创建 Issue 本身不会启动运行。'
+      value: '填写并人工确认后再添加 ready-for-agent 标签；创建 Issue 本身不会启动运行。当前可信入口只支持 codex。'
   - type: textarea
     id: goal
     attributes:

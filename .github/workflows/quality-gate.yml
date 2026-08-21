@@ -272,60 +272,158 @@ jobs:
               exit 1
             fi
             execution_header_count=$(grep -c '^> Issue-Execution-Contract-Digest:' <<< "$source_body" || true)
-            if [ "$execution_header_count" -gt 0 ]; then
-              mode_header_count=$(grep -c '^> Issue-Remote-Check-Mode:' <<< "$source_body" || true)
-              ids_header_count=$(grep -c '^> Issue-Remote-Check-IDs:' <<< "$source_body" || true)
-              if [ "$execution_header_count" -ne 1 ] || [ "$mode_header_count" -ne 1 ] || [ "$ids_header_count" -ne 1 ]; then
-                echo "::error::ready Issue remote check headers must appear exactly once"
+            if [ "$execution_header_count" -ne 1 ]; then
+              echo "::error::ready Issue source must contain one execution contract digest; legacy runs need a new Issue"
+              exit 1
+            fi
+            mode_header_count=$(grep -c '^> Issue-Remote-Check-Mode:' <<< "$source_body" || true)
+            ids_header_count=$(grep -c '^> Issue-Remote-Check-IDs:' <<< "$source_body" || true)
+            if [ "$mode_header_count" -ne 1 ] || [ "$ids_header_count" -ne 1 ]; then
+              echo "::error::ready Issue remote check headers must appear exactly once"
+              exit 1
+            fi
+            execution_digest=$(sed -n 's/^> Issue-Execution-Contract-Digest: //p' <<< "$source_body")
+            remote_mode=$(sed -n 's/^> Issue-Remote-Check-Mode: //p' <<< "$source_body")
+            remote_checks=$(sed -n 's/^> Issue-Remote-Check-IDs: //p' <<< "$source_body")
+            if ! [[ "$execution_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::ready Issue execution contract digest is invalid"
+              exit 1
+            fi
+            python3 - "$PR_HEAD" "$source_path" "$execution_digest" "$remote_mode" "$remote_checks" <<'PY'
+          import hashlib
+          import json
+          import re
+          import subprocess
+          import sys
+
+          head, source_path, expected_digest, expected_mode, expected_ids = sys.argv[1:]
+          source = subprocess.check_output(
+              ["git", "show", f"{head}:{source_path}"], text=True, encoding="utf-8"
+          )
+          blocks = re.findall(
+              r"^#### Execution Contract\s*\r?\n+```json\s*\r?\n([\s\S]+?)\r?\n```",
+              source,
+              re.MULTILINE,
+          )
+          if len(blocks) != 1:
+              raise SystemExit("ready Issue source must contain one execution contract block")
+          try:
+              raw = json.loads(blocks[0])
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"ready Issue execution contract is invalid JSON: {error}")
+
+          def exact(value, keys, label):
+              if not isinstance(value, dict) or set(value) != set(keys):
+                  raise SystemExit(f"{label} has an invalid shape")
+              return value
+
+          def ids(value, label):
+              if (
+                  not isinstance(value, list)
+                  or any(not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", item) for item in value)
+                  or len(set(value)) != len(value)
+              ):
+                  raise SystemExit(f"{label} has invalid check ids")
+              return value
+
+          root = exact(
+              raw,
+              ["schemaVersion", "storyAcceptance", "localChecks", "remoteDelivery", "runMetrics"],
+              "execution contract",
+          )
+          if type(root["schemaVersion"]) is not int or root["schemaVersion"] != 1:
+              raise SystemExit("ready Issue execution contract schemaVersion is invalid")
+          story = exact(root["storyAcceptance"], ["evidenceSource", "network", "criteria"], "storyAcceptance")
+          criteria = story["criteria"]
+          if (
+              story["evidenceSource"] != "validator"
+              or story["network"] != "disabled"
+              or not isinstance(criteria, list)
+              or not criteria
+              or any(not isinstance(item, str) or not item or item != item.strip() or len(item) > 4000 for item in criteria)
+              or len(set(criteria)) != len(criteria)
+          ):
+              raise SystemExit("ready Issue storyAcceptance is invalid")
+          local = exact(root["localChecks"], ["evidenceSource", "network", "mode", "checkIds"], "localChecks")
+          local_ids = ids(local["checkIds"], "localChecks")
+          if (
+              local["evidenceSource"] != "engine"
+              or local["network"] != "current-host"
+              or local["mode"] not in ["scoped", "full"]
+              or (local["mode"] == "full" and local_ids)
+          ):
+              raise SystemExit("ready Issue localChecks is invalid")
+          remote = exact(root["remoteDelivery"], ["evidenceSource", "network", "mode", "checkIds", "ruleset"], "remoteDelivery")
+          remote_ids = ids(remote["checkIds"], "remoteDelivery")
+          if (
+              remote["evidenceSource"] != "github"
+              or remote["network"] != "github-actions"
+              or remote["mode"] not in ["scoped", "full"]
+              or (remote["mode"] == "full" and remote_ids)
+              or remote["ruleset"] != "required"
+          ):
+              raise SystemExit("ready Issue remoteDelivery is invalid")
+          metrics = exact(root["runMetrics"], ["evidenceSource", "metrics"], "runMetrics")
+          expected_metrics = ["ready-to-trusted", "active", "waiting", "continuations"]
+          if metrics["evidenceSource"] != "engine-clock" or metrics["metrics"] != expected_metrics:
+              raise SystemExit("ready Issue runMetrics is invalid")
+
+          normalized = {
+              "schemaVersion": 1,
+              "storyAcceptance": {"evidenceSource": "validator", "network": "disabled", "criteria": criteria},
+              "localChecks": {"evidenceSource": "engine", "network": "current-host", "mode": local["mode"], "checkIds": local_ids},
+              "remoteDelivery": {"evidenceSource": "github", "network": "github-actions", "mode": remote["mode"], "checkIds": remote_ids, "ruleset": "required"},
+              "runMetrics": {"evidenceSource": "engine-clock", "metrics": expected_metrics},
+          }
+          payload = json.dumps(
+              {"domain": "coding-x-ready-issue-execution-v1", "contract": normalized},
+              ensure_ascii=False,
+              separators=(",", ":"),
+          ).encode("utf-8")
+          actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+          actual_ids = ",".join(remote_ids) if remote_ids else "-"
+          if actual_digest != expected_digest or remote["mode"] != expected_mode or actual_ids != expected_ids:
+              raise SystemExit("ready Issue remote headers do not match the execution contract")
+          PY
+            if [ "$remote_mode" != scoped ]; then
+              echo "::error::ready Issue remote mode must be scoped for a pull request"
+              exit 1
+            fi
+            if [ "$remote_checks" != - ]; then
+              if ! [[ "$remote_checks" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then
+                echo "::error::ready Issue remote check ids are invalid"
                 exit 1
               fi
-              execution_digest=$(sed -n 's/^> Issue-Execution-Contract-Digest: //p' <<< "$source_body")
-              remote_mode=$(sed -n 's/^> Issue-Remote-Check-Mode: //p' <<< "$source_body")
-              remote_checks=$(sed -n 's/^> Issue-Remote-Check-IDs: //p' <<< "$source_body")
-              if ! [[ "$execution_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-                echo "::error::ready Issue execution contract digest is invalid"
-                exit 1
-              fi
-              if [ "$remote_mode" != scoped ]; then
-                echo "::error::ready Issue remote mode must be scoped for a pull request"
-                exit 1
-              fi
-              if [ "$remote_checks" != - ]; then
-                if ! [[ "$remote_checks" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then
-                  echo "::error::ready Issue remote check ids are invalid"
-                  exit 1
-                fi
-                IFS=',' read -r -a remote_check_ids <<< "$remote_checks"
-                seen_remote_check_ids=,
-                for remote_check_id in "${remote_check_ids[@]}"; do
-                  case "$seen_remote_check_ids" in
-                    *",${remote_check_id},"*)
-                      echo "::error::ready Issue remote check id ${remote_check_id} is duplicated"
-                      exit 1
-                      ;;
-                  esac
-                  seen_remote_check_ids="${seen_remote_check_ids}${remote_check_id},"
-                  case "$remote_check_id" in
-                    tests) check_1=true ;;
-                    linux-mount-proof) check_2=true ;;
-                    legacy-compatibility) check_3=true ;;
-                    windows-native-proof) check_4=true ;;
-                    build) check_5=true ;;
-                    windows-supervisor-reproducibility) check_6=true ;;
-                    windows-path-inspector-reproducibility) check_7=true ;;
-                    cli-smoke) check_8=true ;;
-                    format) check_9=true ;;
-                    lint) check_10=true ;;
-                    typecheck) check_11=true ;;
-                    repository-health) check_12=true ;;
-                    dependency-audit) check_13=true ;;
-                    *)
-                      echo "::error::ready Issue remote check ${remote_check_id} has no declared GitHub job"
-                      exit 1
-                      ;;
-                  esac
-                done
-              fi
+              IFS=',' read -r -a remote_check_ids <<< "$remote_checks"
+              seen_remote_check_ids=,
+              for remote_check_id in "${remote_check_ids[@]}"; do
+                case "$seen_remote_check_ids" in
+                  *",${remote_check_id},"*)
+                    echo "::error::ready Issue remote check id ${remote_check_id} is duplicated"
+                    exit 1
+                    ;;
+                esac
+                seen_remote_check_ids="${seen_remote_check_ids}${remote_check_id},"
+                case "$remote_check_id" in
+                  tests) check_1=true ;;
+                  linux-mount-proof) check_2=true ;;
+                  legacy-compatibility) check_3=true ;;
+                  windows-native-proof) check_4=true ;;
+                  build) check_5=true ;;
+                  windows-supervisor-reproducibility) check_6=true ;;
+                  windows-path-inspector-reproducibility) check_7=true ;;
+                  cli-smoke) check_8=true ;;
+                  format) check_9=true ;;
+                  lint) check_10=true ;;
+                  typecheck) check_11=true ;;
+                  repository-health) check_12=true ;;
+                  dependency-audit) check_13=true ;;
+                  *)
+                    echo "::error::ready Issue remote check ${remote_check_id} has no declared GitHub job"
+                    exit 1
+                    ;;
+                esac
+              done
             fi
           fi
           job_1=false

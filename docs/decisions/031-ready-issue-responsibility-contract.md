@@ -32,7 +32,8 @@ Builder 已完成候选和本地适用检查后，断网 Story Validator 仍被�
 5. 入口在切换分支、创建源 PRD 提交或启动 Agent 前核对：本地 id 是否支持当前平台，远端 id 是否有
    GitHub job，真实远端必需检查与 Ruleset 是否存在权威裁决路径。loop preflight 对冻结 PRD 再执行同一核对。
 6. 合同规范化摘要写入源 PRD 与运行 PRD，并进入 Issue run identity。改变任何字段都建立新身份，旧
-   workspace、分支或评论不能冒充新运行。
+   workspace、分支或评论不能冒充新运行。Agent 前、运行后和可信标记前还要重读 Issue、完整源 PRD
+   正文与 PR 的目标/非目标/来源/风险，任一偏离都失败关闭。
 7. 本地检查证明绑定 HEAD、Story 变化摘要、质量契约、显式要求和每个 check id 的选择原因。相同
    check id 集合若从 `path` 改为 `explicit`，旧证明也不得复用。
 8. 远端显式 id 由源 PRD 中与合同相互校验的机器头传给质量契约生成的 GitHub 计划，并强制并入当前
@@ -71,8 +72,10 @@ Builder 已完成候选和本地适用检查后，断网 Story Validator 仍被�
 
 ## 后果
 
-- 旧 ready Issue 没有执行合同时不再兼容运行；维护者必须用当前模板补合同、移除再重新添加
-  `ready-for-agent`，从而取得新的 ready 时间与运行身份。
+- 尚未启动的旧 ready Issue 没有执行合同时，维护者可用当前模板补合同、移除再重新添加
+  `ready-for-agent`；已有运行评论、分支、workspace 或 PR 的旧 Issue 必须保留现场并新建 Issue，不能
+  让新身份接管旧运行。
+- 当前可信 Issue 入口只接受 `codex`；Claude/Cursor 在能够签发正式 Validator 凭证前于任何 Agent 前拒绝。
 - Issue 作者需要明确选择责任层，但不需要复制命令、平台矩阵或 Ruleset 名称；这些仍由质量契约单一
   维护。
 - 本地快速路径不退化为默认全量；显式本地 id 只补充路径选择，远端条件不扩大 Validator 权限。

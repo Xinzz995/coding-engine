@@ -22,6 +22,7 @@ import {
 } from '../quality/contract.js';
 import { GhGitHubQualityClient } from '../quality/github-unmanaged.js';
 import type { Prd } from '../engine/prd.js';
+import type { AgentKind } from '../engine/agent.js';
 import { tryReadPrd } from '../engine/prd.js';
 import {
   parseIssueExecutionContract,
@@ -120,6 +121,8 @@ interface PullRequestObservation {
   readonly headRefOid: string;
   readonly baseRefName: string;
   readonly url: string;
+  readonly title: string;
+  readonly body: string;
 }
 
 interface IssueComment {
@@ -274,7 +277,7 @@ function executionContract(value: string): {
 } {
   if (value === '') {
     throw new Error(
-      'ready Issue 缺少版本化执行合同；请使用当前“Agent 执行任务”模板迁移后重新添加 ready-for-agent 标签',
+      'ready Issue 缺少版本化执行合同；未启动的旧 Issue 可按当前模板补齐并重新添加 ready-for-agent 标签；已有运行评论、分支或 PR 的旧 Issue 必须保留原现场并新建 Issue，不能冒充同一运行迁移',
     );
   }
   const match = /^```json\s*\r?\n([\s\S]+?)\r?\n```$/u.exec(value);
@@ -391,8 +394,34 @@ function parsePullRequests(value: unknown): PullRequestObservation[] {
       headRefOid: text(root.headRefOid, `GitHub PR[${index}] head`),
       baseRefName: text(root.baseRefName, `GitHub PR[${index}] base`),
       url: text(root.url, `GitHub PR[${index}] URL`),
+      title: text(root.title, `GitHub PR[${index}] title`),
+      body: typeof root.body === 'string' ? root.body : '',
     };
   });
+}
+
+function normalizedIdentityText(value: string): string {
+  return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n').trim();
+}
+
+function assertPullRequestIntent(
+  pullRequest: PullRequestObservation,
+  issue: ReadyIssue,
+  sourcePath: string,
+): void {
+  if (pullRequest.title !== issue.title) throw new Error('Issue PR 标题已偏离冻结 Issue 标题');
+  const sections = issueSections(pullRequest.body);
+  const expected = new Map<string, string>([
+    ['本次目标', issue.goal],
+    ['明确的非目标', issue.nonGoals],
+    ['Spec 与验收标准来源', `${sourcePath}\n\nCloses #${issue.number}`],
+    ['风险说明', issue.risk],
+  ]);
+  for (const [name, value] of expected) {
+    if (normalizedIdentityText(sections.get(name) ?? '') !== normalizedIdentityText(value)) {
+      throw new Error(`Issue PR 的“${name}”已偏离冻结 Issue 意图`);
+    }
+  }
 }
 
 function parseComments(value: unknown): IssueComment[] {
@@ -921,6 +950,8 @@ export async function runReadyIssue(options: {
   readonly root: string;
   readonly workspaceBase: string;
   readonly issueNumber: number;
+  /** production CLI always passes the selected runner; tests default to the only trusted runner. */
+  readonly runner?: AgentKind;
   readonly runEngine: (context: {
     readonly workspace: string;
     readonly branch: string;
@@ -995,6 +1026,12 @@ export async function runReadyIssue(options: {
   };
   const branch = `codex/issue-${issue.number}`;
   const sourcePath = `docs/prds/prd-issue-${issue.number}.md`;
+  const expectedSourcePrd = renderSourcePrd({
+    issue,
+    runId,
+    branch,
+    date: issue.readyAt.slice(0, 10),
+  });
   const workspace = workspaceInsideRoot(root, join(options.workspaceBase, `issue-${issue.number}`));
   const readComments = () =>
     parseComments(
@@ -1131,7 +1168,20 @@ export async function runReadyIssue(options: {
 
   let pullRequest: PullRequestObservation | undefined;
   const sourceAbsolute = join(root, sourcePath);
-  const remoteAuthorityDigests = new Set<string>();
+  const assertSourceCurrent = (): void => {
+    const source = readIssueSource(sourceAbsolute).toString('utf8');
+    if (normalizedIdentityText(source) !== normalizedIdentityText(expectedSourcePrd)) {
+      throw new Error('Issue 源 PRD 正文已偏离冻结 Issue 意图');
+    }
+    const bindings = sourceBindings(source);
+    if (
+      bindings.runId !== runId ||
+      bindings.bodyDigest !== issue.bodyDigest ||
+      bindings.executionContractDigest !== issue.executionContractDigest
+    ) {
+      throw new Error('Issue 源 PRD 已变化；旧运行身份已失效');
+    }
+  };
   const remoteAuthorityReader =
     options.remoteAuthorityReader ??
     ((input: { readonly repository: string; readonly contract: QualityContract }) => {
@@ -1141,7 +1191,12 @@ export async function runReadyIssue(options: {
         client.listRulesets(input.repository),
       );
     });
-  const assertExecutionContractCapability = (): void => {
+  const assertExecutionContractCapability = (readRemoteAuthority: boolean): void => {
+    if ((options.runner ?? 'codex') !== 'codex') {
+      throw new Error(
+        `ready Issue 当前只能使用 codex 完成可信 Validator 闭环；${options.runner} 只能开发，拒绝在 Builder 后才发现无法签发凭证`,
+      );
+    }
     const quality = (options.qualityContractReader ?? readQualityContract)(root);
     if (quality.status !== 'ready') {
       throw new Error(`执行合同无法对账：${qualityReadDiagnostic(quality)}`);
@@ -1154,7 +1209,7 @@ export async function runReadyIssue(options: {
     if (!reconciliation.ok) {
       throw new Error(`执行合同无法启动：${reconciliation.errors.join('；')}`);
     }
-    if (!remoteAuthorityDigests.has(quality.digest)) {
+    if (readRemoteAuthority) {
       const remoteErrors = remoteAuthorityReader({
         repository: repository.nameWithOwner,
         contract: quality.contract,
@@ -1162,14 +1217,13 @@ export async function runReadyIssue(options: {
       if (remoteErrors.length > 0) {
         throw new Error(`执行合同远端权威来源不可用：${remoteErrors.join('；')}`);
       }
-      remoteAuthorityDigests.add(quality.digest);
     }
   };
   try {
     if (initialStatus !== '') {
       throw new Error('Issue 入口要求干净工作树；请先提交或处理现有改动');
     }
-    assertExecutionContractCapability();
+    assertExecutionContractCapability(true);
     const currentBranch = run('git', ['branch', '--show-current']);
     if (currentBranch !== repository.defaultBranch && currentBranch !== branch) {
       throw new Error(`Issue 入口只能从 ${repository.defaultBranch} 或 ${branch} 运行`);
@@ -1199,7 +1253,7 @@ export async function runReadyIssue(options: {
       }
     }
     // 目标分支可能已有不同质量契约；在任何源 PRD 提交或 Agent 前按切换后的实际内容再核对。
-    assertExecutionContractCapability();
+    assertExecutionContractCapability(false);
 
     let pullRequests = parsePullRequests(
       json(
@@ -1213,7 +1267,7 @@ export async function runReadyIssue(options: {
           '--state',
           'all',
           '--json',
-          'number,state,isDraft,headRefOid,baseRefName,url',
+          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
         ]),
         'GitHub PR 列表',
       ),
@@ -1236,14 +1290,7 @@ export async function runReadyIssue(options: {
         throw new Error(`Issue 源 PRD 不可稳定读取：${existingSource.diagnostic}`);
       }
       if (existingSource.status === 'ready') {
-        const existingBindings = sourceBindings(existingSource.bytes.toString('utf8'));
-        if (
-          existingBindings.runId !== runId ||
-          existingBindings.bodyDigest !== issue.bodyDigest ||
-          existingBindings.executionContractDigest !== issue.executionContractDigest
-        ) {
-          throw new Error('同名 Issue 分支已有不同运行身份的源 PRD');
-        }
+        assertSourceCurrent();
         const tracked = run('git', ['ls-files', '--', sourcePath]);
         if (tracked !== sourcePath) throw new Error('已有 Issue 源 PRD 尚未提交，拒绝自动接管');
       } else {
@@ -1289,7 +1336,7 @@ export async function runReadyIssue(options: {
             '--state',
             'open',
             '--json',
-            'number,state,isDraft,headRefOid,baseRefName,url',
+            'number,state,isDraft,headRefOid,baseRefName,url,title,body',
           ]),
           '新建 PR 回读',
         ),
@@ -1302,6 +1349,7 @@ export async function runReadyIssue(options: {
     throw error;
   }
   if (!pullRequest) throw new Error('Issue PR 不可用');
+  assertPullRequestIntent(pullRequest, issue, sourcePath);
   const headBefore = run('git', ['rev-parse', 'HEAD']);
   if (
     comment &&
@@ -1348,15 +1396,7 @@ export async function runReadyIssue(options: {
   });
 
   try {
-    const source = readIssueSource(sourceAbsolute).toString('utf8');
-    const bindings = sourceBindings(source);
-    if (
-      bindings.runId !== runId ||
-      bindings.bodyDigest !== issue.bodyDigest ||
-      bindings.executionContractDigest !== issue.executionContractDigest
-    ) {
-      throw new Error('ready Issue 内容或标签事件已变化；旧分支不能冒充新运行');
-    }
+    assertSourceCurrent();
     await (options.initializeWorkspace ?? initializeIssueWorkspace)({
       root,
       workspace,
@@ -1366,6 +1406,35 @@ export async function runReadyIssue(options: {
       branch,
       sourcePath,
     });
+    assertIssueIdentityCurrent();
+    assertExecutionContractCapability(true);
+    assertSourceCurrent();
+    const beforeAgentPullRequests = parsePullRequests(
+      json(
+        run('gh', [
+          'pr',
+          'list',
+          '--repo',
+          repository.nameWithOwner,
+          '--head',
+          branch,
+          '--state',
+          'all',
+          '--json',
+          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
+        ]),
+        'Agent 启动前 PR 回读',
+      ),
+    );
+    if (
+      beforeAgentPullRequests.length !== 1 ||
+      beforeAgentPullRequests[0].number !== pullRequest.number ||
+      beforeAgentPullRequests[0].state !== 'OPEN' ||
+      beforeAgentPullRequests[0].baseRefName !== repository.defaultBranch
+    ) {
+      throw new Error('Agent 启动前 PR 的状态或目标分支已变化');
+    }
+    assertPullRequestIntent(beforeAgentPullRequests[0], issue, sourcePath);
     comment = publish({
       ...comment.state,
       phase: 'running',
@@ -1414,14 +1483,7 @@ export async function runReadyIssue(options: {
   let currentHead = headBefore;
   try {
     assertIssueIdentityCurrent();
-    const currentSourceBindings = sourceBindings(readIssueSource(sourceAbsolute).toString('utf8'));
-    if (
-      currentSourceBindings.runId !== runId ||
-      currentSourceBindings.bodyDigest !== issue.bodyDigest ||
-      currentSourceBindings.executionContractDigest !== issue.executionContractDigest
-    ) {
-      throw new Error('Issue 源 PRD 已变化；旧运行身份已失效');
-    }
+    assertSourceCurrent();
     const currentBranchAfter = run('git', ['branch', '--show-current']);
     if (currentBranchAfter !== branch) throw new Error('引擎运行后当前分支发生变化，拒绝推送');
     const dirty = statusPaths(
@@ -1459,7 +1521,7 @@ export async function runReadyIssue(options: {
           '--state',
           'all',
           '--json',
-          'number,state,isDraft,headRefOid,baseRefName,url',
+          'number,state,isDraft,headRefOid,baseRefName,url,title,body',
         ]),
         '引擎运行后 PR 回读',
       ),
@@ -1472,7 +1534,8 @@ export async function runReadyIssue(options: {
     ) {
       throw new Error('引擎运行后 PR 已关闭、消失、重复或改变目标分支');
     }
-    const currentPullRequest = currentPullRequests[0];
+    let currentPullRequest = currentPullRequests[0];
+    assertPullRequestIntent(currentPullRequest, issue, sourcePath);
     if (!pushed && currentPullRequest.headRefOid !== currentHead) {
       throw new Error('引擎运行后 PR 最新提交与已验证本地提交不一致');
     }
@@ -1510,6 +1573,34 @@ export async function runReadyIssue(options: {
     let message = engine.message;
     if (engine.exitCode === 0 && !pushed) {
       assertIssueIdentityCurrent();
+      const finalPullRequests = parsePullRequests(
+        json(
+          run('gh', [
+            'pr',
+            'list',
+            '--repo',
+            repository.nameWithOwner,
+            '--head',
+            branch,
+            '--state',
+            'all',
+            '--json',
+            'number,state,isDraft,headRefOid,baseRefName,url,title,body',
+          ]),
+          '可信标记前 PR 回读',
+        ),
+      );
+      if (
+        finalPullRequests.length !== 1 ||
+        finalPullRequests[0].number !== pullRequest.number ||
+        finalPullRequests[0].state !== 'OPEN' ||
+        finalPullRequests[0].baseRefName !== repository.defaultBranch ||
+        finalPullRequests[0].headRefOid !== currentHead
+      ) {
+        throw new Error('可信标记前 PR 的状态、目标或最新提交已变化');
+      }
+      currentPullRequest = finalPullRequests[0];
+      assertPullRequestIntent(currentPullRequest, issue, sourcePath);
       phase = 'trusted';
       if (currentPullRequest.isDraft) {
         run('gh', ['pr', 'ready', String(pullRequest.number), '--repo', repository.nameWithOwner]);

@@ -14,7 +14,8 @@ scope: root
 实现提交或启动 Agent 前，把它与当前质量契约、运行平台和 GitHub 证据能力逐项对账。
 
 本轮不扩大 Validator 网络或宿主权限，不取消按变化范围选择，不增加轮询、队列、自动合并或发布。
-普通非 Issue PRD 沿用现有路径；旧 ready Issue 缺少执行合同时明确要求迁移，不猜测旧文本含义。
+普通非 Issue PRD 沿用现有路径；旧 ready Issue 缺少执行合同时明确要求迁移，不猜测旧文本含义；已有
+运行现场时必须新建 Issue，不能用新身份接管旧评论、分支、workspace 或 PR。
 
 ## 可证伪完成合同
 
@@ -27,7 +28,7 @@ scope: root
 | 5 | scoped 本地检查把显式 id 与路径选择取并集且每项只执行一次；full 只执行当前平台契约全集 | selector 和 loop gate 回归 | 显式项重复运行、被路径筛掉或跨平台运行 |
 | 6 | 检查证明绑定 HEAD、变化摘要、质量契约和逐项选择原因；任一变化拒绝复用 | proof/currentness 回归 | 相同 id 集合但责任来源不同仍复用旧证明 |
 | 7 | 远端条件只由当前 PR head 的 GitHub 检查与 Ruleset 裁决，不进入断网 Validator | remote / issue refresh 回归 | 本地语义结论被远端等待阻断，或缺远端结果仍可信 |
-| 8 | 普通 scoped Issue、单分支、单 PR、单评论及相同输入复用保持不变 | Issue 入口组合回归 | 默认合同退化成 full，或重复创建远端对象 |
+| 8 | 普通 scoped Issue、单分支、单 PR、单评论及相同输入复用保持不变；Issue、源 PRD 正文和 PR 意图始终一致 | Issue 入口组合回归 | 默认合同退化成 full、重复创建远端对象，或修改正文后仍可信 |
 | 9 | 用户文档给出可复制合同和分层选择规则，并记录 #318 的失败原因 | 文档与仓库健康检查 | 文档继续推荐“所有检查通过”这类混合标准 |
 
 ## 设计裁决
@@ -46,7 +47,8 @@ Issue 模板提供唯一一个 JSON 对象，包含：
 
 ### 运行前对账
 
-入口从当前质量契约建立唯一 check id 表。`localChecks.checkIds` 必须支持当前平台；
+入口从当前质量契约建立唯一 check id 表，并确认所选 runner 能完成正式 Validator 闭环；
+`localChecks.checkIds` 必须支持当前平台；
 `remoteDelivery.checkIds` 必须至少出现在一个 GitHub job 中，且项目必须由实际存在的 GitHub 必需检查与
 受管 Ruleset 提供权威交付结论。任何不匹配在分支切换、源 PRD 提交和 Agent 调用前停止。
 

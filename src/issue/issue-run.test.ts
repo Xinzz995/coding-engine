@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -316,6 +316,28 @@ describe('ready Issue contract', () => {
         .slice(callsBeforeAuthorityCheck)
         .some((call) => ['switch', 'commit', 'push'].includes(call.args[0] ?? '')),
     ).toBe(false);
+
+    const callsBeforeRunnerCheck = calls.length;
+    await expect(
+      runReadyIssue({
+        ...issueRunPreflight(),
+        runner: 'claude',
+        root,
+        workspaceBase: '.workspace',
+        issueNumber: 42,
+        executor,
+        runEngine: async () => {
+          engineCalls += 1;
+          return { exitCode: 0, message: 'must not run' };
+        },
+      }),
+    ).rejects.toThrow('当前只能使用 codex');
+    expect(engineCalls).toBe(0);
+    expect(
+      calls
+        .slice(callsBeforeRunnerCheck)
+        .some((call) => ['switch', 'commit', 'push'].includes(call.args[0] ?? '')),
+    ).toBe(false);
   });
 
   it('continues one branch and one PR, then records ready-to-trusted total time', async () => {
@@ -332,6 +354,8 @@ describe('ready Issue contract', () => {
     let failCreatePr = true;
     let failPush = false;
     let currentIssue = issue();
+    let prTitle = currentIssue.title;
+    let prBody = '';
     const calls: IssueRunCommandInvocation[] = [];
     const executor = (invocation: IssueRunCommandInvocation): string => {
       calls.push(invocation);
@@ -389,6 +413,8 @@ describe('ready Issue contract', () => {
                   headRefOid: remoteHead,
                   baseRefName: 'main',
                   url: 'https://example.test/pr/7',
+                  title: prTitle,
+                  body: prBody,
                 },
               ]
             : [],
@@ -397,6 +423,8 @@ describe('ready Issue contract', () => {
       if (joined.startsWith('pr create')) {
         createPrCalls += 1;
         if (failCreatePr) throw new Error('simulated PR creation failure');
+        prTitle = String(args[args.indexOf('--title') + 1]);
+        prBody = String(args[args.indexOf('--body') + 1]);
         prCreated = true;
         return 'https://example.test/pr/7';
       }
@@ -448,10 +476,22 @@ describe('ready Issue contract', () => {
       new Date('2026-08-15T00:19:00.000Z'),
       new Date('2026-08-15T00:20:00.000Z'),
       new Date('2026-08-15T00:21:00.000Z'),
+      new Date('2026-08-15T00:22:00.000Z'),
+      new Date('2026-08-15T00:23:00.000Z'),
+      new Date('2026-08-15T00:24:00.000Z'),
+      new Date('2026-08-15T00:25:00.000Z'),
     ];
+    let remoteAuthorityReads = 0;
+    const preflight = {
+      ...issueRunPreflight(),
+      remoteAuthorityReader: () => {
+        remoteAuthorityReads += 1;
+        return [] as string[];
+      },
+    };
     await expect(
       runReadyIssue({
-        ...issueRunPreflight(),
+        ...preflight,
         root,
         workspaceBase: '.workspace',
         issueNumber: 42,
@@ -468,7 +508,7 @@ describe('ready Issue contract', () => {
 
     failCreatePr = false;
     const first = await runReadyIssue({
-      ...issueRunPreflight(),
+      ...preflight,
       root,
       workspaceBase: '.workspace',
       issueNumber: 42,
@@ -481,6 +521,7 @@ describe('ready Issue contract', () => {
       },
     });
     expect(first.phase).toBe('waiting-remote');
+    expect(remoteAuthorityReads).toBe(3);
     expect(createPrCalls).toBe(2);
     expect(commentBody).toContain(ISSUE_RUN_COMMENT_MARKER);
     const sourcePrd = readFileSync(join(root, 'docs/prds/prd-issue-42.md'), 'utf8');
@@ -491,7 +532,7 @@ describe('ready Issue contract', () => {
 
     let refreshCalls = 0;
     const second = await runReadyIssue({
-      ...issueRunPreflight(),
+      ...preflight,
       root,
       workspaceBase: '.workspace',
       issueNumber: 42,
@@ -526,7 +567,7 @@ describe('ready Issue contract', () => {
 
     refreshCalls = 0;
     const third = await runReadyIssue({
-      ...issueRunPreflight(),
+      ...preflight,
       root,
       workspaceBase: '.workspace',
       issueNumber: 42,
@@ -564,7 +605,7 @@ describe('ready Issue contract', () => {
 
     failPush = true;
     const failedCloseout = await runReadyIssue({
-      ...issueRunPreflight(),
+      ...preflight,
       root,
       workspaceBase: '.workspace',
       issueNumber: 42,
@@ -583,7 +624,7 @@ describe('ready Issue contract', () => {
 
     failPush = false;
     const failedPreparation = await runReadyIssue({
-      ...issueRunPreflight(),
+      ...preflight,
       root,
       workspaceBase: '.workspace',
       issueNumber: 42,
@@ -602,7 +643,7 @@ describe('ready Issue contract', () => {
 
     remoteHead = head;
     const closedDuringEngine = await runReadyIssue({
-      ...issueRunPreflight(),
+      ...preflight,
       root,
       workspaceBase: '.workspace',
       issueNumber: 42,
@@ -620,7 +661,7 @@ describe('ready Issue contract', () => {
     prState = 'OPEN';
     currentIssue = issue();
     const changedDuringEngine = await runReadyIssue({
-      ...issueRunPreflight(),
+      ...preflight,
       root,
       workspaceBase: '.workspace',
       issueNumber: 42,
@@ -634,5 +675,44 @@ describe('ready Issue contract', () => {
     });
     expect(changedDuringEngine).toMatchObject({ exitCode: 2, phase: 'failed' });
     expect(changedDuringEngine.state.message).toContain('Issue 内容或标签事件已变化');
+
+    currentIssue = issue();
+    const sourceChangedDuringEngine = await runReadyIssue({
+      ...preflight,
+      root,
+      workspaceBase: '.workspace',
+      issueNumber: 42,
+      executor,
+      now: () => times.shift()!,
+      initializeWorkspace: async () => undefined,
+      runEngine: async () => {
+        const sourcePath = join(root, 'docs/prds/prd-issue-42.md');
+        writeFileSync(
+          sourcePath,
+          readFileSync(sourcePath, 'utf8').replace('完成一个可恢复入口。', '弱化后的目标。'),
+        );
+        return { exitCode: 0, message: 'stale source' };
+      },
+    });
+    expect(sourceChangedDuringEngine).toMatchObject({ exitCode: 2, phase: 'failed' });
+    expect(sourceChangedDuringEngine.state.message).toContain('源 PRD 正文已偏离');
+
+    const sourcePath = join(root, 'docs/prds/prd-issue-42.md');
+    writeFileSync(sourcePath, sourcePrd);
+    const prChangedDuringEngine = await runReadyIssue({
+      ...preflight,
+      root,
+      workspaceBase: '.workspace',
+      issueNumber: 42,
+      executor,
+      now: () => times.shift()!,
+      initializeWorkspace: async () => undefined,
+      runEngine: async () => {
+        prBody = prBody.replace('完成一个可恢复入口。', '弱化后的 PR 目标。');
+        return { exitCode: 0, message: 'stale PR intent' };
+      },
+    });
+    expect(prChangedDuringEngine).toMatchObject({ exitCode: 2, phase: 'failed' });
+    expect(prChangedDuringEngine.state.message).toContain('PR 的“本次目标”已偏离');
   });
 });
