@@ -4,6 +4,10 @@ import { parseRunStateValue } from '../contracts/run-state-contract.js';
 import { readModelRouting } from '../engine/models.js';
 import type { Prd } from '../engine/prd.js';
 import { parseIssueExecutionContract } from '../engine/issue-execution-contract.js';
+import {
+  issueWorkspaceIdentityMatchesPrd,
+  readIssueWorkspaceIdentity,
+} from '../engine/issue-workspace-identity.js';
 import { readTddConfig, runTddGate } from '../engine/tdd-gate.js';
 import { readGitHead } from '../engine/validation-protocol.js';
 import {
@@ -507,19 +511,83 @@ function errorCode(error: unknown): string | undefined {
     : undefined;
 }
 
-async function currentPrdBranch(session: WorkspaceSession): Promise<string | null> {
+async function currentPrdRecord(
+  session: WorkspaceSession,
+): Promise<Record<string, unknown> | null> {
   const snapshot = await readMutationFileSnapshot(session.lease.workspace.path, 'prd.json');
   if (snapshot.snapshot.kind === 'missing') return null;
-  const record = strictJsonObject(snapshot.bytes, 'current prd.json');
-  return nonEmptyString(record.branchName, 'current prd.json branchName');
+  return strictJsonObject(snapshot.bytes, 'current prd.json');
+}
+
+function issueRunId(record: Record<string, unknown>, label: string): string {
+  const description = nonEmptyString(record.description, `${label} description`, PRODUCT_TEXT_LIMIT);
+  const matches = [...description.matchAll(/^Issue-Run-ID:\s*(sha256:[0-9a-f]{64})\s*$/gmu)];
+  if (matches.length !== 1) throw mutationInvalid(`${label} must contain one Issue-Run-ID`);
+  return matches[0][1];
+}
+
+function assertLegacyIssueIdentityPreserved(
+  current: Record<string, unknown> | null,
+  candidate: Record<string, unknown>,
+): void {
+  if (current === null) return;
+  const currentHasContract = current.executionContract !== undefined;
+  const currentHasDigest = current.executionContractDigest !== undefined;
+  if (!currentHasContract && !currentHasDigest) return;
+  if (currentHasContract !== currentHasDigest) {
+    throw mutationInvalid('current ready Issue PRD identity is incomplete and cannot be replaced');
+  }
+  const parsed = parseIssueExecutionContract(current.executionContract);
+  if (!parsed.ok || parsed.digest !== current.executionContractDigest) {
+    throw mutationInvalid('current ready Issue PRD identity is invalid and cannot be replaced');
+  }
+  const candidateExecution = parseIssueExecutionContract(candidate.executionContract);
+  if (
+    !candidateExecution.ok ||
+    candidateExecution.digest !== candidate.executionContractDigest ||
+    candidateExecution.digest !== parsed.digest
+  ) {
+    throw mutationInvalid('candidate ready Issue PRD identity is invalid or changed');
+  }
+  if (
+    candidate.project !== current.project ||
+    candidate.branchName !== current.branchName ||
+    candidate.sourcePrd !== current.sourcePrd ||
+    candidate.executionContractDigest !== current.executionContractDigest ||
+    issueRunId(candidate, 'candidate ready Issue PRD') !==
+      issueRunId(current, 'current ready Issue PRD')
+  ) {
+    throw mutationInvalid('ready Issue workspace cannot be downgraded or rebound by PRD mutation');
+  }
+}
+
+function assertPersistentIssueIdentity(
+  session: WorkspaceSession,
+  candidate: Record<string, unknown>,
+): void {
+  const identity = readIssueWorkspaceIdentity(session.lease.workspace.path);
+  if (identity.status === 'invalid') {
+    throw mutationInvalid(`Issue workspace identity is invalid: ${identity.error}`);
+  }
+  if (
+    identity.status === 'ready' &&
+    !issueWorkspaceIdentityMatchesPrd(identity.identity, candidate as unknown as Prd)
+  ) {
+    throw mutationInvalid('Issue workspace identity cannot be removed or rebound by PRD mutation');
+  }
 }
 
 async function assertApplyMode(
   session: WorkspaceSession,
   mode: ApplyPrdV1Mode,
-  candidateBranch: string,
+  candidate: Record<string, unknown>,
 ): Promise<void> {
-  const currentBranch = await currentPrdBranch(session);
+  assertPersistentIssueIdentity(session, candidate);
+  const current = await currentPrdRecord(session);
+  assertLegacyIssueIdentityPreserved(current, candidate);
+  const currentBranch =
+    current === null ? null : nonEmptyString(current.branchName, 'current prd.json branchName');
+  const candidateBranch = nonEmptyString(candidate.branchName, 'candidate prd.json branchName');
   if (mode === 'rederive-feature') {
     if (currentBranch === null || currentBranch !== candidateBranch) {
       throw mutationInvalid('rederive-feature mode does not match the current PRD branch');
@@ -701,7 +769,7 @@ export async function runApplyPrdV1Mutation(
   throwIfInterrupted(options);
   assertWindowsWorkspaceTreeHasNoReparsePoints(session.lease.workspace.path);
   const normalized = normalizeApplyRequest(request);
-  await assertApplyMode(session, normalized.mode, normalized.candidate.branchName);
+  await assertApplyMode(session, normalized.mode, normalized.candidate.prdRecord);
   await verifyApplyEnvironment(session, normalized, options);
 
   const names = await rootNames(session);
@@ -772,6 +840,7 @@ function normalizeRepairRequest(request: RepairV1Request): {
   readonly prdDigest: string;
   readonly stateDigest: string | null;
   readonly prd: Buffer;
+  readonly prdRecord: Record<string, unknown>;
   readonly state: Buffer | null;
 } {
   const root = strictRecord(request, ['schemaVersion', 'source', 'candidate'], 'repair-v1 request');
@@ -779,7 +848,7 @@ function normalizeRepairRequest(request: RepairV1Request): {
   const source = strictRecord(root.source, ['prdDigest', 'stateDigest'], 'repair-v1 source');
   const candidate = strictRecord(root.candidate, ['prd', 'state'], 'repair-v1 candidate');
   const prd = productBytes(candidate.prd, 'repair-v1 candidate.prd');
-  strictJsonObject(prd, 'repair-v1 candidate.prd');
+  const prdRecord = strictJsonObject(prd, 'repair-v1 candidate.prd');
   const state =
     candidate.state === null ? null : productBytes(candidate.state, 'repair-v1 candidate.state');
   if (state) strictJsonObject(state, 'repair-v1 candidate.state');
@@ -790,6 +859,7 @@ function normalizeRepairRequest(request: RepairV1Request): {
         ? null
         : digest(source.stateDigest, 'repair-v1 source.stateDigest'),
     prd,
+    prdRecord,
     state,
   };
 }
@@ -805,9 +875,21 @@ export async function runRepairV1Mutation(
   }
   throwIfInterrupted(options);
   const normalized = normalizeRepairRequest(request);
+  assertPersistentIssueIdentity(session, normalized.prdRecord);
   const currentPrd = await readMutationFileSnapshot(session.lease.workspace.path, 'prd.json');
   if (currentPrd.snapshot.kind !== 'file' || currentPrd.snapshot.digest !== normalized.prdDigest) {
     throw mutationInvalid('repair-v1 source prd digest does not bind current prd.json');
+  }
+  let currentRecord: Record<string, unknown> | null = null;
+  try {
+    currentRecord = strictJsonObject(currentPrd.bytes, 'current repair prd.json');
+  } catch {
+    // Repair exists for malformed PRD bytes. New ready Issue workspaces retain the separate
+    // persistent identity checked above; an unbranded malformed legacy file has no safe identity
+    // to infer and must remain repairable.
+  }
+  if (currentRecord !== null) {
+    assertLegacyIssueIdentityPreserved(currentRecord, normalized.prdRecord);
   }
   const currentState = await readMutationFileSnapshot(session.lease.workspace.path, 'state.json');
   if (currentState.snapshot.kind === 'missing') {

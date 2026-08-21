@@ -50,6 +50,10 @@ import {
   type IssueExecutionContractCapabilities,
 } from './issue-execution-contract.js';
 import { consumeReadyIssueRunAuthority } from './issue-run-authority.js';
+import {
+  issueWorkspaceIdentityMatchesPrd,
+  readIssueWorkspaceIdentity,
+} from './issue-workspace-identity.js';
 
 type QualityReader = NonNullable<LoopConfig['qualityContractReader']>;
 type ReadyQualityContract = Extract<QualityContractReadResult, { status: 'ready' }>;
@@ -142,6 +146,21 @@ export async function runLoopPreflight(
   }
 
   const bootPrd = (await guard.read()).prd;
+  const persistentIssueIdentityRead = readIssueWorkspaceIdentity(workspace);
+  if (persistentIssueIdentityRead.status === 'invalid') {
+    console.error(
+      `❌ Issue workspace 持久身份不可用：${persistentIssueIdentityRead.error}；不得降级为普通运行`,
+    );
+    return { status: 'failed', exitCode: 2 };
+  }
+  const persistentIssueIdentity =
+    persistentIssueIdentityRead.status === 'ready'
+      ? persistentIssueIdentityRead.identity
+      : null;
+  if (persistentIssueIdentity !== null && !bootPrd) {
+    console.error('❌ Issue workspace 持久身份仍存在，但 prd.json 缺失或损坏；不得降级为普通运行');
+    return { status: 'failed', exitCode: 2 };
+  }
   let issueExecutionCapabilities: IssueExecutionContractCapabilities | null = null;
   let issueRunAuthorityClaims: ReturnType<typeof consumeReadyIssueRunAuthority> = null;
   if (bootPrd) {
@@ -152,6 +171,12 @@ export async function runLoopPreflight(
     }
     const hasExecutionContract = bootPrd.executionContract !== undefined;
     const hasExecutionDigest = bootPrd.executionContractDigest !== undefined;
+    if (persistentIssueIdentity !== null && (!hasExecutionContract || !hasExecutionDigest)) {
+      console.error(
+        '❌ Issue workspace 的持久身份仍存在，prd.json 不得删除执行合同后降级为普通运行',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
     if (hasExecutionContract !== hasExecutionDigest) {
       console.error(
         '❌ ready Issue 执行合同与摘要必须同时存在；请从当前 Issue 重新建立运行 workspace',
@@ -240,6 +265,23 @@ export async function runLoopPreflight(
     ) {
       console.error(
         '❌ ready Issue 实时授权与当前项目、workspace、提交或运行身份不一致；请重新执行 coding-x issue run',
+      );
+      return { status: 'failed', exitCode: 2 };
+    }
+    if (
+      persistentIssueIdentity !== null &&
+      (issueRunAuthorityClaims.repository !== persistentIssueIdentity.repository ||
+        issueRunAuthorityClaims.issueNumber !== persistentIssueIdentity.issueNumber ||
+        issueRunAuthorityClaims.bodyDigest !== persistentIssueIdentity.bodyDigest ||
+        issueRunAuthorityClaims.branch !== persistentIssueIdentity.branch ||
+        issueRunAuthorityClaims.pullRequest !== persistentIssueIdentity.pullRequest ||
+        issueRunAuthorityClaims.runId !== persistentIssueIdentity.runId ||
+        issueRunAuthorityClaims.executionContractDigest !==
+          persistentIssueIdentity.executionContractDigest ||
+        !issueWorkspaceIdentityMatchesPrd(persistentIssueIdentity, bootPrd))
+    ) {
+      console.error(
+        '❌ ready Issue 实时授权、持久 workspace 身份与当前 PRD 不一致；请重新执行 coding-x issue run',
       );
       return { status: 'failed', exitCode: 2 };
     }

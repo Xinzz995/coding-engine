@@ -10,6 +10,7 @@ export interface ReadyIssueRunAuthorityClaims {
   readonly workspace: string;
   readonly repository: string;
   readonly issueNumber: number;
+  readonly bodyDigest: string;
   readonly branch: string;
   readonly pullRequest: number;
   readonly runId: string;

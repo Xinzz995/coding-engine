@@ -8,6 +8,10 @@ import {
   digestIssueExecutionContract,
   type IssueExecutionContract,
 } from '../engine/issue-execution-contract.js';
+import {
+  ensureIssueWorkspaceIdentity,
+  ISSUE_WORKSPACE_IDENTITY_FILE,
+} from '../engine/issue-workspace-identity.js';
 import { readQualityContract } from '../quality/contract.js';
 import { CODING_X_VERSION } from '../version.js';
 import { digestBytes } from './filesystem.js';
@@ -249,9 +253,13 @@ describe('fixed apply-prd-v1 product mutation', () => {
         metrics: ['ready-to-trusted', 'active', 'waiting', 'continuations'],
       },
     };
-    const runtimePrd = prd('codex/issue-42', 'ready Issue', {
+    const executionContractDigest = digestIssueExecutionContract(executionContract);
+    const runId = `sha256:${'1'.repeat(64)}`;
+    const runtimePrd = prd('codex/issue-42', `ready Issue\n\nIssue-Run-ID: ${runId}`, {
+      project: 'fixture/repository',
+      sourcePrd: 'source.txt',
       executionContract,
-      executionContractDigest: digestIssueExecutionContract(executionContract),
+      executionContractDigest,
       userStories: [
         {
           id: 'US-001',
@@ -263,6 +271,17 @@ describe('fixed apply-prd-v1 product mutation', () => {
       ],
     });
     const accepted = await fixture('apply-prd');
+    await ensureIssueWorkspaceIdentity(accepted.session, {
+      schemaVersion: 1,
+      repository: 'fixture/repository',
+      issueNumber: 42,
+      bodyDigest: `sha256:${'2'.repeat(64)}`,
+      branch: 'codex/issue-42',
+      pullRequest: 7,
+      runId,
+      sourcePrd: 'source.txt',
+      executionContractDigest,
+    });
     await expect(
       runApplyPrdV1Mutation(
         accepted.session,
@@ -274,6 +293,19 @@ describe('fixed apply-prd-v1 product mutation', () => {
         APPLY_OPTIONS,
       ),
     ).resolves.toMatchObject({ state: { phase: 'committed' } });
+    expect(existsSync(join(accepted.root, ISSUE_WORKSPACE_IDENTITY_FILE))).toBe(true);
+    await expect(
+      runApplyPrdV1Mutation(
+        accepted.session,
+        applyRequest('rederive-feature', {
+          prd: prd('codex/issue-42', 'downgraded ordinary PRD'),
+          state: null,
+          progress: null,
+        }),
+        APPLY_OPTIONS,
+      ),
+    ).rejects.toThrow(/cannot be removed or rebound/u);
+    expect(readFileSync(join(accepted.root, 'prd.json'))).toEqual(runtimePrd);
     await expect(accepted.session.close()).resolves.toContain('released-');
 
     const rejected = await fixture('apply-prd');

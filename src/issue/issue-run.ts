@@ -39,6 +39,10 @@ import {
   withReadyIssueRunAuthority,
   type ReadyIssueRunAuthority,
 } from '../engine/issue-run-authority.js';
+import {
+  ensureIssueWorkspaceIdentity,
+  type IssueWorkspaceIdentity,
+} from '../engine/issue-workspace-identity.js';
 
 export const READY_FOR_AGENT_LABEL = 'ready-for-agent' as const;
 export const ISSUE_RUN_COMMENT_MARKER = '<!-- coding-x-issue-run-v1 -->' as const;
@@ -842,6 +846,7 @@ async function initializeIssueWorkspace(options: {
   issue: ReadyIssue;
   runId: string;
   branch: string;
+  pullRequest: number;
   sourcePath: string;
 }): Promise<void> {
   await bootstrapWorkspace({ workspacePath: options.workspace });
@@ -870,28 +875,17 @@ async function initializeIssueWorkspace(options: {
     ) {
       throw new Error('Issue workspace 已绑定其他运行，拒绝接管');
     }
-    return;
   }
-  const source = readIssueSource(join(options.root, options.sourcePath));
-  const head = execFileSync('git', ['rev-parse', 'HEAD'], {
-    cwd: options.root,
-    encoding: 'utf8',
-  }).trim();
-  const candidate: ApplyPrdV1Candidate = {
-    prd: `${JSON.stringify(expectedPrd, null, 2)}\n`,
-    state: null,
-    progress: '# Progress\n',
-  };
-  const request: ApplyPrdV1Request = {
+  const identity: IssueWorkspaceIdentity = {
     schemaVersion: 1,
-    mode: 'replace-feature',
-    source: { bytes: source, digest: digestBytes(source) },
-    git: { expectedHead: head, currentHead: head },
-    quality: { expectedDigest: quality.digest, currentDigest: quality.digest },
-    candidate: {
-      ...candidate,
-      digest: applyPrdV1CandidateDigest('replace-feature', candidate),
-    },
+    repository: options.repository,
+    issueNumber: options.issue.number,
+    bodyDigest: options.issue.bodyDigest,
+    branch: options.branch,
+    pullRequest: options.pullRequest,
+    runId: options.runId,
+    sourcePrd: options.sourcePath,
+    executionContractDigest: options.issue.executionContractDigest,
   };
   const lease = await acquireWorkspaceLease({
     workspacePath: options.workspace,
@@ -899,6 +893,32 @@ async function initializeIssueWorkspace(options: {
   });
   const session = createWorkspaceSession(lease);
   try {
+    await ensureIssueWorkspaceIdentity(session, identity);
+    if (existing !== null) {
+      await session.close();
+      return;
+    }
+    const source = readIssueSource(join(options.root, options.sourcePath));
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: options.root,
+      encoding: 'utf8',
+    }).trim();
+    const candidate: ApplyPrdV1Candidate = {
+      prd: `${JSON.stringify(expectedPrd, null, 2)}\n`,
+      state: null,
+      progress: '# Progress\n',
+    };
+    const request: ApplyPrdV1Request = {
+      schemaVersion: 1,
+      mode: 'replace-feature',
+      source: { bytes: source, digest: digestBytes(source) },
+      git: { expectedHead: head, currentHead: head },
+      quality: { expectedDigest: quality.digest, currentDigest: quality.digest },
+      candidate: {
+        ...candidate,
+        digest: applyPrdV1CandidateDigest('replace-feature', candidate),
+      },
+    };
     await runApplyPrdV1Mutation(session, request, {
       projectRoot: options.root,
       runtimeMode: 'formal',
@@ -1518,6 +1538,7 @@ export async function runReadyIssue(options: {
       issue,
       runId,
       branch,
+      pullRequest: pullRequest.number,
       sourcePath,
     });
     assertIssueIdentityCurrent();
@@ -1575,6 +1596,7 @@ export async function runReadyIssue(options: {
           workspace: existsSync(workspace) ? realpathSync(workspace) : workspace,
           repository: repository.nameWithOwner,
           issueNumber: issue.number,
+          bodyDigest: issue.bodyDigest,
           branch,
           pullRequest: pullRequest.number,
           runId,

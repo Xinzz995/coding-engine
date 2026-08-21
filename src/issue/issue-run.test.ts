@@ -531,7 +531,9 @@ describe('ready Issue contract', () => {
       issueNumber: 42,
       executor,
       now: () => times.shift()!,
-      initializeWorkspace: async () => undefined,
+      initializeWorkspace: async ({ pullRequest }) => {
+        expect(pullRequest).toBe(7);
+      },
       runEngine: async ({ authority }) => {
         expect(consumeReadyIssueRunAuthority(authority)).toMatchObject({
           repository: 'Xinzz995/example',

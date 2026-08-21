@@ -12,6 +12,10 @@ import {
 } from './issue-execution-contract.js';
 import { withReadyIssueRunAuthority } from './issue-run-authority.js';
 import {
+  ISSUE_WORKSPACE_IDENTITY_FILE,
+  renderIssueWorkspaceIdentity,
+} from './issue-workspace-identity.js';
+import {
   setup,
   story,
   runLoop,
@@ -25,6 +29,7 @@ import {
 } from './loop-test-support.js';
 
 const READY_ISSUE_RUN_ID = `sha256:${'a'.repeat(64)}`;
+const READY_ISSUE_BODY_DIGEST = `sha256:${'b'.repeat(64)}`;
 const READY_ISSUE_PROJECT = 'owner/repository';
 const READY_ISSUE_BRANCH = 'codex/issue-42';
 const READY_ISSUE_SOURCE = 'docs/prds/prd-issue-42.md';
@@ -53,6 +58,7 @@ async function runAuthorizedReadyIssue(
       workspace: realpathSync(input.workspace),
       repository: READY_ISSUE_PROJECT,
       issueNumber: 42,
+      bodyDigest: READY_ISSUE_BODY_DIGEST,
       branch: READY_ISSUE_BRANCH,
       pullRequest: 7,
       runId: READY_ISSUE_RUN_ID,
@@ -64,6 +70,32 @@ async function runAuthorizedReadyIssue(
 }
 
 describe('runLoop quality gate', { timeout: 30_000, concurrent: false }, () => {
+  it('does not let a persistent Issue workspace become an ordinary run after contract removal', async () => {
+    const { workspace, instructionsDir } = setup([story()], readyIssuePrdFields());
+    writeFileSync(
+      join(workspace, ISSUE_WORKSPACE_IDENTITY_FILE),
+      renderIssueWorkspaceIdentity({
+        schemaVersion: 1,
+        repository: READY_ISSUE_PROJECT,
+        issueNumber: 42,
+        bodyDigest: READY_ISSUE_BODY_DIGEST,
+        branch: READY_ISSUE_BRANCH,
+        pullRequest: 7,
+        runId: READY_ISSUE_RUN_ID,
+        sourcePrd: READY_ISSUE_SOURCE,
+        executionContractDigest: `sha256:${'c'.repeat(64)}`,
+      }),
+    );
+    const { fake, calls } = fakeCounting(workspace);
+    process.env.CODING_X_CLAUDE_BIN = `node ${fake}`;
+    try {
+      expect(await runProductionLoop(strictConfig(workspace, instructionsDir))).toBe(2);
+      expect(existsSync(calls)).toBe(false);
+    } finally {
+      delete process.env.CODING_X_CLAUDE_BIN;
+    }
+  });
+
   it('validation-only clears the candidate only when a project command explicitly fails', async () => {
     const { workspace, instructionsDir, head } = setup([story()], {
       qualityChecks: ['node -e "process.exit(7)"'],
