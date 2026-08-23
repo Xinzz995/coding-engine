@@ -31,11 +31,11 @@ import {
   InlineProgramTransportError,
 } from '../workspace-safety/inline-program.js';
 import {
-  ExternalFileLinkSnapshotBudget,
   ExternalFileLinkSnapshotBudgetError,
   sameExternalFileLinkIdentity,
-  snapshotManagedExternalFileLinks,
+  snapshotManagedExternalFileLinksWithAdaptiveBudget,
   type ExternalFileLinkIdentity,
+  type ManagedAdaptiveExternalFileLinkSnapshotResult,
   type ManagedExternalFileLinkSnapshot,
 } from './external-file-link-identity.js';
 import { assertCleanValidationTreeHasNoMountPoints } from './clean-validation-mounts.js';
@@ -63,7 +63,6 @@ const MAX_GIT_HISTORY_REFS = 16;
 const MAX_EXTERNAL_LINK_FILE_BYTES = 256 * 1024 * 1024;
 const MAX_EXTERNAL_LINKS = 1024;
 const MAX_EXTERNAL_LINK_TARGET_BYTES = 1024 * 1024 * 1024;
-const EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS = 30_000;
 
 export type CleanValidationCheckoutErrorCode =
   | 'invalid-source'
@@ -110,6 +109,8 @@ export interface CleanValidationCheckoutOptions {
   };
   /** @internal 用不可读取的来源证明预算拒绝发生在 fetch 之前；生产不设置。 */
   readonly repositoryUrlForTests?: string;
+  /** @internal 受控单调时钟只用于证明外部链接期限覆盖最终整树复核。 */
+  readonly externalFileLinkNowForTests?: () => number;
   /** @internal 在最终拓扑复核前制造确定性竞态；生产不设置。 */
   readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
 }
@@ -226,22 +227,24 @@ function pathInside(parent: string, candidate: string): boolean {
 async function observeManagedFileLinks(
   links: readonly { readonly target: string; readonly path: string }[],
   context: string,
-  budget: ExternalFileLinkSnapshotBudget,
   managed: ManagedGateContext,
   checkoutRoot: string,
   sourceRoot: string,
-): Promise<ManagedExternalFileLinkSnapshot[]> {
+  nowForTests?: () => number,
+): Promise<ManagedAdaptiveExternalFileLinkSnapshotResult> {
   try {
-    return await snapshotManagedExternalFileLinks({
+    return await snapshotManagedExternalFileLinksWithAdaptiveBudget({
       linkPaths: links.map(({ target }) => target),
       checkoutRoot,
       sourceRoot,
       maxFileBytes: MAX_EXTERNAL_LINK_FILE_BYTES,
-      budget,
+      maxLinks: MAX_EXTERNAL_LINKS,
+      maxTargetReadBytes: MAX_EXTERNAL_LINK_TARGET_BYTES,
       session: managed.session,
       kind: managed.kind,
       cwd: checkoutRoot,
       ...(managed.termination ? { termination: managed.termination } : {}),
+      ...(nowForTests === undefined ? {} : { nowForTests }),
     });
   } catch (error) {
     if (error instanceof ExternalFileLinkSnapshotBudgetError) {
@@ -1284,6 +1287,7 @@ async function assertSafeArtifactTopology(
     readonly permittedExternalLinks: ReadonlyMap<string, ExternalFileLinkIdentity>;
     readonly signal?: AbortSignal;
     readonly managed: ManagedGateContext;
+    readonly externalFileLinkNowForTests?: () => number;
     readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
   },
 ): Promise<Map<string, ExternalFileLinkIdentity>> {
@@ -1445,30 +1449,26 @@ async function assertSafeArtifactTopology(
       `${context}无法在 ${initialBackingFileSystem.description} 上证明 hard link 组可信`,
     );
   }
-  const externalLinkBudget =
+  const managedSnapshot =
     managedLinks.length === 0
-      ? null
-      : new ExternalFileLinkSnapshotBudget(
-          {
-            maxLinks: MAX_EXTERNAL_LINKS,
-            maxTargetReadBytes: MAX_EXTERNAL_LINK_TARGET_BYTES,
-            deadlineMs: EXTERNAL_LINK_SNAPSHOT_DEADLINE_MS,
-          },
-          options.signal,
-        );
-  const managedObservations =
-    managedLinks.length === 0
-      ? []
+      ? undefined
       : await observeManagedFileLinks(
           managedLinks,
           context,
-          externalLinkBudget!,
           options.managed,
           root,
           sourceRoot,
+          options.externalFileLinkNowForTests,
         );
-  for (let index = 0; index < managedLinks.length; index += 1) {
+  const externalLinkBudget = managedSnapshot?.budget;
+  const externalLinkCheckpoint = (): void => {
     checkpoint();
+    externalLinkBudget?.checkpoint();
+  };
+  const managedObservations: ManagedExternalFileLinkSnapshot[] =
+    managedSnapshot?.snapshots ?? [];
+  for (let index = 0; index < managedLinks.length; index += 1) {
+    externalLinkCheckpoint();
     const { path } = managedLinks[index];
     const observation = managedObservations[index];
     if (observation.scope === 'internal') continue;
@@ -1510,16 +1510,24 @@ async function assertSafeArtifactTopology(
     }
   }
   try {
-    externalLinkBudget?.assertDarwinMountTableCurrent();
+    externalLinkCheckpoint();
     const finalBackingFileSystem = assertNoMountPoints();
+    externalLinkCheckpoint();
     options.beforeFinalTopologyScanForTests?.(root, context);
+    externalLinkCheckpoint();
     const finalHardLinkProof = snapshotCleanValidationHardLinks({
       root,
       owningRoot: (path) => policy.owningRoot(path),
       maxEntries: MAX_VALIDATION_TREE_ENTRIES,
       signal: options.signal,
+      ...(externalLinkBudget === undefined
+        ? {}
+        : { checkpoint: () => externalLinkBudget.checkpoint() }),
     });
+    externalLinkCheckpoint();
     const afterFinalScanFileSystem = assertNoMountPoints();
+    externalLinkBudget?.assertDarwinMountTableCurrent();
+    externalLinkCheckpoint();
     if (
       finalHardLinkProof.digest !== initialHardLinkProof.digest ||
       finalHardLinkProof.groups !== initialHardLinkProof.groups ||
@@ -1870,6 +1878,9 @@ export async function createCleanValidationCheckout(
           permittedExternalLinks,
           signal: options.managed.termination?.signal,
           managed: options.managed,
+          ...(options.externalFileLinkNowForTests === undefined
+            ? {}
+            : { externalFileLinkNowForTests: options.externalFileLinkNowForTests }),
           ...(options.beforeFinalTopologyScanForTests === undefined
             ? {}
             : { beforeFinalTopologyScanForTests: options.beforeFinalTopologyScanForTests }),

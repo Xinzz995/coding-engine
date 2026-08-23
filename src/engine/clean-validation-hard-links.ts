@@ -176,11 +176,13 @@ export function snapshotCleanValidationHardLinks(options: {
   readonly owningRoot: (path: string) => string | null;
   readonly maxEntries: number;
   readonly signal?: AbortSignal;
+  readonly checkpoint?: () => void;
 }): CleanValidationHardLinkProof {
   const observations: CleanValidationHardLinkObservation[] = [];
   let entries = 0;
   const checkpoint = (): void => {
     if (options.signal?.aborted) throw invalid('复核被中断');
+    options.checkpoint?.();
   };
   const visit = (directory: string, prefix = ''): void => {
     checkpoint();
