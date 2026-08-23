@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -18,12 +19,15 @@ import {
   ExternalFileLinkSnapshotBudget,
   ExternalFileLinkSnapshotBudgetError,
   canSnapshotExternalFileLinks,
+  externalFileLinkSnapshotBudgetMsForTests,
   externalFileLinkReaderProgramForTests,
   isExternalFileSystemMagicOrRemote,
+  managedExternalFileLinkReaderVerdictForTests,
   parseExternalFileLinkBatchSnapshotForTests,
   sameExternalFileLinkIdentity,
   snapshotManagedExternalFileLink,
   snapshotManagedExternalFileLinks,
+  snapshotManagedExternalFileLinksWithAdaptiveBudget,
   type ExternalFileLinkIdentity,
 } from './external-file-link-identity.js';
 
@@ -177,6 +181,8 @@ describe('external file link snapshot budget', () => {
     timed.checkpoint();
     now = 110;
     expect(timed.remainingMs()).toBe(20);
+    now = 129.1;
+    expect(timed.remainingMs()).toBe(1);
     now = 131;
     expect(() => timed.checkpoint()).toThrow(ExternalFileLinkSnapshotBudgetError);
     expect(() => timed.checkpoint()).toThrow(/统一期限/u);
@@ -185,6 +191,24 @@ describe('external file link snapshot budget', () => {
     const interrupted = new ExternalFileLinkSnapshotBudget(limits, controller.signal, () => 0);
     controller.abort();
     expect(() => interrupted.reserveTarget('target', 1)).toThrow(/被中断/u);
+  });
+
+  it('shortens the original metadata budget without resetting its monotonic start', () => {
+    let now = 100;
+    const budget = new ExternalFileLinkSnapshotBudget(
+      { maxLinks: 2, maxTargetReadBytes: 1024, deadlineMs: 180_000 },
+      undefined,
+      () => now,
+    );
+    budget.countLink();
+    budget.countLink();
+    now = 110;
+    budget.establishWorkload({ linkCount: 2, distinctTargets: 1, distinctTargetBytes: 8 });
+
+    expect(budget.remainingMs()).toBe(31_030);
+    expect(() =>
+      budget.establishWorkload({ linkCount: 2, distinctTargets: 1, distinctTargetBytes: 8 }),
+    ).toThrow(/建立时机非法/u);
   });
 
   it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
@@ -540,17 +564,20 @@ describe('external file link snapshot budget', () => {
   );
 
   it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
-    'reads one stable external target only once when multiple links share a reader batch',
+    'reads one inode once when links use different hard-link paths in one reader batch',
     async () => {
       const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'coding-x-batch-link-cache-')));
       const checkoutRoot = join(root, 'checkout');
       const sourceRoot = join(root, 'source');
       mkdirSync(checkoutRoot);
       mkdirSync(sourceRoot);
-      const target = join(root, 'target');
-      writeFileSync(target, 'content\n');
+      const firstTarget = join(root, 'first-target');
+      const secondTarget = join(root, 'second-target');
+      writeFileSync(firstTarget, 'content\n');
+      linkSync(firstTarget, secondTarget);
       const links = [join(checkoutRoot, 'first'), join(checkoutRoot, 'second')];
-      for (const link of links) symlinkSync(target, link);
+      symlinkSync(firstTarget, links[0]);
+      symlinkSync(secondTarget, links[1]);
       const managed = await createManagedProcessTestSession();
       try {
         await expect(
@@ -1021,4 +1048,463 @@ describe('external file link snapshot budget', () => {
     expect(isExternalFileSystemMagicOrRemote('darwin', 26n)).toBe(true);
     expect(isExternalFileSystemMagicOrRemote('freebsd', 0x9fa0n)).toBe(false);
   });
+});
+
+describe('adaptive external file link snapshot deadline', () => {
+  it.each([
+    ['zero workload', 0, 0, 30_000],
+    ['one 8 MiB target and two links', 2, 8 * 1024 * 1024, 31_040],
+    ['maximum permitted workload', 1024, 1024 * 1024 * 1024, 178_480],
+  ])('uses the fixed formula for %s', (_name, linkCount, distinctTargetBytes, expected) => {
+    expect(externalFileLinkSnapshotBudgetMsForTests(linkCount, distinctTargetBytes)).toBe(expected);
+  });
+
+  it('rejects invalid or over-cap workloads and never exceeds the 180 second ceiling', () => {
+    expect(() => externalFileLinkSnapshotBudgetMsForTests(-1, 0)).toThrow(/非法/u);
+    expect(() => externalFileLinkSnapshotBudgetMsForTests(1025, 0)).toThrow(/超过/u);
+    expect(() => externalFileLinkSnapshotBudgetMsForTests(1, 1024 * 1024 * 1024 + 1)).toThrow(
+      /超过/u,
+    );
+    expect(externalFileLinkSnapshotBudgetMsForTests(1024, 1024 * 1024 * 1024)).toBeLessThanOrEqual(
+      180_000,
+    );
+  });
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'keeps a controlled legal read that crosses the old deadline inside its adaptive budget',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-adaptive-reader-'));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      const target = join(root, 'target');
+      const linkPath = join(checkoutRoot, 'tool');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(target, 'content\n');
+      symlinkSync(target, linkPath);
+      const managed = await createManagedProcessTestSession();
+      let now = 0;
+      const budget = new ExternalFileLinkSnapshotBudget(
+        {
+          maxLinks: 1,
+          maxTargetReadBytes: 1024,
+          deadlineMs: 31_020,
+          workload: { linkCount: 1, distinctTargets: 1, distinctTargetBytes: 8 },
+        },
+        undefined,
+        () => now,
+        0,
+      );
+      const advance = setTimeout(() => {
+        now = 30_001;
+      }, 1);
+      try {
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            readerProgramForTests: `
+            const crypto = require('node:crypto');
+            const path = require('node:path');
+            const raw = process.argv[1];
+            const request = JSON.parse(raw);
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+            const target = {
+              dev: '1', ino: '2', uid: '3', nlink: '1', mode: '33188', size: '8',
+              mtimeNs: '4', ctimeNs: '5',
+            };
+            process.stdout.write(JSON.stringify({
+              schemaVersion: 2,
+              requestDigest: crypto.createHash('sha256').update(raw).digest('hex'),
+              ok: true,
+              items: request.links.map((entry) => ({
+                index: entry.index,
+                scope: 'external',
+                resolvedPath: path.resolve(request.checkoutRoot, '..', 'target'),
+                link: { ...target, ino: '3', mode: '41471', size: '6' },
+                linkTargetDigest: 'a'.repeat(64),
+                target,
+                bytesRead: 8,
+                eof: true,
+                targetDigest: 'b'.repeat(64),
+              })),
+            }));
+          `,
+          }),
+        ).resolves.toMatchObject({ scope: 'external' });
+        expect(now).toBe(30_001);
+        const oldBudget = new ExternalFileLinkSnapshotBudget(
+          { maxLinks: 1, maxTargetReadBytes: 1024, deadlineMs: 30_000 },
+          undefined,
+          () => now,
+          0,
+        );
+        expect(() => oldBudget.checkpoint()).toThrow(/统一期限/u);
+      } finally {
+        clearTimeout(advance);
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it('reports bounded mechanical progress when the adaptive deadline expires', () => {
+    let now = 31_020;
+    const budget = new ExternalFileLinkSnapshotBudget(
+      {
+        maxLinks: 1,
+        maxTargetReadBytes: 1024,
+        deadlineMs: 31_020,
+        workload: { linkCount: 1, distinctTargets: 1, distinctTargetBytes: 8 },
+      },
+      undefined,
+      () => now,
+      0,
+    );
+    expect(() => budget.checkpoint()).toThrow(
+      /budgetMs=31020, elapsedMs=31020, links=1, distinctTargets=1, completedLinks=0, completedTargets=0, readBytes=0, remainingBytes=8/u,
+    );
+    now = 31_021;
+    expect(() => budget.checkpoint()).toThrow(/budgetMs=31020/u);
+  });
+
+  it('marks byte progress unavailable while a managed reader batch is still active', () => {
+    let now = 0;
+    const budget = new ExternalFileLinkSnapshotBudget(
+      {
+        maxLinks: 1,
+        maxTargetReadBytes: 1024,
+        deadlineMs: 31_020,
+        workload: { linkCount: 1, distinctTargets: 1, distinctTargetBytes: 8 },
+      },
+      undefined,
+      () => now,
+      0,
+    );
+    expect(budget.beginReaderBatch()).toBe(1024);
+    now = 31_020;
+    expect(() => budget.checkpoint()).toThrow(/readBytes=unavailable, remainingBytes=unavailable/u);
+  });
+
+  it('preserves managed-reader faults ahead of timeout and rejects missing settlement proof', () => {
+    type Result = Parameters<typeof managedExternalFileLinkReaderVerdictForTests>[0];
+    const result = (overrides: Partial<Result> = {}): Result => ({
+      verdict: 'completed',
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      processTreeNotEmpty: false,
+      terminationReason: null,
+      durationMs: 1,
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      ...overrides,
+    });
+
+    expect(() =>
+      managedExternalFileLinkReaderVerdictForTests(
+        result({ verdict: 'terminated', timedOut: true, terminationReason: 'user-interrupt' }),
+      ),
+    ).toThrow(/被中断/u);
+    expect(() =>
+      managedExternalFileLinkReaderVerdictForTests(
+        result({ verdict: 'terminated', timedOut: true, terminationReason: 'output-failure' }),
+      ),
+    ).toThrow(/输出故障/u);
+    expect(() =>
+      managedExternalFileLinkReaderVerdictForTests(
+        result({
+          verdict: 'root-failed',
+          exitCode: 7,
+          timedOut: true,
+          terminationReason: 'timeout',
+        }),
+      ),
+    ).toThrow(/非正常退出/u);
+    expect(() =>
+      managedExternalFileLinkReaderVerdictForTests(
+        result({
+          verdict: 'process-tree-not-empty',
+          timedOut: true,
+          processTreeNotEmpty: true,
+          terminationReason: 'timeout',
+        }),
+      ),
+    ).toThrow(/进程树未清空/u);
+    expect(() =>
+      managedExternalFileLinkReaderVerdictForTests(
+        result({ verdict: 'terminated', exitCode: null }),
+      ),
+    ).toThrow(/结算证明缺失/u);
+    expect(
+      managedExternalFileLinkReaderVerdictForTests(
+        result({
+          verdict: 'terminated',
+          exitCode: null,
+          timedOut: true,
+          terminationReason: 'timeout',
+        }),
+      ),
+    ).toBe('timeout');
+    for (const contradictory of [
+      result({ timedOut: true }),
+      result({ terminationReason: 'timeout' }),
+      result({ timedOut: true, terminationReason: 'timeout' }),
+      result({ verdict: 'terminated', exitCode: 0, timedOut: true, terminationReason: 'timeout' }),
+      result({
+        verdict: 'terminated',
+        exitCode: null,
+        signal: 'SIGTERM',
+        timedOut: true,
+        terminationReason: 'timeout',
+      }),
+    ]) {
+      expect(() => managedExternalFileLinkReaderVerdictForTests(contradictory)).toThrow(
+        /结算证明缺失或矛盾/u,
+      );
+    }
+    expect(managedExternalFileLinkReaderVerdictForTests(result())).toBe('completed');
+  });
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'keeps a reader output failure when it arrives at the absolute deadline',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-deadline-output-failure-'));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      const target = join(root, 'target');
+      const linkPath = join(checkoutRoot, 'tool');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(target, 'content\n');
+      symlinkSync(target, linkPath);
+      const managed = await createManagedProcessTestSession();
+      let now = 0;
+      const budget = new ExternalFileLinkSnapshotBudget(
+        {
+          maxLinks: 1,
+          maxTargetReadBytes: 1024,
+          deadlineMs: 1_000,
+          workload: { linkCount: 1, distinctTargets: 1, distinctTargetBytes: 8 },
+        },
+        undefined,
+        () => now,
+        0,
+      );
+      const expire = setTimeout(() => {
+        now = 1_000;
+      }, 1);
+      try {
+        await expect(
+          snapshotManagedExternalFileLink({
+            linkPath,
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            budget,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            readerProgramForTests: `
+              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+              process.stderr.write('reader-output-failure');
+              process.exit(1);
+            `,
+          }),
+        ).rejects.toThrow(/reader-output-failure/u);
+      } finally {
+        clearTimeout(expire);
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    20_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'derives one workload and digest for different hard-link paths to the same inode',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-adaptive-workload-'));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      const firstTarget = join(root, 'first-target');
+      const secondTarget = join(root, 'second-target');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(firstTarget, 'content\n');
+      linkSync(firstTarget, secondTarget);
+      const links = [join(checkoutRoot, 'first'), join(checkoutRoot, 'second')];
+      symlinkSync(firstTarget, links[0]);
+      symlinkSync(secondTarget, links[1]);
+      const managed = await createManagedProcessTestSession();
+      let workload:
+        { linkCount: number; distinctTargets: number; distinctTargetBytes: number } | undefined;
+      try {
+        const { snapshots } = await snapshotManagedExternalFileLinksWithAdaptiveBudget({
+          linkPaths: links,
+          checkoutRoot,
+          sourceRoot,
+          maxFileBytes: 1024,
+          maxLinks: 2,
+          maxTargetReadBytes: 1024,
+          session: managed.session,
+          kind: 'quality-check',
+          cwd: checkoutRoot,
+          onWorkloadForTests: (observed) => {
+            workload = observed;
+          },
+        });
+        expect(workload).toEqual({ linkCount: 2, distinctTargets: 1, distinctTargetBytes: 8 });
+        expect(snapshots).toHaveLength(2);
+        expect(
+          snapshots.map(
+            (snapshot) => snapshot.scope === 'external' && snapshot.identity.resolvedPath,
+          ),
+        ).toEqual([realpathSync.native(firstTarget), realpathSync.native(secondTarget)]);
+        expect(snapshots).toMatchObject([
+          {
+            scope: 'external',
+            identity: { targetDigest: createHash('sha256').update('content\n').digest('hex') },
+          },
+          {
+            scope: 'external',
+            identity: { targetDigest: createHash('sha256').update('content\n').digest('hex') },
+          },
+        ]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'fails closed when a same-sized target changes after metadata and before content reading',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-adaptive-drift-'));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      const target = join(root, 'target');
+      const linkPath = join(checkoutRoot, 'tool');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(target, 'content\n');
+      symlinkSync(target, linkPath);
+      const managed = await createManagedProcessTestSession();
+      try {
+        await expect(
+          snapshotManagedExternalFileLinksWithAdaptiveBudget({
+            linkPaths: [linkPath],
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            maxLinks: 1,
+            maxTargetReadBytes: 1024,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            afterMetadataForTests: () => {
+              writeFileSync(target, 'changed\n');
+            },
+          }),
+        ).rejects.toThrow(/元数据与内容读取身份不一致/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'keeps observed content identity drift ahead of the absolute deadline',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-content-drift-deadline-'));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      const target = join(root, 'target');
+      const linkPath = join(checkoutRoot, 'tool');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(target, 'content\n');
+      symlinkSync(target, linkPath);
+      const managed = await createManagedProcessTestSession();
+      let now = 0;
+      try {
+        await expect(
+          snapshotManagedExternalFileLinksWithAdaptiveBudget({
+            linkPaths: [linkPath],
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            maxLinks: 1,
+            maxTargetReadBytes: 1024,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            nowForTests: () => now,
+            afterMetadataForTests: () => {
+              writeFileSync(target, 'changed\n');
+            },
+            onIdentityPhaseForTests: (phase) => {
+              if (phase === 'before-content-compare') now = 31_020;
+            },
+          }),
+        ).rejects.toThrow(/元数据与内容读取身份不一致/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'keeps observed final metadata drift ahead of the absolute deadline',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-final-metadata-deadline-'));
+      const checkoutRoot = join(root, 'checkout');
+      const sourceRoot = join(root, 'source');
+      const target = join(root, 'target');
+      const linkPath = join(checkoutRoot, 'tool');
+      mkdirSync(checkoutRoot);
+      mkdirSync(sourceRoot);
+      writeFileSync(target, 'content\n');
+      symlinkSync(target, linkPath);
+      const managed = await createManagedProcessTestSession();
+      let now = 0;
+      try {
+        await expect(
+          snapshotManagedExternalFileLinksWithAdaptiveBudget({
+            linkPaths: [linkPath],
+            checkoutRoot,
+            sourceRoot,
+            maxFileBytes: 1024,
+            maxLinks: 1,
+            maxTargetReadBytes: 1024,
+            session: managed.session,
+            kind: 'quality-check',
+            cwd: checkoutRoot,
+            nowForTests: () => now,
+            onIdentityPhaseForTests: (phase) => {
+              if (phase === 'after-content-validated') writeFileSync(target, 'changed\n');
+              if (phase === 'before-final-metadata-compare') now = 31_020;
+            },
+          }),
+        ).rejects.toThrow(/元数据在内容读取期间发生变化/u);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+        await managed.close();
+      }
+    },
+    30_000,
+  );
 });

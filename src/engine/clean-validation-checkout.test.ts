@@ -741,11 +741,7 @@ describe.runIf(
     execFileSync('git', ['commit', '-q', '-m', 'rename source to docs'], { cwd: source.root });
     const head = source.head();
     const platform =
-      process.platform === 'darwin'
-        ? 'macos'
-        : process.platform === 'win32'
-          ? 'windows'
-          : 'linux';
+      process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
     const pathContract = contract();
     pathContract.checks = {
       test: {
@@ -1645,6 +1641,105 @@ describe.runIf(
           message: expect.stringContaining('需受管核对的普通文件链接超过 1024 条'),
         });
       } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'keeps the adaptive external-link deadline through the final topology scan',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const external = mkdtempSync(join(tmpdir(), 'coding-x-external-deadline-'));
+      roots.push(external);
+      const target = join(external, 'tool');
+      writeFileSync(target, 'content\n');
+      const managed = await createManagedProcessTestSession();
+      let now = 0;
+      try {
+        await expect(
+          createCleanValidationCheckout({
+            sourceRoot: source.root,
+            head: source.head(),
+            contract: contract({
+              prepare: [
+                {
+                  executable: process.execPath,
+                  args: [
+                    '-e',
+                    `require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync(${JSON.stringify(target)}, 'node_modules/tool')`,
+                  ],
+                  cwd: '.',
+                  platforms: ['linux', 'macos'],
+                  timeoutMs: 5_000,
+                },
+              ],
+            }),
+            managed: { session: managed.session, kind: 'quality-check' },
+            externalFileLinkNowForTests: () => now,
+            beforeFinalTopologyScanForTests: (root) => {
+              if (existsSync(join(root, 'node_modules', 'tool'))) now = 31_020;
+            },
+          }),
+        ).rejects.toMatchObject({
+          code: 'topology-unverifiable',
+          message: expect.stringMatching(
+            /budgetMs=31020, elapsedMs=31020, links=1, distinctTargets=1/u,
+          ),
+        });
+      } finally {
+        await managed.close();
+      }
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
+    'keeps observed final topology drift ahead of the absolute deadline',
+    async () => {
+      const source = repository({ '.gitignore': 'node_modules/\n', 'source.txt': 'tracked\n' });
+      const external = mkdtempSync(join(tmpdir(), 'coding-x-topology-drift-deadline-'));
+      roots.push(external);
+      const target = join(external, 'tool');
+      writeFileSync(target, 'content\n');
+      const managed = await createManagedProcessTestSession();
+      let now = 0;
+      let mutate = false;
+      const checkout = await createCleanValidationCheckout({
+        sourceRoot: source.root,
+        head: source.head(),
+        contract: contract({
+          prepare: [
+            {
+              executable: process.execPath,
+              args: [
+                '-e',
+                `require('node:fs').mkdirSync('node_modules'); require('node:fs').symlinkSync(${JSON.stringify(target)}, 'node_modules/tool')`,
+              ],
+              cwd: '.',
+              platforms: ['linux', 'macos'],
+              timeoutMs: 5_000,
+            },
+          ],
+        }),
+        managed: { session: managed.session, kind: 'quality-check' },
+        externalFileLinkNowForTests: () => now,
+        beforeFinalTopologyScanForTests: (root) => {
+          if (mutate) writeFileSync(join(root, 'node_modules', 'late.txt'), 'late\n');
+        },
+        afterFinalTopologyScanForTests: () => {
+          if (mutate) now = 31_020;
+        },
+      });
+      mutate = true;
+      try {
+        await expect(checkout.assertCurrent('期限边缘拓扑漂移')).rejects.toMatchObject({
+          code: 'topology-unverifiable',
+          message: expect.stringContaining('整树拓扑、hard link 组或后备文件系统'),
+        });
+      } finally {
+        expect(checkout.cleanup()).toMatchObject({ status: 'removed' });
         await managed.close();
       }
     },

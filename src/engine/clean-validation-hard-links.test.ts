@@ -123,5 +123,27 @@ describe.runIf(process.platform === 'linux' || process.platform === 'darwin')(
       expect(current.groups).toBe(1);
       expect(current.digest).not.toBe(initial.digest);
     });
+
+    it('checks the shared external-link deadline during recursive topology traversal', () => {
+      const root = mkdtempSync(join(tmpdir(), 'coding-x-topology-deadline-'));
+      roots.push(root);
+      mkdirSync(join(root, 'nested'));
+      writeFileSync(join(root, 'nested', 'first'), 'first\n');
+      writeFileSync(join(root, 'nested', 'second'), 'second\n');
+      let checkpoints = 0;
+
+      expect(() =>
+        snapshotCleanValidationHardLinks({
+          root,
+          owningRoot: () => null,
+          maxEntries: 100,
+          checkpoint: () => {
+            checkpoints += 1;
+            if (checkpoints === 3) throw new Error('shared-deadline-expired');
+          },
+        }),
+      ).toThrow('shared-deadline-expired');
+      expect(checkpoints).toBe(3);
+    });
   },
 );
