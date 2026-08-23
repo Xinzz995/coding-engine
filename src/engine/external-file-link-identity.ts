@@ -249,8 +249,9 @@ export class ExternalFileLinkSnapshotBudget {
     const elapsed = Math.max(0, Math.floor(this.now() - this.#startedAt));
     const workload = this.#workload;
     const unavailable = 'unavailable';
+    const readBytes = this.#readerBatchActive ? unavailable : String(this.#targetReadBytes);
     const remainingBytes =
-      workload === undefined
+      workload === undefined || this.#readerBatchActive
         ? unavailable
         : String(Math.max(0, workload.distinctTargetBytes - this.#targetReadBytes));
     return new ExternalFileLinkSnapshotBudgetError(
@@ -261,7 +262,7 @@ export class ExternalFileLinkSnapshotBudget {
         `distinctTargets=${workload === undefined ? unavailable : workload.distinctTargets}, ` +
         `completedLinks=${this.#completedLinks}, ` +
         `completedTargets=${this.#targets.size}, ` +
-        `readBytes=${this.#targetReadBytes}, ` +
+        `readBytes=${readBytes}, ` +
         `remainingBytes=${remainingBytes}）`,
     );
   }
@@ -285,7 +286,7 @@ export class ExternalFileLinkSnapshotBudget {
   /** 把所有目标内容读取绑定到同一个绝对期限，而不是为每个文件重新获得 30 秒。 */
   remainingMs(): number {
     this.checkpoint();
-    const remaining = Math.floor(this.#deadline - this.now());
+    const remaining = Math.ceil(this.#deadline - this.now());
     if (remaining < 1) {
       throw this.timeoutError();
     }
@@ -319,7 +320,7 @@ export class ExternalFileLinkSnapshotBudget {
       );
     }
     this.#targetReadBytes += bytes;
-    this.checkpoint();
+    this.assertUsableBeforeDeadline();
   }
 
   poisonReaderBatch(): void {
@@ -350,7 +351,7 @@ export class ExternalFileLinkSnapshotBudget {
   }
 
   assertCompletedWorkload(): void {
-    this.checkpoint();
+    this.assertUsableBeforeDeadline();
     const workload = this.#workload;
     if (
       workload !== undefined &&
@@ -360,6 +361,7 @@ export class ExternalFileLinkSnapshotBudget {
     ) {
       throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接核对进度或工作量不完整');
     }
+    this.checkpoint();
   }
 
   reserveTarget(identity: string, bytes: number): boolean {
@@ -374,7 +376,7 @@ export class ExternalFileLinkSnapshotBudget {
   }
 
   #reserveTarget(identity: string, bytes: number, digest?: string): boolean {
-    this.checkpoint();
+    this.assertUsableBeforeDeadline();
     const previous = this.#targets.get(identity);
     if (previous !== undefined) {
       if (previous.bytes !== bytes) {
@@ -750,7 +752,7 @@ function snapshotLink(request, linkPath, darwinMounts, batchTargetBudget) {
     return { result: { scope, resolvedPath }, proof };
   }
 
-  const targetKey = [resolvedPath, ...Object.values(identity(targetBefore))].join('\0');
+  const targetKey = Object.values(identity(targetBefore)).join('\0');
   const cachedDigest = batchTargetBudget.targets.get(targetKey);
   if (cachedDigest !== undefined) {
     assertLinkProof(linkPath, proof, darwinMounts, request.checkoutRoot);
@@ -913,7 +915,7 @@ try {
 `;
 
 const EXTERNAL_FILE_LINK_METADATA_READER = (() => {
-  const startMarker = String.raw`  const targetKey = [resolvedPath, ...Object.values(identity(targetBefore))].join('\0');`;
+  const startMarker = String.raw`  const targetKey = Object.values(identity(targetBefore)).join('\0');`;
   const endMarker = '\n  } finally {';
   const start = EXTERNAL_FILE_LINK_READER.indexOf(startMarker);
   const end = EXTERNAL_FILE_LINK_READER.indexOf(endMarker, start);
@@ -1365,9 +1367,7 @@ function managedExternalFileLinkReaderVerdict(
   result: ManagedWorkspaceProcessResult,
   context: string,
 ): 'completed' | 'timeout' {
-  const diagnostic = Buffer.concat([result.stdout, result.stderr])
-    .toString('utf8')
-    .slice(-500);
+  const diagnostic = Buffer.concat([result.stdout, result.stderr]).toString('utf8').slice(-500);
   const detail = diagnostic ? `：${diagnostic}` : '';
   if (
     result.terminationReason !== null &&
@@ -1398,12 +1398,21 @@ function managedExternalFileLinkReaderVerdict(
   if (result.processTreeNotEmpty || result.verdict === 'process-tree-not-empty') {
     throw new ExternalFileLinkSnapshotBudgetError(`${context}进程树未清空`);
   }
-  if (result.timedOut || result.terminationReason === 'timeout') return 'timeout';
+  if (
+    result.verdict === 'terminated' &&
+    result.exitCode === null &&
+    result.signal === null &&
+    result.timedOut &&
+    result.terminationReason === 'timeout'
+  ) {
+    return 'timeout';
+  }
   if (
     result.verdict !== 'completed' ||
     result.exitCode !== 0 ||
     result.signal !== null ||
-    result.terminationReason !== null
+    result.terminationReason !== null ||
+    result.timedOut
   ) {
     throw new ExternalFileLinkSnapshotBudgetError(`${context}结算证明缺失或矛盾`);
   }
@@ -1421,8 +1430,14 @@ export function managedExternalFileLinkReaderVerdictForTests(
  * 多条链接按真实 24k 命令行上限贪心分批；每批在同一个固定受管 reader 中依次解析，
  * 所有批次共享调用方的绝对期限。主进程只消费结构化快照，不读取链接目标。
  */
-export async function snapshotManagedExternalFileLinks(
+type ParsedExternalFileLinkSnapshotBatchValidator = (
+  snapshots: readonly ManagedExternalFileLinkSnapshot[],
+  firstIndex: number,
+) => void;
+
+async function snapshotManagedExternalFileLinksInternal(
   options: ManagedExternalFileLinkBatchSnapshotOptions,
+  validateParsedBatch?: ParsedExternalFileLinkSnapshotBatchValidator,
 ): Promise<ManagedExternalFileLinkSnapshot[]> {
   if (!canSnapshotExternalFileLinks(process.platform)) {
     throw new ExternalFileLinkSnapshotBudgetError(
@@ -1497,20 +1512,14 @@ export async function snapshotManagedExternalFileLinks(
         sourceRoot,
         maxFileBytes: options.maxFileBytes,
       });
-      options.budget.checkpoint();
       const batchTargets = new Map<string, number>();
       for (const snapshot of parsed) {
         if (snapshot.scope !== 'external') continue;
-        const key = externalFileTargetIdentityKey(
-          snapshot.identity.resolvedPath,
-          snapshot.identity.target,
-        );
+        const key = externalFileTargetIdentityKey(snapshot.identity.target);
         const bytes = Number(snapshot.identity.target.size);
         const previous = batchTargets.get(key);
         if (previous !== undefined && previous !== bytes) {
-          throw new ExternalFileLinkSnapshotBudgetError(
-            '外部普通文件链接批次目标大小不一致',
-          );
+          throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接批次目标大小不一致');
         }
         batchTargets.set(key, bytes);
       }
@@ -1521,13 +1530,12 @@ export async function snapshotManagedExternalFileLinks(
         }
         batchReadBytes += bytes;
       }
+      options.budget.assertUsableBeforeDeadline();
+      validateParsedBatch?.(parsed, batch.firstIndex);
       options.budget.finishReaderBatch(batchReadBytes);
       for (const snapshot of parsed) {
         if (snapshot.scope !== 'external') continue;
-        const key = externalFileTargetIdentityKey(
-          snapshot.identity.resolvedPath,
-          snapshot.identity.target,
-        );
+        const key = externalFileTargetIdentityKey(snapshot.identity.target);
         options.budget.reserveTargetSnapshot(
           key,
           Number(snapshot.identity.target.size),
@@ -1535,6 +1543,7 @@ export async function snapshotManagedExternalFileLinks(
         );
       }
       if (options.trackProgress !== false) options.budget.completeLinks(parsed.length);
+      options.budget.checkpoint();
       snapshots.push(...parsed);
     } catch (error) {
       if (budgetGranted) options.budget.poisonReaderBatch();
@@ -1547,12 +1556,24 @@ export async function snapshotManagedExternalFileLinks(
   return snapshots;
 }
 
+export async function snapshotManagedExternalFileLinks(
+  options: ManagedExternalFileLinkBatchSnapshotOptions,
+): Promise<ManagedExternalFileLinkSnapshot[]> {
+  return await snapshotManagedExternalFileLinksInternal(options);
+}
+
 /**
  * 元数据 reader 与内容 reader 使用同一套受管解析和前后身份复核；它不读取文件内容，
  * 只为在内容读取前机械建立受界工作量。调用方必须在内容阶段重新比对这些身份。
  */
-export async function snapshotManagedExternalFileLinkMetadata(
+type ParsedExternalFileLinkMetadataBatchValidator = (
+  metadata: readonly ManagedExternalFileLinkMetadata[],
+  firstIndex: number,
+) => void;
+
+async function snapshotManagedExternalFileLinkMetadataInternal(
   options: ManagedExternalFileLinkBatchMetadataOptions,
+  validateParsedBatch?: ParsedExternalFileLinkMetadataBatchValidator,
 ): Promise<ManagedExternalFileLinkMetadata[]> {
   if (!canSnapshotExternalFileLinks(process.platform)) {
     throw new ExternalFileLinkSnapshotBudgetError(
@@ -1622,14 +1643,22 @@ export async function snapshotManagedExternalFileLinkMetadata(
       sourceRoot,
       maxFileBytes: options.maxFileBytes,
     });
-    options.budget.checkpoint();
+    options.budget.assertUsableBeforeDeadline();
+    validateParsedBatch?.(parsed, batch.firstIndex);
     if (options.trackProgress) options.budget.completeLinks(parsed.length);
+    options.budget.checkpoint();
     metadata.push(...parsed);
   }
   if (metadata.length !== options.linkPaths.length) {
     throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据结果不完整');
   }
   return metadata;
+}
+
+export async function snapshotManagedExternalFileLinkMetadata(
+  options: ManagedExternalFileLinkBatchMetadataOptions,
+): Promise<ManagedExternalFileLinkMetadata[]> {
+  return await snapshotManagedExternalFileLinkMetadataInternal(options);
 }
 
 function sameExternalFileLinkMetadataIdentity(
@@ -1652,7 +1681,11 @@ function sameManagedExternalFileLinkMetadata(
   if (left.scope === 'external' && right.scope === 'external') {
     return sameExternalFileLinkMetadataIdentity(left.identity, right.identity);
   }
-  return left.scope !== 'external' && right.scope !== 'external' && left.resolvedPath === right.resolvedPath;
+  return (
+    left.scope !== 'external' &&
+    right.scope !== 'external' &&
+    left.resolvedPath === right.resolvedPath
+  );
 }
 
 interface ResolvedExternalFileLinkSnapshotWorkload {
@@ -1680,10 +1713,7 @@ function resolveExternalFileLinkSnapshotWorkload(
       );
     }
     targetByResolvedPath.set(observation.identity.resolvedPath, observation.identity.target);
-    const key = externalFileTargetIdentityKey(
-      observation.identity.resolvedPath,
-      observation.identity.target,
-    );
+    const key = externalFileTargetIdentityKey(observation.identity.target);
     const bytes = Number(observation.identity.target.size);
     const previous = distinctTargets.get(key);
     if (previous !== undefined) {
@@ -1722,6 +1752,10 @@ export type ManagedAdaptiveExternalFileLinkSnapshotOptions = Omit<
   readonly onWorkloadForTests?: (workload: ExternalFileLinkSnapshotWorkload) => void;
   /** @internal 只用于在元数据与内容读取之间制造确定性身份漂移。 */
   readonly afterMetadataForTests?: () => void;
+  /** @internal 只用于把确定性身份漂移与期限推进到同一裁决边缘。 */
+  readonly onIdentityPhaseForTests?: (
+    phase: 'before-content-compare' | 'after-content-validated' | 'before-final-metadata-compare',
+  ) => void;
 };
 
 export interface ManagedAdaptiveExternalFileLinkSnapshotResult {
@@ -1762,57 +1796,75 @@ export async function snapshotManagedExternalFileLinksWithAdaptiveBudget(
 
   const targetDigests = new Map<string, string>();
   if (resolved.representativeIndexes.length > 0) {
-    const content = await snapshotManagedExternalFileLinks({
+    await snapshotManagedExternalFileLinksInternal(
+      {
+        ...options,
+        linkPaths: resolved.representativeIndexes.map((index) => options.linkPaths[index]),
+        budget,
+        countLinks: false,
+        trackProgress: false,
+      },
+      (content, firstIndex) => {
+        options.onIdentityPhaseForTests?.('before-content-compare');
+        for (let offset = 0; offset < content.length; offset += 1) {
+          const representativeIndex = resolved.representativeIndexes[firstIndex + offset];
+          const initial = initialMetadata[representativeIndex];
+          const observed = content[offset];
+          if (
+            initial.scope !== 'external' ||
+            observed.scope !== 'external' ||
+            !sameExternalFileLinkMetadataIdentity(initial.identity, observed.identity)
+          ) {
+            throw new ExternalFileLinkSnapshotBudgetError(
+              '外部普通文件链接元数据与内容读取身份不一致',
+            );
+          }
+          const key = externalFileTargetIdentityKey(observed.identity.target);
+          const previous = targetDigests.get(key);
+          if (previous !== undefined && previous !== observed.identity.targetDigest) {
+            throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接重复目标摘要冲突');
+          }
+          targetDigests.set(key, observed.identity.targetDigest);
+        }
+      },
+    );
+  }
+  options.onIdentityPhaseForTests?.('after-content-validated');
+
+  const finalMetadata = await snapshotManagedExternalFileLinkMetadataInternal(
+    {
       ...options,
-      linkPaths: resolved.representativeIndexes.map((index) => options.linkPaths[index]),
       budget,
       countLinks: false,
-      trackProgress: false,
-    });
-    for (let offset = 0; offset < content.length; offset += 1) {
-      const initial = initialMetadata[resolved.representativeIndexes[offset]];
-      const observed = content[offset];
-      if (
-        initial.scope !== 'external' ||
-        observed.scope !== 'external' ||
-        !sameExternalFileLinkMetadataIdentity(initial.identity, observed.identity)
-      ) {
-        throw new ExternalFileLinkSnapshotBudgetError(
-          '外部普通文件链接元数据与内容读取身份不一致',
-        );
+      trackProgress: true,
+    },
+    (metadata, firstIndex) => {
+      options.onIdentityPhaseForTests?.('before-final-metadata-compare');
+      for (let offset = 0; offset < metadata.length; offset += 1) {
+        const index = firstIndex + offset;
+        const observation = metadata[offset];
+        if (!sameManagedExternalFileLinkMetadata(initialMetadata[index], observation)) {
+          throw new ExternalFileLinkSnapshotBudgetError(
+            '外部普通文件链接元数据在内容读取期间发生变化',
+          );
+        }
+        if (observation.scope !== 'external') continue;
+        const key = externalFileTargetIdentityKey(observation.identity.target);
+        if (!targetDigests.has(key)) {
+          throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接缺少稳定目标内容摘要');
+        }
       }
-      const key = externalFileTargetIdentityKey(
-        observed.identity.resolvedPath,
-        observed.identity.target,
-      );
-      const previous = targetDigests.get(key);
-      if (previous !== undefined && previous !== observed.identity.targetDigest) {
-        throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接重复目标摘要冲突');
-      }
-      targetDigests.set(key, observed.identity.targetDigest);
-    }
-  }
-
-  const finalMetadata = await snapshotManagedExternalFileLinkMetadata({
-    ...options,
-    budget,
-    countLinks: false,
-    trackProgress: true,
-  });
+    },
+  );
   if (finalMetadata.length !== initialMetadata.length) {
     throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接最终元数据结果不完整');
   }
   const snapshots = finalMetadata.map((observation, index) => {
     if (!sameManagedExternalFileLinkMetadata(initialMetadata[index], observation)) {
-      throw new ExternalFileLinkSnapshotBudgetError(
-        '外部普通文件链接元数据在内容读取期间发生变化',
-      );
+      throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接元数据在内容读取期间发生变化');
     }
     if (observation.scope !== 'external') return observation;
-    const key = externalFileTargetIdentityKey(
-      observation.identity.resolvedPath,
-      observation.identity.target,
-    );
+    const key = externalFileTargetIdentityKey(observation.identity.target);
     const targetDigest = targetDigests.get(key);
     if (targetDigest === undefined) {
       throw new ExternalFileLinkSnapshotBudgetError('外部普通文件链接缺少稳定目标内容摘要');
@@ -1838,12 +1890,8 @@ export async function snapshotManagedExternalFileLink(
   return snapshots[0];
 }
 
-export function externalFileTargetIdentityKey(
-  resolvedPath: string,
-  identity: ExternalFileStatIdentity,
-): string {
+function externalFileTargetIdentityKey(identity: ExternalFileStatIdentity): string {
   return [
-    resolvedPath,
     identity.dev,
     identity.ino,
     identity.uid,

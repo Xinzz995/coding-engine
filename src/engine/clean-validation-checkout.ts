@@ -113,6 +113,8 @@ export interface CleanValidationCheckoutOptions {
   readonly externalFileLinkNowForTests?: () => number;
   /** @internal 在最终拓扑复核前制造确定性竞态；生产不设置。 */
   readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
+  /** @internal 在最终拓扑证明建立后推进受控时钟；生产不设置。 */
+  readonly afterFinalTopologyScanForTests?: (root: string, context: string) => void;
 }
 
 export interface CleanValidationCheckoutCleanup {
@@ -248,10 +250,7 @@ async function observeManagedFileLinks(
     });
   } catch (error) {
     if (error instanceof ExternalFileLinkSnapshotBudgetError) {
-      throw new CleanValidationCheckoutError(
-        'topology-unverifiable',
-        `${context}${error.message}`,
-      );
+      throw new CleanValidationCheckoutError('topology-unverifiable', `${context}${error.message}`);
     }
     throw new CleanValidationCheckoutError(
       'topology-unverifiable',
@@ -1289,6 +1288,7 @@ async function assertSafeArtifactTopology(
     readonly managed: ManagedGateContext;
     readonly externalFileLinkNowForTests?: () => number;
     readonly beforeFinalTopologyScanForTests?: (root: string, context: string) => void;
+    readonly afterFinalTopologyScanForTests?: (root: string, context: string) => void;
   },
 ): Promise<Map<string, ExternalFileLinkIdentity>> {
   const assertNoMountPoints = (): CleanValidationBackingFileSystemProof => {
@@ -1411,10 +1411,7 @@ async function assertSafeArtifactTopology(
     await visit(root);
   } catch (error) {
     if (error instanceof CleanValidationHardLinkProofError) {
-      throw new CleanValidationCheckoutError(
-        'topology-unverifiable',
-        `${context}${error.message}`,
-      );
+      throw new CleanValidationCheckoutError('topology-unverifiable', `${context}${error.message}`);
     }
     if (error instanceof CleanValidationCheckoutError) throw error;
     throw new CleanValidationCheckoutError(
@@ -1428,10 +1425,7 @@ async function assertSafeArtifactTopology(
     initialHardLinkProof = freezeCleanValidationHardLinks(topology);
   } catch (error) {
     if (error instanceof CleanValidationHardLinkProofError) {
-      throw new CleanValidationCheckoutError(
-        'topology-unverifiable',
-        `${context}${error.message}`,
-      );
+      throw new CleanValidationCheckoutError('topology-unverifiable', `${context}${error.message}`);
     }
     if (error instanceof CleanValidationCheckoutError) throw error;
     throw new CleanValidationCheckoutError(
@@ -1465,8 +1459,11 @@ async function assertSafeArtifactTopology(
     checkpoint();
     externalLinkBudget?.checkpoint();
   };
-  const managedObservations: ManagedExternalFileLinkSnapshot[] =
-    managedSnapshot?.snapshots ?? [];
+  const externalLinkUsableBeforeDeadline = (): void => {
+    checkpoint();
+    externalLinkBudget?.assertUsableBeforeDeadline();
+  };
+  const managedObservations: ManagedExternalFileLinkSnapshot[] = managedSnapshot?.snapshots ?? [];
   for (let index = 0; index < managedLinks.length; index += 1) {
     externalLinkCheckpoint();
     const { path } = managedLinks[index];
@@ -1512,6 +1509,17 @@ async function assertSafeArtifactTopology(
   try {
     externalLinkCheckpoint();
     const finalBackingFileSystem = assertNoMountPoints();
+    externalLinkUsableBeforeDeadline();
+    if (
+      initialHardLinkProof.groups > 0 &&
+      (!finalBackingFileSystem.hardLinksTrusted ||
+        finalBackingFileSystem.identity !== initialBackingFileSystem.identity)
+    ) {
+      throw new CleanValidationCheckoutError(
+        'topology-unverifiable',
+        `${context}验证检出整树拓扑、hard link 组或后备文件系统在核对期间发生变化`,
+      );
+    }
     externalLinkCheckpoint();
     options.beforeFinalTopologyScanForTests?.(root, context);
     externalLinkCheckpoint();
@@ -1524,35 +1532,34 @@ async function assertSafeArtifactTopology(
         ? {}
         : { checkpoint: () => externalLinkBudget.checkpoint() }),
     });
-    externalLinkCheckpoint();
-    const afterFinalScanFileSystem = assertNoMountPoints();
-    externalLinkBudget?.assertDarwinMountTableCurrent();
-    externalLinkCheckpoint();
+    options.afterFinalTopologyScanForTests?.(root, context);
+    externalLinkUsableBeforeDeadline();
     if (
       finalHardLinkProof.digest !== initialHardLinkProof.digest ||
-      finalHardLinkProof.groups !== initialHardLinkProof.groups ||
-      finalBackingFileSystem.identity !== afterFinalScanFileSystem.identity ||
-      (finalHardLinkProof.groups > 0 &&
-        (!finalBackingFileSystem.hardLinksTrusted ||
-          finalBackingFileSystem.identity !== initialBackingFileSystem.identity))
+      finalHardLinkProof.groups !== initialHardLinkProof.groups
     ) {
       throw new CleanValidationCheckoutError(
         'topology-unverifiable',
         `${context}验证检出整树拓扑、hard link 组或后备文件系统在核对期间发生变化`,
       );
     }
-  } catch (error) {
-    if (error instanceof ExternalFileLinkSnapshotBudgetError) {
+    externalLinkCheckpoint();
+    const afterFinalScanFileSystem = assertNoMountPoints();
+    externalLinkUsableBeforeDeadline();
+    if (finalBackingFileSystem.identity !== afterFinalScanFileSystem.identity) {
       throw new CleanValidationCheckoutError(
         'topology-unverifiable',
-        `${context}${error.message}`,
+        `${context}验证检出整树拓扑、hard link 组或后备文件系统在核对期间发生变化`,
       );
     }
+    externalLinkBudget?.assertDarwinMountTableCurrent();
+    externalLinkCheckpoint();
+  } catch (error) {
+    if (error instanceof ExternalFileLinkSnapshotBudgetError) {
+      throw new CleanValidationCheckoutError('topology-unverifiable', `${context}${error.message}`);
+    }
     if (error instanceof CleanValidationHardLinkProofError) {
-      throw new CleanValidationCheckoutError(
-        'topology-unverifiable',
-        `${context}${error.message}`,
-      );
+      throw new CleanValidationCheckoutError('topology-unverifiable', `${context}${error.message}`);
     }
     if (error instanceof CleanValidationCheckoutError) throw error;
     throw new CleanValidationCheckoutError(
@@ -1884,6 +1891,9 @@ export async function createCleanValidationCheckout(
           ...(options.beforeFinalTopologyScanForTests === undefined
             ? {}
             : { beforeFinalTopologyScanForTests: options.beforeFinalTopologyScanForTests }),
+          ...(options.afterFinalTopologyScanForTests === undefined
+            ? {}
+            : { afterFinalTopologyScanForTests: options.afterFinalTopologyScanForTests }),
         },
       );
       const unexpected = status
