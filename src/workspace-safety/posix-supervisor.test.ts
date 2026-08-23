@@ -164,6 +164,33 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     expect(parsePosixSupervisorEventControlled(event)).toEqual({ type: 'RESULT', code, signal });
   });
 
+  it('rejects an opaque runner natural settlement budget above 30 seconds before execution', async () => {
+    const setupState = await setup();
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-opaque-settlement-bound-'));
+    roots.push(controlRoot);
+    const markerPath = join(controlRoot, 'must-not-run');
+
+    await expect(
+      runWorkspaceOperation(setupState.session, operationOptions(), (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(
+            `require('node:fs').writeFileSync(${JSON.stringify(markerPath)},'ran')`,
+            setupState.workspace,
+          ),
+          posixProcessDomain: 'opaque-runner',
+          timeouts: { opaqueRunnerNaturalSettlementMs: 30_001 },
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'invalid',
+      message: expect.stringMatching(/opaqueRunnerNaturalSettlementMs.*supported range/u),
+    });
+
+    expect(existsSync(markerPath)).toBe(false);
+    expect(setupState.session.state).toBe('isolated');
+    await expect(setupState.session.close()).rejects.toMatchObject({ code: 'isolated' });
+  });
+
   it('detects a deliberate IPC control descriptor in the inventory positive control', async () => {
     const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-posix-fd-positive-'));
     roots.push(controlRoot);
@@ -793,6 +820,85 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
     await setupState.session.close();
   }, 15_000);
 
+  it('keeps an overdue opaque runner proof-missing with bounded settlement diagnostics', async () => {
+    const setupState = await setup();
+    const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-opaque-settlement-deadline-'));
+    roots.push(controlRoot);
+    const signalPath = join(controlRoot, 'unexpected-term');
+    const descendantSource = [
+      "const {writeFileSync}=require('node:fs');",
+      `const signalPath=${JSON.stringify(signalPath)};`,
+      "process.on('SIGTERM',()=>writeFileSync(signalPath,'SIGTERM'));",
+      "if (!process.send) process.exit(92);",
+      "process.send({type:'ready'});",
+      'setInterval(()=>{},1000);',
+    ].join('');
+    const rootSource = [
+      "const {spawn}=require('node:child_process');",
+      `const child=spawn(process.execPath,['-e',${JSON.stringify(descendantSource)}],`,
+      "  {stdio:['ignore',1,2,'ipc']});",
+      "child.once('message',()=>{child.disconnect();process.exit(0);});",
+    ].join('');
+    let containment: ContainmentDescriptor | undefined;
+    let rootResultAt: number | undefined;
+    let failure: unknown;
+
+    try {
+      await runWorkspaceOperation(setupState.session, operationOptions(), (operation) =>
+        runDarkPosixSupervisedOperation(operation, {
+          target: target(rootSource, setupState.workspace),
+          posixProcessDomain: 'opaque-runner',
+          timeouts: {
+            naturalDrainMs: 50,
+            opaqueRunnerNaturalSettlementMs: 350,
+            termMs: 50,
+            killMs: 1000,
+            ackMs: 1000,
+            pollMs: 10,
+          },
+          hooks: {
+            onArmed: ({ containment: armed }) => {
+              containment = armed;
+              trackGroup(armed);
+            },
+            onRootResult: () => {
+              rootResultAt = performance.now();
+            },
+          },
+        }),
+      );
+    } catch (error) {
+      failure = error;
+    }
+    const failedAt = performance.now();
+
+    expect(failure).toBeInstanceOf(Error);
+    if (!(failure instanceof Error)) throw new Error('opaque settlement unexpectedly completed');
+    expect(failure).toMatchObject({ code: 'isolated' });
+    expect(failure.message).toContain('settlementBudgetMs=350');
+    expect(failure.message).toContain('lastObservedMemberCount=2');
+    expect(failure.message).toContain('stdoutEof=false');
+    expect(failure.message).toContain('stderrEof=false');
+    expect(failure.message).toContain('pendingOutputCount=0');
+    expect(failure.message).not.toMatch(/memberPids|members=\[|pid=\d/u);
+    expect(failure.message.length).toBeLessThan(512);
+    expect(rootResultAt).toBeTypeOf('number');
+    if (rootResultAt === undefined) throw new Error('opaque runner RESULT was not observed');
+    expect(failedAt - rootResultAt).toBeGreaterThanOrEqual(250);
+    expect(failedAt - rootResultAt).toBeLessThan(2000);
+    expect(existsSync(signalPath)).toBe(false);
+    expect(existsSync(join(operationPath(setupState.workspace), DRAINED_RECEIPT_FILE))).toBe(false);
+    expect(
+      parseQuarantineRecord(
+        readFileSync(join(operationPath(setupState.workspace), QUARANTINE_FILE)),
+      ).reason,
+    ).toBe('operation-proof-missing');
+    if (containment?.platform === 'posix-process-group-v1') {
+      expect(await waitForPosixProcessGroupEmpty(containment.pgid, 5000, 20)).toBe(true);
+      groups.delete(containment.pgid);
+    }
+  }, 15_000);
+
   it.each([
     ['natural signal exit', "process.kill(process.pid, 'SIGTERM')"],
     [
@@ -810,7 +916,13 @@ describe.runIf(process.platform !== 'win32')('dark POSIX supervisor integration'
           runDarkPosixSupervisedOperation(operation, {
             target: target(source, setupState.workspace),
             posixProcessDomain: 'opaque-runner',
-            timeouts: { naturalDrainMs: 100, termMs: 100, killMs: 3000, pollMs: 20 },
+            timeouts: {
+              naturalDrainMs: 100,
+              opaqueRunnerNaturalSettlementMs: 100,
+              termMs: 100,
+              killMs: 3000,
+              pollMs: 20,
+            },
             hooks: {
               onArmed: ({ containment: armed }) => {
                 containment = armed;

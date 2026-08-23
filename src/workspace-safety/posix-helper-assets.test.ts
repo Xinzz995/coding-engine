@@ -132,8 +132,12 @@ describe.runIf(process.platform !== 'win32')('fixed POSIX helper assets', () => 
     expect(supervisor).not.toContain('signalGroup(');
     expect(supervisor).toContain('const prepareDeadline = deadlineAfter(timeouts.handshakeMs)');
     expect(supervisor).toContain('remainingDeadlineMs(deadline)');
-    expect(supervisor).toContain('let naturallyDrained = containmentIsNaturallyDrained();');
-    expect(supervisor).toContain('if (remainingDeadlineMs(naturalDeadline) === 0) break;');
+    expect(supervisor).toContain('const waitForNaturalDrain = async (deadline) => {');
+    expect(supervisor).toContain('let naturallyDrained = await waitForNaturalDrain(naturalDeadline);');
+    expect(supervisor).toContain(
+      'naturallyDrained = await waitForNaturalDrain(naturalSettlementDeadline);',
+    );
+    expect(supervisor).toContain('if (remainingDeadlineMs(deadline) === 0) break;');
     expect(supervisor).toContain('await terminateContainment(beginCloseout());');
     expect(supervisor).toContain(
       "launcher?.send({ schemaVersion: 1, type: 'SIGNAL_GROUP', mode: 'KILL' });",

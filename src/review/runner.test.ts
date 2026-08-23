@@ -4062,7 +4062,9 @@ describe('managed Final Review runner execution', () => {
       expect(existsSync(reviewPackage.root)).toBe(true);
       expect(invocationPath && existsSync(invocationPath)).toBe(true);
     },
-    30_000,
+    // The production opaque-runner settlement window is 30 seconds; this residue case must
+    // observe that full fail-closed boundary before asserting retained temporary domains.
+    50_000,
   );
 
   it.runIf(process.platform === 'linux' || process.platform === 'darwin')(
