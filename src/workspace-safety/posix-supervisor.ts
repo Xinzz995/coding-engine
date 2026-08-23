@@ -46,11 +46,15 @@ const SUPERVISOR_HELPER_PATH = posixSupervisorHelperPath();
 const LAUNCHER_HELPER_PATH = posixLauncherHelperPath();
 const MAX_EVENT_STRING = 16_384;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+// 取舍: opaque Runner 的自然结算固定最多 30 秒；真实自托管负载再次超过该上限时再重新评估。
+const DEFAULT_OPAQUE_RUNNER_NATURAL_SETTLEMENT_MS = 30_000;
 type PosixOutputStream = 'stdout' | 'stderr';
 
 export interface PosixSupervisorTimeouts {
   readonly handshakeMs?: number;
   readonly naturalDrainMs?: number;
+  /** @internal Deterministic fault-injection seam; production keeps the fixed 30-second budget. */
+  readonly opaqueRunnerNaturalSettlementMs?: number;
   readonly termMs?: number;
   readonly killMs?: number;
   readonly ackMs?: number;
@@ -60,6 +64,7 @@ export interface PosixSupervisorTimeouts {
 interface ResolvedTimeouts {
   readonly handshakeMs: number;
   readonly naturalDrainMs: number;
+  readonly opaqueRunnerNaturalSettlementMs: number;
   readonly termMs: number;
   readonly killMs: number;
   readonly ackMs: number;
@@ -249,9 +254,19 @@ function resolveTimeouts(input: PosixSupervisorTimeouts = {}): ResolvedTimeouts 
     'termMs',
   );
   if (termMs > killMs) invalid('termMs must fit inside the total killMs deadline');
+  const opaqueRunnerNaturalSettlementMs = bounded(
+    input.opaqueRunnerNaturalSettlementMs,
+    DEFAULT_OPAQUE_RUNNER_NATURAL_SETTLEMENT_MS,
+    0,
+    'opaqueRunnerNaturalSettlementMs',
+  );
+  if (opaqueRunnerNaturalSettlementMs > DEFAULT_OPAQUE_RUNNER_NATURAL_SETTLEMENT_MS) {
+    invalid('opaqueRunnerNaturalSettlementMs is outside the supported range');
+  }
   return {
     handshakeMs: bounded(input.handshakeMs, 10_000, 10, 'handshakeMs'),
     naturalDrainMs: bounded(input.naturalDrainMs, 5000, 0, 'naturalDrainMs'),
+    opaqueRunnerNaturalSettlementMs,
     termMs,
     killMs,
     ackMs: bounded(input.ackMs, 10_000, 10, 'ackMs'),
@@ -1348,9 +1363,15 @@ export async function runDarkPosixSupervisedOperation(
         if (!started || result) invalid('RESULT is duplicated or precedes STARTED');
         result = event;
         terminationTrigger.rootCompleted();
+        const naturalSettlementMs =
+          options.posixProcessDomain === 'opaque-runner' &&
+          Number.isSafeInteger(event.code) &&
+          event.signal === null
+            ? timeouts.opaqueRunnerNaturalSettlementMs
+            : timeouts.naturalDrainMs;
         closeoutDeadline ??= MonotonicDeadline.after(
           terminationTrigger.reason === undefined
-            ? timeouts.naturalDrainMs + timeouts.killMs
+            ? naturalSettlementMs + timeouts.killMs
             : timeouts.killMs,
         );
         failureCloseoutDeadline = closeoutDeadline;

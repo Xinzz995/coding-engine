@@ -79,14 +79,15 @@ export function jsonBytes(value) {
 
 export function parseTimeouts(value) {
   const parsed = JSON.parse(value);
-  if (
-    !exactKeys(parsed, ['handshakeMs', 'naturalDrainMs', 'termMs', 'killMs', 'ackMs', 'pollMs'])
-  ) {
+  if (!exactKeys(parsed, ['handshakeMs', 'naturalDrainMs', 'opaqueRunnerNaturalSettlementMs', 'termMs', 'killMs', 'ackMs', 'pollMs'])) {
     throw new Error('invalid POSIX supervisor timeouts');
   }
   return {
     handshakeMs: boundedInteger(parsed.handshakeMs, 'handshakeMs', 10, 60_000),
     naturalDrainMs: boundedInteger(parsed.naturalDrainMs, 'naturalDrainMs', 0, 60_000),
+    opaqueRunnerNaturalSettlementMs: boundedInteger(
+      parsed.opaqueRunnerNaturalSettlementMs, 'opaqueRunnerNaturalSettlementMs', 0, 30_000,
+    ),
     termMs: boundedInteger(parsed.termMs, 'termMs', 0, 60_000),
     killMs: boundedInteger(parsed.killMs, 'killMs', 1, 60_000),
     ackMs: boundedInteger(parsed.ackMs, 'ackMs', 10, 60_000),

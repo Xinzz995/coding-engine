@@ -570,7 +570,9 @@ describe('runAgent', () => {
         rmSync(invocationRoot, { recursive: true, force: true });
       }
     }
-  }, 30_000);
+    // The production opaque-runner settlement window is 30 seconds; this residue case must
+    // observe that full fail-closed boundary before asserting retained temporary domains.
+  }, 50_000);
 
   it('stops immediately when the protected prompt invocation directory cannot be established', async () => {
     const originalBin = process.env.CODING_X_CLAUDE_BIN;

@@ -223,8 +223,15 @@ function armPrepareDeadline(label) {
 }
 
 function beginCloseout(includeNaturalDrain = false) {
+  const naturalSettlementMs =
+    includeNaturalDrain &&
+    posixProcessDomain === 'opaque-runner' &&
+    Number.isSafeInteger(rootResult?.code) &&
+    rootResult?.signal === null
+      ? timeouts.opaqueRunnerNaturalSettlementMs
+      : timeouts.naturalDrainMs;
   const candidate = deadlineAfter(
-    timeouts.killMs + (includeNaturalDrain ? timeouts.naturalDrainMs : 0),
+    timeouts.killMs + (includeNaturalDrain ? naturalSettlementMs : 0),
   );
   closeoutDeadline =
     closeoutDeadline === undefined || includeNaturalDrain
@@ -462,37 +469,69 @@ async function finishPrestartAbort() {
 async function drainNormally() {
   if (cleanupStarted) return;
   cleanupStarted = true;
+  const extendedOpaqueSettlement =
+    posixProcessDomain === 'opaque-runner' &&
+    Number.isSafeInteger(rootResult?.code) &&
+    rootResult?.signal === null;
+  const naturalSettlementBudgetMs = extendedOpaqueSettlement
+    ? timeouts.opaqueRunnerNaturalSettlementMs
+    : timeouts.naturalDrainMs;
   const initialCloseoutDeadline = beginCloseout(true);
+  const naturalSettlementDeadline = initialCloseoutDeadline - timeouts.killMs;
   const naturalDeadline = Math.min(
-    initialCloseoutDeadline,
-    deadlineAfter(timeouts.naturalDrainMs),
+    naturalSettlementDeadline,
+    deadlineAfter(Math.min(timeouts.naturalDrainMs, naturalSettlementBudgetMs)),
   );
+  let lastObservedMemberCount = 0;
   const containmentIsNaturallyDrained = () => {
     if (outputSettled()) {
       const members = groupMembers(launcherPgid);
+      lastObservedMemberCount = members.length;
       return members.length === 1 && members[0] === launcher.pid;
     }
     return false;
   };
-  let naturallyDrained = containmentIsNaturallyDrained();
-  while (
-    !naturallyDrained &&
-    parentConnected &&
-    !terminalCause &&
-    remainingDeadlineMs(naturalDeadline) > 0
-  ) {
-    const remaining = remainingDeadlineMs(naturalDeadline);
-    if (remaining === 0) break;
-    await delay(Math.min(timeouts.pollMs, remaining));
-    if (remainingDeadlineMs(naturalDeadline) === 0) break;
-    naturallyDrained = containmentIsNaturallyDrained();
-  }
+  const waitForNaturalDrain = async (deadline) => {
+    let drained = containmentIsNaturallyDrained();
+    while (
+      !drained &&
+      parentConnected &&
+      !terminalCause &&
+      remainingDeadlineMs(deadline) > 0
+    ) {
+      const remaining = remainingDeadlineMs(deadline);
+      if (remaining === 0) break;
+      await delay(Math.min(timeouts.pollMs, remaining));
+      if (remainingDeadlineMs(deadline) === 0) break;
+      drained = containmentIsNaturallyDrained();
+    }
+    return drained;
+  };
+  let naturallyDrained = await waitForNaturalDrain(naturalDeadline);
   if (terminalCause) {
     // TERMINATE or parent EOF may arrive after natural drain has already begun.
     // Re-read and tighten the shared closeout deadline instead of continuing with
     // the longer natural-drain deadline captured at entry.
     await terminateContainment(beginCloseout());
     return finishStartedDrain(terminalCause);
+  }
+  if (!naturallyDrained && extendedOpaqueSettlement) {
+    naturallyDrained = await waitForNaturalDrain(naturalSettlementDeadline);
+    if (terminalCause) {
+      await terminateContainment(beginCloseout());
+      return finishStartedDrain(terminalCause);
+    }
+    if (!naturallyDrained) {
+      lastObservedMemberCount = groupMembers(launcherPgid).length;
+      const pendingOutputCount = outstandingOutput.size + pendingOutput.length;
+      throw new Error(
+        'opaque runner natural settlement timed out: ' +
+          `settlementBudgetMs=${naturalSettlementBudgetMs}, ` +
+          `lastObservedMemberCount=${lastObservedMemberCount}, ` +
+          `stdoutEof=${stdoutEof}, stderrEof=${stderrEof}, ` +
+          `pendingOutputCount=${pendingOutputCount}`,
+      );
+    }
   }
   if (!naturallyDrained) {
     const members = groupMembers(launcherPgid);

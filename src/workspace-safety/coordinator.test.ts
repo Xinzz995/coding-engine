@@ -150,6 +150,59 @@ describe.runIf(
     await session.close();
   }, 20_000);
 
+  it.runIf(process.platform !== 'win32')(
+    'includes a post-fast-path opaque runner natural settlement in the managed duration',
+    async () => {
+      const { workspace, session } = await readySession();
+      const controlRoot = mkdtempSync(join(tmpdir(), 'coding-x-opaque-natural-settlement-'));
+      roots.push(controlRoot);
+      const signalPath = join(controlRoot, 'unexpected-signal');
+      const descendantSource = [
+        "const {writeFileSync}=require('node:fs');",
+        `const signalPath=${JSON.stringify(signalPath)};`,
+        "process.on('SIGTERM',()=>{writeFileSync(signalPath,'SIGTERM');process.exit(90);});",
+        "process.on('SIGINT',()=>{writeFileSync(signalPath,'SIGINT');process.exit(91);});",
+        "process.stdout.write('settlement-start\\n');",
+        "if (!process.send) process.exit(92);",
+        "process.send({type:'ready'});",
+        "setTimeout(()=>{process.stdout.write('settlement-complete\\n');process.exit(0);},5500);",
+      ].join('');
+      const rootSource = [
+        "const {spawn}=require('node:child_process');",
+        `const child=spawn(process.execPath,['-e',${JSON.stringify(descendantSource)}],`,
+        "  {stdio:['ignore',1,2,'ipc']});",
+        "child.once('message',()=>{child.disconnect();process.exit(0);});",
+      ].join('');
+
+      const result = await runManagedWorkspaceProcess(session, {
+        kind: 'final-review',
+        delegation: 'read-only-v1',
+        executable: process.execPath,
+        args: ['-e', rootSource],
+        cwd: workspace,
+        environment: environmentEntries(process.env),
+        timeoutMs: 15_000,
+        posixProcessDomain: 'opaque-runner',
+      });
+
+      expect(result).toMatchObject({
+        verdict: 'completed',
+        exitCode: 0,
+        timedOut: false,
+        processTreeNotEmpty: false,
+        terminationReason: null,
+      });
+      expect(result.durationMs).toBeGreaterThanOrEqual(5000);
+      expect(result.durationMs).toBeLessThan(15_000);
+      expect(result.stdout.toString('utf8')).toBe('settlement-start\nsettlement-complete\n');
+      expect(result.stderr.toString('utf8')).toBe('');
+      expect(existsSync(signalPath)).toBe(false);
+      expect(session.state).toBe('open');
+      await session.close();
+    },
+    25_000,
+  );
+
   it('runs a managed status probe through the fixed supervisor under a candidate-proof owner', async () => {
     const { workspace, session } = await readySession('candidate-proof');
     const result = await runManagedWorkspaceProcess(session, {
